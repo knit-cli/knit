@@ -9,7 +9,14 @@ src/
   main.rs       binary entry point only
   lib.rs        module wiring and command dispatch
   cli.rs        clap command definitions
-  commands.rs   user-facing command behavior
+  commands/
+    mod.rs      command module wiring
+    init.rs
+    add.rs
+    worktree.rs
+    status.rs
+    commit.rs
+    log.rs
   model.rs      bundle / ChangeGroup data structures
   store.rs      .knit config and bundle file persistence
   git.rs        git subprocess helpers
@@ -22,13 +29,14 @@ tests/
   status.rs
 ```
 
-Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model.rs` owns the long-lived schema types; `commands.rs` coordinates those types with filesystem and git operations.
+Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model.rs` owns the long-lived schema types; each file in `commands/` coordinates one user-facing command with filesystem and git operations.
 
 ## Boundaries
 
 - `main.rs` should stay tiny. It parses CLI arguments and calls `knit::run`.
 - `cli.rs` should contain only argument shape and help text.
-- `commands.rs` may orchestrate multiple modules, but should avoid low-level git or JSON details.
+- Each file in `commands/` owns one user-facing command or tightly coupled command pair.
+- `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should load the active bundle from `.knit/config.json`.
 - Pure helper behavior should live in small modules and have integration tests under `tests/`.
