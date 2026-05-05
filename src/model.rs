@@ -128,6 +128,19 @@ impl BundleNode {
         }
     }
 
+    pub fn repos_removed(id: String, created_at: String, repo_ids: Vec<String>) -> Self {
+        Self {
+            id,
+            node_type: "repo.removed".to_string(),
+            created_at,
+            title: None,
+            repo_ids: Some(repo_ids),
+            commit_group_id: None,
+            message: None,
+            commits: Vec::new(),
+        }
+    }
+
     pub fn worktrees_materialized(id: String, created_at: String, repo_ids: Vec<String>) -> Self {
         Self {
             id,

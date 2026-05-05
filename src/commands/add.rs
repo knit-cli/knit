@@ -3,7 +3,7 @@ use crate::git::{current_branch, git_output_optional, git_root, infer_base_branc
 use crate::ids::{node_id, slugify, unique_repo_id};
 use crate::model::{BundleNode, RepoEntry};
 use crate::paths::same_path;
-use crate::store::{load_active_bundle, save_active_bundle};
+use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
@@ -21,7 +21,7 @@ pub fn add_repos(
     base_override: Option<&str>,
     materialize: bool,
 ) -> Result<()> {
-    let mut active = load_active_bundle()?;
+    let mut active = load_active_bundle_for_update()?;
     let plans = resolve_repo_plans(repo_paths, base_override)?;
     let mut touched_repo_ids = Vec::new();
 

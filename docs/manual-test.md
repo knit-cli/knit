@@ -29,10 +29,9 @@ knit add ../backend ../frontend
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
-git -C .knit/worktrees/venue-capacity/backend add app.txt
-git -C .knit/worktrees/venue-capacity/frontend add app.txt
 
 knit status
+knit stage
 knit commit -m "Add venue capacity integration"
 knit log
 ```
@@ -41,7 +40,7 @@ Expected result:
 
 - `.knit/bundles/venue-capacity.bundle.json` exists.
 - The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit add`.
-- `knit status` reports staged changes before the commit.
+- `knit stage` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged worktree.
 - `knit log` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 

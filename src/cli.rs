@@ -31,8 +31,16 @@ pub enum Commands {
         #[arg(long)]
         no_worktree: bool,
     },
+    /// Remove repositories from bundle tracking. Leaves git branches/worktrees in place.
+    Remove {
+        /// Repo ids to remove from the active bundle.
+        #[arg(required = true)]
+        repo_ids: Vec<String>,
+    },
     /// Create per-repo worktrees for the active bundle.
     Worktree,
+    /// Stage all latest changes in tracked worktrees.
+    Stage,
     /// Show status for all repos in the active bundle.
     Status,
     /// Commit staged changes across bundle worktrees.
@@ -40,6 +48,9 @@ pub enum Commands {
         /// Commit message to use in every repo with staged changes.
         #[arg(short, long)]
         message: String,
+        /// Stage all tracked worktree changes before committing.
+        #[arg(long)]
+        stage: bool,
     },
     /// Show logical commit groups recorded in the active bundle.
     Log,

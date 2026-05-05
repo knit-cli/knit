@@ -1,7 +1,7 @@
 use crate::git::{branch_exists, git_output, is_git_worktree, resolve_base_ref};
 use crate::ids::node_id;
 use crate::model::BundleNode;
-use crate::store::{load_active_bundle, save_active_bundle, ActiveBundle};
+use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
@@ -9,7 +9,7 @@ use std::fs;
 use std::path::PathBuf;
 
 pub fn create_worktrees() -> Result<()> {
-    let mut active = load_active_bundle()?;
+    let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
         bail!("The active bundle has no repos. Run `knit add <repo-path>` first.");
     }

@@ -20,9 +20,11 @@ pub fn run(cli: Cli) -> Result<()> {
             base,
             no_worktree,
         } => commands::add_repos(&repo_paths, base.as_deref(), !no_worktree),
+        Commands::Remove { repo_ids } => commands::remove_repos(&repo_ids),
         Commands::Worktree => commands::create_worktrees(),
+        Commands::Stage => commands::stage_all(),
         Commands::Status => commands::show_status(),
-        Commands::Commit { message } => commands::commit_staged(&message),
+        Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log => commands::show_log(),
         Commands::Show { commit_group_id } => commands::show_group(&commit_group_id),
     }

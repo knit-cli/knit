@@ -2,14 +2,17 @@ use crate::git::git_output;
 use crate::ids::{commit_group_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef};
 use crate::status::has_staged_changes;
-use crate::store::{load_active_bundle, save_active_bundle, ActiveBundle};
+use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub fn commit_staged(message: &str) -> Result<()> {
-    let mut active = load_active_bundle()?;
+pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
+    let mut active = load_active_bundle_for_update()?;
+    if stage_first {
+        stage_all_tracked(&active)?;
+    }
     let repos_to_commit = repos_with_staged_changes(&active)?;
 
     if repos_to_commit.is_empty() {
@@ -61,6 +64,22 @@ pub fn commit_staged(message: &str) -> Result<()> {
     save_active_bundle(&active)?;
 
     println!("Recorded commit group {group_id}");
+    Ok(())
+}
+
+pub(crate) fn stage_all_tracked(active: &ActiveBundle) -> Result<()> {
+    for repo in &active.bundle.repos {
+        let Some(worktree_path) = &repo.worktree_path else {
+            continue;
+        };
+        let worktree_abs = active.root.join(worktree_path);
+        if !worktree_abs.exists() {
+            continue;
+        }
+        git_output(&worktree_abs, ["add", "-A"])
+            .with_context(|| format!("{}: failed to stage changes", repo.id))?;
+    }
+
     Ok(())
 }
 
