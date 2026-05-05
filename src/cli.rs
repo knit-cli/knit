@@ -19,13 +19,17 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Add a local git repository to the active bundle.
+    /// Add local git repositories to the active bundle and materialize worktrees.
     Add {
-        /// Path to a local git repository.
-        repo_path: PathBuf,
+        /// Paths to local git repositories.
+        #[arg(required = true)]
+        repo_paths: Vec<PathBuf>,
         /// Override the inferred base branch.
         #[arg(long)]
         base: Option<String>,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
     },
     /// Create per-repo worktrees for the active bundle.
     Worktree,

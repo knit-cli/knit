@@ -38,10 +38,7 @@ From a workspace folder that sits beside your local repos:
 
 ```sh
 knit init "venue capacity"
-knit add ../backend
-knit add ../frontend
-knit add ../scraper
-knit worktree
+knit add ../backend ../frontend ../scraper
 ```
 
 Make changes inside the generated worktrees, stage the files with git, then inspect and commit:
@@ -64,7 +61,7 @@ The active bundle is printed by `knit init` and lives at:
 
 ```sh
 knit init "<title>" [--force]
-knit add <repo-path> [--base <branch>]
+knit add <repo-path>... [--base <branch>] [--no-worktree]
 knit worktree
 knit status
 knit commit -m "<message>"
@@ -72,9 +69,11 @@ knit log
 knit show <commit-group-id>
 ```
 
-`knit add` stores the absolute git repo path, repo id, origin remote when available, and inferred base branch. Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
+`knit add` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, and inferred base branch. By default it also creates the `knit/<bundle-id>` branch and the worktree for each added repo. Use `--no-worktree` for metadata-only registration.
 
-`knit worktree` creates `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
+Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
+
+`knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
 `knit commit` commits only repos with staged changes in their bundle worktrees. Every commit gets the same logical message plus trailers:
 
@@ -85,9 +84,23 @@ Knit-Bundle: <bundle-id>
 
 The bundle records the full mapping from logical commit group to repo commit SHAs.
 
+## Bundle Nodes
+
+The bundle is a feature ledger. It stores current state in `repos` and `commitGroups`, and an ordered node chain in `nodes`.
+
+Typical node types:
+
+- `feature.created`
+- `repo.added`
+- `worktree.materialized`
+- `commit.group`
+
+`headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.
+
 ## V0 Limitations
 
 - Knit v0 is not perfectly transactional. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
+- `knit add` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit commit` only looks for staged changes inside bundle worktrees.
 - Bundle schema validation is currently serde-based, not a standalone JSON Schema file.

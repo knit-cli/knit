@@ -15,7 +15,11 @@ pub use cli::{Cli, Commands};
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
         Commands::Init { title, force } => commands::init_bundle(&title, force),
-        Commands::Add { repo_path, base } => commands::add_repo(&repo_path, base.as_deref()),
+        Commands::Add {
+            repo_paths,
+            base,
+            no_worktree,
+        } => commands::add_repos(&repo_paths, base.as_deref(), !no_worktree),
         Commands::Worktree => commands::create_worktrees(),
         Commands::Status => commands::show_status(),
         Commands::Commit { message } => commands::commit_staged(&message),

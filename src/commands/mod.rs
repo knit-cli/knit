@@ -5,7 +5,7 @@ pub mod log;
 pub mod status;
 pub mod worktree;
 
-pub use add::add_repo;
+pub use add::add_repos;
 pub use commit::commit_staged;
 pub use init::init_bundle;
 pub use log::{show_group, show_log};

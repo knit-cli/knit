@@ -1,6 +1,6 @@
 use crate::git::git_output;
 use crate::ids::{commit_group_id, short_sha};
-use crate::model::{CommitGroup, CommitRef};
+use crate::model::{BundleNode, CommitGroup, CommitRef};
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
@@ -47,9 +47,16 @@ pub fn commit_staged(message: &str) -> Result<()> {
     active.bundle.commit_groups.push(CommitGroup {
         id: group_id.clone(),
         message: message.to_string(),
-        created_at,
-        commits,
+        created_at: created_at.clone(),
+        commits: commits.clone(),
     });
+    active.bundle.nodes.push(BundleNode::commit_group(
+        group_id.clone(),
+        created_at,
+        message.to_string(),
+        commits,
+    ));
+    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
     save_active_bundle(&active)?;
 

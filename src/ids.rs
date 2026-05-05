@@ -43,6 +43,14 @@ pub fn unique_repo_id(bundle: &ChangeGroup, desired_id: &str) -> String {
 }
 
 pub fn commit_group_id() -> String {
+    object_id("kg")
+}
+
+pub fn node_id(prefix: &str) -> String {
+    object_id(prefix)
+}
+
+fn object_id(prefix: &str) -> String {
     let date = Utc::now().format("%Y%m%d");
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -50,7 +58,7 @@ pub fn commit_group_id() -> String {
         .unwrap_or_default();
     let mixed = nanos ^ u128::from(std::process::id());
     let suffix = format!("{:06x}", mixed & 0xFF_FFFF);
-    format!("kg_{date}_{suffix}")
+    format!("{prefix}_{date}_{suffix}")
 }
 
 pub fn short_sha(sha: &str) -> String {

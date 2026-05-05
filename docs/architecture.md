@@ -29,7 +29,7 @@ tests/
   status.rs
 ```
 
-Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model.rs` owns the long-lived schema types; each file in `commands/` coordinates one user-facing command with filesystem and git operations.
+Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model.rs` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each file in `commands/` coordinates one user-facing command with filesystem and git operations.
 
 ## Boundaries
 
@@ -49,3 +49,14 @@ Cheap pure behavior belongs in integration tests:
 - Status classification: `tests/status.rs`
 
 End-to-end git behavior is documented as a manual smoke test in [manual-test.md](manual-test.md). As Knit grows, that smoke test can become an automated integration test using temporary toy repos.
+
+## Bundle Ledger
+
+The bundle carries both current state and history:
+
+- `repos`: current tracked repos, branches, and worktree paths.
+- `commitGroups`: compatibility list of logical commits across repos.
+- `nodes`: ordered ledger entries such as `feature.created`, `repo.added`, `worktree.materialized`, and `commit.group`.
+- `headNodeId`: the latest node in the ledger.
+
+Command files should append nodes when they create meaningful reviewable state. Gloss can consume a node or the current bundle head without owning git lifecycle.

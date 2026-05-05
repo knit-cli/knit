@@ -25,9 +25,7 @@ git -C frontend commit -m "Initial frontend"
 
 cd workspace
 knit init "venue capacity"
-knit add ../backend
-knit add ../frontend
-knit worktree
+knit add ../backend ../frontend
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
@@ -42,8 +40,9 @@ knit log
 Expected result:
 
 - `.knit/bundles/venue-capacity.bundle.json` exists.
+- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit add`.
 - `knit status` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged worktree.
-- `knit log` shows one logical commit group with both repo SHAs.
+- `knit log` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 
 Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

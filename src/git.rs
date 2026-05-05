@@ -1,7 +1,7 @@
 use anyhow::{bail, Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 pub fn git_root(path: &Path) -> Result<PathBuf> {
     let path = path
@@ -141,6 +141,8 @@ where
     Command::new("git")
         .args(&args)
         .current_dir(cwd)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
         .status()
         .map(|status| status.success())
         .unwrap_or(false)
