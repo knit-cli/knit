@@ -82,7 +82,7 @@ pub fn status(text: &str) -> String {
 
 pub fn movement(text: &str) -> String {
     match text {
-        "advanced" | "added" | "committed" | "created" | "staged" => ok(text),
+        "advanced" | "added" | "committed" | "created" | "fetched" | "staged" => ok(text),
         "rewound" | "diverged" | "dropped" | "removed" => danger(text),
         _ => warn(text),
     }

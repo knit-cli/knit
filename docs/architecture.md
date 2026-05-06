@@ -18,6 +18,7 @@ src/
     stage.rs
     status.rs
     diff.rs
+    fetch.rs
     pull.rs
     sync.rs
     commit.rs
@@ -30,6 +31,7 @@ src/
   git.rs        git subprocess helpers
   ids.rs        slugs, commit group ids, SHA formatting
   paths.rs      path comparison helpers
+  repo_selectors.rs shared tracked-repo selector resolution
   selectors.rs  bundle log selector resolution for HEAD, node ids, and SHAs
   status.rs     git status classification
   time.rs       timestamp formatting

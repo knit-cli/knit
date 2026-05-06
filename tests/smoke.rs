@@ -435,6 +435,44 @@ fn pull_updates_original_base_checkout_and_bundle_base_sha() {
 }
 
 #[test]
+fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let initial_head = git(&backend, ["rev-parse", "HEAD"]);
+    let initial_bundle = read_bundle(&workspace);
+    let initial_base_sha = initial_bundle["repos"][0]["baseSha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    append_line(&collaborator.join("app.txt"), "remote base fetch");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base fetch"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let fetch = knit(&workspace, ["fetch", "backend"]);
+    assert!(fetch.contains("backend"));
+    assert!(fetch.contains("origin/main"));
+    assert!(fetch.contains(&remote_sha[..7]));
+    assert_eq!(git(&backend, ["rev-parse", "origin/main"]), remote_sha);
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), initial_head);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["baseSha"].as_str(),
+        Some(initial_base_sha.as_str())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");

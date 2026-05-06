@@ -87,6 +87,14 @@ pub enum Commands {
         /// Optional repo ids or paths to limit the diff.
         repos: Vec<String>,
     },
+    /// Fetch tracked repos without merging.
+    Fetch {
+        /// Optional repo ids or paths to limit the fetch.
+        repos: Vec<String>,
+        /// Fetch every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+    },
     /// Pull tracked repos.
     Pull {
         /// Optional repo ids or paths to limit the pull.

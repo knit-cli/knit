@@ -84,6 +84,7 @@ knit remove <repo-id>...
 knit worktree
 knit status
 knit diff [--stat] [repo-id-or-path...]
+knit fetch [--all] [repo-id-or-path...]
 knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
 knit sync
 knit commit -m "<message>" [--stage]
@@ -124,6 +125,14 @@ knit diff
 knit diff --stat
 knit diff backend
 knit diff --stat ../backend
+```
+
+`knit fetch` updates remote refs and local object availability without merging, rebasing, moving checkouts, or changing bundle state. It is the safer way to give Knit and Gloss fresher git history:
+
+```sh
+knit fetch
+knit fetch backend
+knit fetch --all
 ```
 
 `knit pull` updates tracked repos from their remotes. By default it runs in the original repo path on the recorded base branch and uses `git pull --ff-only`, then updates the repo's recorded `baseSha` in the bundle. It refuses to run when an affected checkout has uncommitted changes unless `--force` is passed. Use `--rebase` for `git pull --rebase`.
@@ -202,6 +211,7 @@ Typical node types:
 - `knit track` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
 - Knit uses a simple `.knit/knit.lock` file to prevent concurrent bundle writes. If a process crashes, a stale lock may need manual removal.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
+- `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.

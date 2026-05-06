@@ -6,6 +6,7 @@ pub mod ids;
 pub mod model;
 pub mod output;
 pub mod paths;
+pub mod repo_selectors;
 pub mod selectors;
 pub mod status;
 pub mod store;
@@ -42,6 +43,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
         Commands::Status => commands::show_status(),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
+        Commands::Fetch { repos, all } => commands::fetch_repos(&repos, all),
         Commands::Pull {
             repos,
             all,

@@ -130,6 +130,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    This should be safer than `pull` and should probably land before or with `pull`.
 
+   Baseline implemented: `knit fetch`, `knit fetch <repo>`, and `knit fetch --all` fetch `origin` in the original repo path. Fetch updates remote refs/object availability only; it does not move checkouts, update `baseSha`, or append bundle nodes.
+
 5. `knit push`
 
    Push tracked feature branches.

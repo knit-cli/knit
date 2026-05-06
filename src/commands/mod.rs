@@ -1,5 +1,6 @@
 pub mod commit;
 pub mod diff;
+pub mod fetch;
 pub mod git_passthrough;
 pub mod init;
 pub mod log;
@@ -14,6 +15,7 @@ pub mod worktree;
 
 pub use commit::commit_staged;
 pub use diff::show_diff;
+pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
 pub use init::init_bundle;
 pub use log::{show_log, show_target};
