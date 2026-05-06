@@ -5,6 +5,52 @@ Knit is the workspace and history tool for cross-repo feature work. The next com
 - Git-flow convenience: run familiar git operations across every tracked repo safely.
 - Knit-flow intent: make the bundle ledger easier to inspect, review, close, and hand off to Gloss.
 
+## Checkout Modes
+
+Knit should support two checkout modes per tracked repo:
+
+- `worktree`: the default and safest mode. Knit creates `.knit/worktrees/<bundle>/<repo>` and operates there.
+- `inPlace`: an explicit mode for using the original repo checkout directly.
+
+Proposed command shape:
+
+```sh
+knit add ../backend
+knit add ../backend --in-place
+```
+
+`--in-place` is useful when one person/tool owns the repo checkout for the feature and does not need the original checkout to stay on `main`. It should be first-class, not a hack.
+
+Bundle state should record checkout mode per repo, for example:
+
+```json
+{
+  "id": "backend",
+  "path": "../backend",
+  "checkoutMode": "inPlace",
+  "featureBranch": "knit/venue-capacity",
+  "worktreePath": "../backend"
+}
+```
+
+Safety rules:
+
+- Default remains `worktree`.
+- In-place repos must show clearly in `knit status`.
+- Mutating commands must verify the repo is on the expected feature branch before operating.
+- If an in-place repo is on the wrong branch, `knit status` should warn loudly and mutating commands should refuse unless explicitly forced.
+- `knit clean --worktrees` must never delete in-place repo paths.
+
+## History Access Contract
+
+Knit shells out to git, so it can inspect the git history available in each tracked local repo: commits, branches, merge bases, diffs, logs, file contents at refs, and recorded SHAs.
+
+Gloss should be able to inspect the same repo set when it runs in the same local environment. The bundle should give Gloss enough information to locate the relevant repos, checkouts, branches, SHAs, and bundle nodes. The bundle should not duplicate full git history; git remains the history store.
+
+Important caveat: "full history" means the history available in the local clone. Shallow clones, partial clones, missing remotes, unfetched branches, or garbage-collected unreachable commits can limit what Knit and Gloss can inspect.
+
+`knit fetch` should be the main command for improving local history availability before review. `knit review` may later warn when referenced commits or remotes are unavailable.
+
 ## Near-Term Priority
 
 1. `knit diff`
@@ -146,3 +192,4 @@ Knit is the workspace and history tool for cross-repo feature work. The next com
 - Should feature branch rebases be recorded as `git.observed diverged` or a dedicated `git.rebased` node?
 - Should `knit push` require a clean bundle status before pushing?
 - Should `knit review` eventually create a frozen bundle snapshot, or only print the current bundle path and node?
+- Should `knit review` optionally run `knit fetch` first, or only warn when referenced commits/remotes are unavailable?
