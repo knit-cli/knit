@@ -4,6 +4,7 @@ use crate::git::{
 };
 use crate::ids::{node_id, slugify, unique_repo_id};
 use crate::model::{BundleNode, RepoEntry};
+use crate::output as out;
 use crate::paths::same_path;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use crate::time::now_iso;
@@ -40,7 +41,12 @@ pub fn add_repos(
             existing.base_branch = plan.base_branch;
             existing.base_sha = Some(plan.base_sha);
             touched_repo_ids.push(existing.id.clone());
-            println!("Updated repo {} ({})", existing.id, existing.path);
+            println!(
+                "{} {} ({})",
+                out::movement("updated"),
+                out::repo(&existing.id),
+                out::path(&existing.path)
+            );
             continue;
         }
 
@@ -56,7 +62,7 @@ pub fn add_repos(
             worktree_path: None,
             head_sha: None,
         });
-        println!("Added repo {repo_id}");
+        println!("{} {}", out::movement("added"), out::repo(&repo_id));
         touched_repo_ids.push(repo_id);
     }
 

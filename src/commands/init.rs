@@ -1,5 +1,6 @@
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig};
+use crate::output as out;
 use crate::store::{find_knit_root, write_json};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -38,6 +39,10 @@ pub fn init_bundle(title: &str, force: bool) -> Result<()> {
     let config = KnitConfig::new(bundle_id);
     write_json(&knit_dir.join("config.json"), &config)?;
 
-    println!("Active bundle: {}", bundle_path.display());
+    println!(
+        "{} {}",
+        out::heading("Active bundle:"),
+        out::path(bundle_path.display())
+    );
     Ok(())
 }

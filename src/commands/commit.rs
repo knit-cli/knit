@@ -1,6 +1,7 @@
 use crate::git::{git_output, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange};
+use crate::output as out;
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
@@ -13,7 +14,11 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let observed = sync_observed_changes(&mut active)?;
     for change in &observed {
-        println!("{}: {}", change.repo_id, sync_note(change));
+        println!(
+            "{}: {}",
+            out::repo(&change.repo_id),
+            out::warn(sync_note(change))
+        );
     }
 
     if stage_first {
@@ -50,7 +55,12 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         let sha = rev_parse(&target.worktree_abs, "HEAD")
             .with_context(|| format!("{}: failed to read commit sha", target.repo_id))?;
         let short = short_sha(&sha);
-        println!("{}: committed {short}", target.repo_id);
+        println!(
+            "{}: {} {}",
+            out::repo(&target.repo_id),
+            out::movement("committed"),
+            out::sha(short)
+        );
         commits.push(CommitRef {
             repo_id: target.repo_id.clone(),
             sha: sha.clone(),
@@ -83,7 +93,11 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     active.bundle.updated_at = now_iso();
     save_active_bundle(&active)?;
 
-    println!("Recorded commit group {group_id}");
+    println!(
+        "{} {}",
+        out::heading("Recorded commit group"),
+        out::node(group_id)
+    );
     Ok(())
 }
 

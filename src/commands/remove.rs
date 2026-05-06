@@ -1,5 +1,6 @@
 use crate::ids::node_id;
 use crate::model::BundleNode;
+use crate::output as out;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use crate::time::now_iso;
 use anyhow::{bail, Result};
@@ -33,9 +34,17 @@ pub fn remove_repos(repo_ids: &[String]) -> Result<()> {
 
     for index in indexes {
         let repo = active.bundle.repos.remove(index);
-        println!("Removed repo {} from bundle tracking", repo.id);
+        println!(
+            "{} repo {} from bundle tracking",
+            out::movement("removed"),
+            out::repo(&repo.id)
+        );
         if let Some(worktree_path) = repo.worktree_path {
-            println!("Left existing worktree in place at {worktree_path}");
+            println!(
+                "{} existing worktree in place at {}",
+                out::muted("Left"),
+                out::path(worktree_path)
+            );
         }
         removed.push(repo.id);
     }

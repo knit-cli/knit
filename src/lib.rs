@@ -3,6 +3,7 @@ pub mod commands;
 pub mod git;
 pub mod ids;
 pub mod model;
+pub mod output;
 pub mod paths;
 pub mod status;
 pub mod store;

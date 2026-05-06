@@ -1,6 +1,7 @@
 use crate::git::{branch_exists, git_output, is_git_worktree, resolve_base_ref, rev_parse};
 use crate::ids::node_id;
 use crate::model::BundleNode;
+use crate::output as out;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -65,7 +66,11 @@ pub fn materialize_repos(
                             format!("{}: failed to read worktree HEAD", repo.id)
                         })?);
                 }
-                println!("{}: worktree already present at {}", repo.id, worktree_path);
+                println!(
+                    "{}: worktree already present at {}",
+                    out::repo(&repo.id),
+                    out::path(&worktree_path)
+                );
                 materialized_repo_ids.push(repo.id.clone());
                 continue;
             }
@@ -99,7 +104,11 @@ pub fn materialize_repos(
                         .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
                 );
             }
-            println!("{}: created worktree from existing branch", repo.id);
+            println!(
+                "{}: {} worktree from existing branch",
+                out::repo(&repo.id),
+                out::movement("created")
+            );
             materialized_repo_ids.push(repo.id.clone());
         } else {
             git_output(
@@ -118,7 +127,12 @@ pub fn materialize_repos(
                 rev_parse(&worktree_abs, "HEAD")
                     .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
             );
-            println!("{}: created {}", repo.id, feature_branch);
+            println!(
+                "{}: {} {}",
+                out::repo(&repo.id),
+                out::movement("created"),
+                out::branch(feature_branch)
+            );
             materialized_repo_ids.push(repo.id.clone());
         }
     }

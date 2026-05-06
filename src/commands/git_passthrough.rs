@@ -1,4 +1,5 @@
 use crate::model::RepoEntry;
+use crate::output as out;
 use crate::store::{load_active_bundle, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
@@ -24,7 +25,11 @@ pub fn run_git(args: &[OsString], explicit_repos: &[String], all: bool) -> Resul
     for repo in repos {
         let cwd = repo_cwd(&active, repo);
         if multiple {
-            println!("== {} ({}) ==", repo.id, cwd.display());
+            println!(
+                "== {} ({}) ==",
+                out::repo(&repo.id),
+                out::path(cwd.display())
+            );
         }
 
         let status = Command::new("git")
