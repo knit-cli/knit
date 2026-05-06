@@ -31,9 +31,13 @@ pub fn checkout_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<PathBuf> 
 }
 
 pub fn checkout_display_path(repo: &RepoEntry) -> String {
-    repo.worktree_path
-        .clone()
-        .unwrap_or_else(|| repo.path.clone())
+    if let Some(path) = &repo.worktree_path {
+        path.clone()
+    } else if is_in_place(repo) {
+        repo.path.clone()
+    } else {
+        "(not materialized)".to_string()
+    }
 }
 
 pub fn ensure_expected_branch(repo: &RepoEntry, checkout_dir: &Path) -> Result<()> {

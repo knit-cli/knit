@@ -646,6 +646,11 @@ fn clean_removes_plans_and_generated_worktrees_only() {
     assert!(bundle["repos"][0]["worktreePath"].is_null());
     let valid = knit(&workspace, ["bundle", "validate"]);
     assert!(valid.contains("Bundle valid"));
+    let status_after_clean = knit(&workspace, ["status"]);
+    assert!(status_after_clean.contains("(not materialized)"));
+    assert!(status_after_clean.contains("missing worktree"));
+    let git_after_clean = knit_fails(&workspace, ["git", "status", "--short", "backend"]);
+    assert!(git_after_clean.contains("has no active checkout"));
 
     knit(&workspace, ["worktree"]);
     assert!(worktree.exists());

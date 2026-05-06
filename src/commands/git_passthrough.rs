@@ -24,7 +24,13 @@ pub fn run_git(args: &[OsString], explicit_repos: &[String], all: bool) -> Resul
     let mut failures = Vec::new();
 
     for repo in repos {
-        let cwd = repo_cwd(&active, repo);
+        let cwd = match repo_cwd(&active, repo) {
+            Ok(cwd) => cwd,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", repo.id));
+                continue;
+            }
+        };
         if multiple {
             println!(
                 "== {} ({}) ==",
@@ -164,8 +170,13 @@ fn repo_matches(active: &ActiveBundle, repo: &RepoEntry, selector: &str) -> bool
             .is_some_and(|path| path == selector_abs)
 }
 
-fn repo_cwd(active: &ActiveBundle, repo: &RepoEntry) -> PathBuf {
-    checkout_dir(active, repo).unwrap_or_else(|| PathBuf::from(&repo.path))
+fn repo_cwd(active: &ActiveBundle, repo: &RepoEntry) -> Result<PathBuf> {
+    checkout_dir(active, repo).with_context(|| {
+        format!(
+            "{} has no active checkout. Run `knit worktree` to materialize it.",
+            repo.id
+        )
+    })
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {

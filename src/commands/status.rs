@@ -6,7 +6,6 @@ use crate::status::status_label;
 use crate::store::load_active_bundle;
 use crate::tracking::{detect_unrecorded_changes, status_note};
 use anyhow::Result;
-use std::path::PathBuf;
 
 pub fn show_status() -> Result<()> {
     let active = load_active_bundle()?;
@@ -28,7 +27,22 @@ pub fn show_status() -> Result<()> {
     for repo in &active.bundle.repos {
         let expected_branch = repo.feature_branch.as_deref().unwrap_or("(not created)");
         let worktree = checkout_display_path(repo);
-        let status_dir = checkout_dir(&active, repo).unwrap_or_else(|| PathBuf::from(&repo.path));
+        let Some(status_dir) = checkout_dir(&active, repo) else {
+            let label = if is_in_place(repo) {
+                "missing checkout"
+            } else {
+                "missing worktree"
+            };
+            println!(
+                "{} {} {} {} {}",
+                out::repo_field(&repo.id, 14),
+                out::branch_field(expected_branch, 26),
+                out::path_field(&worktree, 48),
+                out::header_field(checkout_mode_label(repo), 10),
+                out::status(label)
+            );
+            continue;
+        };
         let actual_branch =
             current_branch(&status_dir)?.unwrap_or_else(|| "(detached)".to_string());
         let branch = if is_in_place(repo)
