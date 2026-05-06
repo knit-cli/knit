@@ -51,6 +51,17 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
         "capacity scraper feed",
     );
 
+    let frontend_git_status = knit(
+        &workspace,
+        ["git", "status", "--short", frontend.to_str().unwrap()],
+    );
+    assert!(frontend_git_status.contains("M app.txt"));
+
+    let all_git_status = knit(&workspace, ["git", "status", "--short"]);
+    assert!(all_git_status.contains("== backend"));
+    assert!(all_git_status.contains("== frontend"));
+    assert!(all_git_status.contains("== scraper"));
+
     let stage_output = knit(&workspace, ["stage"]);
     assert!(stage_output.contains("backend: staged"));
     assert!(stage_output.contains("frontend: staged"));
@@ -78,6 +89,10 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
         &workspace.join(".knit/worktrees/venue-capacity/frontend"),
         ["commit", "-m", "Manual frontend polish"],
     );
+    let raw_frontend_sha = git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["rev-parse", "HEAD"],
+    );
 
     let status_output = knit(&workspace, ["status"]);
     assert!(status_output.contains("frontend"));
@@ -85,6 +100,16 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
 
     let sync_output = knit(&workspace, ["sync"]);
     assert!(sync_output.contains("frontend: observed 1 unrecorded commit(s)"));
+    let observed_log = knit(&workspace, ["log"]);
+    assert!(observed_log.contains("observed git changes"));
+    assert!(observed_log.contains("frontend"));
+    assert!(observed_log.contains(&raw_frontend_sha[..7]));
+    let limited_log = knit(&workspace, ["log", "-n", "1"]);
+    assert!(limited_log.contains("observed git changes"));
+    assert!(!limited_log.contains("Add venue capacity integration"));
+    let shorthand_log = knit(&workspace, ["log", "-1"]);
+    assert!(shorthand_log.contains("observed git changes"));
+    assert!(!shorthand_log.contains("Add venue capacity integration"));
 
     knit(&workspace, ["remove", "scraper"]);
 
@@ -149,6 +174,9 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
 
     let rewind_sync = knit(&workspace, ["sync"]);
     assert!(rewind_sync.contains("frontend: observed rewind removing 1 commit(s)"));
+    let rewind_log = knit(&workspace, ["log"]);
+    assert!(rewind_log.contains("rewound"));
+    assert!(rewind_log.contains(&raw_frontend_sha[..7]));
 
     let bundle = read_bundle(&workspace);
     let observed_nodes = bundle["nodes"]

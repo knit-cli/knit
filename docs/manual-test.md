@@ -31,9 +31,11 @@ printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
 
 knit status
+knit git status --short
+knit git status --short ../frontend
 knit stage
 knit commit -m "Add venue capacity integration"
-knit log
+knit log -1
 ```
 
 Expected result:
@@ -42,7 +44,7 @@ Expected result:
 - The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit add`.
 - `knit stage` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged worktree.
-- `knit log` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
+- `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 
 To test a raw git commit outside Knit:
 
@@ -53,9 +55,10 @@ git -C .knit/worktrees/venue-capacity/frontend commit -m "Manual frontend polish
 
 knit status
 knit sync
+knit log
 ```
 
-Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, and `knit sync` appends a `git.observed` node to the bundle.
+Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, `knit sync` appends a `git.observed` node to the bundle, and `knit log` shows `observed git changes` with the frontend commit SHA.
 
 To test a reset/rewind:
 
@@ -64,8 +67,9 @@ git -C .knit/worktrees/venue-capacity/frontend reset --hard HEAD~1
 
 knit status
 knit sync
+knit log
 ```
 
-Expected result: `knit status` reports `rewound commits: 1` for `frontend`, and `knit sync` appends another `git.observed` node with `movement: "rewound"` and `droppedCommits`.
+Expected result: `knit status` reports `rewound commits: 1` for `frontend`, `knit sync` appends another `git.observed` node with `movement: "rewound"` and `droppedCommits`, and `knit log` shows the rewind.
 
 Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

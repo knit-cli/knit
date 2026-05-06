@@ -1,18 +1,40 @@
 use crate::git::git_output;
 use crate::ids::short_sha;
+use crate::model::BundleNode;
 use crate::store::load_active_bundle;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
-pub fn show_log() -> Result<()> {
+pub fn show_log(limit: Option<usize>, shorthand_limit: Option<&str>) -> Result<()> {
+    let limit = resolve_limit(limit, shorthand_limit)?;
     let active = load_active_bundle()?;
-    if active.bundle.commit_groups.is_empty() {
-        println!("No commit groups recorded yet.");
+    if active.bundle.nodes.is_empty() && active.bundle.commit_groups.is_empty() {
+        println!("No bundle nodes recorded yet.");
         return Ok(());
     }
 
-    for group in &active.bundle.commit_groups {
+    if !active.bundle.nodes.is_empty() {
+        let nodes = active
+            .bundle
+            .nodes
+            .iter()
+            .filter(|node| is_loggable_node(node))
+            .collect::<Vec<_>>();
+        if nodes.is_empty() {
+            println!("No log entries recorded yet.");
+            return Ok(());
+        }
+
+        let start = limited_start(nodes.len(), limit);
+        for node in &nodes[start..] {
+            print_node(node);
+        }
+        return Ok(());
+    }
+
+    let start = limited_start(active.bundle.commit_groups.len(), limit);
+    for group in &active.bundle.commit_groups[start..] {
         println!("{}  {}", group.id, group.message);
         for commit in &group.commits {
             println!("  {:<10} {}", commit.repo_id, short_sha(&commit.sha));
@@ -20,6 +42,122 @@ pub fn show_log() -> Result<()> {
     }
 
     Ok(())
+}
+
+fn resolve_limit(limit: Option<usize>, shorthand_limit: Option<&str>) -> Result<Option<usize>> {
+    let Some(shorthand_limit) = shorthand_limit else {
+        return Ok(limit);
+    };
+    if limit.is_some() {
+        bail!("Use either -n/--limit or -<count>, not both.");
+    }
+
+    let raw = shorthand_limit.trim();
+    let count = raw.strip_prefix('-').unwrap_or(raw);
+    if count.is_empty() || !count.chars().all(|char| char.is_ascii_digit()) {
+        bail!("Expected a log count like `-2`.");
+    }
+
+    Ok(Some(count.parse()?))
+}
+
+fn limited_start(len: usize, limit: Option<usize>) -> usize {
+    match limit {
+        Some(limit) => len.saturating_sub(limit),
+        None => 0,
+    }
+}
+
+fn is_loggable_node(node: &BundleNode) -> bool {
+    matches!(
+        node.node_type.as_str(),
+        "commit.group" | "git.observed" | "repo.removed"
+    )
+}
+
+fn print_node(node: &BundleNode) {
+    match node.node_type.as_str() {
+        "commit.group" => {
+            println!(
+                "{}  {}",
+                node.id,
+                node.message.as_deref().unwrap_or("Commit group")
+            );
+            for commit in &node.commits {
+                println!("  {:<10} {}", commit.repo_id, short_sha(&commit.sha));
+            }
+        }
+        "git.observed" => {
+            println!("{}  observed git changes", node.id);
+            for change in &node.repo_changes {
+                match change.movement.as_str() {
+                    "advanced" => {
+                        if change.commits.is_empty() {
+                            println!(
+                                "  {:<10} advanced {}",
+                                change.repo_id,
+                                short_sha(&change.after_sha)
+                            );
+                        } else {
+                            for sha in &change.commits {
+                                println!("  {:<10} advanced {}", change.repo_id, short_sha(sha));
+                            }
+                        }
+                    }
+                    "rewound" => {
+                        println!(
+                            "  {:<10} rewound  {} -> {}",
+                            change.repo_id,
+                            change
+                                .before_sha
+                                .as_deref()
+                                .map(short_sha)
+                                .unwrap_or_else(|| "-".to_string()),
+                            short_sha(&change.after_sha)
+                        );
+                        for sha in &change.dropped_commits {
+                            println!("  {:<10} dropped  {}", "", short_sha(sha));
+                        }
+                    }
+                    "diverged" => {
+                        println!(
+                            "  {:<10} diverged {} -> {}",
+                            change.repo_id,
+                            change
+                                .before_sha
+                                .as_deref()
+                                .map(short_sha)
+                                .unwrap_or_else(|| "-".to_string()),
+                            short_sha(&change.after_sha)
+                        );
+                        for sha in &change.commits {
+                            println!("  {:<10} added    {}", "", short_sha(sha));
+                        }
+                        for sha in &change.dropped_commits {
+                            println!("  {:<10} dropped  {}", "", short_sha(sha));
+                        }
+                    }
+                    movement => {
+                        println!(
+                            "  {:<10} {} {}",
+                            change.repo_id,
+                            movement,
+                            short_sha(&change.after_sha)
+                        );
+                    }
+                }
+            }
+        }
+        "repo.removed" => {
+            println!("{}  removed repos", node.id);
+            if let Some(repo_ids) = &node.repo_ids {
+                for repo_id in repo_ids {
+                    println!("  {repo_id}");
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 pub fn show_group(commit_group_id: &str) -> Result<()> {

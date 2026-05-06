@@ -27,7 +27,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Status => commands::show_status(),
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
-        Commands::Log => commands::show_log(),
+        Commands::Log {
+            limit,
+            shorthand_limit,
+        } => commands::show_log(limit, shorthand_limit.as_deref()),
+        Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { commit_group_id } => commands::show_group(&commit_group_id),
     }
 }

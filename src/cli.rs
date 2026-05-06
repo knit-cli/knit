@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use std::ffi::OsString;
 use std::path::PathBuf;
 
 #[derive(Parser)]
@@ -54,8 +55,27 @@ pub enum Commands {
         #[arg(long)]
         stage: bool,
     },
-    /// Show logical commit groups recorded in the active bundle.
-    Log,
+    /// Show bundle ledger entries.
+    Log {
+        /// Show only the latest N log entries. With no value, defaults to 10.
+        #[arg(short = 'n', long = "limit", value_name = "COUNT", num_args = 0..=1, default_missing_value = "10")]
+        limit: Option<usize>,
+        /// Git-style shorthand for the latest N entries, for example `knit log -2`.
+        #[arg(value_name = "-COUNT", allow_hyphen_values = true)]
+        shorthand_limit: Option<String>,
+    },
+    /// Run a git command in tracked bundle worktrees.
+    Git {
+        /// Target repo id or path. Repeat for multiple repos.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Run against every tracked repo.
+        #[arg(long)]
+        all: bool,
+        /// Git arguments to pass through.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
+    },
     /// Show git show --stat for each commit in a logical group.
     Show {
         /// Commit group id to inspect.

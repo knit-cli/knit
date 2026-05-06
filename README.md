@@ -81,7 +81,9 @@ knit stage
 knit status
 knit sync
 knit commit -m "<message>" [--stage]
-knit log
+knit log [-<count>]
+knit log [-n [count]]
+knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <commit-group-id>
 ```
 
@@ -93,7 +95,20 @@ Base inference prefers the current branch only when it is clean and named `main`
 
 `knit stage` runs `git add -A` in every tracked worktree. `knit status` shows ordinary git status and also reports unrecorded commits when a tracked branch moved outside Knit.
 
-`knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`.
+`knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
+
+`knit git` passes arguments directly to git in tracked bundle worktrees. With no repo selector it runs against every tracked repo:
+
+```sh
+knit git status
+knit git status --short
+knit git status --short backend
+knit git status --short ../backend
+knit git status --short '*'
+knit git --repo backend diff --stat
+```
+
+Repo selectors can be repo ids, original repo paths, or worktree paths. Quote `'*'` when you want Knit to receive the literal all-repos selector instead of your shell expanding it. If a git argument is ambiguous with a repo id, use `--repo`.
 
 If a tracked branch is reset backward, `knit status` reports rewound commits and `knit sync` records a `git.observed` node with `movement: "rewound"` and `droppedCommits`. Existing `commit.group` nodes remain as history; current state is derived from each repo's latest `headSha`.
 
