@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit add <repo-path>` first.");
+        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
     }
 
     let repos = resolve_repos(&active, selectors)?;

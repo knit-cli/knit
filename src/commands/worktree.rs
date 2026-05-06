@@ -15,7 +15,7 @@ use std::path::PathBuf;
 pub fn create_worktrees() -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit add <repo-path>` first.");
+        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
     }
 
     let materialized_repo_ids = materialize_repos(&mut active, None)?;

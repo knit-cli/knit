@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 pub fn run_git(args: &[OsString], explicit_repos: &[String], all: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit add <repo-path>` first.");
+        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
     }
 
     let (git_args, selectors) = split_args(&active, args, explicit_repos, all)?;

@@ -1,6 +1,6 @@
 # Knit
 
-Knit is a local-first Rust CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": it keeps a small bundle of related repositories, creates coordinated worktrees, commits staged changes across those worktrees, and records the result in a language-neutral JSON artifact.
+Knit is a local-first Rust CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": it keeps a small bundle of related repositories, creates coordinated checkouts, commits staged changes across those checkouts, and records the result in a language-neutral JSON artifact.
 
 Knit shells out to `git` in v0. It does not use libgit2 and it does not try to replace git.
 
@@ -48,14 +48,14 @@ From a workspace folder that sits beside your local repos:
 
 ```sh
 knit init "venue capacity"
-knit add ../backend ../frontend ../scraper
+knit track ../backend ../frontend ../scraper
 ```
 
-Make changes inside the generated worktrees, stage the files with git, then inspect and commit:
+Make changes inside the generated worktrees, add the files, then inspect and commit:
 
 ```sh
 knit status
-knit stage
+knit add
 knit commit -m "Add venue capacity integration"
 knit log
 ```
@@ -76,10 +76,12 @@ The active bundle is printed by `knit init` and lives at:
 
 ```sh
 knit init "<title>" [--force]
-knit add <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
+knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
+knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
+knit stage [-r <repo>] [-N] [-u] [repo-or-pathspec...]
+knit untrack <repo-id>...
 knit remove <repo-id>...
 knit worktree
-knit stage
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit sync
@@ -92,17 +94,29 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <commit-group-id>
 ```
 
-`knit add` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each added repo. Use `--no-worktree` for metadata-only registration.
+`knit track` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 
-Use `--in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
+Use `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
 Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
 
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
-`knit stage` runs `git add -A` in every tracked checkout. `knit status` shows ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
+`knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
-`knit diff` shows cross-repo diffs against each repo's recorded `baseSha`. It includes committed, staged, and unstaged tracked-file changes in the current checkout. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
+```sh
+knit add
+knit add backend
+knit add backend app.txt
+knit add --repo frontend src/App.tsx
+knit add --intent-to-add frontend new-file.ts
+```
+
+`knit stage` is kept as an alias for `knit add`, because Git also accepts `git stage` as an alias for `git add`.
+
+`knit status` shows ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
+
+`knit diff` shows cross-repo diffs against each repo's recorded `baseSha`. It follows `git diff`: committed, staged, and unstaged tracked-file changes are shown, while untracked files are not shown until they are added to the index. Use `knit status` or `knit git status --short` to see untracked files. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
 
 ```sh
 knit diff
@@ -122,7 +136,7 @@ Revert behavior is based on the target node:
 - `git.observed` with `rewound`: cherry-pick the dropped commits back.
 - `git.observed` with `diverged`: revert added commits, then cherry-pick dropped commits.
 
-`knit git` passes arguments directly to git in tracked bundle worktrees. With no repo selector it runs against every tracked repo:
+`knit git` passes arguments directly to git in tracked checkouts. With no repo selector it runs against every tracked repo:
 
 ```sh
 knit git status
@@ -139,7 +153,7 @@ Knit colors interactive terminal output for scanability. It disables color autom
 
 If a tracked branch is reset backward, `knit status` reports rewound commits and `knit sync` records a `git.observed` node with `movement: "rewound"` and `droppedCommits`. Existing `commit.group` nodes remain as history; current state is derived from each repo's latest `headSha`.
 
-`knit commit` commits only repos with staged changes in their bundle worktrees. With `--stage`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
+`knit commit` commits only repos with staged changes in their tracked checkouts. With `--stage`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
 
 The git commits are created sequentially, one repo at a time. Knit records them as one logical commit group in the bundle. Every repo commit gets the same logical message plus trailers:
 
@@ -150,7 +164,7 @@ Knit-Bundle: <bundle-id>
 
 The bundle records the full mapping from logical commit group to repo commit SHAs.
 
-`knit remove <repo-id>...` removes repos from bundle tracking and appends a `repo.removed` node. It intentionally leaves existing git branches and worktrees in place in v0.
+`knit untrack <repo-id>...` removes repos from bundle tracking and appends a `repo.removed` node. It intentionally leaves existing git branches and checkouts in place. `knit remove` remains as an alias.
 
 ## Bundle Nodes
 
@@ -171,10 +185,10 @@ Typical node types:
 ## V0 Limitations
 
 - Knit v0 is not perfectly transactional. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
-- `knit add` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
+- `knit track` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
 - Knit uses a simple `.knit/knit.lock` file to prevent concurrent bundle writes. If a process crashes, a stale lock may need manual removal.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
-- `knit commit` only looks for staged changes inside bundle worktrees.
+- `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
 - `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.
 - Bundle schema validation is currently serde-based, not a standalone JSON Schema file.

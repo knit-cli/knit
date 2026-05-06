@@ -25,7 +25,7 @@ git -C frontend commit -m "Initial frontend"
 
 cd workspace
 knit init "venue capacity"
-knit add ../backend ../frontend
+knit track ../backend ../frontend
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
@@ -34,7 +34,7 @@ knit status
 knit diff --stat
 knit git status --short
 knit git status --short ../frontend
-knit stage
+knit add
 knit commit -m "Add venue capacity integration"
 knit log -1
 knit revert HEAD
@@ -45,9 +45,9 @@ knit log -1
 Expected result:
 
 - `.knit/bundles/venue-capacity.bundle.json` exists.
-- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit add`.
-- `knit stage` reports staged changes before the commit.
-- `knit commit` creates one commit in each staged worktree.
+- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit track`.
+- `knit add` reports staged changes before the commit.
+- `knit commit` creates one commit in each staged checkout.
 - `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 - `knit revert HEAD` writes a plan, and `knit revert HEAD --apply` creates one revert commit per affected repo plus a `revert.group` node.
 

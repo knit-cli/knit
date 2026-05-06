@@ -20,8 +20,8 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Add local git repositories to the active bundle and materialize checkouts.
-    Add {
+    /// Track local git repositories in the active bundle and materialize checkouts.
+    Track {
         /// Paths to local git repositories.
         #[arg(required = true)]
         repo_paths: Vec<PathBuf>,
@@ -35,7 +35,27 @@ pub enum Commands {
         #[arg(long)]
         no_worktree: bool,
     },
-    /// Remove repositories from bundle tracking. Leaves git branches/worktrees in place.
+    /// Stage file changes inside tracked checkouts, like git add.
+    Add {
+        /// Limit staging to one or more repo ids or paths. Positional pathspecs then apply inside those repos.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Record only intent to add pathspecs, like git add -N.
+        #[arg(short = 'N', long = "intent-to-add")]
+        intent_to_add: bool,
+        /// Stage modifications/deletions to tracked files only, like git add -u.
+        #[arg(short = 'u', long)]
+        update: bool,
+        /// Optional repo selectors or pathspecs.
+        args: Vec<String>,
+    },
+    /// Stop tracking repositories. Leaves git branches/checkouts in place.
+    Untrack {
+        /// Repo ids to remove from the active bundle.
+        #[arg(required = true)]
+        repo_ids: Vec<String>,
+    },
+    /// Remove repositories from bundle tracking. Alias for untrack.
     Remove {
         /// Repo ids to remove from the active bundle.
         #[arg(required = true)]
@@ -43,8 +63,20 @@ pub enum Commands {
     },
     /// Create per-repo worktrees for the active bundle.
     Worktree,
-    /// Stage all latest changes in tracked worktrees.
-    Stage,
+    /// Stage file changes inside tracked checkouts. Alias for add.
+    Stage {
+        /// Limit staging to one or more repo ids or paths.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Record only intent to add pathspecs, like git add -N.
+        #[arg(short = 'N', long = "intent-to-add")]
+        intent_to_add: bool,
+        /// Stage modifications/deletions to tracked files only, like git add -u.
+        #[arg(short = 'u', long)]
+        update: bool,
+        /// Optional repo selectors or pathspecs.
+        args: Vec<String>,
+    },
     /// Show status for all repos in the active bundle.
     Status,
     /// Show cross-repo diffs against each repo base.
@@ -57,7 +89,7 @@ pub enum Commands {
     },
     /// Record git commits that happened outside Knit.
     Sync,
-    /// Commit staged changes across bundle worktrees.
+    /// Commit staged changes across tracked checkouts.
     Commit {
         /// Commit message to use in every repo with staged changes.
         #[arg(short, long)]
@@ -86,7 +118,7 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
     },
-    /// Run a git command in tracked bundle worktrees.
+    /// Run a git command in tracked checkouts.
     Git {
         /// Target repo id or path. Repeat for multiple repos.
         #[arg(short = 'r', long = "repo", value_name = "REPO")]

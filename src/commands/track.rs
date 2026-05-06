@@ -20,7 +20,7 @@ struct RepoPlan {
     base_sha: String,
 }
 
-pub fn add_repos(
+pub fn track_repos(
     repo_paths: &[PathBuf],
     base_override: Option<&str>,
     materialize: bool,

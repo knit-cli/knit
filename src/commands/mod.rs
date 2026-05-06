@@ -1,4 +1,3 @@
-pub mod add;
 pub mod commit;
 pub mod diff;
 pub mod git_passthrough;
@@ -9,9 +8,9 @@ pub mod revert;
 pub mod stage;
 pub mod status;
 pub mod sync;
+pub mod track;
 pub mod worktree;
 
-pub use add::add_repos;
 pub use commit::commit_staged;
 pub use diff::show_diff;
 pub use git_passthrough::run_git;
@@ -19,7 +18,8 @@ pub use init::init_bundle;
 pub use log::{show_group, show_log};
 pub use remove::remove_repos;
 pub use revert::revert_target;
-pub use stage::stage_all;
+pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;
+pub use track::track_repos;
 pub use worktree::create_worktrees;

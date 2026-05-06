@@ -12,7 +12,7 @@ src/
   commands/
     mod.rs      command module wiring
     init.rs
-    add.rs
+    track.rs
     remove.rs
     worktree.rs
     stage.rs

@@ -32,7 +32,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         if !observed.is_empty() {
             save_active_bundle(&active)?;
         }
-        bail!("No staged changes found in bundle worktrees.");
+        bail!("No staged changes found in tracked checkouts.");
     }
 
     let group_id = commit_group_id();

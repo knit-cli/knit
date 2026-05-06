@@ -15,16 +15,23 @@ Knit should support two checkout modes per tracked repo:
 Proposed command shape:
 
 ```sh
-knit add ../backend
-knit add ../backend --in-place
+knit track ../backend
+knit track ../backend --in-place
 ```
 
 Baseline implemented:
 
-- `knit add --in-place`
+- `knit track --in-place`
 - per-repo `checkoutMode`
 - in-place status labeling
 - wrong-branch guardrails for mutating commands
+
+Vocabulary update implemented:
+
+- `knit track`: add repos/checkouts to the feature.
+- `knit untrack`: remove repos from Knit tracking.
+- `knit add`: stage file changes inside tracked checkouts, like `git add`.
+- `knit stage`: alias for `knit add`, matching Git's own `stage` alias.
 
 `--in-place` is useful when one person/tool owns the repo checkout for the feature and does not need the original checkout to stay on `main`. It should be first-class, not a hack.
 
@@ -73,7 +80,7 @@ Important caveat: "full history" means the history available in the local clone.
 
    Default behavior should compare each tracked checkout against its recorded base/head as appropriate. `--stat` should be optimized for quick scanning.
 
-   Baseline implemented: `knit diff`, `knit diff --stat`, and repo id/path filtering against each repo's recorded `baseSha`.
+   Baseline implemented: `knit diff`, `knit diff --stat`, and repo id/path filtering against each repo's recorded `baseSha`. Untracked files intentionally follow `git diff` behavior: they appear in status, not diff, until added to the index.
 
 2. Improve `knit show`
 

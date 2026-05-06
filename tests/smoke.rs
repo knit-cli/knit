@@ -21,7 +21,7 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     knit(
         &workspace,
         [
-            "add",
+            "track",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
             scraper.to_str().unwrap(),
@@ -50,12 +50,18 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
         &workspace.join(".knit/worktrees/venue-capacity/scraper/app.txt"),
         "capacity scraper feed",
     );
+    fs::write(
+        workspace.join(".knit/worktrees/venue-capacity/frontend/untracked.txt"),
+        "not in git yet\n",
+    )
+    .unwrap();
 
     let frontend_git_status = knit(
         &workspace,
         ["git", "status", "--short", frontend.to_str().unwrap()],
     );
     assert!(frontend_git_status.contains("M app.txt"));
+    assert!(frontend_git_status.contains("?? untracked.txt"));
 
     let all_git_status = knit(&workspace, ["git", "status", "--short"]);
     assert!(all_git_status.contains("== backend"));
@@ -70,9 +76,10 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
 
     let frontend_diff = knit(&workspace, ["diff", "frontend"]);
     assert!(frontend_diff.contains("capacity frontend ui"));
+    assert!(!frontend_diff.contains("untracked.txt"));
     assert!(!frontend_diff.contains("capacity backend api"));
 
-    let stage_output = knit(&workspace, ["stage"]);
+    let stage_output = knit(&workspace, ["add"]);
     assert!(stage_output.contains("backend: staged"));
     assert!(stage_output.contains("frontend: staged"));
     assert!(stage_output.contains("scraper: staged"));
@@ -250,7 +257,11 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
     knit(&workspace, ["init", "venue capacity"]);
     knit(
         &workspace,
-        ["add", backend.to_str().unwrap(), frontend.to_str().unwrap()],
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
     );
 
     append_line(
@@ -360,7 +371,10 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     init_repo(&backend, "backend");
 
     knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["add", "--in-place", backend.to_str().unwrap()]);
+    knit(
+        &workspace,
+        ["track", "--in-place", backend.to_str().unwrap()],
+    );
 
     assert!(!workspace
         .join(".knit/worktrees/venue-capacity/backend")
