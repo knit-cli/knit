@@ -1,3 +1,4 @@
+use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::git::{git_output, rev_parse};
 use crate::ids::{revert_group_id, revert_plan_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
@@ -514,13 +515,10 @@ fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, PathBuf)
         .enumerate()
         .find(|(_, repo)| repo.id == repo_id)
         .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
-    let Some(worktree_path) = &repo.worktree_path else {
-        bail!("{repo_id}: no worktree is recorded in the bundle.");
+    let Some(worktree) = checkout_dir(active, repo) else {
+        bail!("{repo_id}: no checkout is recorded in the bundle.");
     };
-    let worktree = active.root.join(worktree_path);
-    if !worktree.exists() {
-        bail!("{}: worktree is missing at {}", repo_id, worktree.display());
-    }
+    ensure_expected_branch(repo, &worktree)?;
 
     Ok((index, worktree))
 }

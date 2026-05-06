@@ -3,7 +3,7 @@ use crate::git::{
     current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
 };
 use crate::ids::{node_id, slugify, unique_repo_id};
-use crate::model::{BundleNode, RepoEntry};
+use crate::model::{BundleNode, RepoEntry, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE};
 use crate::output as out;
 use crate::paths::same_path;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
@@ -24,6 +24,7 @@ pub fn add_repos(
     repo_paths: &[PathBuf],
     base_override: Option<&str>,
     materialize: bool,
+    in_place: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let plans = resolve_repo_plans(repo_paths, base_override)?;
@@ -40,6 +41,9 @@ pub fn add_repos(
             existing.remote = plan.remote;
             existing.base_branch = plan.base_branch;
             existing.base_sha = Some(plan.base_sha);
+            if in_place {
+                existing.checkout_mode = CHECKOUT_MODE_IN_PLACE.to_string();
+            }
             touched_repo_ids.push(existing.id.clone());
             println!(
                 "{} {} ({})",
@@ -57,6 +61,11 @@ pub fn add_repos(
             path: plan.path,
             remote: plan.remote,
             base_branch: plan.base_branch,
+            checkout_mode: if in_place {
+                CHECKOUT_MODE_IN_PLACE.to_string()
+            } else {
+                CHECKOUT_MODE_WORKTREE.to_string()
+            },
             base_sha: Some(plan.base_sha),
             feature_branch: None,
             worktree_path: None,

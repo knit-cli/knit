@@ -2,6 +2,8 @@ use serde::{Deserialize, Serialize};
 
 pub const SCHEMA_VERSION: &str = "0.1";
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
+pub const CHECKOUT_MODE_WORKTREE: &str = "worktree";
+pub const CHECKOUT_MODE_IN_PLACE: &str = "inPlace";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -62,12 +64,18 @@ pub struct RepoEntry {
     pub path: String,
     pub remote: Option<String>,
     pub base_branch: String,
+    #[serde(default = "default_checkout_mode")]
+    pub checkout_mode: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_sha: Option<String>,
     pub feature_branch: Option<String>,
     pub worktree_path: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub head_sha: Option<String>,
+}
+
+fn default_checkout_mode() -> String {
+    CHECKOUT_MODE_WORKTREE.to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

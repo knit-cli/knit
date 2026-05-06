@@ -1,3 +1,4 @@
+pub mod checkout;
 pub mod cli;
 pub mod commands;
 pub mod git;
@@ -20,8 +21,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Add {
             repo_paths,
             base,
+            in_place,
             no_worktree,
-        } => commands::add_repos(&repo_paths, base.as_deref(), !no_worktree),
+        } => commands::add_repos(&repo_paths, base.as_deref(), !no_worktree, in_place),
         Commands::Remove { repo_ids } => commands::remove_repos(&repo_ids),
         Commands::Worktree => commands::create_worktrees(),
         Commands::Stage => commands::stage_all(),

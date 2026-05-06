@@ -1,3 +1,4 @@
+use crate::checkout::checkout_dir;
 use crate::git::git_output;
 use crate::ids::short_sha;
 use crate::model::BundleNode;
@@ -232,12 +233,7 @@ pub fn show_group(commit_group_id: &str) -> Result<()> {
             .iter()
             .find(|repo| repo.id == commit.repo_id)
             .with_context(|| format!("No repo found for {}", commit.repo_id))?;
-        let repo_dir = repo
-            .worktree_path
-            .as_ref()
-            .map(|path| active.root.join(path))
-            .filter(|path| path.exists())
-            .unwrap_or_else(|| PathBuf::from(&repo.path));
+        let repo_dir = checkout_dir(&active, repo).unwrap_or_else(|| PathBuf::from(&repo.path));
         println!(
             "== {} {} ==",
             out::repo(&commit.repo_id),

@@ -1,3 +1,4 @@
+use crate::checkout::{checkout_dir, ensure_expected_branch, ensure_mutable_checkouts};
 use crate::git::{git_output, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange};
@@ -12,6 +13,7 @@ use std::path::PathBuf;
 
 pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    ensure_mutable_checkouts(&active)?;
     let observed = sync_observed_changes(&mut active)?;
     for change in &observed {
         println!(
@@ -103,13 +105,10 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
 
 pub(crate) fn stage_all_tracked(active: &ActiveBundle) -> Result<()> {
     for repo in &active.bundle.repos {
-        let Some(worktree_path) = &repo.worktree_path else {
+        let Some(worktree_abs) = checkout_dir(active, repo) else {
             continue;
         };
-        let worktree_abs = active.root.join(worktree_path);
-        if !worktree_abs.exists() {
-            continue;
-        }
+        ensure_expected_branch(repo, &worktree_abs)?;
         git_output(&worktree_abs, ["add", "-A"])
             .with_context(|| format!("{}: failed to stage changes", repo.id))?;
     }
@@ -128,13 +127,10 @@ fn repos_with_staged_changes(active: &ActiveBundle) -> Result<Vec<CommitTarget>>
     let mut repos_to_commit = Vec::new();
 
     for (repo_index, repo) in active.bundle.repos.iter().enumerate() {
-        let Some(worktree_path) = &repo.worktree_path else {
+        let Some(worktree_abs) = checkout_dir(active, repo) else {
             continue;
         };
-        let worktree_abs = active.root.join(worktree_path);
-        if !worktree_abs.exists() {
-            continue;
-        }
+        ensure_expected_branch(repo, &worktree_abs)?;
         let short_status = git_output(&worktree_abs, ["status", "--short"])?;
         if has_staged_changes(&short_status) {
             let before_sha = rev_parse(&worktree_abs, "HEAD")

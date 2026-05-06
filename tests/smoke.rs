@@ -340,6 +340,48 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["add", "--in-place", backend.to_str().unwrap()]);
+
+    assert!(!workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "knit/venue-capacity"
+    );
+
+    let bundle = read_bundle(&workspace);
+    let repo = &bundle["repos"][0];
+    assert_eq!(repo["checkoutMode"].as_str(), Some("inPlace"));
+    assert_eq!(repo["worktreePath"].as_str(), repo["path"].as_str());
+
+    append_line(&backend.join("app.txt"), "in-place feature");
+    let status = knit(&workspace, ["status"]);
+    assert!(status.contains("in-place"));
+    assert!(status.contains("modified"));
+
+    knit(&workspace, ["commit", "--stage", "-m", "In-place feature"]);
+    assert!(git(&backend, ["log", "-1", "--pretty=%B"]).contains("In-place feature"));
+
+    git(&backend, ["checkout", "main"]);
+    let wrong_branch_status = knit(&workspace, ["status"]);
+    assert!(wrong_branch_status.contains("wrong branch"));
+    let stage_failure = knit_fails(&workspace, ["stage"]);
+    assert!(stage_failure.contains("expected `knit/venue-capacity`"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 fn unique_temp_dir() -> PathBuf {
     let nanos = SystemTime::now()
         .duration_since(UNIX_EPOCH)

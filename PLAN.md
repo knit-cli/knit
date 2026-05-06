@@ -19,6 +19,13 @@ knit add ../backend
 knit add ../backend --in-place
 ```
 
+Baseline implemented:
+
+- `knit add --in-place`
+- per-repo `checkoutMode`
+- in-place status labeling
+- wrong-branch guardrails for mutating commands
+
 `--in-place` is useful when one person/tool owns the repo checkout for the feature and does not need the original checkout to stay on `main`. It should be first-class, not a hack.
 
 Bundle state should record checkout mode per repo, for example:

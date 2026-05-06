@@ -1,3 +1,4 @@
+use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::commands::commit::stage_all_tracked;
 use crate::git::git_output;
 use crate::output as out;
@@ -10,19 +11,11 @@ pub fn stage_all() -> Result<()> {
     stage_all_tracked(&active)?;
 
     for repo in &active.bundle.repos {
-        let Some(worktree_path) = &repo.worktree_path else {
+        let Some(worktree_abs) = checkout_dir(&active, repo) else {
             println!("{}: {}", out::repo(&repo.id), out::muted("no worktree"));
             continue;
         };
-        let worktree_abs = active.root.join(worktree_path);
-        if !worktree_abs.exists() {
-            println!(
-                "{}: {}",
-                out::repo(&repo.id),
-                out::danger("worktree missing")
-            );
-            continue;
-        }
+        ensure_expected_branch(repo, &worktree_abs)?;
         let short_status = git_output(&worktree_abs, ["status", "--short"])?;
         println!(
             "{}: {}",

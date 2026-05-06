@@ -76,7 +76,7 @@ The active bundle is printed by `knit init` and lives at:
 
 ```sh
 knit init "<title>" [--force]
-knit add <repo-path>... [--base <branch>] [--no-worktree]
+knit add <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit remove <repo-id>...
 knit worktree
 knit stage
@@ -91,13 +91,15 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <commit-group-id>
 ```
 
-`knit add` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, and inferred base branch. By default it also creates the `knit/<bundle-id>` branch and the worktree for each added repo. Use `--no-worktree` for metadata-only registration.
+`knit add` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each added repo. Use `--no-worktree` for metadata-only registration.
+
+Use `--in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
 Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
 
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
-`knit stage` runs `git add -A` in every tracked worktree. `knit status` shows ordinary git status and also reports unrecorded commits when a tracked branch moved outside Knit.
+`knit stage` runs `git add -A` in every tracked checkout. `knit status` shows ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
 

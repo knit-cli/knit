@@ -38,6 +38,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
   "path": "/absolute/path/to/backend",
   "remote": "git@github.com:org/backend.git",
   "baseBranch": "main",
+  "checkoutMode": "worktree",
   "baseSha": "000aaa",
   "featureBranch": "knit/venue-capacity",
   "worktreePath": ".knit/worktrees/venue-capacity/backend",
@@ -45,7 +46,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 }
 ```
 
-`path` is absolute. `worktreePath` is relative to the Knit workspace.
+`path` is absolute. `checkoutMode` is `worktree` for generated Knit worktrees or `inPlace` for operating in the original repo checkout. `worktreePath` is relative to the Knit workspace in `worktree` mode and is the original absolute repo path in `inPlace` mode.
 
 `baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When actual git `HEAD` differs from `headSha`, Knit reports unrecorded git commits and `knit sync` records them.
 

@@ -1,4 +1,7 @@
-use crate::git::{branch_exists, git_output, is_git_worktree, resolve_base_ref, rev_parse};
+use crate::checkout::is_in_place;
+use crate::git::{
+    branch_exists, current_branch, git_output, is_git_worktree, resolve_base_ref, rev_parse,
+};
 use crate::ids::node_id;
 use crate::model::BundleNode;
 use crate::output as out;
@@ -46,6 +49,12 @@ pub fn materialize_repos(
 
         let repo_root = PathBuf::from(&repo.path);
         let feature_branch = format!("knit/{bundle_id}");
+        if is_in_place(repo) {
+            materialize_in_place(repo, &repo_root, &feature_branch)?;
+            materialized_repo_ids.push(repo.id.clone());
+            continue;
+        }
+
         let worktree_path = format!(".knit/worktrees/{}/{}", bundle_id, repo.id);
         let worktree_abs = active.root.join(&worktree_path);
         let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
@@ -138,4 +147,58 @@ pub fn materialize_repos(
     }
 
     Ok(materialized_repo_ids)
+}
+
+fn materialize_in_place(
+    repo: &mut crate::model::RepoEntry,
+    repo_root: &PathBuf,
+    feature_branch: &str,
+) -> Result<()> {
+    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
+    let base_sha = rev_parse(repo_root, &base_ref)
+        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    if repo.base_sha.is_none() {
+        repo.base_sha = Some(base_sha);
+    }
+
+    let current_branch = current_branch(repo_root)?;
+    if current_branch.as_deref() != Some(feature_branch) {
+        let short_status = git_output(repo_root, ["status", "--short"])?;
+        if !short_status.trim().is_empty() {
+            bail!(
+                "{}: in-place checkout must be clean before switching branches.",
+                repo.id
+            );
+        }
+
+        if branch_exists(repo_root, feature_branch) {
+            git_output(repo_root, ["checkout", feature_branch])
+                .with_context(|| format!("{}: failed to checkout {feature_branch}", repo.id))?;
+        } else {
+            git_output(
+                repo_root,
+                [
+                    OsString::from("checkout"),
+                    OsString::from("-b"),
+                    OsString::from(feature_branch),
+                    OsString::from(base_ref),
+                ],
+            )
+            .with_context(|| format!("{}: failed to create {feature_branch}", repo.id))?;
+        }
+    }
+
+    repo.feature_branch = Some(feature_branch.to_string());
+    repo.worktree_path = Some(repo.path.clone());
+    repo.head_sha = Some(
+        rev_parse(repo_root, "HEAD")
+            .with_context(|| format!("{}: failed to read in-place HEAD", repo.id))?,
+    );
+    println!(
+        "{}: using in-place checkout at {}",
+        out::repo(&repo.id),
+        out::path(&repo.path)
+    );
+
+    Ok(())
 }

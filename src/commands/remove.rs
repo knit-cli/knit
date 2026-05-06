@@ -1,3 +1,4 @@
+use crate::checkout::is_in_place;
 use crate::ids::node_id;
 use crate::model::BundleNode;
 use crate::output as out;
@@ -39,7 +40,16 @@ pub fn remove_repos(repo_ids: &[String]) -> Result<()> {
             out::movement("removed"),
             out::repo(&repo.id)
         );
-        if let Some(worktree_path) = repo.worktree_path {
+        if let Some(worktree_path) = &repo.worktree_path {
+            if is_in_place(&repo) {
+                println!(
+                    "{} in-place checkout untouched at {}",
+                    out::muted("Left"),
+                    out::path(worktree_path)
+                );
+                removed.push(repo.id);
+                continue;
+            }
             println!(
                 "{} existing worktree in place at {}",
                 out::muted("Left"),

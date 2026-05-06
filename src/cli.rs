@@ -20,7 +20,7 @@ pub enum Commands {
         #[arg(long)]
         force: bool,
     },
-    /// Add local git repositories to the active bundle and materialize worktrees.
+    /// Add local git repositories to the active bundle and materialize checkouts.
     Add {
         /// Paths to local git repositories.
         #[arg(required = true)]
@@ -28,6 +28,9 @@ pub enum Commands {
         /// Override the inferred base branch.
         #[arg(long)]
         base: Option<String>,
+        /// Use each original repo checkout directly instead of creating a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
         /// Only update the bundle; do not create branches or worktrees.
         #[arg(long)]
         no_worktree: bool,

@@ -20,6 +20,9 @@ src/
     sync.rs
     commit.rs
     log.rs
+    revert.rs
+    git_passthrough.rs
+  checkout.rs   checkout mode helpers and in-place branch guards
   model.rs      bundle / ChangeGroup data structures
   store.rs      .knit config and bundle file persistence
   git.rs        git subprocess helpers
@@ -42,6 +45,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should load the active bundle from `.knit/config.json`.
+- `checkout.rs` owns checkout path resolution, checkout mode labels, and in-place branch safety checks.
 - Pure helper behavior should live in small modules and have integration tests under `tests/`.
 
 ## Testing
@@ -57,7 +61,7 @@ End-to-end git behavior is documented as a manual smoke test in [manual-test.md]
 
 The bundle carries both current state and history:
 
-- `repos`: current tracked repos, branches, and worktree paths.
+- `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: compatibility list of logical commits across repos.
 - `nodes`: ordered ledger entries such as `feature.created`, `repo.added`, `worktree.materialized`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
 - `headNodeId`: the latest node in the ledger.

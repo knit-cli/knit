@@ -1,3 +1,4 @@
+use crate::checkout::checkout_dir;
 use crate::git::{is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
 use crate::model::{BundleNode, RepoChange, RepoEntry};
@@ -91,10 +92,7 @@ pub fn sync_observed_changes(active: &mut ActiveBundle) -> Result<Vec<RepoChange
 }
 
 pub fn repo_worktree_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<PathBuf> {
-    repo.worktree_path
-        .as_ref()
-        .map(|path| active.root.join(path))
-        .filter(|path| path.exists())
+    checkout_dir(active, repo)
 }
 
 fn build_repo_change(

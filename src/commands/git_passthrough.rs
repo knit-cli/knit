@@ -1,3 +1,4 @@
+use crate::checkout::checkout_dir;
 use crate::model::RepoEntry;
 use crate::output as out;
 use crate::store::{load_active_bundle, ActiveBundle};
@@ -164,11 +165,7 @@ fn repo_matches(active: &ActiveBundle, repo: &RepoEntry, selector: &str) -> bool
 }
 
 fn repo_cwd(active: &ActiveBundle, repo: &RepoEntry) -> PathBuf {
-    repo.worktree_path
-        .as_ref()
-        .map(|path| active.root.join(path))
-        .filter(|path| path.exists())
-        .unwrap_or_else(|| PathBuf::from(&repo.path))
+    checkout_dir(active, repo).unwrap_or_else(|| PathBuf::from(&repo.path))
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {
