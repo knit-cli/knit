@@ -95,9 +95,29 @@ Current node types:
 ```json
 {
   "repoId": "frontend",
+  "movement": "advanced",
   "beforeSha": "abc123",
   "afterSha": "def456",
   "commits": ["def456"]
+}
+```
+
+Movement values:
+
+- `advanced`: the branch moved forward from `beforeSha` to `afterSha`; `commits` lists newly added commits.
+- `rewound`: the branch was reset to an ancestor; `droppedCommits` lists commits no longer reachable from the branch head.
+- `diverged`: the branch was rewritten to a different line; `commits` lists new commits and `droppedCommits` lists replaced commits.
+
+Rewind example:
+
+```json
+{
+  "repoId": "frontend",
+  "movement": "rewound",
+  "beforeSha": "def456",
+  "afterSha": "abc123",
+  "commits": [],
+  "droppedCommits": ["def456"]
 }
 ```
 

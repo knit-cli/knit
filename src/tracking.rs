@@ -1,4 +1,4 @@
-use crate::git::{rev_list, rev_parse};
+use crate::git::{is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
 use crate::model::{BundleNode, RepoChange, RepoEntry};
 use crate::store::ActiveBundle;
@@ -21,21 +21,44 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
             continue;
         }
 
-        let commits = match &before_sha {
-            Some(before) => rev_list(&worktree_dir, before, &after_sha)
-                .with_context(|| format!("{}: failed to list unrecorded commits", repo.id))?,
-            None => vec![after_sha.clone()],
-        };
-
-        changes.push(RepoChange {
-            repo_id: repo.id.clone(),
+        changes.push(build_repo_change(
+            &worktree_dir,
+            repo.id.clone(),
             before_sha,
             after_sha,
-            commits,
-        });
+        )?);
     }
 
     Ok(changes)
+}
+
+pub fn status_note(change: &RepoChange) -> String {
+    match change.movement.as_str() {
+        "advanced" => format!("unrecorded commits: {}", change.commits.len()),
+        "rewound" => format!("rewound commits: {}", change.dropped_commits.len()),
+        "diverged" => format!(
+            "diverged (+{} -{})",
+            change.commits.len(),
+            change.dropped_commits.len()
+        ),
+        _ => "changed".to_string(),
+    }
+}
+
+pub fn sync_note(change: &RepoChange) -> String {
+    match change.movement.as_str() {
+        "advanced" => format!("observed {} unrecorded commit(s)", change.commits.len()),
+        "rewound" => format!(
+            "observed rewind removing {} commit(s)",
+            change.dropped_commits.len()
+        ),
+        "diverged" => format!(
+            "observed divergence (+{} -{} commit(s))",
+            change.commits.len(),
+            change.dropped_commits.len()
+        ),
+        _ => "observed git movement".to_string(),
+    }
 }
 
 pub fn sync_observed_changes(active: &mut ActiveBundle) -> Result<Vec<RepoChange>> {
@@ -72,4 +95,66 @@ pub fn repo_worktree_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<Path
         .as_ref()
         .map(|path| active.root.join(path))
         .filter(|path| path.exists())
+}
+
+fn build_repo_change(
+    worktree_dir: &PathBuf,
+    repo_id: String,
+    before_sha: Option<String>,
+    after_sha: String,
+) -> Result<RepoChange> {
+    let Some(before) = before_sha.clone() else {
+        return Ok(RepoChange {
+            repo_id,
+            movement: "advanced".to_string(),
+            before_sha,
+            after_sha: after_sha.clone(),
+            commits: vec![after_sha],
+            dropped_commits: Vec::new(),
+        });
+    };
+
+    if is_ancestor(worktree_dir, &before, &after_sha) {
+        return Ok(RepoChange {
+            repo_id,
+            movement: "advanced".to_string(),
+            before_sha,
+            after_sha: after_sha.clone(),
+            commits: rev_list(worktree_dir, &before, &after_sha)
+                .context("failed to list advanced commits")?,
+            dropped_commits: Vec::new(),
+        });
+    }
+
+    if is_ancestor(worktree_dir, &after_sha, &before) {
+        return Ok(RepoChange {
+            repo_id,
+            movement: "rewound".to_string(),
+            before_sha,
+            after_sha: after_sha.clone(),
+            commits: Vec::new(),
+            dropped_commits: rev_list(worktree_dir, &after_sha, &before)
+                .context("failed to list dropped commits")?,
+        });
+    }
+
+    let base = merge_base(worktree_dir, &before, &after_sha)?;
+    let (commits, dropped_commits) = if let Some(base) = base {
+        (
+            rev_list(worktree_dir, &base, &after_sha)
+                .context("failed to list divergent commits")?,
+            rev_list(worktree_dir, &base, &before).context("failed to list replaced commits")?,
+        )
+    } else {
+        (vec![after_sha.clone()], vec![before])
+    };
+
+    Ok(RepoChange {
+        repo_id,
+        movement: "diverged".to_string(),
+        before_sha,
+        after_sha,
+        commits,
+        dropped_commits,
+    })
 }

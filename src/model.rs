@@ -90,9 +90,17 @@ pub struct CommitRef {
 #[serde(rename_all = "camelCase")]
 pub struct RepoChange {
     pub repo_id: String,
+    #[serde(default = "default_movement")]
+    pub movement: String,
     pub before_sha: Option<String>,
     pub after_sha: String,
     pub commits: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dropped_commits: Vec<String>,
+}
+
+fn default_movement() -> String {
+    "advanced".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

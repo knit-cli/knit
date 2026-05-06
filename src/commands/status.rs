@@ -1,7 +1,7 @@
 use crate::git::git_output;
 use crate::status::status_label;
 use crate::store::load_active_bundle;
-use crate::tracking::detect_unrecorded_changes;
+use crate::tracking::{detect_unrecorded_changes, status_note};
 use anyhow::Result;
 use std::path::PathBuf;
 
@@ -23,7 +23,7 @@ pub fn show_status() -> Result<()> {
         let short_status = git_output(&status_dir, ["status", "--short"])?;
         let mut label = status_label(&short_status).to_string();
         if let Some(change) = unrecorded.iter().find(|change| change.repo_id == repo.id) {
-            label.push_str(&format!(" (unrecorded commits: {})", change.commits.len()));
+            label.push_str(&format!(" ({})", status_note(change)));
         }
         println!("{:<14} {:<26} {:<48} {}", repo.id, branch, worktree, label);
     }

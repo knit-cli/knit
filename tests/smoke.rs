@@ -127,12 +127,50 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
         Some("frontend")
     );
     assert_eq!(
+        observed["repoChanges"][0]["movement"].as_str(),
+        Some("advanced")
+    );
+    assert_eq!(
         observed["repoChanges"][0]["commits"]
             .as_array()
             .unwrap()
             .len(),
         1
     );
+
+    git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["reset", "--hard", "HEAD~1"],
+    );
+
+    let rewind_status = knit(&workspace, ["status"]);
+    assert!(rewind_status.contains("frontend"));
+    assert!(rewind_status.contains("rewound commits: 1"));
+
+    let rewind_sync = knit(&workspace, ["sync"]);
+    assert!(rewind_sync.contains("frontend: observed rewind removing 1 commit(s)"));
+
+    let bundle = read_bundle(&workspace);
+    let observed_nodes = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"] == "git.observed")
+        .collect::<Vec<_>>();
+    assert_eq!(observed_nodes.len(), 2);
+    let rewind_observed = observed_nodes[1];
+    assert_eq!(
+        rewind_observed["repoChanges"][0]["movement"].as_str(),
+        Some("rewound")
+    );
+    assert_eq!(
+        rewind_observed["repoChanges"][0]["droppedCommits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
     assert_eq!(
         bundle["headNodeId"].as_str(),
         bundle["nodes"].as_array().unwrap().last().unwrap()["id"].as_str()

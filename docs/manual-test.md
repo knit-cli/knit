@@ -57,4 +57,15 @@ knit sync
 
 Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, and `knit sync` appends a `git.observed` node to the bundle.
 
+To test a reset/rewind:
+
+```sh
+git -C .knit/worktrees/venue-capacity/frontend reset --hard HEAD~1
+
+knit status
+knit sync
+```
+
+Expected result: `knit status` reports `rewound commits: 1` for `frontend`, and `knit sync` appends another `git.observed` node with `movement: "rewound"` and `droppedCommits`.
+
 Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

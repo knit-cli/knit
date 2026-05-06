@@ -4,7 +4,7 @@ use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange};
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
-use crate::tracking::sync_observed_changes;
+use crate::tracking::{sync_note, sync_observed_changes};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -13,11 +13,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let observed = sync_observed_changes(&mut active)?;
     for change in &observed {
-        println!(
-            "{}: observed {} unrecorded commit(s)",
-            change.repo_id,
-            change.commits.len()
-        );
+        println!("{}: {}", change.repo_id, sync_note(change));
     }
 
     if stage_first {
@@ -61,9 +57,11 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         });
         repo_changes.push(RepoChange {
             repo_id: target.repo_id,
+            movement: "advanced".to_string(),
             before_sha: Some(target.before_sha),
             after_sha: sha.clone(),
             commits: vec![sha.clone()],
+            dropped_commits: Vec::new(),
         });
         active.bundle.repos[target.repo_index].head_sha = Some(sha);
     }

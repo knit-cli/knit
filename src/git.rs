@@ -108,6 +108,14 @@ pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<Str
         .collect())
 }
 
+pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
+    git_success(cwd, ["merge-base", "--is-ancestor", ancestor, descendant])
+}
+
+pub fn merge_base(cwd: &Path, left: &str, right: &str) -> Result<Option<String>> {
+    git_output_optional(cwd, ["merge-base", left, right])
+}
+
 pub fn git_output<I, S>(cwd: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,

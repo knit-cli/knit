@@ -95,6 +95,8 @@ Base inference prefers the current branch only when it is clean and named `main`
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`.
 
+If a tracked branch is reset backward, `knit status` reports rewound commits and `knit sync` records a `git.observed` node with `movement: "rewound"` and `droppedCommits`. Existing `commit.group` nodes remain as history; current state is derived from each repo's latest `headSha`.
+
 `knit commit` commits only repos with staged changes in their bundle worktrees. With `--stage`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
 
 The git commits are created sequentially, one repo at a time. Knit records them as one logical commit group in the bundle. Every repo commit gets the same logical message plus trailers:
