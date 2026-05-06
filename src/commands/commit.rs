@@ -1,21 +1,34 @@
-use crate::git::git_output;
+use crate::git::{git_output, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
-use crate::model::{BundleNode, CommitGroup, CommitRef};
+use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange};
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
+use crate::tracking::sync_observed_changes;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    let observed = sync_observed_changes(&mut active)?;
+    for change in &observed {
+        println!(
+            "{}: observed {} unrecorded commit(s)",
+            change.repo_id,
+            change.commits.len()
+        );
+    }
+
     if stage_first {
         stage_all_tracked(&active)?;
     }
     let repos_to_commit = repos_with_staged_changes(&active)?;
 
     if repos_to_commit.is_empty() {
+        if !observed.is_empty() {
+            save_active_bundle(&active)?;
+        }
         bail!("No staged changes found in bundle worktrees.");
     }
 
@@ -26,25 +39,33 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         active.bundle.id
     );
     let mut commits = Vec::new();
+    let mut repo_changes = Vec::new();
 
-    for (repo_id, worktree_abs) in repos_to_commit {
+    for target in repos_to_commit {
         git_output(
-            &worktree_abs,
+            &target.worktree_abs,
             [
                 OsString::from("commit"),
                 OsString::from("-m"),
                 OsString::from(&commit_message),
             ],
         )
-        .with_context(|| format!("{repo_id}: git commit failed"))?;
-        let sha = git_output(&worktree_abs, ["rev-parse", "HEAD"])
-            .with_context(|| format!("{repo_id}: failed to read commit sha"))?;
+        .with_context(|| format!("{}: git commit failed", target.repo_id))?;
+        let sha = rev_parse(&target.worktree_abs, "HEAD")
+            .with_context(|| format!("{}: failed to read commit sha", target.repo_id))?;
         let short = short_sha(&sha);
-        println!("{repo_id}: committed {short}");
+        println!("{}: committed {short}", target.repo_id);
         commits.push(CommitRef {
-            repo_id,
-            sha: sha.trim().to_string(),
+            repo_id: target.repo_id.clone(),
+            sha: sha.clone(),
         });
+        repo_changes.push(RepoChange {
+            repo_id: target.repo_id,
+            before_sha: Some(target.before_sha),
+            after_sha: sha.clone(),
+            commits: vec![sha.clone()],
+        });
+        active.bundle.repos[target.repo_index].head_sha = Some(sha);
     }
 
     active.bundle.commit_groups.push(CommitGroup {
@@ -58,6 +79,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         created_at,
         message.to_string(),
         commits,
+        repo_changes,
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
@@ -83,10 +105,17 @@ pub(crate) fn stage_all_tracked(active: &ActiveBundle) -> Result<()> {
     Ok(())
 }
 
-fn repos_with_staged_changes(active: &ActiveBundle) -> Result<Vec<(String, PathBuf)>> {
+struct CommitTarget {
+    repo_index: usize,
+    repo_id: String,
+    worktree_abs: PathBuf,
+    before_sha: String,
+}
+
+fn repos_with_staged_changes(active: &ActiveBundle) -> Result<Vec<CommitTarget>> {
     let mut repos_to_commit = Vec::new();
 
-    for repo in &active.bundle.repos {
+    for (repo_index, repo) in active.bundle.repos.iter().enumerate() {
         let Some(worktree_path) = &repo.worktree_path else {
             continue;
         };
@@ -96,7 +125,14 @@ fn repos_with_staged_changes(active: &ActiveBundle) -> Result<Vec<(String, PathB
         }
         let short_status = git_output(&worktree_abs, ["status", "--short"])?;
         if has_staged_changes(&short_status) {
-            repos_to_commit.push((repo.id.clone(), worktree_abs));
+            let before_sha = rev_parse(&worktree_abs, "HEAD")
+                .with_context(|| format!("{}: failed to read current HEAD", repo.id))?;
+            repos_to_commit.push(CommitTarget {
+                repo_index,
+                repo_id: repo.id.clone(),
+                worktree_abs,
+                before_sha,
+            });
         }
     }
 

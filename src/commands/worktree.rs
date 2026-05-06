@@ -1,4 +1,4 @@
-use crate::git::{branch_exists, git_output, is_git_worktree, resolve_base_ref};
+use crate::git::{branch_exists, git_output, is_git_worktree, resolve_base_ref, rev_parse};
 use crate::ids::node_id;
 use crate::model::BundleNode;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
@@ -47,12 +47,24 @@ pub fn materialize_repos(
         let feature_branch = format!("knit/{bundle_id}");
         let worktree_path = format!(".knit/worktrees/{}/{}", bundle_id, repo.id);
         let worktree_abs = active.root.join(&worktree_path);
+        let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
+        let base_sha = rev_parse(&repo_root, &base_ref)
+            .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
 
+        if repo.base_sha.is_none() {
+            repo.base_sha = Some(base_sha.clone());
+        }
         repo.feature_branch = Some(feature_branch.clone());
         repo.worktree_path = Some(worktree_path.clone());
 
         if worktree_abs.exists() {
             if is_git_worktree(&worktree_abs) {
+                if repo.head_sha.is_none() {
+                    repo.head_sha =
+                        Some(rev_parse(&worktree_abs, "HEAD").with_context(|| {
+                            format!("{}: failed to read worktree HEAD", repo.id)
+                        })?);
+                }
                 println!("{}: worktree already present at {}", repo.id, worktree_path);
                 materialized_repo_ids.push(repo.id.clone());
                 continue;
@@ -81,10 +93,15 @@ pub fn materialize_repos(
                 ],
             )
             .with_context(|| format!("failed to add worktree for {}", repo.id))?;
+            if repo.head_sha.is_none() {
+                repo.head_sha = Some(
+                    rev_parse(&worktree_abs, "HEAD")
+                        .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+                );
+            }
             println!("{}: created worktree from existing branch", repo.id);
             materialized_repo_ids.push(repo.id.clone());
         } else {
-            let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
             git_output(
                 &repo_root,
                 [
@@ -97,6 +114,10 @@ pub fn materialize_repos(
                 ],
             )
             .with_context(|| format!("failed to create branch/worktree for {}", repo.id))?;
+            repo.head_sha = Some(
+                rev_parse(&worktree_abs, "HEAD")
+                    .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+            );
             println!("{}: created {}", repo.id, feature_branch);
             materialized_repo_ids.push(repo.id.clone());
         }

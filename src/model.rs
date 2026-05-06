@@ -62,8 +62,12 @@ pub struct RepoEntry {
     pub path: String,
     pub remote: Option<String>,
     pub base_branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_sha: Option<String>,
     pub feature_branch: Option<String>,
     pub worktree_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub head_sha: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -84,6 +88,15 @@ pub struct CommitRef {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+pub struct RepoChange {
+    pub repo_id: String,
+    pub before_sha: Option<String>,
+    pub after_sha: String,
+    pub commits: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct BundleNode {
     pub id: String,
     #[serde(rename = "type")]
@@ -99,6 +112,8 @@ pub struct BundleNode {
     pub message: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_changes: Vec<RepoChange>,
 }
 
 impl BundleNode {
@@ -112,6 +127,7 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             commits: Vec::new(),
+            repo_changes: Vec::new(),
         }
     }
 
@@ -125,6 +141,7 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             commits: Vec::new(),
+            repo_changes: Vec::new(),
         }
     }
 
@@ -138,6 +155,7 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             commits: Vec::new(),
+            repo_changes: Vec::new(),
         }
     }
 
@@ -151,6 +169,7 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             commits: Vec::new(),
+            repo_changes: Vec::new(),
         }
     }
 
@@ -159,6 +178,7 @@ impl BundleNode {
         created_at: String,
         message: String,
         commits: Vec<CommitRef>,
+        repo_changes: Vec<RepoChange>,
     ) -> Self {
         Self {
             id: group_id.clone(),
@@ -169,6 +189,21 @@ impl BundleNode {
             commit_group_id: Some(group_id),
             message: Some(message),
             commits,
+            repo_changes,
+        }
+    }
+
+    pub fn git_observed(id: String, created_at: String, repo_changes: Vec<RepoChange>) -> Self {
+        Self {
+            id,
+            node_type: "git.observed".to_string(),
+            created_at,
+            title: None,
+            repo_ids: None,
+            commit_group_id: None,
+            message: None,
+            commits: Vec::new(),
+            repo_changes,
         }
     }
 }

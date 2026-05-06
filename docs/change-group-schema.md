@@ -38,12 +38,16 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
   "path": "/absolute/path/to/backend",
   "remote": "git@github.com:org/backend.git",
   "baseBranch": "main",
+  "baseSha": "000aaa",
   "featureBranch": "knit/venue-capacity",
-  "worktreePath": ".knit/worktrees/venue-capacity/backend"
+  "worktreePath": ".knit/worktrees/venue-capacity/backend",
+  "headSha": "abc123"
 }
 ```
 
 `path` is absolute. `worktreePath` is relative to the Knit workspace.
+
+`baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When actual git `HEAD` differs from `headSha`, Knit reports unrecorded git commits and `knit sync` records them.
 
 ## Commit Group
 
@@ -81,8 +85,20 @@ Current node types:
 - `repo.added`
 - `worktree.materialized`
 - `commit.group`
+- `git.observed`
 - `repo.removed`
 
-`commit.group` nodes include `commitGroupId`, `message`, and `commits`. Repo/worktree nodes include `repoIds`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `git.observed` nodes include `repoChanges`. Repo/worktree nodes include `repoIds`.
+
+`repoChanges` records how a repo moved:
+
+```json
+{
+  "repoId": "frontend",
+  "beforeSha": "abc123",
+  "afterSha": "def456",
+  "commits": ["def456"]
+}
+```
 
 Gloss should treat the bundle as read-only input. Gloss can analyze the current `headNodeId`, a specific `commit.group` node, or the full current bundle.

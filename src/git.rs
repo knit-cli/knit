@@ -79,6 +79,35 @@ pub fn is_git_worktree(path: &Path) -> bool {
     git_success(path, ["rev-parse", "--is-inside-work-tree"])
 }
 
+pub fn rev_parse(cwd: &Path, reference: &str) -> Result<String> {
+    Ok(git_output(cwd, ["rev-parse", reference])?
+        .trim()
+        .to_string())
+}
+
+pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<String>> {
+    if before_sha == after_sha {
+        return Ok(Vec::new());
+    }
+
+    let range = format!("{before_sha}..{after_sha}");
+    let output = git_output(
+        cwd,
+        [
+            OsString::from("rev-list"),
+            OsString::from("--reverse"),
+            OsString::from(range),
+        ],
+    )?;
+
+    Ok(output
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .map(ToString::to_string)
+        .collect())
+}
+
 pub fn git_output<I, S>(cwd: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,

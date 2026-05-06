@@ -25,8 +25,10 @@ fn makes_unique_repo_ids() {
         path: "/tmp/backend".to_string(),
         remote: None,
         base_branch: "main".to_string(),
+        base_sha: None,
         feature_branch: None,
         worktree_path: None,
+        head_sha: None,
     });
     assert_eq!(unique_repo_id(&bundle, "backend"), "backend-2");
 }

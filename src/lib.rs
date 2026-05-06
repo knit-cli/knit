@@ -7,6 +7,7 @@ pub mod paths;
 pub mod status;
 pub mod store;
 pub mod time;
+pub mod tracking;
 
 use anyhow::Result;
 
@@ -24,6 +25,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Worktree => commands::create_worktrees(),
         Commands::Stage => commands::stage_all(),
         Commands::Status => commands::show_status(),
+        Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log => commands::show_log(),
         Commands::Show { commit_group_id } => commands::show_group(&commit_group_id),

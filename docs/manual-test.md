@@ -44,4 +44,17 @@ Expected result:
 - `knit commit` creates one commit in each staged worktree.
 - `knit log` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 
+To test a raw git commit outside Knit:
+
+```sh
+printf "manual frontend polish\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
+git -C .knit/worktrees/venue-capacity/frontend add app.txt
+git -C .knit/worktrees/venue-capacity/frontend commit -m "Manual frontend polish"
+
+knit status
+knit sync
+```
+
+Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, and `knit sync` appends a `git.observed` node to the bundle.
+
 Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

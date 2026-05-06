@@ -79,6 +79,7 @@ knit remove <repo-id>...
 knit worktree
 knit stage
 knit status
+knit sync
 knit commit -m "<message>" [--stage]
 knit log
 knit show <commit-group-id>
@@ -90,7 +91,11 @@ Base inference prefers the current branch only when it is clean and named `main`
 
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
-`knit stage` runs `git add -A` in every tracked worktree. `knit commit` commits only repos with staged changes in their bundle worktrees. With `--stage`, it stages first and then commits.
+`knit stage` runs `git add -A` in every tracked worktree. `knit status` shows ordinary git status and also reports unrecorded commits when a tracked branch moved outside Knit.
+
+`knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`.
+
+`knit commit` commits only repos with staged changes in their bundle worktrees. With `--stage`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
 
 The git commits are created sequentially, one repo at a time. Knit records them as one logical commit group in the bundle. Every repo commit gets the same logical message plus trailers:
 
@@ -113,6 +118,7 @@ Typical node types:
 - `repo.added`
 - `worktree.materialized`
 - `commit.group`
+- `git.observed`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

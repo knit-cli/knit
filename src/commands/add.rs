@@ -1,5 +1,7 @@
 use crate::commands::worktree::materialize_repos;
-use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
+use crate::git::{
+    current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
+};
 use crate::ids::{node_id, slugify, unique_repo_id};
 use crate::model::{BundleNode, RepoEntry};
 use crate::paths::same_path;
@@ -14,6 +16,7 @@ struct RepoPlan {
     path: String,
     remote: Option<String>,
     base_branch: String,
+    base_sha: String,
 }
 
 pub fn add_repos(
@@ -35,6 +38,7 @@ pub fn add_repos(
             let existing = &mut active.bundle.repos[index];
             existing.remote = plan.remote;
             existing.base_branch = plan.base_branch;
+            existing.base_sha = Some(plan.base_sha);
             touched_repo_ids.push(existing.id.clone());
             println!("Updated repo {} ({})", existing.id, existing.path);
             continue;
@@ -47,8 +51,10 @@ pub fn add_repos(
             path: plan.path,
             remote: plan.remote,
             base_branch: plan.base_branch,
+            base_sha: Some(plan.base_sha),
             feature_branch: None,
             worktree_path: None,
+            head_sha: None,
         });
         println!("Added repo {repo_id}");
         touched_repo_ids.push(repo_id);
@@ -112,11 +118,14 @@ fn resolve_repo_plan(repo_path: &Path, base_override: Option<&str>) -> Result<Re
         Some(base) => base.to_string(),
         None => infer_base_branch(&repo_root, current_branch.as_deref())?,
     };
+    let base_ref = resolve_base_ref(&repo_root, &base_branch);
+    let base_sha = rev_parse(&repo_root, &base_ref)?;
 
     Ok(RepoPlan {
         name,
         path,
         remote,
         base_branch,
+        base_sha,
     })
 }

@@ -43,6 +43,8 @@ pub enum Commands {
     Stage,
     /// Show status for all repos in the active bundle.
     Status,
+    /// Record git commits that happened outside Knit.
+    Sync,
     /// Commit staged changes across bundle worktrees.
     Commit {
         /// Commit message to use in every repo with staged changes.

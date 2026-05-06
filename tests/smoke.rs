@@ -66,11 +66,35 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(log_output.contains("frontend"));
     assert!(log_output.contains("scraper"));
 
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "manual frontend polish",
+    );
+    git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["add", "app.txt"],
+    );
+    git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["commit", "-m", "Manual frontend polish"],
+    );
+
+    let status_output = knit(&workspace, ["status"]);
+    assert!(status_output.contains("frontend"));
+    assert!(status_output.contains("unrecorded commits: 1"));
+
+    let sync_output = knit(&workspace, ["sync"]);
+    assert!(sync_output.contains("frontend: observed 1 unrecorded commit(s)"));
+
     knit(&workspace, ["remove", "scraper"]);
 
     let bundle = read_bundle(&workspace);
     assert_eq!(bundle["kind"], "ChangeGroup");
     assert_eq!(bundle["repos"].as_array().unwrap().len(), 2);
+    for repo in bundle["repos"].as_array().unwrap() {
+        assert!(repo["baseSha"].as_str().is_some());
+        assert!(repo["headSha"].as_str().is_some());
+    }
     assert!(workspace
         .join(".knit/worktrees/venue-capacity/scraper")
         .exists());
@@ -88,8 +112,26 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
             "repo.added",
             "worktree.materialized",
             "commit.group",
+            "git.observed",
             "repo.removed",
         ]
+    );
+    let observed = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "git.observed")
+        .unwrap();
+    assert_eq!(
+        observed["repoChanges"][0]["repoId"].as_str(),
+        Some("frontend")
+    );
+    assert_eq!(
+        observed["repoChanges"][0]["commits"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
     );
     assert_eq!(
         bundle["headNodeId"].as_str(),
