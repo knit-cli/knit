@@ -81,6 +81,7 @@ knit remove <repo-id>...
 knit worktree
 knit stage
 knit status
+knit diff [--stat] [repo-id-or-path...]
 knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -100,6 +101,15 @@ Base inference prefers the current branch only when it is clean and named `main`
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
 `knit stage` runs `git add -A` in every tracked checkout. `knit status` shows ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
+
+`knit diff` shows cross-repo diffs against each repo's recorded `baseSha`. It includes committed, staged, and unstaged tracked-file changes in the current checkout. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
+
+```sh
+knit diff
+knit diff --stat
+knit diff backend
+knit diff --stat ../backend
+```
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
 

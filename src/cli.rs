@@ -47,6 +47,14 @@ pub enum Commands {
     Stage,
     /// Show status for all repos in the active bundle.
     Status,
+    /// Show cross-repo diffs against each repo base.
+    Diff {
+        /// Show a compact diffstat instead of full patches.
+        #[arg(long)]
+        stat: bool,
+        /// Optional repo ids or paths to limit the diff.
+        repos: Vec<String>,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across bundle worktrees.

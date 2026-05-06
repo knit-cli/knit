@@ -17,6 +17,7 @@ src/
     worktree.rs
     stage.rs
     status.rs
+    diff.rs
     sync.rs
     commit.rs
     log.rs

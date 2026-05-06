@@ -62,6 +62,16 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(all_git_status.contains("== frontend"));
     assert!(all_git_status.contains("== scraper"));
 
+    let diff_stat = knit(&workspace, ["diff", "--stat"]);
+    assert!(diff_stat.contains("== backend"));
+    assert!(diff_stat.contains("== frontend"));
+    assert!(diff_stat.contains("== scraper"));
+    assert!(diff_stat.contains("app.txt"));
+
+    let frontend_diff = knit(&workspace, ["diff", "frontend"]);
+    assert!(frontend_diff.contains("capacity frontend ui"));
+    assert!(!frontend_diff.contains("capacity backend api"));
+
     let stage_output = knit(&workspace, ["stage"]);
     assert!(stage_output.contains("backend: staged"));
     assert!(stage_output.contains("frontend: staged"));
@@ -369,6 +379,9 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     let status = knit(&workspace, ["status"]);
     assert!(status.contains("in-place"));
     assert!(status.contains("modified"));
+    let diff = knit(&workspace, ["diff", "--stat", "backend"]);
+    assert!(diff.contains("backend"));
+    assert!(diff.contains("app.txt"));
 
     knit(&workspace, ["commit", "--stage", "-m", "In-place feature"]);
     assert!(git(&backend, ["log", "-1", "--pretty=%B"]).contains("In-place feature"));

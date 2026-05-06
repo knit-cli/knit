@@ -31,6 +31,7 @@ printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
 
 knit status
+knit diff --stat
 knit git status --short
 knit git status --short ../frontend
 knit stage

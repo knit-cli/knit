@@ -28,6 +28,7 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Worktree => commands::create_worktrees(),
         Commands::Stage => commands::stage_all(),
         Commands::Status => commands::show_status(),
+        Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {

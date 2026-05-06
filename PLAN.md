@@ -71,7 +71,9 @@ Important caveat: "full history" means the history available in the local clone.
    knit diff HEAD~1
    ```
 
-   Default behavior should compare each tracked worktree against its recorded base/head as appropriate. `--stat` should be optimized for quick scanning.
+   Default behavior should compare each tracked checkout against its recorded base/head as appropriate. `--stat` should be optimized for quick scanning.
+
+   Baseline implemented: `knit diff`, `knit diff --stat`, and repo id/path filtering against each repo's recorded `baseSha`.
 
 2. Improve `knit show`
 
