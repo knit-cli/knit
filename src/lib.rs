@@ -51,6 +51,11 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             feature,
         } => commands::pull_repos(&repos, all, rebase, force, feature),
+        Commands::Push {
+            repos,
+            all,
+            set_upstream,
+        } => commands::push_repos(&repos, all, set_upstream),
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {

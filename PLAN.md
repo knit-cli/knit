@@ -144,6 +144,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    This should not create PRs. It only coordinates git push for feature branches.
 
+   Baseline implemented: `knit push`, `knit push <repo>`, `knit push --all`, and `knit push --set-upstream` push each tracked feature branch to `origin`. Push validates that the checkout is on the recorded feature branch, reports per-repo success/failure, and leaves PR/GitHub creation out of scope.
+
 ## Knit-Native Flow
 
 1. `knit bundle`

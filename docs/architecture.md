@@ -20,6 +20,7 @@ src/
     diff.rs
     fetch.rs
     pull.rs
+    push.rs
     sync.rs
     commit.rs
     log.rs

@@ -86,6 +86,7 @@ knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
 knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
+knit push [--all] [--set-upstream] [repo-id-or-path...]
 knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -145,6 +146,15 @@ knit pull --rebase frontend
 ```
 
 Use `knit pull --feature` when you intentionally want to pull the tracked Knit feature checkout instead of the original/base checkout. Feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
+
+`knit push` pushes tracked feature branches to `origin`. It does not create PRs, update GitHub metadata, or change bundle state. By default it pushes the current feature branch to `origin/<branch>` without setting upstream; use `--set-upstream` when you want git's upstream tracking configured:
+
+```sh
+knit push
+knit push backend
+knit push --all
+knit push --set-upstream frontend
+```
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
 
@@ -213,6 +223,7 @@ Typical node types:
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
+- `knit push` only pushes feature branches to `origin`; it does not create or update PRs.
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
 - `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.

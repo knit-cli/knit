@@ -112,6 +112,17 @@ pub enum Commands {
         #[arg(long)]
         feature: bool,
     },
+    /// Push tracked feature branches.
+    Push {
+        /// Optional repo ids or paths to limit the push.
+        repos: Vec<String>,
+        /// Push every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+        /// Set each feature branch's upstream to origin/<branch>.
+        #[arg(long)]
+        set_upstream: bool,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.

@@ -473,6 +473,56 @@ fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
 }
 
 #[test]
+fn push_sends_feature_branch_and_can_set_upstream() {
+    let root = unique_temp_dir();
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+
+    append_line(&feature.join("app.txt"), "feature push");
+    knit(&workspace, ["commit", "--stage", "-m", "Feature push"]);
+    let first_sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let push = knit(&workspace, ["push", "backend"]);
+    assert!(push.contains("backend"));
+    assert!(push.contains("origin/knit/venue-capacity"));
+    assert!(push.contains(&first_sha[..7]));
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        first_sha
+    );
+
+    append_line(&feature.join("app.txt"), "feature push with upstream");
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Feature push with upstream"],
+    );
+    let second_sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let push_upstream = knit(&workspace, ["push", "--set-upstream", "backend"]);
+    assert!(push_upstream.contains("backend"));
+    assert!(push_upstream.contains(&second_sha[..7]));
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        second_sha
+    );
+    assert_eq!(
+        git(
+            &feature,
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .trim(),
+        "origin/knit/venue-capacity"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
