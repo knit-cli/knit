@@ -21,6 +21,15 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     init_repo(&scraper, "scraper");
 
     knit(&workspace, ["init", "venue capacity"]);
+    let bundle_path = knit(&workspace, ["bundle", "path"]);
+    assert!(bundle_path
+        .trim_end()
+        .ends_with("venue-capacity.bundle.json"));
+    let printed_bundle = knit(&workspace, ["bundle", "print"]);
+    assert!(printed_bundle.contains("\"kind\": \"ChangeGroup\""));
+    assert!(printed_bundle.contains("\"id\": \"venue-capacity\""));
+    let valid_bundle = knit(&workspace, ["bundle", "validate"]);
+    assert!(valid_bundle.contains("Bundle valid"));
     knit(
         &workspace,
         [

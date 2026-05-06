@@ -1,3 +1,4 @@
+pub mod bundle;
 pub mod commit;
 pub mod diff;
 pub mod fetch;
@@ -14,6 +15,7 @@ pub mod sync;
 pub mod track;
 pub mod worktree;
 
+pub use bundle::{bundle_path, print_bundle, validate_bundle};
 pub use commit::commit_staged;
 pub use diff::show_diff;
 pub use fetch::fetch_repos;

@@ -11,6 +11,7 @@ src/
   cli.rs        clap command definitions
   commands/
     mod.rs      command module wiring
+    bundle.rs
     init.rs
     track.rs
     remove.rs
@@ -48,6 +49,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `main.rs` should stay tiny. It parses CLI arguments and calls `knit::run`.
 - `cli.rs` should contain only argument shape and help text.
 - Each file in `commands/` owns one user-facing command or tightly coupled command pair.
+- `commands/bundle.rs` only inspects or validates the existing bundle artifact; it must not create a second review handoff object.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should load the active bundle from `.knit/config.json`.

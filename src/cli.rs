@@ -63,6 +63,11 @@ pub enum Commands {
     },
     /// Create per-repo worktrees for the active bundle.
     Worktree,
+    /// Inspect the active bundle artifact.
+    Bundle {
+        #[command(subcommand)]
+        command: BundleCommand,
+    },
     /// Stage file changes inside tracked checkouts. Alias for add.
     Stage {
         /// Limit staging to one or more repo ids or paths.
@@ -171,4 +176,14 @@ pub enum Commands {
         /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
         target: String,
     },
+}
+
+#[derive(Subcommand)]
+pub enum BundleCommand {
+    /// Print the active bundle file path.
+    Path,
+    /// Print the active bundle JSON.
+    Print,
+    /// Validate the active bundle structure.
+    Validate,
 }

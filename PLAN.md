@@ -150,7 +150,7 @@ Important caveat: "full history" means the history available in the local clone.
 
 1. `knit bundle`
 
-   Inspect and validate the artifact that Gloss consumes.
+   Inspect and validate the existing source-of-truth artifact that Gloss consumes.
 
    ```sh
    knit bundle path
@@ -158,17 +158,13 @@ Important caveat: "full history" means the history available in the local clone.
    knit bundle validate
    ```
 
-2. `knit review`
+   This must not produce a second review object. Knit continuously maintains `.knit/bundles/<slug>.bundle.json`; Gloss should read that bundle and use the referenced repos, branches, and SHAs for analysis.
 
-   Produce the reviewable bundle target for Gloss without invoking Gloss.
+   Baseline implemented: `knit bundle path`, `knit bundle print`, and `knit bundle validate` inspect the active bundle. Validation checks structural `ChangeGroup` invariants and deliberately does not perform git reachability or review analysis.
 
-   ```sh
-   knit review
-   knit review HEAD
-   knit review <node-id>
-   ```
+2. Gloss handoff
 
-   Output should clearly identify the bundle path and node id. No LLM, GitHub, or UI behavior belongs here.
+   Do not add `knit review` for now. Review/ranking/explanation belongs in Gloss. Gloss can either accept a bundle path explicitly or discover the active `.knit/config.json` from the current workspace. If a future frozen snapshot/export is needed, design that separately as a portability feature, not as the normal review path.
 
 3. `knit checkpoint`
 
@@ -215,5 +211,5 @@ Important caveat: "full history" means the history available in the local clone.
 - Should `knit pull` default to original repo paths, feature worktrees, or both with separate phases?
 - Should feature branch rebases be recorded as `git.observed diverged` or a dedicated `git.rebased` node?
 - Should `knit push` require a clean bundle status before pushing?
-- Should `knit review` eventually create a frozen bundle snapshot, or only print the current bundle path and node?
-- Should `knit review` optionally run `knit fetch` first, or only warn when referenced commits/remotes are unavailable?
+- Should Gloss prefer an explicit bundle path, active Knit workspace discovery, or both?
+- Should Knit later support a frozen bundle export/import command for portability across machines?

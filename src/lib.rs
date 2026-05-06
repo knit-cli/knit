@@ -15,7 +15,7 @@ pub mod tracking;
 
 use anyhow::Result;
 
-pub use cli::{Cli, Commands};
+pub use cli::{BundleCommand, Cli, Commands};
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -35,6 +35,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Untrack { repo_ids } => commands::remove_repos(&repo_ids),
         Commands::Remove { repo_ids } => commands::remove_repos(&repo_ids),
         Commands::Worktree => commands::create_worktrees(),
+        Commands::Bundle { command } => match command {
+            BundleCommand::Path => commands::bundle_path(),
+            BundleCommand::Print => commands::print_bundle(),
+            BundleCommand::Validate => commands::validate_bundle(),
+        },
         Commands::Stage {
             repos,
             intent_to_add,

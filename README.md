@@ -82,6 +82,9 @@ knit stage [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit untrack <repo-id>...
 knit remove <repo-id>...
 knit worktree
+knit bundle path
+knit bundle print
+knit bundle validate
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
@@ -104,6 +107,16 @@ Use `knit track --in-place` to make Knit operate directly in the original repo c
 Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
 
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
+
+`knit bundle` inspects the existing `.bundle.json` / `ChangeGroup` artifact. It does not produce a separate review object:
+
+```sh
+knit bundle path
+knit bundle print
+knit bundle validate
+```
+
+Gloss should read this bundle and inspect the referenced repos, branches, and SHAs directly.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
