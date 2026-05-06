@@ -6,6 +6,7 @@ pub mod ids;
 pub mod model;
 pub mod output;
 pub mod paths;
+pub mod selectors;
 pub mod status;
 pub mod store;
 pub mod time;
@@ -53,6 +54,6 @@ pub fn run(cli: Cli) -> Result<()> {
             apply,
         } => commands::revert_target(&target, apply),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
-        Commands::Show { commit_group_id } => commands::show_group(&commit_group_id),
+        Commands::Show { target } => commands::show_target(&target),
     }
 }

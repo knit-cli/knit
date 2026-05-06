@@ -29,6 +29,7 @@ src/
   git.rs        git subprocess helpers
   ids.rs        slugs, commit group ids, SHA formatting
   paths.rs      path comparison helpers
+  selectors.rs  bundle log selector resolution for HEAD, node ids, and SHAs
   status.rs     git status classification
   time.rs       timestamp formatting
 tests/

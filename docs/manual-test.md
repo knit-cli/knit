@@ -37,6 +37,7 @@ knit git status --short ../frontend
 knit add
 knit commit -m "Add venue capacity integration"
 knit log -1
+knit show HEAD
 knit revert HEAD
 knit revert HEAD --apply
 knit log -1
@@ -49,6 +50,7 @@ Expected result:
 - `knit add` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged checkout.
 - `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
+- `knit show HEAD` shows the node details and git stats for the latest logical group.
 - `knit revert HEAD` writes a plan, and `knit revert HEAD --apply` creates one revert commit per affected repo plus a `revert.group` node.
 
 To test a raw git commit outside Knit:
@@ -61,9 +63,10 @@ git -C .knit/worktrees/venue-capacity/frontend commit -m "Manual frontend polish
 knit status
 knit sync
 knit log
+knit show HEAD
 ```
 
-Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, `knit sync` appends a `git.observed` node to the bundle, and `knit log` shows `observed git changes` with the frontend commit SHA.
+Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, `knit sync` appends a `git.observed` node to the bundle, `knit log` shows `observed git changes` with the frontend commit SHA, and `knit show HEAD` shows the raw commit stats.
 
 To test a reset/rewind:
 

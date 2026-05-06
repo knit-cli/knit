@@ -2,7 +2,10 @@ use serde_json::Value;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
 fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
@@ -93,6 +96,11 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(log_output.contains("backend"));
     assert!(log_output.contains("frontend"));
     assert!(log_output.contains("scraper"));
+    let show_head = knit(&workspace, ["show", "HEAD"]);
+    assert!(show_head.contains("commit.group"));
+    assert!(show_head.contains("Add venue capacity integration"));
+    assert!(show_head.contains("backend"));
+    assert!(show_head.contains("app.txt"));
 
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
@@ -121,6 +129,13 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(observed_log.contains("observed git changes"));
     assert!(observed_log.contains("frontend"));
     assert!(observed_log.contains(&raw_frontend_sha[..7]));
+    let observed_show = knit(&workspace, ["show", &raw_frontend_sha[..7]]);
+    assert!(observed_show.contains("git.observed"));
+    assert!(observed_show.contains("Manual frontend polish"));
+    assert!(observed_show.contains(&raw_frontend_sha[..7]));
+    let previous_show = knit(&workspace, ["show", "HEAD~1"]);
+    assert!(previous_show.contains("commit.group"));
+    assert!(previous_show.contains("Add venue capacity integration"));
     let limited_log = knit(&workspace, ["log", "-n", "1"]);
     assert!(limited_log.contains("observed git changes"));
     assert!(!limited_log.contains("Add venue capacity integration"));
@@ -194,6 +209,10 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     let rewind_log = knit(&workspace, ["log"]);
     assert!(rewind_log.contains("rewound"));
     assert!(rewind_log.contains(&raw_frontend_sha[..7]));
+    let rewind_show = knit(&workspace, ["show", "HEAD"]);
+    assert!(rewind_show.contains("git.observed"));
+    assert!(rewind_show.contains("rewound"));
+    assert!(rewind_show.contains(&raw_frontend_sha[..7]));
 
     let bundle = read_bundle(&workspace);
     let observed_nodes = bundle["nodes"]
@@ -298,6 +317,9 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
     assert!(apply.contains("Recorded revert group"));
     let log = knit(&workspace, ["log", "-1"]);
     assert!(log.contains("revert"));
+    let show_revert = knit(&workspace, ["show", "HEAD"]);
+    assert!(show_revert.contains("revert.group"));
+    assert!(show_revert.contains("Revert Feature change"));
     assert!(
         !fs::read_to_string(workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"))
             .unwrap()
@@ -414,7 +436,11 @@ fn unique_temp_dir() -> PathBuf {
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_nanos();
-    let path = std::env::temp_dir().join(format!("knit-smoke-{}-{nanos}", std::process::id()));
+    let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let path = std::env::temp_dir().join(format!(
+        "knit-smoke-{}-{nanos}-{counter}",
+        std::process::id()
+    ));
     fs::create_dir_all(&path).unwrap();
     path
 }

@@ -15,7 +15,7 @@ pub use commit::commit_staged;
 pub use diff::show_diff;
 pub use git_passthrough::run_git;
 pub use init::init_bundle;
-pub use log::{show_group, show_log};
+pub use log::{show_log, show_target};
 pub use remove::remove_repos;
 pub use revert::revert_target;
 pub use stage::stage_paths;

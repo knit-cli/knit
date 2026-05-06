@@ -130,9 +130,9 @@ pub enum Commands {
         #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
     },
-    /// Show git show --stat for each commit in a logical group.
+    /// Show git details for a bundle log entry.
     Show {
-        /// Commit group id to inspect.
-        commit_group_id: String,
+        /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
+        target: String,
     },
 }

@@ -95,6 +95,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    A git SHA should resolve to the owning bundle node, matching `knit revert` semantics.
 
+   Baseline implemented: `knit show` now resolves `HEAD`, `HEAD~N`, node ids/prefixes, commit group ids, and recorded git commit SHAs through the same selector code as `knit revert`. Commit/revert groups show git stats for each recorded repo commit, observed git nodes show movement plus available commit stats, and removed-repo nodes summarize their repo ids.
+
 3. `knit pull`
 
    Pull from every tracked repo, primarily for keeping the original repo and/or base refs current.

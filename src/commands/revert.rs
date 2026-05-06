@@ -3,6 +3,7 @@ use crate::git::{git_output, rev_parse};
 use crate::ids::{revert_group_id, revert_plan_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
 use crate::output as out;
+use crate::selectors::resolve_log_node;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
     ActiveBundle,
@@ -75,7 +76,7 @@ fn plan_revert(target: &str) -> Result<()> {
 
 fn apply_revert(target: &str) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
-    let target_node = resolve_target_node(&active.bundle.nodes, target)?.clone();
+    let target_node = resolve_log_node(&active.bundle.nodes, target)?.clone();
     let path = plan_path(&active, &target_node.id);
 
     if !path.exists() {
@@ -198,7 +199,7 @@ fn apply_revert(target: &str) -> Result<()> {
 }
 
 fn build_plan(active: &ActiveBundle, target: &str) -> Result<RevertPlan> {
-    let target_node = resolve_target_node(&active.bundle.nodes, target)?;
+    let target_node = resolve_log_node(&active.bundle.nodes, target)?;
     let mut repos = match target_node.node_type.as_str() {
         "commit.group" | "revert.group" => plans_for_commits(active, &target_node.commits)?,
         "git.observed" => plans_for_observed(active, target_node)?,
@@ -404,107 +405,6 @@ fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperatio
     };
 
     Ok(())
-}
-
-fn resolve_target_node<'a>(nodes: &'a [BundleNode], target: &str) -> Result<&'a BundleNode> {
-    let loggable = nodes
-        .iter()
-        .filter(|node| is_loggable_node(node))
-        .collect::<Vec<_>>();
-    if loggable.is_empty() {
-        bail!("No revertable bundle log entries found.");
-    }
-
-    if target == "HEAD" || target.starts_with("HEAD~") {
-        let offset = if target == "HEAD" {
-            0
-        } else {
-            target
-                .strip_prefix("HEAD~")
-                .and_then(|raw| raw.parse::<usize>().ok())
-                .with_context(|| format!("Invalid log selector `{target}`."))?
-        };
-        let Some(index) = loggable.len().checked_sub(1 + offset) else {
-            bail!("Log selector `{target}` is before the start of the bundle log.");
-        };
-        return Ok(loggable[index]);
-    }
-
-    let id_matches = loggable
-        .iter()
-        .filter(|node| {
-            node.id == target
-                || node.id.starts_with(target)
-                || node
-                    .commit_group_id
-                    .as_deref()
-                    .is_some_and(|id| id == target || id.starts_with(target))
-        })
-        .copied()
-        .collect::<Vec<_>>();
-
-    match id_matches.as_slice() {
-        [node] => Ok(node),
-        [] => resolve_target_node_by_sha(&loggable, target),
-        _ => bail!("`{target}` is ambiguous; use a longer node id."),
-    }
-}
-
-fn resolve_target_node_by_sha<'a>(
-    loggable: &[&'a BundleNode],
-    target: &str,
-) -> Result<&'a BundleNode> {
-    let exact = matching_sha_node_indexes(loggable, target, true);
-    let matches = if exact.is_empty() {
-        matching_sha_node_indexes(loggable, target, false)
-    } else {
-        exact
-    };
-
-    let Some(index) = matches.into_iter().max() else {
-        bail!("No revertable bundle log entry or recorded git commit matched `{target}`.");
-    };
-
-    Ok(loggable[index])
-}
-
-fn matching_sha_node_indexes(loggable: &[&BundleNode], target: &str, exact: bool) -> Vec<usize> {
-    loggable
-        .iter()
-        .enumerate()
-        .filter_map(|(index, node)| node_matches_sha(node, target, exact).then_some(index))
-        .collect()
-}
-
-fn node_matches_sha(node: &BundleNode, target: &str, exact: bool) -> bool {
-    node.commits
-        .iter()
-        .any(|commit| sha_matches(&commit.sha, target, exact))
-        || node.repo_changes.iter().any(|change| {
-            change
-                .commits
-                .iter()
-                .any(|sha| sha_matches(sha, target, exact))
-                || change
-                    .dropped_commits
-                    .iter()
-                    .any(|sha| sha_matches(sha, target, exact))
-        })
-}
-
-fn sha_matches(sha: &str, target: &str, exact: bool) -> bool {
-    if exact {
-        sha == target
-    } else {
-        sha.starts_with(target)
-    }
-}
-
-fn is_loggable_node(node: &BundleNode) -> bool {
-    matches!(
-        node.node_type.as_str(),
-        "commit.group" | "git.observed" | "revert.group" | "repo.removed"
-    )
 }
 
 fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, PathBuf)> {
