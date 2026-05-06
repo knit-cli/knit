@@ -63,7 +63,21 @@ pub fn sync_note(change: &RepoChange) -> String {
 }
 
 pub fn sync_observed_changes(active: &mut ActiveBundle) -> Result<Vec<RepoChange>> {
+    sync_observed_changes_for_repo_ids(active, None)
+}
+
+pub fn sync_observed_changes_for_repo_ids(
+    active: &mut ActiveBundle,
+    repo_ids: Option<&[String]>,
+) -> Result<Vec<RepoChange>> {
     let changes = detect_unrecorded_changes(active)?;
+    let changes = match repo_ids {
+        Some(repo_ids) => changes
+            .into_iter()
+            .filter(|change| repo_ids.iter().any(|repo_id| repo_id == &change.repo_id))
+            .collect::<Vec<_>>(),
+        None => changes,
+    };
     if changes.is_empty() {
         return Ok(changes);
     }

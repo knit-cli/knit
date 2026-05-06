@@ -384,6 +384,102 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
 }
 
 #[test]
+fn pull_updates_original_base_checkout_and_bundle_base_sha() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let feature_head_before = git(
+        &workspace.join(".knit/worktrees/venue-capacity/backend"),
+        ["rev-parse", "HEAD"],
+    );
+
+    append_line(&collaborator.join("app.txt"), "remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let pull = knit(&workspace, ["pull", "backend"]);
+    assert!(pull.contains("backend"));
+    assert!(pull.contains(&remote_sha[..7]));
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), remote_sha);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["baseSha"].as_str(),
+        Some(remote_sha.trim())
+    );
+    assert_eq!(
+        git(
+            &workspace.join(".knit/worktrees/venue-capacity/backend"),
+            ["rev-parse", "HEAD"],
+        ),
+        feature_head_before
+    );
+
+    append_line(&collaborator.join("app.txt"), "second remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Second remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    append_line(&backend.join("app.txt"), "local dirty base checkout");
+
+    let dirty_pull = knit_fails(&workspace, ["pull", "backend"]);
+    assert!(dirty_pull.contains("Refusing to pull with uncommitted changes"));
+    assert!(dirty_pull.contains("backend"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_feature_checkout_records_observed_git_movement() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    git(&feature, ["push", "-u", "origin", "knit/venue-capacity"]);
+
+    git(
+        &collaborator,
+        ["fetch", "origin", "knit/venue-capacity:knit/venue-capacity"],
+    );
+    git(&collaborator, ["checkout", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "remote feature update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote feature update"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let remote_feature_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let pull = knit(&workspace, ["pull", "--feature", "backend"]);
+    assert!(pull.contains("backend"));
+    assert!(pull.contains(&remote_feature_sha[..7]));
+    assert!(pull.contains("observed 1 unrecorded commit(s)"));
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), remote_feature_sha);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["headSha"].as_str(),
+        Some(remote_feature_sha.trim())
+    );
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("git.observed"));
+    assert_eq!(latest["repoChanges"][0]["repoId"].as_str(), Some("backend"));
+    assert_eq!(
+        latest["repoChanges"][0]["movement"].as_str(),
+        Some("advanced")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -454,6 +550,47 @@ fn init_repo(path: &Path, label: &str) {
     fs::write(path.join("app.txt"), format!("{label}\n")).unwrap();
     git(path, ["add", "app.txt"]);
     git(path, ["commit", "-m", &format!("Initial {label}")]);
+}
+
+fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf) {
+    let seed = root.join(format!("{label}-seed"));
+    init_repo(&seed, label);
+
+    let remote = root.join(format!("{label}.git"));
+    git(
+        root,
+        [
+            "clone",
+            "--bare",
+            seed.to_str().unwrap(),
+            remote.to_str().unwrap(),
+        ],
+    );
+
+    let local = root.join(label);
+    git(
+        root,
+        ["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+    );
+    configure_git_user(&local);
+
+    let collaborator = root.join(format!("{label}-collaborator"));
+    git(
+        root,
+        [
+            "clone",
+            remote.to_str().unwrap(),
+            collaborator.to_str().unwrap(),
+        ],
+    );
+    configure_git_user(&collaborator);
+
+    (remote, local, collaborator)
+}
+
+fn configure_git_user(path: &Path) {
+    git(path, ["config", "user.email", "knit@example.test"]);
+    git(path, ["config", "user.name", "Knit Smoke"]);
 }
 
 fn append_line(path: &Path, line: &str) {

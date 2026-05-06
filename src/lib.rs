@@ -42,6 +42,13 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
         Commands::Status => commands::show_status(),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
+        Commands::Pull {
+            repos,
+            all,
+            rebase,
+            force,
+            feature,
+        } => commands::pull_repos(&repos, all, rebase, force, feature),
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {

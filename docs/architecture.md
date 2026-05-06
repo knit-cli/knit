@@ -18,6 +18,7 @@ src/
     stage.rs
     status.rs
     diff.rs
+    pull.rs
     sync.rs
     commit.rs
     log.rs

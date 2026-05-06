@@ -87,6 +87,23 @@ pub enum Commands {
         /// Optional repo ids or paths to limit the diff.
         repos: Vec<String>,
     },
+    /// Pull tracked repos.
+    Pull {
+        /// Optional repo ids or paths to limit the pull.
+        repos: Vec<String>,
+        /// Pull every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+        /// Use git pull --rebase instead of the default fast-forward-only pull.
+        #[arg(long)]
+        rebase: bool,
+        /// Allow git pull to run with uncommitted changes.
+        #[arg(long)]
+        force: bool,
+        /// Pull the tracked feature checkouts instead of original/base repo paths.
+        #[arg(long)]
+        feature: bool,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.

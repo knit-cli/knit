@@ -116,6 +116,8 @@ Important caveat: "full history" means the history available in the local clone.
    - Record meaningful branch movement as `git.observed` when tracked feature branch heads change.
    - Print a per-repo summary of before/after SHAs.
 
+   Baseline implemented: `knit pull`, `knit pull <repo>`, `knit pull --all`, and `knit pull --rebase`. Default pulls run in original repo paths on recorded base branches using `git pull --ff-only`, refuse dirty affected checkouts unless `--force` is passed, print before/after SHAs, and update `baseSha`. `knit pull --feature` explicitly pulls tracked feature checkouts and records feature branch movement as `git.observed`.
+
 4. `knit fetch`
 
    Fetch all tracked repos without merging.
