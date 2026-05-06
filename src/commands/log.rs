@@ -198,6 +198,14 @@ fn print_node(node: &BundleNode) {
                 }
             }
         }
+        "checkpoint" => {
+            println!(
+                "{}  {}  {}",
+                out::node(&node.id),
+                out::heading("checkpoint"),
+                node.message.as_deref().unwrap_or("")
+            );
+        }
         "repo.removed" => {
             println!("{}  {}", out::node(&node.id), out::danger("removed repos"));
             if let Some(repo_ids) = &node.repo_ids {

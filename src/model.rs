@@ -252,4 +252,19 @@ impl BundleNode {
             repo_changes,
         }
     }
+
+    pub fn checkpoint(id: String, created_at: String, message: String) -> Self {
+        Self {
+            id,
+            node_type: "checkpoint".to_string(),
+            created_at,
+            title: None,
+            repo_ids: None,
+            commit_group_id: None,
+            message: Some(message),
+            target_node_id: None,
+            commits: Vec::new(),
+            repo_changes: Vec::new(),
+        }
+    }
 }

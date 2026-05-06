@@ -85,6 +85,7 @@ knit worktree
 knit bundle path
 knit bundle print
 knit bundle validate
+knit checkpoint "<note>"
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
@@ -117,6 +118,14 @@ knit bundle validate
 ```
 
 Gloss should read this bundle and inspect the referenced repos, branches, and SHAs directly.
+
+`knit checkpoint "<note>"` appends a non-git ledger node to the active bundle. It is useful when the feature has meaningful state that is not ready for a git commit yet:
+
+```sh
+knit checkpoint "frontend wired, backend pending"
+```
+
+Checkpoints show up in `knit log` and `knit show HEAD`. They do not create commits, move branches, or change repo state.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
@@ -221,6 +230,7 @@ Typical node types:
 - `feature.created`
 - `repo.added`
 - `worktree.materialized`
+- `checkpoint`
 - `commit.group`
 - `git.observed`
 - `revert.group`

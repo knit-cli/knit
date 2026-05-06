@@ -40,6 +40,7 @@ pub fn run(cli: Cli) -> Result<()> {
             BundleCommand::Print => commands::print_bundle(),
             BundleCommand::Validate => commands::validate_bundle(),
         },
+        Commands::Checkpoint { message } => commands::record_checkpoint(&message),
         Commands::Stage {
             repos,
             intent_to_add,

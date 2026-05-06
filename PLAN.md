@@ -176,6 +176,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    This is useful for recording feature state when there is no commit yet.
 
+   Baseline implemented: `knit checkpoint "<note>"` appends a `checkpoint` node to the active bundle, updates `headNodeId`, appears in `knit log`, and can be inspected with `knit show HEAD`. It does not touch git.
+
 4. `knit close`
 
    Mark the bundle as closed without deleting git state.

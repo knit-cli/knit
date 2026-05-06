@@ -68,6 +68,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: BundleCommand,
     },
+    /// Add a non-git note to the active bundle ledger.
+    Checkpoint {
+        /// Checkpoint note to record.
+        message: String,
+    },
     /// Stage file changes inside tracked checkouts. Alias for add.
     Stage {
         /// Limit staging to one or more repo ids or paths.

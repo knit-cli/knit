@@ -532,6 +532,41 @@ fn push_sends_feature_branch_and_can_set_upstream() {
 }
 
 #[test]
+fn checkpoint_records_non_git_ledger_note() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    let output = knit(
+        &workspace,
+        ["checkpoint", "frontend wired, backend pending"],
+    );
+    assert!(output.contains("Recorded checkpoint"));
+
+    let log = knit(&workspace, ["log", "-1"]);
+    assert!(log.contains("checkpoint"));
+    assert!(log.contains("frontend wired, backend pending"));
+
+    let show = knit(&workspace, ["show", "HEAD"]);
+    assert!(show.contains("checkpoint"));
+    assert!(show.contains("frontend wired, backend pending"));
+
+    let valid = knit(&workspace, ["bundle", "validate"]);
+    assert!(valid.contains("Bundle valid"));
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("checkpoint"));
+    assert_eq!(
+        bundle["headNodeId"].as_str(),
+        Some(latest["id"].as_str().unwrap())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
