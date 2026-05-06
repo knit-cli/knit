@@ -79,6 +79,21 @@ pub enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Remove Knit-generated local state.
+    Clean {
+        /// Remove stored revert plans.
+        #[arg(long)]
+        plans: bool,
+        /// Remove generated worktrees for the active bundle.
+        #[arg(long)]
+        worktrees: bool,
+        /// Remove all cleanable generated state.
+        #[arg(long)]
+        all: bool,
+        /// Pass --force to git worktree remove.
+        #[arg(long)]
+        force: bool,
+    },
     /// Stage file changes inside tracked checkouts. Alias for add.
     Stage {
         /// Limit staging to one or more repo ids or paths.

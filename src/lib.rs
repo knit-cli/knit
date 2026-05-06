@@ -42,6 +42,12 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         Commands::Checkpoint { message } => commands::record_checkpoint(&message),
         Commands::Close { reason } => commands::close_bundle(reason.as_deref()),
+        Commands::Clean {
+            plans,
+            worktrees,
+            all,
+            force,
+        } => commands::clean_generated(plans, worktrees, all, force),
         Commands::Stage {
             repos,
             intent_to_add,

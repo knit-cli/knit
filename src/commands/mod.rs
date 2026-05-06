@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod checkpoint;
+pub mod clean;
 pub mod close;
 pub mod commit;
 pub mod diff;
@@ -19,6 +20,7 @@ pub mod worktree;
 
 pub use bundle::{bundle_path, print_bundle, validate_bundle};
 pub use checkpoint::record_checkpoint;
+pub use clean::clean_generated;
 pub use close::close_bundle;
 pub use commit::commit_staged;
 pub use diff::show_diff;

@@ -610,6 +610,50 @@ fn close_records_feature_closed_node_without_git_state() {
 }
 
 #[test]
+fn clean_removes_plans_and_generated_worktrees_only() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let worktree = workspace.join(".knit/worktrees/venue-capacity/backend");
+
+    append_line(&worktree.join("app.txt"), "clean test change");
+    knit(&workspace, ["commit", "--stage", "-m", "Clean test change"]);
+    knit(&workspace, ["revert", "HEAD"]);
+    assert!(workspace.join(".knit/revert-plans").exists());
+
+    let no_target = knit_fails(&workspace, ["clean"]);
+    assert!(no_target.contains("Choose what to clean"));
+
+    let clean_plans = knit(&workspace, ["clean", "--plans"]);
+    assert!(clean_plans.contains("removed"));
+    assert!(!workspace.join(".knit/revert-plans").exists());
+
+    let clean_worktrees = knit(&workspace, ["clean", "--worktrees"]);
+    assert!(clean_worktrees.contains("backend"));
+    assert!(clean_worktrees.contains("removed"));
+    assert!(!worktree.exists());
+    assert!(backend.exists());
+    assert!(
+        git(&backend, ["branch", "--list", "knit/venue-capacity"]).contains("knit/venue-capacity")
+    );
+
+    let bundle = read_bundle(&workspace);
+    assert!(bundle["repos"][0]["worktreePath"].is_null());
+    let valid = knit(&workspace, ["bundle", "validate"]);
+    assert!(valid.contains("Bundle valid"));
+
+    knit(&workspace, ["worktree"]);
+    assert!(worktree.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");

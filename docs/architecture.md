@@ -13,6 +13,7 @@ src/
     mod.rs      command module wiring
     bundle.rs
     checkpoint.rs
+    clean.rs
     close.rs
     init.rs
     track.rs

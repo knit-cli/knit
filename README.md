@@ -87,6 +87,7 @@ knit bundle print
 knit bundle validate
 knit checkpoint "<note>"
 knit close [--reason <reason>]
+knit clean [--plans] [--worktrees] [--all] [--force]
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
@@ -136,6 +137,16 @@ knit close --reason "merged"
 ```
 
 The close node shows up in `knit log` and `knit show HEAD`. It is a ledger marker only.
+
+`knit clean` removes only Knit-generated local state after an explicit target flag. It never deletes source repos or git branches:
+
+```sh
+knit clean --plans
+knit clean --worktrees
+knit clean --all
+```
+
+`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the active bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
@@ -258,6 +269,7 @@ Typical node types:
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
 - `knit push` only pushes feature branches to `origin`; it does not create or update PRs.
+- `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place.
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
 - `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.

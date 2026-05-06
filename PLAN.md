@@ -203,6 +203,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    This must be conservative. It should never delete source repos or branches by default.
 
+   Baseline implemented: `knit clean --plans`, `knit clean --worktrees`, and `knit clean --all` remove only Knit-generated local state. Plans clean `.knit/revert-plans`. Worktree cleaning uses `git worktree remove`, skips in-place checkouts, clears recorded `worktreePath`, and leaves source repos and branches intact. `--force` passes through to `git worktree remove --force`.
+
 ## Git Parity Candidates
 
 - `knit branch`: show tracked feature branches, base branches, and upstreams.
