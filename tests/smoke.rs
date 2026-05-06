@@ -198,11 +198,144 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
             .len(),
         1
     );
+    let rewind_observed_id = rewind_observed["id"].as_str().unwrap().to_string();
 
     assert_eq!(
         bundle["headNodeId"].as_str(),
         bundle["nodes"].as_array().unwrap().last().unwrap()["id"].as_str()
     );
+
+    let raw_frontend_target = &raw_frontend_sha[..7];
+    let rewind_revert_plan = knit(&workspace, ["revert", raw_frontend_target]);
+    assert!(rewind_revert_plan.contains("cherryPick"));
+    let rewind_revert_apply = knit(&workspace, ["revert", raw_frontend_target, "--apply"]);
+    assert!(rewind_revert_apply.contains("Recorded revert group"));
+    assert!(
+        fs::read_to_string(workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"))
+            .unwrap()
+            .contains("manual frontend polish")
+    );
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("revert.group"));
+    assert_eq!(
+        latest["targetNodeId"].as_str(),
+        Some(rewind_observed_id.as_str())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_plans_and_applies_commit_groups_and_observed_git() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        ["add", backend.to_str().unwrap(), frontend.to_str().unwrap()],
+    );
+
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "feature backend",
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "feature frontend",
+    );
+    knit(&workspace, ["commit", "--stage", "-m", "Feature change"]);
+    let bundle = read_bundle(&workspace);
+    let feature_backend_sha = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "commit.group")
+        .unwrap()["commits"][0]["sha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let feature_backend_target = &feature_backend_sha[..7];
+
+    let unplanned_apply = knit_fails(&workspace, ["revert", feature_backend_target, "--apply"]);
+    assert!(unplanned_apply.contains("No revert plan found"));
+
+    let plan = knit(&workspace, ["revert", feature_backend_target]);
+    assert!(plan.contains("Revert plan"));
+    assert!(plan.contains("backend"));
+    assert!(plan.contains("frontend"));
+    assert!(plan.contains(&format!("knit revert {feature_backend_target} --apply")));
+
+    let apply = knit(&workspace, ["revert", feature_backend_target, "--apply"]);
+    assert!(apply.contains("Recorded revert group"));
+    let log = knit(&workspace, ["log", "-1"]);
+    assert!(log.contains("revert"));
+    assert!(
+        !fs::read_to_string(workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"))
+            .unwrap()
+            .contains("feature backend")
+    );
+    assert!(
+        !fs::read_to_string(workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"))
+            .unwrap()
+            .contains("feature frontend")
+    );
+
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "raw frontend",
+    );
+    git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["add", "app.txt"],
+    );
+    git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["commit", "-m", "Raw frontend"],
+    );
+    let raw_frontend_sha = git(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend"),
+        ["rev-parse", "HEAD"],
+    );
+    let raw_frontend_target = &raw_frontend_sha[..7];
+    knit(&workspace, ["sync"]);
+
+    let observed_plan = knit(&workspace, ["revert", raw_frontend_target]);
+    assert!(observed_plan.contains("observed git changes"));
+    assert!(observed_plan.contains("frontend"));
+    let observed_apply = knit(&workspace, ["revert", raw_frontend_target, "--apply"]);
+    assert!(observed_apply.contains("Recorded revert group"));
+    assert!(
+        !fs::read_to_string(workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"))
+            .unwrap()
+            .contains("raw frontend")
+    );
+
+    let bundle = read_bundle(&workspace);
+    let node_types = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["type"].as_str().unwrap())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        node_types
+            .iter()
+            .filter(|node_type| **node_type == "revert.group")
+            .count(),
+        2
+    );
+
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("revert.group"));
+    assert!(latest["targetNodeId"].as_str().is_some());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -248,6 +381,22 @@ where
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
     command.args(args).current_dir(cwd);
     run(command)
+}
+
+fn knit_fails<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command.args(args).current_dir(cwd);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 fn git<I, S>(cwd: &Path, args: I) -> String

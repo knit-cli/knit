@@ -64,6 +64,17 @@ pub enum Commands {
         #[arg(value_name = "-COUNT", allow_hyphen_values = true)]
         shorthand_limit: Option<String>,
     },
+    /// Revert a bundle log entry across its affected repos.
+    Revert {
+        /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
+        target: String,
+        /// Write or refresh a revert plan. This is the default when --apply is not passed.
+        #[arg(long, conflicts_with = "apply")]
+        plan: bool,
+        /// Apply a previously planned revert.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Run a git command in tracked bundle worktrees.
     Git {
         /// Target repo id or path. Repeat for multiple repos.

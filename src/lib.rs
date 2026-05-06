@@ -32,6 +32,11 @@ pub fn run(cli: Cli) -> Result<()> {
             limit,
             shorthand_limit,
         } => commands::show_log(limit, shorthand_limit.as_deref()),
+        Commands::Revert {
+            target,
+            plan: _,
+            apply,
+        } => commands::revert_target(&target, apply),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { commit_group_id } => commands::show_group(&commit_group_id),
     }

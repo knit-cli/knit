@@ -46,6 +46,14 @@ pub fn commit_group_id() -> String {
     object_id("kg")
 }
 
+pub fn revert_group_id() -> String {
+    object_id("rv")
+}
+
+pub fn revert_plan_id() -> String {
+    object_id("rp")
+}
+
 pub fn node_id(prefix: &str) -> String {
     object_id(prefix)
 }

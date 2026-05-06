@@ -86,9 +86,10 @@ Current node types:
 - `worktree.materialized`
 - `commit.group`
 - `git.observed`
+- `revert.group`
 - `repo.removed`
 
-`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `git.observed` nodes include `repoChanges`. Repo/worktree nodes include `repoIds`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. Repo/worktree nodes include `repoIds`.
 
 `repoChanges` records how a repo moved:
 

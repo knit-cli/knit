@@ -36,6 +36,9 @@ knit git status --short ../frontend
 knit stage
 knit commit -m "Add venue capacity integration"
 knit log -1
+knit revert HEAD
+knit revert HEAD --apply
+knit log -1
 ```
 
 Expected result:
@@ -45,6 +48,7 @@ Expected result:
 - `knit stage` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged worktree.
 - `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
+- `knit revert HEAD` writes a plan, and `knit revert HEAD --apply` creates one revert commit per affected repo plus a `revert.group` node.
 
 To test a raw git commit outside Knit:
 

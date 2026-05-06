@@ -33,6 +33,8 @@ Knit stores local state under the directory where `knit init` runs:
   config.json
   bundles/
     <slug>.bundle.json
+  revert-plans/
+    <node-id>.json
   worktrees/
     <slug>/
       <repo-name>/
@@ -83,6 +85,8 @@ knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
 knit log [-n [count]]
+knit revert <sha|node|HEAD|HEAD~N> [--plan]
+knit revert <sha|node|HEAD|HEAD~N> --apply
 knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <commit-group-id>
 ```
@@ -96,6 +100,15 @@ Base inference prefers the current branch only when it is clean and named `main`
 `knit stage` runs `git add -A` in every tracked worktree. `knit status` shows ordinary git status and also reports unrecorded commits when a tracked branch moved outside Knit.
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
+
+`knit revert <target>` resolves bundle log selectors like `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, and git commit SHAs shown in `knit log`. A commit SHA resolves to the latest bundle node that mentions that commit, so if a commit was later observed as dropped by a reset, reverting by that SHA restores it from the latest rewind node. By default it writes a checked revert plan under `.knit/revert-plans/` and prints the per-repo operations. `knit revert <target> --apply` requires that plan to exist, verifies each affected worktree is still clean and at the planned head, then creates one revert commit per affected repo and appends a `revert.group` node.
+
+Revert behavior is based on the target node:
+
+- `commit.group` and `revert.group`: revert the recorded commits.
+- `git.observed` with `advanced`: revert the observed commits.
+- `git.observed` with `rewound`: cherry-pick the dropped commits back.
+- `git.observed` with `diverged`: revert added commits, then cherry-pick dropped commits.
 
 `knit git` passes arguments directly to git in tracked bundle worktrees. With no repo selector it runs against every tracked repo:
 
@@ -138,6 +151,7 @@ Typical node types:
 - `worktree.materialized`
 - `commit.group`
 - `git.observed`
+- `revert.group`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.
@@ -149,10 +163,11 @@ Typical node types:
 - Knit uses a simple `.knit/knit.lock` file to prevent concurrent bundle writes. If a process crashes, a stale lock may need manual removal.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit commit` only looks for staged changes inside bundle worktrees.
+- `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
+- `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.
 - Bundle schema validation is currently serde-based, not a standalone JSON Schema file.
 - Knit does not create GitHub PRs.
 - Knit does not run LLMs, MCP servers, or review agents.
-- Knit does not implement automatic revert.
 
 ## Manual Test With Toy Repos
 
@@ -166,8 +181,6 @@ See [docs/architecture.md](docs/architecture.md) for the module boundaries and t
 
 ## Roadmap
 
-- `knit revert <group-id> --plan`
-- `knit revert <group-id> --apply`
 - Standalone JSON Schema for `ChangeGroup`
 - Safer partial-failure recovery for multi-repo commits
 - Better detection of existing registered worktrees

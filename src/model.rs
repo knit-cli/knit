@@ -118,6 +118,8 @@ pub struct BundleNode {
     pub commit_group_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -134,6 +136,7 @@ impl BundleNode {
             repo_ids: None,
             commit_group_id: None,
             message: None,
+            target_node_id: None,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -148,6 +151,7 @@ impl BundleNode {
             repo_ids: Some(repo_ids),
             commit_group_id: None,
             message: None,
+            target_node_id: None,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -162,6 +166,7 @@ impl BundleNode {
             repo_ids: Some(repo_ids),
             commit_group_id: None,
             message: None,
+            target_node_id: None,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -176,6 +181,7 @@ impl BundleNode {
             repo_ids: Some(repo_ids),
             commit_group_id: None,
             message: None,
+            target_node_id: None,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -196,6 +202,29 @@ impl BundleNode {
             repo_ids: None,
             commit_group_id: Some(group_id),
             message: Some(message),
+            target_node_id: None,
+            commits,
+            repo_changes,
+        }
+    }
+
+    pub fn revert_group(
+        group_id: String,
+        created_at: String,
+        target_node_id: String,
+        message: String,
+        commits: Vec<CommitRef>,
+        repo_changes: Vec<RepoChange>,
+    ) -> Self {
+        Self {
+            id: group_id.clone(),
+            node_type: "revert.group".to_string(),
+            created_at,
+            title: None,
+            repo_ids: None,
+            commit_group_id: Some(group_id),
+            message: Some(message),
+            target_node_id: Some(target_node_id),
             commits,
             repo_changes,
         }
@@ -210,6 +239,7 @@ impl BundleNode {
             repo_ids: None,
             commit_group_id: None,
             message: None,
+            target_node_id: None,
             commits: Vec::new(),
             repo_changes,
         }

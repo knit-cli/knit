@@ -76,7 +76,7 @@ fn limited_start(len: usize, limit: Option<usize>) -> usize {
 fn is_loggable_node(node: &BundleNode) -> bool {
     matches!(
         node.node_type.as_str(),
-        "commit.group" | "git.observed" | "repo.removed"
+        "commit.group" | "git.observed" | "revert.group" | "repo.removed"
     )
 }
 
@@ -87,6 +87,23 @@ fn print_node(node: &BundleNode) {
                 "{}  {}",
                 out::node(&node.id),
                 node.message.as_deref().unwrap_or("Commit group")
+            );
+            for commit in &node.commits {
+                println!(
+                    "  {} {}",
+                    out::repo_field(&commit.repo_id, 10),
+                    out::sha(short_sha(&commit.sha))
+                );
+            }
+        }
+        "revert.group" => {
+            let target = node.target_node_id.as_deref().unwrap_or("unknown");
+            println!(
+                "{}  {} {}  {}",
+                out::node(&node.id),
+                out::danger("revert"),
+                out::node(target),
+                node.message.as_deref().unwrap_or("Revert")
             );
             for commit in &node.commits {
                 println!(
