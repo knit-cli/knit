@@ -233,6 +233,7 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record message", node.id));
             }
         }
+        "feature.closed" => {}
         _ => {}
     }
 

@@ -206,6 +206,15 @@ fn print_node(node: &BundleNode) {
                 node.message.as_deref().unwrap_or("")
             );
         }
+        "feature.closed" => {
+            let reason = node.message.as_deref().unwrap_or("closed");
+            println!(
+                "{}  {}  {}",
+                out::node(&node.id),
+                out::danger("closed"),
+                reason
+            );
+        }
         "repo.removed" => {
             println!("{}  {}", out::node(&node.id), out::danger("removed repos"));
             if let Some(repo_ids) = &node.repo_ids {

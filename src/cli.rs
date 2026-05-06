@@ -73,6 +73,12 @@ pub enum Commands {
         /// Checkpoint note to record.
         message: String,
     },
+    /// Mark the active bundle closed without mutating git state.
+    Close {
+        /// Optional reason to record on the close node.
+        #[arg(long)]
+        reason: Option<String>,
+    },
     /// Stage file changes inside tracked checkouts. Alias for add.
     Stage {
         /// Limit staging to one or more repo ids or paths.

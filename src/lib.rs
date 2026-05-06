@@ -41,6 +41,7 @@ pub fn run(cli: Cli) -> Result<()> {
             BundleCommand::Validate => commands::validate_bundle(),
         },
         Commands::Checkpoint { message } => commands::record_checkpoint(&message),
+        Commands::Close { reason } => commands::close_bundle(reason.as_deref()),
         Commands::Stage {
             repos,
             intent_to_add,

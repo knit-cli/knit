@@ -267,4 +267,19 @@ impl BundleNode {
             repo_changes: Vec::new(),
         }
     }
+
+    pub fn feature_closed(id: String, created_at: String, reason: Option<String>) -> Self {
+        Self {
+            id,
+            node_type: "feature.closed".to_string(),
+            created_at,
+            title: None,
+            repo_ids: None,
+            commit_group_id: None,
+            message: reason,
+            target_node_id: None,
+            commits: Vec::new(),
+            repo_changes: Vec::new(),
+        }
+    }
 }

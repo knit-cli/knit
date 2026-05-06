@@ -13,6 +13,7 @@ src/
     mod.rs      command module wiring
     bundle.rs
     checkpoint.rs
+    close.rs
     init.rs
     track.rs
     remove.rs
@@ -72,7 +73,7 @@ The bundle carries both current state and history:
 
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: compatibility list of logical commits across repos.
-- `nodes`: ordered ledger entries such as `feature.created`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
+- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
 - `headNodeId`: the latest node in the ledger.
 
 Command files should append nodes when they create meaningful reviewable state. Gloss can consume a node or the current bundle head without owning git lifecycle.

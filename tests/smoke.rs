@@ -567,6 +567,49 @@ fn checkpoint_records_non_git_ledger_note() {
 }
 
 #[test]
+fn close_records_feature_closed_node_without_git_state() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let head_before_close = git(&feature, ["rev-parse", "HEAD"]);
+
+    let close = knit(&workspace, ["close", "--reason", "merged"]);
+    assert!(close.contains("Closed bundle"));
+
+    let log = knit(&workspace, ["log", "-1"]);
+    assert!(log.contains("closed"));
+    assert!(log.contains("merged"));
+
+    let show = knit(&workspace, ["show", "HEAD"]);
+    assert!(show.contains("feature.closed"));
+    assert!(show.contains("merged"));
+
+    let valid = knit(&workspace, ["bundle", "validate"]);
+    assert!(valid.contains("Bundle valid"));
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), head_before_close);
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("feature.closed"));
+    assert_eq!(latest["message"].as_str(), Some("merged"));
+    assert_eq!(
+        bundle["headNodeId"].as_str(),
+        Some(latest["id"].as_str().unwrap())
+    );
+
+    let second_close = knit_fails(&workspace, ["close"]);
+    assert!(second_close.contains("already closed"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");

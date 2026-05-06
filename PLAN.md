@@ -189,6 +189,8 @@ Important caveat: "full history" means the history available in the local clone.
 
    This should append a `feature.closed` node.
 
+   Baseline implemented: `knit close` and `knit close --reason <reason>` append a `feature.closed` node to the active bundle, update `headNodeId`, appear in `knit log`, and can be inspected with `knit show HEAD`. It does not delete or mutate git state.
+
 5. `knit clean`
 
    Remove Knit-local generated state after explicit confirmation.

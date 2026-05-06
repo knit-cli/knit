@@ -4,7 +4,12 @@ use anyhow::{bail, Context, Result};
 pub fn is_loggable_node(node: &BundleNode) -> bool {
     matches!(
         node.node_type.as_str(),
-        "checkpoint" | "commit.group" | "git.observed" | "revert.group" | "repo.removed"
+        "checkpoint"
+            | "commit.group"
+            | "feature.closed"
+            | "git.observed"
+            | "revert.group"
+            | "repo.removed"
     )
 }
 
