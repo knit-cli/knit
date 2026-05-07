@@ -23,6 +23,12 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit commit --stage"));
     assert!(agents.contains("gloss prepare"));
 
+    fs::remove_file(workspace.join("AGENTS.md")).unwrap();
+    let existing_workspace_output = knit(&workspace, ["init", "venue capacity", "--agents"]);
+    assert!(existing_workspace_output.contains("AGENTS.md"));
+    let existing_workspace_agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(existing_workspace_agents.contains("This is a Knit workspace"));
+
     fs::write(workspace.join("AGENTS.md"), "custom guidance\n").unwrap();
     knit(
         &workspace,

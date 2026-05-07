@@ -14,10 +14,22 @@ pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let existing_root = find_knit_root(&cwd);
 
-    if existing_root.is_some() && !force {
-        bail!(
-            "An active Knit bundle already exists here. Use --force to replace the active bundle."
-        );
+    if let Some(root) = existing_root.as_ref() {
+        if !force {
+            if agents {
+                let agents_path = write_agents_md(root)?;
+                println!(
+                    "{} {}",
+                    out::heading("AGENTS.md:"),
+                    out::path(agents_path.display())
+                );
+                return Ok(());
+            }
+
+            bail!(
+                "An active Knit bundle already exists here. Use --force to replace the active bundle."
+            );
+        }
     }
 
     let root = existing_root.unwrap_or(cwd);
