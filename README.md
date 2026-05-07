@@ -47,7 +47,7 @@ The bundle file is the source of truth. `config.json` only tracks the active bun
 From a workspace folder that sits beside your local repos:
 
 ```sh
-knit init "venue capacity"
+knit init "venue capacity" --agents
 knit track ../backend ../frontend ../scraper
 ```
 
@@ -75,7 +75,7 @@ The active bundle is printed by `knit init` and lives at:
 ## Commands
 
 ```sh
-knit init "<title>" [--force]
+knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit stage [-r <repo>] [-N] [-u] [repo-or-pathspec...]
@@ -104,6 +104,8 @@ knit show <sha|node|HEAD|HEAD~N>
 ```
 
 `knit track` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
+
+Use `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the workspace. The file explains the core Knit workflow for coding agents and points them at the main commands. Knit will not overwrite an existing `AGENTS.md`.
 
 Use `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 

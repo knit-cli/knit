@@ -8,6 +8,35 @@ use std::time::{SystemTime, UNIX_EPOCH};
 static TEMP_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn init_can_generate_agents_tutorial() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let output = knit(&workspace, ["init", "venue capacity", "--agents"]);
+    assert!(output.contains("AGENTS.md"));
+
+    let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("This is a Knit workspace"));
+    assert!(agents.contains("knit status"));
+    assert!(agents.contains("knit track"));
+    assert!(agents.contains("knit commit --stage"));
+    assert!(agents.contains("gloss prepare"));
+
+    fs::write(workspace.join("AGENTS.md"), "custom guidance\n").unwrap();
+    knit(
+        &workspace,
+        ["init", "venue capacity", "--force", "--agents"],
+    );
+    assert_eq!(
+        fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
+        "custom guidance\n"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     let root = unique_temp_dir();
     let backend = root.join("backend");

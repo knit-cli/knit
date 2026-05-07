@@ -19,7 +19,11 @@ pub use cli::{BundleCommand, Cli, Commands};
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
-        Commands::Init { title, force } => commands::init_bundle(&title, force),
+        Commands::Init {
+            title,
+            force,
+            agents,
+        } => commands::init_bundle(&title, force, agents),
         Commands::Track {
             repo_paths,
             base,

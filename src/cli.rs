@@ -19,6 +19,9 @@ pub enum Commands {
         /// Replace an existing active bundle with the same slug.
         #[arg(long)]
         force: bool,
+        /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
+        #[arg(long)]
+        agents: bool,
     },
     /// Track local git repositories in the active bundle and materialize checkouts.
     Track {
