@@ -7,6 +7,9 @@ use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
 
+const KNIT_AGENTS_BEGIN: &str = "<!-- BEGIN KNIT AGENTS -->";
+const KNIT_AGENTS_END: &str = "<!-- END KNIT AGENTS -->";
+
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let existing_root = find_knit_root(&cwd);
@@ -60,17 +63,49 @@ pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
     let path = root.join("AGENTS.md");
-    if path.exists() {
-        return Ok(path);
-    }
+    let next = if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read existing {}", path.display()))?;
+        upsert_agents_section(&existing)
+    } else {
+        format!("# AGENTS.md\n\n{}", agents_section())
+    };
 
-    fs::write(&path, agents_md())
+    fs::write(&path, next)
         .with_context(|| format!("failed to write Knit agent tutorial at {}", path.display()))?;
     Ok(path)
 }
 
-fn agents_md() -> &'static str {
-    r#"# AGENTS.md
+fn upsert_agents_section(existing: &str) -> String {
+    if let Some(start) = existing.find(KNIT_AGENTS_BEGIN) {
+        if let Some(end_offset) = existing[start..].find(KNIT_AGENTS_END) {
+            let end = start + end_offset + KNIT_AGENTS_END.len();
+            let mut next = String::new();
+            next.push_str(&existing[..start]);
+            next.push_str(agents_section().trim_end());
+            next.push_str(&existing[end..]);
+            return ensure_trailing_newline(next);
+        }
+    }
+
+    let mut next = existing.trim_end().to_string();
+    if !next.is_empty() {
+        next.push_str("\n\n");
+    }
+    next.push_str(agents_section());
+    ensure_trailing_newline(next)
+}
+
+fn ensure_trailing_newline(mut text: String) -> String {
+    if !text.ends_with('\n') {
+        text.push('\n');
+    }
+    text
+}
+
+fn agents_section() -> &'static str {
+    r#"<!-- BEGIN KNIT AGENTS -->
+## Knit Workspace Guide
 
 This is a Knit workspace. Knit coordinates feature work that spans one or more Git repositories and records the work in `.knit/bundles/<slug>.bundle.json`.
 
@@ -129,5 +164,6 @@ When using Gloss from this workspace, the active Knit bundle can usually be disc
 gloss prepare
 gloss view
 ```
+<!-- END KNIT AGENTS -->
 "#
 }

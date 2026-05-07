@@ -28,10 +28,17 @@ fn init_can_generate_agents_tutorial() {
         &workspace,
         ["init", "venue capacity", "--force", "--agents"],
     );
-    assert_eq!(
-        fs::read_to_string(workspace.join("AGENTS.md")).unwrap(),
-        "custom guidance\n"
+    let updated = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(updated.contains("custom guidance"));
+    assert!(updated.contains("This is a Knit workspace"));
+    assert_eq!(updated.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
+
+    knit(
+        &workspace,
+        ["init", "venue capacity", "--force", "--agents"],
     );
+    let rerun = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert_eq!(rerun.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
 
     fs::remove_dir_all(root).unwrap();
 }
