@@ -107,6 +107,13 @@ pub fn run(cli: Cli) -> Result<()> {
             LandCommand::Apply { plan } => commands::apply_land_plan(plan.as_deref()),
             LandCommand::Resume { run } => commands::resume_land_run(run.as_deref()),
             LandCommand::Status { run } => commands::show_land_status(run.as_deref()),
+            LandCommand::Update {
+                repos,
+                all,
+                push,
+                set_upstream,
+                continue_merge,
+            } => commands::update_land_branches(&repos, all, push, set_upstream, continue_merge),
         },
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),

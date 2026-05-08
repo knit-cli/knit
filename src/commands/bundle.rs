@@ -228,6 +228,14 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record repoChanges", node.id));
             }
         }
+        "land.update" => {
+            if node.repo_changes.is_empty() {
+                errors.push(format!("node `{}` must record repoChanges", node.id));
+            }
+            if node.provider.as_deref().unwrap_or("").trim().is_empty() {
+                errors.push(format!("node `{}` must record provider", node.id));
+            }
+        }
         "checkpoint" => {
             if node.message.as_deref().unwrap_or("").trim().is_empty() {
                 errors.push(format!("node `{}` must record message", node.id));

@@ -9,6 +9,7 @@ pub fn is_loggable_node(node: &BundleNode) -> bool {
             | "feature.closed"
             | "feature.landed"
             | "git.observed"
+            | "land.update"
             | "revert.group"
             | "repo.removed"
     )

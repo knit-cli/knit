@@ -308,6 +308,30 @@ impl BundleNode {
         }
     }
 
+    pub fn land_update(
+        id: String,
+        created_at: String,
+        provider: String,
+        repo_changes: Vec<RepoChange>,
+    ) -> Self {
+        Self {
+            id,
+            node_type: "land.update".to_string(),
+            created_at,
+            title: None,
+            repo_ids: None,
+            commit_group_id: None,
+            message: Some("updated feature branches from base".to_string()),
+            target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: Some(provider),
+            publication_urls: Vec::new(),
+            commits: Vec::new(),
+            repo_changes,
+        }
+    }
+
     pub fn checkpoint(id: String, created_at: String, message: String) -> Self {
         Self {
             id,

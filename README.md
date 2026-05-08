@@ -101,6 +101,7 @@ knit publish github create [--draft] [--sync|--no-sync] [--set-upstream] [repo-i
 knit publish github sync [repo-id-or-path...]
 knit publish github status [repo-id-or-path...]
 knit land plan [--provider github] [--out <path>] [--force]
+knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>]
 knit land resume [--run <path>]
 knit land status [--run <path>]
@@ -231,12 +232,15 @@ Knit preserves user-written PR text and only replaces the block between `<!-- BE
 
 ```sh
 knit land plan
+knit land update --push
 knit land apply
 knit land status
 knit land resume
 ```
 
 `knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR with `squash`, waits for required checks, and does not delete feature branches. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
+
+`knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
 `knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs.
 
@@ -298,6 +302,7 @@ Typical node types:
 - `git.observed`
 - `revert.group`
 - `feature.landed`
+- `land.update`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

@@ -108,12 +108,13 @@ fn print_node(node: &BundleNode) {
                 );
             }
         }
-        "git.observed" => {
-            println!(
-                "{}  {}",
-                out::node(&node.id),
-                out::heading("observed git changes")
-            );
+        "git.observed" | "land.update" => {
+            let heading = if node.node_type == "land.update" {
+                "updated from base"
+            } else {
+                "observed git changes"
+            };
+            println!("{}  {}", out::node(&node.id), out::heading(heading));
             for change in &node.repo_changes {
                 match change.movement.as_str() {
                     "advanced" => {
@@ -255,7 +256,7 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
 
     match node.node_type.as_str() {
         "commit.group" | "revert.group" => show_commit_refs(active, &node.commits),
-        "git.observed" => show_observed_node(active, node),
+        "git.observed" | "land.update" => show_observed_node(active, node),
         "repo.removed" => {
             if let Some(repo_ids) = &node.repo_ids {
                 for repo_id in repo_ids {
@@ -307,6 +308,11 @@ fn print_show_header(node: &BundleNode) {
         println!("{} {}", out::heading("Message:"), message);
     } else if node.node_type == "git.observed" {
         println!("{} observed git changes", out::heading("Message:"));
+    } else if node.node_type == "land.update" {
+        println!(
+            "{} updated feature branches from base",
+            out::heading("Message:")
+        );
     }
     println!();
 }

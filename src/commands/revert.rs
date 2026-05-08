@@ -202,7 +202,7 @@ fn build_plan(active: &ActiveBundle, target: &str) -> Result<RevertPlan> {
     let target_node = resolve_log_node(&active.bundle.nodes, target)?;
     let mut repos = match target_node.node_type.as_str() {
         "commit.group" | "revert.group" => plans_for_commits(active, &target_node.commits)?,
-        "git.observed" => plans_for_observed(active, target_node)?,
+        "git.observed" | "land.update" => plans_for_observed(active, target_node)?,
         "repo.removed" => bail!(
             "{} is a metadata node. Knit cannot safely restore a removed repo entry because bundle nodes do not yet store the full removed repo record.",
             target_node.id
@@ -430,6 +430,7 @@ fn node_message(node: &BundleNode) -> String {
 
     match node.node_type.as_str() {
         "git.observed" => "observed git changes".to_string(),
+        "land.update" => "feature branch update".to_string(),
         "repo.removed" => "removed repos".to_string(),
         node_type => node_type.to_string(),
     }

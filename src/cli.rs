@@ -268,6 +268,23 @@ pub enum LandCommand {
         #[arg(long)]
         run: Option<PathBuf>,
     },
+    /// Merge current PR base branches into feature branches and record the integration.
+    Update {
+        /// Optional repo ids or paths to limit the update.
+        repos: Vec<String>,
+        /// Update every tracked repo with a recorded PR. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+        /// Push feature branches after successful local updates.
+        #[arg(long)]
+        push: bool,
+        /// Set each feature branch's upstream to origin/<branch> while pushing.
+        #[arg(long)]
+        set_upstream: bool,
+        /// Record already-resolved local branch movements as a land update without running git merge.
+        #[arg(long)]
+        continue_merge: bool,
+    },
 }
 
 #[derive(Subcommand)]

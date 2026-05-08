@@ -727,6 +727,86 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
 }
 
 #[test]
+fn land_update_merges_base_and_records_explicit_node() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&backend_feature.join("app.txt"), "backend feature update");
+    knit(&workspace, ["commit", "--stage", "-m", "Feature update"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    fs::write(
+        backend_collaborator.join("base.txt"),
+        "base branch update\n",
+    )
+    .unwrap();
+    git(&backend_collaborator, ["add", "base.txt"]);
+    git(
+        &backend_collaborator,
+        ["commit", "-m", "Base branch update"],
+    );
+    git(&backend_collaborator, ["push", "origin", "main"]);
+
+    let update = knit_with_fake_gh(
+        &workspace,
+        ["land", "update", "--push"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(update.contains("backend"));
+    assert!(update.contains("updated"));
+    assert!(update.contains("pushed"));
+
+    let local_head = git(&backend_feature, ["rev-parse", "HEAD"]);
+    assert_eq!(
+        git(
+            &backend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        local_head
+    );
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("land.update"));
+    assert_eq!(latest["provider"].as_str(), Some("github"));
+    let repo_changes = latest["repoChanges"].as_array().unwrap();
+    assert_eq!(repo_changes.len(), 1);
+    assert_eq!(repo_changes[0]["repoId"].as_str(), Some("backend"));
+    assert_eq!(
+        repo_changes[0]["afterSha"].as_str(),
+        Some(local_head.trim())
+    );
+    assert_eq!(
+        bundle["repos"][0]["headSha"].as_str(),
+        Some(local_head.trim())
+    );
+
+    let log = knit(&workspace, ["log", "-1"]);
+    assert!(log.contains("updated from base"));
+    let show = knit(&workspace, ["show", "HEAD"]);
+    assert!(show.contains("land.update"));
+    assert!(show.contains("Base branch update"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
