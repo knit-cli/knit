@@ -215,6 +215,19 @@ fn print_node(node: &BundleNode) {
                 reason
             );
         }
+        "feature.landed" => {
+            println!(
+                "{}  {}  {}",
+                out::node(&node.id),
+                out::ok("landed"),
+                node.provider.as_deref().unwrap_or("provider")
+            );
+            if let Some(repo_ids) = &node.repo_ids {
+                for repo_id in repo_ids {
+                    println!("  {}", out::repo(repo_id));
+                }
+            }
+        }
         "repo.removed" => {
             println!("{}  {}", out::node(&node.id), out::danger("removed repos"));
             if let Some(repo_ids) = &node.repo_ids {
@@ -250,6 +263,21 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
                 }
             } else {
                 println!("{}", out::muted("No repo ids recorded."));
+            }
+            Ok(())
+        }
+        "feature.landed" => {
+            if let Some(plan_id) = &node.plan_id {
+                println!("{} {}", out::heading("Plan:"), out::node(plan_id));
+            }
+            if let Some(run_id) = &node.run_id {
+                println!("{} {}", out::heading("Run:"), out::node(run_id));
+            }
+            if let Some(provider) = &node.provider {
+                println!("{} {}", out::heading("Provider:"), provider);
+            }
+            for url in &node.publication_urls {
+                println!("  {url}");
             }
             Ok(())
         }

@@ -7,6 +7,7 @@ pub fn is_loggable_node(node: &BundleNode) -> bool {
         "checkpoint"
             | "commit.group"
             | "feature.closed"
+            | "feature.landed"
             | "git.observed"
             | "revert.group"
             | "repo.removed"

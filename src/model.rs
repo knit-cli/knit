@@ -147,6 +147,14 @@ pub struct BundleNode {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub target_node_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publication_urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -164,6 +172,10 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -179,6 +191,10 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -194,6 +210,10 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -209,6 +229,10 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -230,6 +254,10 @@ impl BundleNode {
             commit_group_id: Some(group_id),
             message: Some(message),
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits,
             repo_changes,
         }
@@ -252,6 +280,10 @@ impl BundleNode {
             commit_group_id: Some(group_id),
             message: Some(message),
             target_node_id: Some(target_node_id),
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits,
             repo_changes,
         }
@@ -267,6 +299,10 @@ impl BundleNode {
             commit_group_id: None,
             message: None,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes,
         }
@@ -282,6 +318,10 @@ impl BundleNode {
             commit_group_id: None,
             message: Some(message),
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -297,6 +337,37 @@ impl BundleNode {
             commit_group_id: None,
             message: reason,
             target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
+            commits: Vec::new(),
+            repo_changes: Vec::new(),
+        }
+    }
+
+    pub fn feature_landed(
+        id: String,
+        created_at: String,
+        plan_id: String,
+        run_id: String,
+        provider: String,
+        repo_ids: Vec<String>,
+        publication_urls: Vec<String>,
+    ) -> Self {
+        Self {
+            id,
+            node_type: "feature.landed".to_string(),
+            created_at,
+            title: None,
+            repo_ids: Some(repo_ids),
+            commit_group_id: None,
+            message: None,
+            target_node_id: None,
+            plan_id: Some(plan_id),
+            run_id: Some(run_id),
+            provider: Some(provider),
+            publication_urls,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }

@@ -162,6 +162,21 @@ Important caveat: "full history" means the history available in the local clone.
 
    Baseline implemented: `knit publish github create` pushes selected feature branches, creates missing GitHub PRs through `gh`, stores provider-neutral `publications` metadata in the bundle with `provider: "github"` and `kind: "pull_request"`, and by default rewrites the managed Knit block in each selected PR body with links to the other PRs in the bundle. `knit publish github sync` refreshes recorded PR metadata and repairs those body blocks. `knit publish github status` prints the recorded GitHub PR set. The operation is best-effort, not atomic; if the body sync phase fails after PR creation, run `knit publish github sync`.
 
+7. `knit land`
+
+   Coordinate cross-repo PR-set landing without pretending the provider is git.
+
+   ```sh
+   knit land plan
+   knit land apply
+   knit land resume
+   knit land status
+   ```
+
+   This belongs in Knit because landing is the operational continuation of the tracked branch/PR set: merge order, CI gates, local deploy commands, durable execution state, and bundle landing history. It should be provider-neutral at the command boundary. GitHub is the first provider because `knit publish github create` already records GitHub PR publications.
+
+   Baseline implemented: `knit land plan` generates `.knit/land-plans/<bundle-id>.land.json` from recorded GitHub PR publications in repo order. Plans support `merge_pr`, `wait_checks`, and `run` steps with `needs` dependencies. `knit land apply` preflights missing/draft/closed PRs, writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`, executes steps sequentially in dependency order, and stops on failure. `knit land resume` skips succeeded steps and retries pending/failed work. `knit land status` prints the latest run or default plan status. Successful runs append a `feature.landed` node. Landing is explicitly not atomic; partial merges live in the run log.
+
 ## Knit-Native Flow
 
 1. `knit bundle`

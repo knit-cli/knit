@@ -80,4 +80,14 @@ knit log
 
 Expected result: `knit status` reports `rewound commits: 1` for `frontend`, `knit sync` appends another `git.observed` node with `movement: "rewound"` and `droppedCommits`, and `knit log` shows the rewind.
 
+To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
+
+```sh
+knit publish github create --no-sync
+knit land plan
+knit land status
+```
+
+Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Only run `knit land apply` against PRs you are comfortable merging. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`; after fixing the failed step, run `knit land resume`.
+
 Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

@@ -1,25 +1,22 @@
 use crate::checkout::checkout_dir;
 use crate::git::{current_branch, git_output, git_output_optional, rev_parse};
 use crate::ids::short_sha;
-use crate::model::{ChangeGroup, PublicationEntry, RepoEntry};
+use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
+use crate::providers::github::{
+    self, create_pr, edit_pr_body, find_existing_pr, pr_number_from_url, publication_for_repo,
+    view_pr, PullRequest,
+};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, save_active_bundle, ActiveBundle,
 };
-use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
-use std::ffi::{OsStr, OsString};
-use std::io::Write;
+use std::ffi::OsString;
 use std::path::Path;
-use std::process::{Command, Stdio};
 
 const KNIT_PR_BLOCK_BEGIN: &str = "<!-- BEGIN KNIT BUNDLE -->";
 const KNIT_PR_BLOCK_END: &str = "<!-- END KNIT BUNDLE -->";
-
-const GITHUB_PROVIDER: &str = "github";
-const GITHUB_PULL_REQUEST_KIND: &str = "pull_request";
 
 pub fn create_github_publications(
     selectors: &[String],
@@ -168,8 +165,8 @@ fn create_or_reuse_pr(
         return Ok(());
     }
 
-    if let Some(existing) = gh_find_existing_pr(&cwd, branch, &repo.base_branch)? {
-        upsert_publication(active, repo, existing);
+    if let Some(existing) = find_existing_pr(&cwd, branch, &repo.base_branch)? {
+        github::upsert_publication(&mut active.bundle, repo, &existing);
         let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
         println!(
             "{}: {} {}",
@@ -182,7 +179,7 @@ fn create_or_reuse_pr(
 
     let title = format!("{} ({})", active.bundle.title, repo.id);
     let initial_body = initial_pr_body(&active.bundle, &repo.id);
-    let url = gh_create_pr(
+    let url = create_pr(
         &cwd,
         &repo.base_branch,
         branch,
@@ -190,7 +187,7 @@ fn create_or_reuse_pr(
         &initial_body,
         draft,
     )?;
-    let summary = gh_view_pr(&cwd, &url).unwrap_or_else(|_| GhPrSummary {
+    let summary = view_pr(&cwd, &url).unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),
@@ -198,8 +195,10 @@ fn create_or_reuse_pr(
         base_ref_name: Some(repo.base_branch.clone()),
         head_ref_name: Some(branch.to_string()),
         body: None,
+        is_draft: None,
+        head_ref_oid: None,
     });
-    upsert_publication(active, repo, summary);
+    github::upsert_publication(&mut active.bundle, repo, &summary);
 
     let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
     println!(
@@ -245,21 +244,21 @@ fn sync_one_pr(active: &mut ActiveBundle, repo: &RepoEntry) -> Result<()> {
     };
 
     let summary = if let Some(pr) = publication_for_repo(&active.bundle, &repo.id) {
-        gh_view_pr(&cwd, &pr.url)?
-    } else if let Some(existing) = gh_find_existing_pr(&cwd, branch, &repo.base_branch)? {
+        view_pr(&cwd, &pr.url)?
+    } else if let Some(existing) = find_existing_pr(&cwd, branch, &repo.base_branch)? {
         existing
     } else {
         println!("{}: {}", out::repo(&repo.id), out::muted("no PR recorded"));
         return Ok(());
     };
 
-    upsert_publication(active, repo, summary.clone());
+    github::upsert_publication(&mut active.bundle, repo, &summary);
     let current_body = summary.body.unwrap_or_default();
     let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body != current_body {
         let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
-        gh_edit_pr_body(&cwd, &pr.url, &next_body)?;
+        edit_pr_body(&cwd, &pr.url, &next_body)?;
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -311,48 +310,6 @@ fn run_push(cwd: &Path, branch: &str, set_upstream: bool) -> Result<()> {
 
     git_output(cwd, args)?;
     Ok(())
-}
-
-fn upsert_publication(active: &mut ActiveBundle, repo: &RepoEntry, summary: GhPrSummary) {
-    let entry = PublicationEntry {
-        repo_id: repo.id.clone(),
-        provider: GITHUB_PROVIDER.to_string(),
-        kind: GITHUB_PULL_REQUEST_KIND.to_string(),
-        number: summary.number,
-        url: summary.url,
-        base_branch: summary
-            .base_ref_name
-            .unwrap_or_else(|| repo.base_branch.clone()),
-        head_branch: summary
-            .head_ref_name
-            .or_else(|| repo.feature_branch.clone())
-            .unwrap_or_default(),
-        state: summary.state.unwrap_or_else(|| "UNKNOWN".to_string()),
-        title: summary.title,
-        updated_at: now_iso(),
-    };
-
-    if let Some(existing) = active.bundle.publications.iter_mut().find(|publication| {
-        publication.provider == GITHUB_PROVIDER
-            && publication.kind == GITHUB_PULL_REQUEST_KIND
-            && publication.repo_id == repo.id
-    }) {
-        *existing = entry;
-    } else {
-        active.bundle.publications.push(entry);
-    }
-    active.bundle.updated_at = now_iso();
-}
-
-fn publication_for_repo<'a>(
-    bundle: &'a ChangeGroup,
-    repo_id: &str,
-) -> Option<&'a PublicationEntry> {
-    bundle.publications.iter().find(|publication| {
-        publication.provider == GITHUB_PROVIDER
-            && publication.kind == GITHUB_PULL_REQUEST_KIND
-            && publication.repo_id == repo_id
-    })
 }
 
 fn initial_pr_body(bundle: &ChangeGroup, current_repo_id: &str) -> String {
@@ -423,191 +380,10 @@ fn append_knit_pr_block(existing_body: &str, block: &str) -> String {
     }
 }
 
-fn gh_find_existing_pr(cwd: &Path, branch: &str, base_branch: &str) -> Result<Option<GhPrSummary>> {
-    let output = gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("list"),
-            OsString::from("--head"),
-            OsString::from(branch),
-            OsString::from("--base"),
-            OsString::from(base_branch),
-            OsString::from("--state"),
-            OsString::from("all"),
-            OsString::from("--json"),
-            OsString::from("number,url,state,title,baseRefName,headRefName,body"),
-            OsString::from("--limit"),
-            OsString::from("1"),
-        ],
-        None,
-    )?;
-    let prs: Vec<GhPrSummary> =
-        serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
-    Ok(prs.into_iter().next())
-}
-
-fn gh_create_pr(
-    cwd: &Path,
-    base_branch: &str,
-    head_branch: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<String> {
-    let mut args = vec![
-        OsString::from("pr"),
-        OsString::from("create"),
-        OsString::from("--base"),
-        OsString::from(base_branch),
-        OsString::from("--head"),
-        OsString::from(head_branch),
-        OsString::from("--title"),
-        OsString::from(title),
-        OsString::from("--body-file"),
-        OsString::from("-"),
-    ];
-    if draft {
-        args.push(OsString::from("--draft"));
-    }
-
-    let output = gh_output(cwd, args, Some(body))?;
-    parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
-}
-
-fn gh_view_pr(cwd: &Path, url: &str) -> Result<GhPrSummary> {
-    let output = gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("view"),
-            OsString::from(url),
-            OsString::from("--json"),
-            OsString::from("number,url,state,title,baseRefName,headRefName,body"),
-        ],
-        None,
-    )?;
-    serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
-}
-
-fn gh_edit_pr_body(cwd: &Path, url: &str, body: &str) -> Result<()> {
-    gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("edit"),
-            OsString::from(url),
-            OsString::from("--body-file"),
-            OsString::from("-"),
-        ],
-        Some(body),
-    )?;
-    Ok(())
-}
-
-fn gh_output<I, S>(cwd: &Path, args: I, stdin: Option<&str>) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_os_string())
-        .collect::<Vec<_>>();
-    let mut child = Command::new("gh")
-        .args(&args)
-        .current_dir(cwd)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to run `gh {}` in {}. Install and authenticate GitHub CLI to use `knit publish github`.",
-                display_args(&args),
-                cwd.display()
-            )
-        })?;
-
-    if let Some(input) = stdin {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .context("failed to open stdin for GitHub CLI")?;
-        child_stdin
-            .write_all(input.as_bytes())
-            .context("failed to write PR body to GitHub CLI")?;
-    }
-
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait for `gh {}`", display_args(&args)))?;
-
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = if stderr.trim().is_empty() {
-        stdout.trim()
-    } else {
-        stderr.trim()
-    };
-    bail!(
-        "gh {} failed in {}: {}",
-        display_args(&args),
-        cwd.display(),
-        detail
-    );
-}
-
-fn parse_pr_url(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .rev()
-        .find(|token| token.starts_with("https://") || token.starts_with("http://"))
-        .map(|token| token.trim_matches(|ch| ch == '"' || ch == '\'').to_string())
-}
-
-fn pr_number_from_url(url: &str) -> Option<u64> {
-    url.rsplit('/').next()?.parse().ok()
-}
-
-fn display_args(args: &[OsString]) -> String {
-    args.iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
-}
-
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct GhPrSummary {
-    number: u64,
-    url: String,
-    #[serde(default)]
-    state: Option<String>,
-    #[serde(default)]
-    title: Option<String>,
-    #[serde(default)]
-    base_ref_name: Option<String>,
-    #[serde(default)]
-    head_ref_name: Option<String>,
-    #[serde(default)]
-    body: Option<String>,
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{CHANGE_GROUP_KIND, SCHEMA_VERSION};
+    use crate::model::{PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION};
 
     #[test]
     fn managed_block_is_replaced_without_touching_user_body() {
@@ -654,8 +430,8 @@ mod tests {
             nodes: Vec::new(),
             publications: vec![PublicationEntry {
                 repo_id: "backend".to_string(),
-                provider: GITHUB_PROVIDER.to_string(),
-                kind: GITHUB_PULL_REQUEST_KIND.to_string(),
+                provider: github::PROVIDER.to_string(),
+                kind: github::PULL_REQUEST_KIND.to_string(),
                 number: 123,
                 url: "https://github.com/acme/backend/pull/123".to_string(),
                 base_branch: "main".to_string(),
@@ -673,8 +449,8 @@ mod tests {
 
         bundle.publications.push(PublicationEntry {
             repo_id: "frontend".to_string(),
-            provider: GITHUB_PROVIDER.to_string(),
-            kind: GITHUB_PULL_REQUEST_KIND.to_string(),
+            provider: github::PROVIDER.to_string(),
+            kind: github::PULL_REQUEST_KIND.to_string(),
             number: 456,
             url: "https://github.com/acme/frontend/pull/456".to_string(),
             base_branch: "main".to_string(),

@@ -16,6 +16,7 @@ src/
     clean.rs
     close.rs
     init.rs
+    land.rs
     track.rs
     remove.rs
     worktree.rs
@@ -31,6 +32,8 @@ src/
     log.rs
     revert.rs
     git_passthrough.rs
+  providers/
+    github.rs     provider-specific forge operations through gh
   checkout.rs   checkout mode helpers and in-place branch guards
   model.rs      bundle / ChangeGroup data structures
   store.rs      .knit config and bundle file persistence
@@ -54,7 +57,9 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `cli.rs` should contain only argument shape and help text.
 - Each file in `commands/` owns one user-facing command or tightly coupled command pair.
 - `commands/bundle.rs` only inspects or validates the existing bundle artifact; it must not create a second review handoff object.
-- `commands/publish.rs` owns provider publishing. It may call provider CLIs such as `gh`, but it should keep publication state as metadata on the bundle and never replace git branches/SHAs as the code source of truth.
+- `commands/publish.rs` owns the user-facing publish workflow. Provider-specific calls live in `providers/`, starting with `providers/github.rs`.
+- `commands/land.rs` owns landing plan/run orchestration. It reads publication metadata, writes `.knit/land-plans/` and `.knit/land-runs/`, and appends `feature.landed` only after every step succeeds.
+- `providers/` owns forge-specific subprocess behavior such as GitHub PR view/check/merge through `gh`. Provider modules should expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should load the active bundle from `.knit/config.json`.
@@ -76,7 +81,7 @@ The bundle carries both current state and history:
 
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: compatibility list of logical commits across repos.
-- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
+- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `feature.landed`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
 - `publications`: provider metadata for PRs or other forge review objects created or synced by Knit.
 - `headNodeId`: the latest node in the ledger.
 

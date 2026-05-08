@@ -1,4 +1,4 @@
-use serde_json::Value;
+use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -658,6 +658,224 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 }
 
 #[test]
+fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend land",
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "frontend land",
+    );
+    knit(&workspace, ["commit", "--stage", "-m", "Landing change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let missing_plan =
+        knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(missing_plan.contains("No land plan found"));
+
+    let plan = knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    assert!(plan.contains("Land plan"));
+    assert!(plan.contains("merge-backend"));
+    assert!(plan.contains("merge-frontend"));
+    let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
+    assert!(plan_path.exists());
+
+    let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(apply.contains("Feature landed"));
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(
+        order.lines().collect::<Vec<_>>(),
+        vec!["backend", "frontend"]
+    );
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("feature.landed"));
+    assert_eq!(latest["provider"].as_str(), Some("github"));
+    assert_eq!(latest["repoIds"].as_array().unwrap().len(), 2);
+    assert_eq!(latest["publicationUrls"].as_array().unwrap().len(), 2);
+    assert!(workspace.join(".knit/land-runs").exists());
+    assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
+    assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend land resume",
+    );
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Landing resume change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
+    let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan["steps"].as_array_mut().unwrap().push(json!({
+        "id": "deploy",
+        "type": "run",
+        "cwd": ".",
+        "command": ["sh", "-c", "test \"$DEPLOY_OK\" = \"yes\" && test -f deploy-ok"],
+        "env": { "DEPLOY_OK": "yes" },
+        "needs": ["merge-backend"]
+    }));
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let failed = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(failed.contains("stopped at step deploy"));
+    let bundle_after_failure = read_bundle(&workspace);
+    assert_ne!(
+        bundle_after_failure["nodes"]
+            .as_array()
+            .unwrap()
+            .last()
+            .unwrap()["type"]
+            .as_str(),
+        Some("feature.landed")
+    );
+
+    fs::write(workspace.join("deploy-ok"), "ready\n").unwrap();
+    let resumed = knit_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
+    assert!(resumed.contains("Feature landed"));
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["backend"]);
+    let status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
+    assert!(status.contains("succeeded"));
+    assert!(status.contains("deploy"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_refuses_draft_publications() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend draft land",
+    );
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Draft landing change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    let failed = knit_fails_with_fake_gh_env(
+        &workspace,
+        ["land", "apply"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_DRAFT", "1")],
+    );
+    assert!(failed.contains("is a draft"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_stops_when_required_checks_fail() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend check failure",
+    );
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Check failure landing"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    let failed = knit_fails_with_fake_gh_env(
+        &workspace,
+        ["land", "apply"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_CHECKS_FAIL", "1")],
+    );
+    assert!(failed.contains("check `test` failed"));
+    assert!(!fake_gh_dir.join("merge-order.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn checkpoint_records_non_git_ledger_note() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
@@ -986,6 +1204,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
+    knit_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[])
+}
+
+fn knit_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
     let old_path = std::env::var_os("PATH").unwrap_or_default();
     let path = format!("{}:{}", fake_bin.display(), old_path.to_string_lossy());
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
@@ -994,7 +1226,49 @@ where
         .current_dir(cwd)
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     run(command)
+}
+
+fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    knit_fails_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[])
+}
+
+fn knit_fails_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", fake_bin.display(), old_path.to_string_lossy());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("PATH", path)
+        .env("GH_FAKE_DIR", fake_gh_dir);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
 }
 
 fn git<I, S>(cwd: &Path, args: I) -> String
@@ -1058,7 +1332,15 @@ case "$sub" in
     tail="${url#https://github.com/acme/}"
     pr_repo="${tail%%/*}"
     number="${url##*/}"
-    printf '{"number":%s,"url":"%s","state":"OPEN","title":"%s PR","baseRefName":"main","headRefName":"knit/venue-capacity","body":"Existing body"}\n' "$number" "$url" "$pr_repo"
+    state="OPEN"
+    if [ -f "$GH_FAKE_DIR/merged-$pr_repo" ]; then
+      state="MERGED"
+    fi
+    draft="false"
+    if [ "${GH_FAKE_DRAFT:-0}" = "1" ]; then
+      draft="true"
+    fi
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"main","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head"}\n' "$number" "$url" "$state" "$pr_repo" "$draft" "$pr_repo"
     ;;
   edit)
     url="$1"
@@ -1066,6 +1348,21 @@ case "$sub" in
     pr_repo="${tail%%/*}"
     cat > "$GH_FAKE_DIR/edit-$pr_repo.md"
     printf '%s\n' "$url"
+    ;;
+  checks)
+    if [ "${GH_FAKE_CHECKS_FAIL:-0}" = "1" ]; then
+      printf '[{"name":"test","state":"FAILURE","bucket":"fail"}]\n'
+    else
+      printf '[]\n'
+    fi
+    ;;
+  merge)
+    url="$1"
+    tail="${url#https://github.com/acme/}"
+    pr_repo="${tail%%/*}"
+    printf '%s\n' "$pr_repo" >> "$GH_FAKE_DIR/merge-order.txt"
+    touch "$GH_FAKE_DIR/merged-$pr_repo"
+    printf 'Merged pull request %s\n' "$url"
     ;;
   *)
     echo "unexpected gh pr command: $sub" >&2

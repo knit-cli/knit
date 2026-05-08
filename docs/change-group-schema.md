@@ -90,9 +90,10 @@ Current node types:
 - `commit.group`
 - `git.observed`
 - `revert.group`
+- `feature.landed`
 - `repo.removed`
 
-`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. Repo/worktree nodes include `repoIds`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`.
 
 `repoChanges` records how a repo moved:
 
@@ -145,5 +146,40 @@ Rewind example:
 ```
 
 Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each PR body. Future providers can use the same array with a different `provider` and `kind`, for example GitLab merge requests.
+
+## Landing Plans And Runs
+
+`knit land plan` writes an editable plan under `.knit/land-plans/`:
+
+```json
+{
+  "schemaVersion": "0.1",
+  "kind": "KnitLandPlan",
+  "id": "land-venue-capacity",
+  "provider": "github",
+  "bundleId": "venue-capacity",
+  "createdAt": "2026-05-05T00:00:00.000Z",
+  "steps": [
+    {
+      "id": "merge-backend",
+      "type": "merge_pr",
+      "repoId": "backend",
+      "method": "squash",
+      "waitForChecks": true,
+      "requiredChecksOnly": true,
+      "deleteBranch": false
+    },
+    {
+      "id": "deploy",
+      "type": "run",
+      "cwd": "../deploy",
+      "command": ["bin/deploy", "staging"],
+      "needs": ["merge-backend"]
+    }
+  ]
+}
+```
+
+`knit land apply` and `knit land resume` write run logs under `.knit/land-runs/`. Run files are operational logs, not the source of truth for code state. The bundle records only the final `feature.landed` summary node after every step succeeds.
 
 Gloss should treat the bundle as read-only input. Gloss can analyze the current `headNodeId`, a specific `commit.group` node, or the full current bundle.

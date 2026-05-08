@@ -6,6 +6,7 @@ pub mod ids;
 pub mod model;
 pub mod output;
 pub mod paths;
+pub mod providers;
 pub mod repo_selectors;
 pub mod selectors;
 pub mod status;
@@ -15,7 +16,7 @@ pub mod tracking;
 
 use anyhow::Result;
 
-pub use cli::{BundleCommand, Cli, Commands, GithubPublishCommand, PublishCommand};
+pub use cli::{BundleCommand, Cli, Commands, GithubPublishCommand, LandCommand, PublishCommand};
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -96,6 +97,16 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::show_github_publication_status(&repos, all)
                 }
             },
+        },
+        Commands::Land { command } => match command {
+            LandCommand::Plan {
+                provider,
+                out,
+                force,
+            } => commands::generate_land_plan(&provider, out.as_deref(), force),
+            LandCommand::Apply { plan } => commands::apply_land_plan(plan.as_deref()),
+            LandCommand::Resume { run } => commands::resume_land_run(run.as_deref()),
+            LandCommand::Status { run } => commands::show_land_status(run.as_deref()),
         },
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),

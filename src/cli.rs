@@ -162,6 +162,11 @@ pub enum Commands {
         #[command(subcommand)]
         target: PublishCommand,
     },
+    /// Plan and execute cross-repo PR landing.
+    Land {
+        #[command(subcommand)]
+        command: LandCommand,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.
@@ -228,6 +233,40 @@ pub enum PublishCommand {
     Github {
         #[command(subcommand)]
         command: GithubPublishCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum LandCommand {
+    /// Generate an editable landing plan from recorded publications.
+    Plan {
+        /// Landing provider to target. GitHub is the only provider implemented.
+        #[arg(long, default_value = "github")]
+        provider: String,
+        /// Write the generated plan to a custom path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Replace an existing plan file.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Execute a landing plan.
+    Apply {
+        /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
+        #[arg(long)]
+        plan: Option<PathBuf>,
+    },
+    /// Resume a failed or incomplete landing run.
+    Resume {
+        /// Run file to resume. Defaults to the latest run.
+        #[arg(long)]
+        run: Option<PathBuf>,
+    },
+    /// Show the latest landing run or default plan status.
+    Status {
+        /// Run file to inspect. Defaults to the latest run.
+        #[arg(long)]
+        run: Option<PathBuf>,
     },
 }
 

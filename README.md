@@ -33,6 +33,10 @@ Knit stores local state under the directory where `knit init` runs:
   config.json
   bundles/
     <slug>.bundle.json
+  land-plans/
+    <slug>.land.json
+  land-runs/
+    <plan-id>-<timestamp>.run.json
   revert-plans/
     <node-id>.json
   worktrees/
@@ -96,6 +100,10 @@ knit push [--all] [--set-upstream] [repo-id-or-path...]
 knit publish github create [--draft] [--sync|--no-sync] [--set-upstream] [repo-id-or-path...]
 knit publish github sync [repo-id-or-path...]
 knit publish github status [repo-id-or-path...]
+knit land plan [--provider github] [--out <path>] [--force]
+knit land apply [--plan <path>]
+knit land resume [--run <path>]
+knit land status [--run <path>]
 knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -219,6 +227,19 @@ knit publish github status
 
 Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
 
+`knit land` coordinates landing the recorded cross-repo PR set. It is provider-neutral at the command boundary, but GitHub is the only provider implemented today:
+
+```sh
+knit land plan
+knit land apply
+knit land status
+knit land resume
+```
+
+`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR with `squash`, waits for required checks, and does not delete feature branches. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
+
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs.
+
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
 
 `knit show <target>` uses the same bundle log selectors as `knit revert`: `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, commit group ids, and recorded git commit SHAs. Commit and revert group nodes show `git show --stat --oneline` for each repo commit. Observed git nodes show the branch movement and the relevant added or dropped commits when those commits are still available locally.
@@ -276,6 +297,7 @@ Typical node types:
 - `commit.group`
 - `git.observed`
 - `revert.group`
+- `feature.landed`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.
@@ -293,6 +315,8 @@ Typical node types:
 - `knit push` only pushes feature branches to `origin`; use `knit publish github create` for GitHub PR publishing.
 - `knit publish` currently supports only GitHub through the `gh` CLI. GitLab/Bitbucket/Forgejo support would need provider adapters.
 - `knit publish github create` is not perfectly transactional. Branch pushes, PR creation, and PR body updates happen sequentially. If phase two fails after PRs are created, run `knit publish github sync`.
+- `knit land` currently supports only GitHub PR publications through the `gh` CLI. Landing is not atomic: PR merges and local run steps happen sequentially. Partial merges are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
+- `knit land plan` never executes local commands. `run` steps execute only during `apply` or `resume`.
 - `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place.
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
@@ -314,5 +338,6 @@ See [docs/architecture.md](docs/architecture.md) for the module boundaries and t
 
 - Standalone JSON Schema for `ChangeGroup`
 - Safer partial-failure recovery for multi-repo commits
+- Provider adapters for non-GitHub publishing and landing
 - Better detection of existing registered worktrees
 - Optional bundle export/import flows for handoff to Gloss
