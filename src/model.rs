@@ -36,6 +36,8 @@ pub struct ChangeGroup {
     pub commit_groups: Vec<CommitGroup>,
     #[serde(default)]
     pub nodes: Vec<BundleNode>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub publications: Vec<PublicationEntry>,
 }
 
 impl ChangeGroup {
@@ -53,8 +55,25 @@ impl ChangeGroup {
             repos: Vec::new(),
             commit_groups: Vec::new(),
             nodes: vec![node],
+            publications: Vec::new(),
         }
     }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublicationEntry {
+    pub repo_id: String,
+    pub provider: String,
+    pub kind: String,
+    pub number: u64,
+    pub url: String,
+    pub base_branch: String,
+    pub head_branch: String,
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    pub updated_at: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

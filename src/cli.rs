@@ -157,6 +157,11 @@ pub enum Commands {
         #[arg(long)]
         set_upstream: bool,
     },
+    /// Publish tracked feature branches to a code hosting provider.
+    Publish {
+        #[command(subcommand)]
+        target: PublishCommand,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.
@@ -215,4 +220,53 @@ pub enum BundleCommand {
     Print,
     /// Validate the active bundle structure.
     Validate,
+}
+
+#[derive(Subcommand)]
+pub enum PublishCommand {
+    /// Publish to GitHub pull requests.
+    Github {
+        #[command(subcommand)]
+        command: GithubPublishCommand,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum GithubPublishCommand {
+    /// Push feature branches and create missing GitHub PRs.
+    Create {
+        /// Optional repo ids or paths to limit PR creation.
+        repos: Vec<String>,
+        /// Create PRs for every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+        /// Create draft PRs.
+        #[arg(long)]
+        draft: bool,
+        /// Explicitly sync cross-links after creation. This is the default.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+        /// Skip the second phase that updates every PR body with cross-links.
+        #[arg(long)]
+        no_sync: bool,
+        /// Set each feature branch's upstream to origin/<branch> while pushing.
+        #[arg(long)]
+        set_upstream: bool,
+    },
+    /// Refresh recorded PR metadata and rewrite Knit cross-link blocks.
+    Sync {
+        /// Optional repo ids or paths to limit PR sync.
+        repos: Vec<String>,
+        /// Sync every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show recorded PRs for the active bundle.
+    Status {
+        /// Optional repo ids or paths to limit PR status.
+        repos: Vec<String>,
+        /// Show every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+    },
 }

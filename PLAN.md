@@ -142,9 +142,25 @@ Important caveat: "full history" means the history available in the local clone.
    knit push --set-upstream
    ```
 
-   This should not create PRs. It only coordinates git push for feature branches.
+   This should not create PRs. It only coordinates git push for feature branches; provider publishing is handled by `knit publish`.
 
-   Baseline implemented: `knit push`, `knit push <repo>`, `knit push --all`, and `knit push --set-upstream` push each tracked feature branch to `origin`. Push validates that the checkout is on the recorded feature branch, reports per-repo success/failure, and leaves PR/GitHub creation out of scope.
+   Baseline implemented: `knit push`, `knit push <repo>`, `knit push --all`, and `knit push --set-upstream` push each tracked feature branch to `origin`. Push validates that the checkout is on the recorded feature branch and reports per-repo success/failure.
+
+6. `knit publish`
+
+   Publish tracked branches to a code hosting provider.
+
+   ```sh
+   knit publish github create
+   knit publish github create --draft
+   knit publish github create --no-sync
+   knit publish github sync
+   knit publish github status
+   ```
+
+   This belongs in Knit because PRs publish the tracked branch set. Gloss may read PR metadata and review the resulting state, but Gloss should not own PR creation.
+
+   Baseline implemented: `knit publish github create` pushes selected feature branches, creates missing GitHub PRs through `gh`, stores provider-neutral `publications` metadata in the bundle with `provider: "github"` and `kind: "pull_request"`, and by default rewrites the managed Knit block in each selected PR body with links to the other PRs in the bundle. `knit publish github sync` refreshes recorded PR metadata and repairs those body blocks. `knit publish github status` prints the recorded GitHub PR set. The operation is best-effort, not atomic; if the body sync phase fails after PR creation, run `knit publish github sync`.
 
 ## Knit-Native Flow
 

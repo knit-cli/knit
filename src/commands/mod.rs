@@ -8,6 +8,7 @@ pub mod fetch;
 pub mod git_passthrough;
 pub mod init;
 pub mod log;
+pub mod publish;
 pub mod pull;
 pub mod push;
 pub mod remove;
@@ -28,6 +29,9 @@ pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
 pub use init::init_bundle;
 pub use log::{show_log, show_target};
+pub use publish::{
+    create_github_publications, show_github_publication_status, sync_github_publications,
+};
 pub use pull::pull_repos;
 pub use push::push_repos;
 pub use remove::remove_repos;

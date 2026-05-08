@@ -25,6 +25,7 @@ src/
     fetch.rs
     pull.rs
     push.rs
+    publish.rs
     sync.rs
     commit.rs
     log.rs
@@ -53,6 +54,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `cli.rs` should contain only argument shape and help text.
 - Each file in `commands/` owns one user-facing command or tightly coupled command pair.
 - `commands/bundle.rs` only inspects or validates the existing bundle artifact; it must not create a second review handoff object.
+- `commands/publish.rs` owns provider publishing. It may call provider CLIs such as `gh`, but it should keep publication state as metadata on the bundle and never replace git branches/SHAs as the code source of truth.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should load the active bundle from `.knit/config.json`.
@@ -75,6 +77,7 @@ The bundle carries both current state and history:
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: compatibility list of logical commits across repos.
 - `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
+- `publications`: provider metadata for PRs or other forge review objects created or synced by Knit.
 - `headNodeId`: the latest node in the ledger.
 
 Command files should append nodes when they create meaningful reviewable state. Gloss can consume a node or the current bundle head without owning git lifecycle.

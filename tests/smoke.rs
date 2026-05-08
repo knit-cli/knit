@@ -574,6 +574,90 @@ fn push_sends_feature_branch_and_can_set_upstream() {
 }
 
 #[test]
+fn pr_create_pushes_creates_records_and_syncs_cross_links() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+    append_line(&backend_feature.join("app.txt"), "backend PR change");
+    append_line(&frontend_feature.join("app.txt"), "frontend PR change");
+    knit(&workspace, ["commit", "--stage", "-m", "PR change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let create = knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--draft"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(create.contains("backend"));
+    assert!(create.contains("frontend"));
+    assert!(create.contains("created"));
+    assert!(create.contains("synced"));
+
+    assert_eq!(
+        git(
+            &backend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        git(&backend_feature, ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(
+            &frontend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        git(&frontend_feature, ["rev-parse", "HEAD"])
+    );
+
+    let bundle = read_bundle(&workspace);
+    let publications = bundle["publications"].as_array().unwrap();
+    assert_eq!(publications.len(), 2);
+    assert_eq!(publications[0]["provider"].as_str(), Some("github"));
+    assert_eq!(publications[0]["kind"].as_str(), Some("pull_request"));
+    assert!(publications
+        .iter()
+        .any(|publication| publication["url"] == "https://github.com/acme/backend/pull/101"));
+    assert!(publications
+        .iter()
+        .any(|publication| publication["url"] == "https://github.com/acme/frontend/pull/202"));
+
+    let backend_body = fs::read_to_string(fake_gh_dir.join("edit-backend.md")).unwrap();
+    assert!(backend_body.contains("This PR is part of Knit bundle `venue-capacity`."));
+    assert!(backend_body.contains("`backend`: https://github.com/acme/backend/pull/101 (this PR)"));
+    assert!(backend_body.contains("`frontend`: https://github.com/acme/frontend/pull/202"));
+
+    let frontend_body = fs::read_to_string(fake_gh_dir.join("edit-frontend.md")).unwrap();
+    assert!(frontend_body.contains("`backend`: https://github.com/acme/backend/pull/101"));
+    assert!(
+        frontend_body.contains("`frontend`: https://github.com/acme/frontend/pull/202 (this PR)")
+    );
+
+    let status = knit(&workspace, ["publish", "github", "status"]);
+    assert!(status.contains("#101"));
+    assert!(status.contains("#202"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn checkpoint_records_non_git_ledger_note() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
@@ -897,6 +981,22 @@ where
     )
 }
 
+fn knit_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = format!("{}:{}", fake_bin.display(), old_path.to_string_lossy());
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("PATH", path)
+        .env("GH_FAKE_DIR", fake_gh_dir);
+    run(command)
+}
+
 fn git<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -917,4 +1017,70 @@ fn run(mut command: Command) -> String {
         );
     }
     String::from_utf8_lossy(&output.stdout).to_string()
+}
+
+#[cfg(unix)]
+fn write_fake_gh(fake_bin: &Path, fake_gh_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(fake_bin).unwrap();
+    fs::create_dir_all(fake_gh_dir).unwrap();
+    let script = fake_bin.join("gh");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+
+if [ "$1" != "pr" ]; then
+  echo "unexpected gh command: $*" >&2
+  exit 1
+fi
+shift
+sub="$1"
+shift
+repo="$(basename "$PWD")"
+
+case "$sub" in
+  list)
+    printf '[]\n'
+    ;;
+  create)
+    cat > "$GH_FAKE_DIR/create-$repo.md"
+    case "$repo" in
+      backend) number=101 ;;
+      frontend) number=202 ;;
+      *) number=303 ;;
+    esac
+    printf 'https://github.com/acme/%s/pull/%s\n' "$repo" "$number"
+    ;;
+  view)
+    url="$1"
+    tail="${url#https://github.com/acme/}"
+    pr_repo="${tail%%/*}"
+    number="${url##*/}"
+    printf '{"number":%s,"url":"%s","state":"OPEN","title":"%s PR","baseRefName":"main","headRefName":"knit/venue-capacity","body":"Existing body"}\n' "$number" "$url" "$pr_repo"
+    ;;
+  edit)
+    url="$1"
+    tail="${url#https://github.com/acme/}"
+    pr_repo="${tail%%/*}"
+    cat > "$GH_FAKE_DIR/edit-$pr_repo.md"
+    printf '%s\n' "$url"
+    ;;
+  *)
+    echo "unexpected gh pr command: $sub" >&2
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+}
+
+#[cfg(not(unix))]
+fn write_fake_gh(_fake_bin: &Path, _fake_gh_dir: &Path) {
+    panic!("fake gh smoke test requires a unix-like shell");
 }

@@ -15,7 +15,7 @@ pub mod tracking;
 
 use anyhow::Result;
 
-pub use cli::{BundleCommand, Cli, Commands};
+pub use cli::{BundleCommand, Cli, Commands, GithubPublishCommand, PublishCommand};
 
 pub fn run(cli: Cli) -> Result<()> {
     match cli.command {
@@ -73,6 +73,30 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             set_upstream,
         } => commands::push_repos(&repos, all, set_upstream),
+        Commands::Publish { target } => match target {
+            PublishCommand::Github { command } => match command {
+                GithubPublishCommand::Create {
+                    repos,
+                    all,
+                    draft,
+                    sync,
+                    no_sync,
+                    set_upstream,
+                } => commands::create_github_publications(
+                    &repos,
+                    all,
+                    draft,
+                    sync || !no_sync,
+                    set_upstream,
+                ),
+                GithubPublishCommand::Sync { repos, all } => {
+                    commands::sync_github_publications(&repos, all)
+                }
+                GithubPublishCommand::Status { repos, all } => {
+                    commands::show_github_publication_status(&repos, all)
+                }
+            },
+        },
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {

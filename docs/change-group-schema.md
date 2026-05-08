@@ -21,7 +21,8 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
   "headNodeId": "kg_20260505_abc123",
   "repos": [],
   "commitGroups": [],
-  "nodes": []
+  "nodes": [],
+  "publications": []
 }
 ```
 
@@ -29,6 +30,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 - `commitGroups` is the compatibility list of logical cross-repo commits.
 - `nodes` is the append-only-ish feature ledger.
 - `headNodeId` points at the latest ledger node.
+- `publications` records provider metadata for published tracked branches.
 
 ## Repo Entry
 
@@ -122,5 +124,26 @@ Rewind example:
   "droppedCommits": ["def456"]
 }
 ```
+
+## Publications
+
+`knit publish github create` and `knit publish github sync` record GitHub PR metadata in `publications`:
+
+```json
+{
+  "repoId": "backend",
+  "provider": "github",
+  "kind": "pull_request",
+  "number": 123,
+  "url": "https://github.com/org/backend/pull/123",
+  "baseBranch": "main",
+  "headBranch": "knit/venue-capacity",
+  "state": "OPEN",
+  "title": "venue capacity (backend)",
+  "updatedAt": "2026-05-05T00:00:00.000Z"
+}
+```
+
+Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each PR body. Future providers can use the same array with a different `provider` and `kind`, for example GitLab merge requests.
 
 Gloss should treat the bundle as read-only input. Gloss can analyze the current `headNodeId`, a specific `commit.group` node, or the full current bundle.
