@@ -186,6 +186,23 @@ pub enum Commands {
         #[command(subcommand)]
         command: LandCommand,
     },
+    /// Merge a bundle or branch into another branch or bundle.
+    Merge {
+        /// Bundle id or git ref to merge. Omit with --continue or --abort.
+        source: Option<String>,
+        /// Target branch or bundle id to merge into.
+        #[arg(long)]
+        into: Option<String>,
+        /// Leave conflicts for manual resolution instead of rolling back this merge run.
+        #[arg(long)]
+        manual: bool,
+        /// Continue the latest manual merge run after conflicts have been resolved and committed.
+        #[arg(long = "continue")]
+        continue_run: bool,
+        /// Abort the latest manual merge run and roll back successful steps from that run.
+        #[arg(long)]
+        abort: bool,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.
@@ -311,6 +328,30 @@ pub enum BundleCommand {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Create a compatibility bundle from the union of repos in source bundles.
+    Compat {
+        /// Source bundle ids to make compatible.
+        #[arg(required = true)]
+        sources: Vec<String>,
+        /// Title for the compatibility bundle. Defaults to a title from the source ids.
+        #[arg(long)]
+        title: Option<String>,
+        /// Use a specific project template instead of source bundle repo metadata.
+        #[arg(long)]
+        project: Option<String>,
+        /// Include every project repo when --project is used.
+        #[arg(long)]
+        all_repos: bool,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+        /// Use each original repo checkout directly instead of creating a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
+        /// Replace an existing bundle with the same slug.
+        #[arg(long)]
+        force: bool,
+    },
     /// Print the resolved bundle file path.
     Path,
     /// Print the resolved bundle JSON.
@@ -414,6 +455,9 @@ pub enum GithubPublishCommand {
     Create {
         /// Optional repo ids or paths to limit PR creation.
         repos: Vec<String>,
+        /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
+        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
+        bases: Vec<String>,
         /// Create PRs for every tracked repo. This is the default when no repos are passed.
         #[arg(long)]
         all: bool,

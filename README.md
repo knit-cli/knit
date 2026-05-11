@@ -2,7 +2,7 @@
 
 Knit is a local-first Rust CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": it keeps a small bundle of related repositories, creates coordinated checkouts, commits staged changes across those checkouts, and records the result in a language-neutral JSON artifact.
 
-Knit shells out to `git` in v0. It does not use libgit2 and it does not try to replace git.
+Knit currently shells out to `git`. It does not use libgit2 and it does not try to replace git.
 
 For local development:
 
@@ -38,6 +38,11 @@ Knit stores local state under the directory where `knit project init`, `knit bun
     <project>.project.json
   locks/
     <bundle>.lock
+  merge-runs/
+    <run-id>.json
+  merge-worktrees/
+    <target-branch>/
+      <repo-name>/
   land-plans/
     <slug>.land.json
   land-runs/
@@ -107,6 +112,7 @@ knit bundle remove <repo-id>...
 knit bundle list [--all] [--archived]
 knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
+knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
 knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
@@ -125,7 +131,7 @@ knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
 knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [repo-id-or-path...]
-knit publish github create [--draft] [--sync|--no-sync] [--set-upstream] [repo-id-or-path...]
+knit publish github create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [repo-id-or-path...]
 knit publish github sync [repo-id-or-path...]
 knit publish github status [repo-id-or-path...]
 knit land plan [--provider github] [--out <path>] [--force]
@@ -133,6 +139,9 @@ knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>]
 knit land resume [--run <path>]
 knit land status [--run <path>]
+knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--manual]
+knit merge --continue
+knit merge --abort
 knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -164,6 +173,14 @@ knit bundle add docs
 ```
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
+
+Compatibility bundles are ordinary bundles created from the union of repos in other bundles. They do not have a special target branch; use them as integration branches when two feature bundles need to be made compatible before either one lands:
+
+```sh
+knit bundle compat feature-x feature-y --title "x y compat"
+knit merge feature-x --into x-y-compat
+knit merge feature-y --into x-y-compat --manual
+```
 
 `knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 
@@ -270,12 +287,14 @@ knit push --set-upstream frontend
 knit publish github create
 knit publish github create --draft
 knit publish github create backend
+knit publish github create --base release
+knit publish github create --base backend=stable --base frontend=main
 knit publish github create --no-sync
 knit publish github sync
 knit publish github status
 ```
 
-`knit publish github create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing GitHub PRs or reuses an existing PR for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected PR body with the complete cross-repo PR list. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after PRs were created, run `knit publish github sync` after fixing auth or network issues.
+`knit publish github create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing GitHub PRs or reuses an existing PR for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected PR body with the complete cross-repo PR list. The PR base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after PRs were created, run `knit publish github sync` after fixing auth or network issues.
 
 Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
 
@@ -294,6 +313,26 @@ knit land resume
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
 `knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs.
+
+`knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
+
+```sh
+knit merge feature-x --into staging
+knit merge feature-y --into staging --manual
+knit merge x-y-compat --into feature-y
+```
+
+For branch targets, Knit creates or reuses managed checkouts under `.knit/merge-worktrees/<target>/<repo>/`. A merge run is recorded under `.knit/merge-runs/`. By default, if any repo conflicts, Knit aborts the failed merge and resets every repo touched by that run back to its pre-run SHA, so the run behaves all-or-none from Knit’s point of view. Pass `--manual` when you want to resolve the conflicted repo yourself; after resolving and committing in the printed checkout, run `knit merge --continue`, or use `knit merge --abort` to roll back the run.
+
+When the target is another bundle, successful merges update that bundle's feature branches and append a `git.observed` node to the target bundle. This makes compatibility workflows explicit without inventing project-level branch targets:
+
+```sh
+knit bundle compat feature-x feature-y --title "x y compat"
+knit merge feature-x --into x-y-compat
+knit merge feature-y --into x-y-compat --manual
+knit merge x-y-compat --into staging
+knit merge x-y-compat --into feature-y
+```
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
 
@@ -360,10 +399,11 @@ Typical node types:
 
 `publications` records provider metadata for published branches. It is useful for linking the GitHub PR set that belongs to the bundle, but it is not the source of truth for code state; git branches, SHAs, and bundle nodes remain the source of truth.
 
-## V0 Limitations
+## Current Limitations
 
-- Knit v0 is not perfectly transactional. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
-- `knit bundle add` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
+- Knit is not a database transaction layer. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
+- `knit bundle add` resolves repo inputs before writing the bundle, but branch/worktree creation can still partially succeed before a later git operation fails.
+- `knit merge` emulates all-or-none behavior for local branch and bundle integration by resetting every repo touched by a failed run back to its pre-run SHA. That rollback is scoped to the current merge run.
 - Knit uses named lock files under `.knit/locks/` to prevent concurrent writes to the same bundle or project. If a process crashes, a stale lock may need manual removal.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
@@ -371,7 +411,7 @@ Typical node types:
 - `knit push` only pushes feature branches to `origin`; use `knit publish github create` for GitHub PR publishing.
 - `knit publish` currently supports only GitHub through the `gh` CLI. GitLab/Bitbucket/Forgejo support would need provider adapters.
 - `knit publish github create` is not perfectly transactional. Branch pushes, PR creation, and PR body updates happen sequentially. If phase two fails after PRs are created, run `knit publish github sync`.
-- `knit land` currently supports only GitHub PR publications through the `gh` CLI. Landing is not atomic: PR merges and local run steps happen sequentially. Partial merges are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
+- `knit land` currently supports only GitHub PR publications through the `gh` CLI. A GitHub PR merge lands into that PR's base branch. Remote PR merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
 - `knit land plan` never executes local commands. `run` steps execute only during `apply` or `resume`.
 - `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place.
 - `knit commit` only looks for staged changes inside tracked checkouts.

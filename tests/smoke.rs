@@ -190,6 +190,138 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
 }
 
 #[test]
+fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+
+    knit(&workspace, ["bundle", "start", "feature x"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/feature-x/backend/app.txt"),
+        "feature x\n",
+    )
+    .unwrap();
+    knit(&workspace, ["commit", "--stage", "-m", "Feature X"]);
+
+    knit(&workspace, ["bundle", "start", "feature y"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/feature-y/backend/app.txt"),
+        "feature y\n",
+    )
+    .unwrap();
+    knit(&workspace, ["commit", "--stage", "-m", "Feature Y"]);
+
+    let first_merge = knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
+    assert!(first_merge.contains("Merged"));
+    let staging = workspace.join(".knit/merge-worktrees/staging/backend");
+    assert_eq!(
+        fs::read_to_string(staging.join("app.txt")).unwrap(),
+        "feature x\n"
+    );
+
+    let failed = knit_fails(&workspace, ["merge", "feature-y", "--into", "staging"]);
+    assert!(failed.contains("Merge aborted and this run was rolled back"));
+    assert_eq!(
+        fs::read_to_string(staging.join("app.txt")).unwrap(),
+        "feature x\n"
+    );
+    assert!(git(&staging, ["diff", "--name-only", "--diff-filter=U"])
+        .trim()
+        .is_empty());
+    assert!(git(&staging, ["status", "--porcelain"]).trim().is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+
+    knit(&workspace, ["bundle", "start", "feature x"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/feature-x/backend/app.txt"),
+        "feature x\n",
+    )
+    .unwrap();
+    knit(&workspace, ["commit", "--stage", "-m", "Feature X"]);
+
+    knit(&workspace, ["bundle", "start", "feature y"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/feature-y/backend/app.txt"),
+        "feature y\n",
+    )
+    .unwrap();
+    knit(&workspace, ["commit", "--stage", "-m", "Feature Y"]);
+
+    knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
+    let staging = workspace.join(".knit/merge-worktrees/staging/backend");
+    let manual = knit_fails(
+        &workspace,
+        ["merge", "feature-y", "--into", "staging", "--manual"],
+    );
+    assert!(manual.contains("manual conflict resolution"));
+    assert!(!git(&staging, ["diff", "--name-only", "--diff-filter=U"])
+        .trim()
+        .is_empty());
+
+    fs::write(staging.join("app.txt"), "resolved staging\n").unwrap();
+    git(&staging, ["add", "app.txt"]);
+    let continued = knit(&workspace, ["merge", "--continue"]);
+    assert!(continued.contains("Merged"));
+    assert_eq!(
+        fs::read_to_string(staging.join("app.txt")).unwrap(),
+        "resolved staging\n"
+    );
+
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "compat",
+            "feature-x",
+            "feature-y",
+            "--title",
+            "x y compat",
+        ],
+    );
+    assert!(workspace
+        .join(".knit/worktrees/x-y-compat/backend")
+        .exists());
+    let compat_merge = knit(&workspace, ["merge", "feature-x", "--into", "x-y-compat"]);
+    assert!(compat_merge.contains("Merged"));
+    assert_eq!(
+        fs::read_to_string(workspace.join(".knit/worktrees/x-y-compat/backend/app.txt")).unwrap(),
+        "feature x\n"
+    );
+
+    let compat_bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/x-y-compat.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(compat_bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"] == "git.observed"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -793,6 +925,64 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let status = knit(&workspace, ["publish", "github", "status"]);
     assert!(status.contains("#101"));
     assert!(status.contains("#202"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_can_override_base_branch() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "release target"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let backend_feature = workspace.join(".knit/worktrees/release-target/backend");
+    append_line(&backend_feature.join("app.txt"), "release PR change");
+    knit(&workspace, ["commit", "--stage", "-m", "Release PR change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let create = knit_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "github",
+            "create",
+            "--no-sync",
+            "--base",
+            "release",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(create.contains("backend"));
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "release"
+    );
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/release-target.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["publications"][0]["baseBranch"].as_str(),
+        Some("release")
+    );
+
+    let rerun = knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(rerun.contains("exists"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1552,6 +1742,21 @@ case "$sub" in
     printf '[]\n'
     ;;
   create)
+    base="main"
+    args="$*"
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --base)
+          base="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    printf '%s\n' "$base" > "$GH_FAKE_DIR/create-$repo.base"
+    printf '%s\n' "$args" > "$GH_FAKE_DIR/create-$repo.args"
     cat > "$GH_FAKE_DIR/create-$repo.md"
     case "$repo" in
       backend) number=101 ;;
@@ -1565,6 +1770,10 @@ case "$sub" in
     tail="${url#https://github.com/acme/}"
     pr_repo="${tail%%/*}"
     number="${url##*/}"
+    base="main"
+    if [ -f "$GH_FAKE_DIR/create-$pr_repo.base" ]; then
+      base="$(cat "$GH_FAKE_DIR/create-$pr_repo.base")"
+    fi
     state="OPEN"
     if [ -f "$GH_FAKE_DIR/merged-$pr_repo" ]; then
       state="MERGED"
@@ -1573,7 +1782,7 @@ case "$sub" in
     if [ "${GH_FAKE_DRAFT:-0}" = "1" ]; then
       draft="true"
     fi
-    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"main","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head"}\n' "$number" "$url" "$state" "$pr_repo" "$draft" "$pr_repo"
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo"
     ;;
   edit)
     url="$1"

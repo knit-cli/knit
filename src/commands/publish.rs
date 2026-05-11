@@ -12,6 +12,7 @@ use crate::store::{
     load_active_bundle, load_active_bundle_for_update, save_active_bundle, ActiveBundle,
 };
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -22,6 +23,7 @@ pub fn create_github_publications(
     selectors: &[String],
     all: bool,
     draft: bool,
+    bases: &[String],
     sync: bool,
     set_upstream: bool,
 ) -> Result<()> {
@@ -31,11 +33,15 @@ pub fn create_github_publications(
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    let base_overrides = BaseOverrides::parse(bases)?;
+    base_overrides.validate_tracked_repos(&active.bundle)?;
     let mut failures = Vec::new();
 
     for index in indexes.iter().copied() {
         let repo = active.bundle.repos[index].clone();
-        match create_or_reuse_pr(&mut active, &repo, draft, set_upstream) {
+        let base_branch =
+            base_overrides.branch_for(&repo, publication_for_repo(&active.bundle, &repo.id));
+        match create_or_reuse_pr(&mut active, &repo, &base_branch, draft, set_upstream) {
             Ok(()) => save_active_bundle(&active)?,
             Err(error) => {
                 println!(
@@ -128,6 +134,7 @@ pub fn show_github_publication_status(selectors: &[String], all: bool) -> Result
 fn create_or_reuse_pr(
     active: &mut ActiveBundle,
     repo: &RepoEntry,
+    base_branch: &str,
     draft: bool,
     set_upstream: bool,
 ) -> Result<()> {
@@ -156,6 +163,13 @@ fn create_or_reuse_pr(
     );
 
     if let Some(existing) = publication_for_repo(&active.bundle, &repo.id) {
+        if existing.base_branch != base_branch {
+            bail!(
+                "{}: PR already recorded against {}. Knit records one PR per repo in a bundle; create a new bundle or publish before changing the base.",
+                repo.id,
+                out::branch(&existing.base_branch)
+            );
+        }
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -165,7 +179,7 @@ fn create_or_reuse_pr(
         return Ok(());
     }
 
-    if let Some(existing) = find_existing_pr(&cwd, branch, &repo.base_branch)? {
+    if let Some(existing) = find_existing_pr(&cwd, branch, base_branch)? {
         github::upsert_publication(&mut active.bundle, repo, &existing);
         let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
         println!(
@@ -179,20 +193,13 @@ fn create_or_reuse_pr(
 
     let title = format!("{} ({})", active.bundle.title, repo.id);
     let initial_body = initial_pr_body(&active.bundle, &repo.id);
-    let url = create_pr(
-        &cwd,
-        &repo.base_branch,
-        branch,
-        &title,
-        &initial_body,
-        draft,
-    )?;
+    let url = create_pr(&cwd, base_branch, branch, &title, &initial_body, draft)?;
     let summary = view_pr(&cwd, &url).unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),
         title: Some(title),
-        base_ref_name: Some(repo.base_branch.clone()),
+        base_ref_name: Some(base_branch.to_string()),
         head_ref_name: Some(branch.to_string()),
         body: None,
         is_draft: None,
@@ -209,6 +216,59 @@ fn create_or_reuse_pr(
         pr.url
     );
     Ok(())
+}
+
+#[derive(Debug, Default)]
+struct BaseOverrides {
+    default: Option<String>,
+    per_repo: BTreeMap<String, String>,
+}
+
+impl BaseOverrides {
+    fn parse(values: &[String]) -> Result<Self> {
+        let mut overrides = Self::default();
+        for value in values {
+            let value = value.trim();
+            if value.is_empty() {
+                bail!("--base cannot be empty.");
+            }
+            if let Some((repo_id, branch)) = value.split_once('=') {
+                let repo_id = repo_id.trim();
+                let branch = branch.trim();
+                if repo_id.is_empty() || branch.is_empty() {
+                    bail!("Use --base REPO=BRANCH with both sides present.");
+                }
+                overrides
+                    .per_repo
+                    .insert(crate::ids::slugify(repo_id), branch.to_string());
+            } else if overrides.default.replace(value.to_string()).is_some() {
+                bail!("Pass only one default --base value, or use repeated --base REPO=BRANCH overrides.");
+            }
+        }
+        Ok(overrides)
+    }
+
+    fn branch_for(
+        &self,
+        repo: &RepoEntry,
+        existing: Option<&crate::model::PublicationEntry>,
+    ) -> String {
+        self.per_repo
+            .get(&repo.id)
+            .or(self.default.as_ref())
+            .cloned()
+            .or_else(|| existing.map(|publication| publication.base_branch.clone()))
+            .unwrap_or_else(|| repo.base_branch.clone())
+    }
+
+    fn validate_tracked_repos(&self, bundle: &ChangeGroup) -> Result<()> {
+        for repo_id in self.per_repo.keys() {
+            if !bundle.repos.iter().any(|repo| &repo.id == repo_id) {
+                bail!("--base references unknown repo `{repo_id}`.");
+            }
+        }
+        Ok(())
+    }
 }
 
 fn sync_github_publications_for_indexes(

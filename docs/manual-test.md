@@ -113,14 +113,27 @@ knit status
 
 Expected result: the same source `backend` repo has both `knit/venue-capacity` and `knit/backend-only` branches, each generated worktree resolves its own bundle from cwd, and `--bundle` overrides cwd/workspace context.
 
+To test local integration into a staging branch:
+
+```sh
+git -C ../backend branch staging
+git -C ../frontend branch staging
+
+knit merge venue-capacity --into staging
+knit bundle compat venue-capacity backend-only --title "venue backend compat"
+knit merge venue-capacity --into venue-backend-compat
+```
+
+Expected result: branch-target merges use `.knit/merge-worktrees/staging/<repo>/`, write `.knit/merge-runs/<run-id>.json`, and either merge every repo in the run or roll back the run to the pre-merge SHAs. Bundle-target merges update the target bundle branches and append a `git.observed` node to that target bundle.
+
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
 ```sh
-knit publish github create --no-sync
+knit publish github create --base main --no-sync
 knit land plan
 knit land status
 ```
 
 Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Only run `knit land apply` against PRs you are comfortable merging. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`; after fixing the failed step, run `knit land resume`.
 
-Knit v0 is not perfectly transactional. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.
+Knit is not a database transaction layer. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

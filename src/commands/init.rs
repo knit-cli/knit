@@ -262,15 +262,36 @@ For a one-step stage and commit:
 knit commit --stage -m "Describe the feature change"
 ```
 
+Publish PRs against their intended GitHub base branch:
+
+```sh
+knit publish github create
+knit publish github create --base release
+knit publish github create --base backend=stable --base frontend=main
+```
+
+Use `knit merge` for local integration into staging branches or compatibility bundles:
+
+```sh
+knit merge feature-a --into staging
+knit bundle compat feature-a feature-b --title "feature a b compat"
+knit merge feature-a --into feature-a-b-compat
+knit merge feature-b --into feature-a-b-compat --manual
+knit merge --continue
+```
+
 ## Useful Commands
 
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle start "Feature title"` creates a bundle.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
+- `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.
 - `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
+- `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.
+- `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit switch <bundle>` is the short alias for bundle switching.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit.
