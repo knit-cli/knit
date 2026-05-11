@@ -3,7 +3,9 @@ pub mod checkpoint;
 pub mod clean;
 pub mod close;
 pub mod commit;
+pub mod config;
 pub mod diff;
+pub mod doctor;
 pub mod fetch;
 pub mod git_passthrough;
 pub mod init;
@@ -16,6 +18,7 @@ pub mod pull;
 pub mod push;
 pub mod remove;
 pub mod revert;
+pub mod schema;
 pub mod stage;
 pub mod status;
 pub mod sync;
@@ -23,13 +26,16 @@ pub mod track;
 pub mod worktree;
 
 pub use bundle::{
-    bundle_path, list_bundles, print_bundle, show_current_bundle, switch_bundle, validate_bundle,
+    archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, restore_bundle,
+    show_current_bundle, switch_bundle, validate_bundle,
 };
 pub use checkpoint::record_checkpoint;
 pub use clean::clean_generated;
 pub use close::close_bundle;
 pub use commit::commit_staged;
+pub use config::set_config_value;
 pub use diff::show_diff;
+pub use doctor::{doctor_workspace, migrate_workspace};
 pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
 pub use init::{init_bundle, start_bundle};
@@ -46,6 +52,7 @@ pub use pull::pull_repos;
 pub use push::push_repos;
 pub use remove::remove_repos;
 pub use revert::revert_target;
+pub use schema::print_schema;
 pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;

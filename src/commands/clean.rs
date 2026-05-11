@@ -1,31 +1,51 @@
 use crate::checkout::is_in_place;
 use crate::git::git_output;
+use crate::model::{ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED};
 use crate::output as out;
-use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
+use crate::store::{
+    find_knit_root, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
+    ActiveBundle,
+};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
-pub fn clean_generated(plans: bool, worktrees: bool, all: bool, force: bool) -> Result<()> {
-    if all && (plans || worktrees) {
+pub fn clean_generated(
+    plans: bool,
+    worktrees: bool,
+    closed: bool,
+    merge_worktrees: bool,
+    all: bool,
+    force: bool,
+) -> Result<()> {
+    if all && (plans || worktrees || closed || merge_worktrees) {
         bail!("Use either --all or specific clean targets, not both.");
     }
     let clean_plans = all || plans;
     let clean_worktrees = all || worktrees;
-    if !clean_plans && !clean_worktrees {
-        bail!("Choose what to clean: --plans, --worktrees, or --all.");
+    let clean_merge_worktrees = all || merge_worktrees;
+    if !clean_plans && !clean_worktrees && !clean_merge_worktrees {
+        bail!("Choose what to clean: --plans, --worktrees, --merge-worktrees, or --all.");
     }
 
-    let mut active = load_active_bundle_for_update()?;
     if clean_plans {
+        let active = load_active_bundle_for_update()?;
         clean_revert_plans(&active)?;
     }
     if clean_worktrees {
-        clean_worktrees_for_active_bundle(&mut active, force)?;
-        active.bundle.updated_at = now_iso();
-        save_active_bundle(&active)?;
+        if closed {
+            clean_closed_bundle_worktrees(force)?;
+        } else {
+            let mut active = load_active_bundle_for_update()?;
+            clean_worktrees_for_active_bundle(&mut active, force)?;
+            active.bundle.updated_at = now_iso();
+            save_active_bundle(&active)?;
+        }
+    }
+    if clean_merge_worktrees {
+        clean_merge_worktrees_for_completed_runs(force)?;
     }
 
     Ok(())
@@ -143,4 +163,101 @@ fn remove_git_worktree(repo_root: &Path, worktree: &Path, force: bool) -> Result
 
 fn remove_empty_dir(path: PathBuf) {
     let _ = fs::remove_dir(path);
+}
+
+fn clean_closed_bundle_worktrees(force: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        println!("{}", out::muted("No bundles."));
+        return Ok(());
+    }
+    let mut cleaned = 0usize;
+    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let bundle: ChangeGroup = read_json(&path)?;
+        let state = crate::commands::bundle::bundle_state(&bundle);
+        if !matches!(state, BUNDLE_STATE_CLOSED | BUNDLE_STATE_ARCHIVED) {
+            continue;
+        }
+        let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
+        clean_worktrees_for_active_bundle(&mut active, force)?;
+        active.bundle.updated_at = now_iso();
+        write_json(&path, &active.bundle)?;
+        cleaned += 1;
+    }
+    if cleaned == 0 {
+        println!(
+            "{}",
+            out::muted("No closed or archived bundle worktrees to clean.")
+        );
+    }
+    Ok(())
+}
+
+fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let runs_dir = root.join(".knit/merge-runs");
+    if !runs_dir.exists() {
+        println!("{}", out::muted("No merge runs to clean."));
+        return Ok(());
+    }
+    let mut removed = 0usize;
+    for entry in
+        fs::read_dir(&runs_dir).with_context(|| format!("failed to read {}", runs_dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+            continue;
+        }
+        let value: serde_json::Value = read_json(&path)?;
+        let status = value["status"].as_str().unwrap_or("");
+        if !matches!(status, "succeeded" | "aborted") {
+            continue;
+        }
+        let Some(steps) = value["steps"].as_array() else {
+            continue;
+        };
+        for step in steps {
+            if step["targetKind"].as_str() != Some("branch") {
+                continue;
+            }
+            let Some(checkout_path) = step["checkoutPath"].as_str() else {
+                continue;
+            };
+            let Some(repo_path) = step["repoPath"].as_str() else {
+                continue;
+            };
+            let checkout = resolve_path(&root, checkout_path);
+            if !checkout.exists() {
+                continue;
+            }
+            let status = git_output(&checkout, ["status", "--porcelain"])?;
+            if !status.trim().is_empty() && !force {
+                println!(
+                    "{} {}",
+                    out::warn("dirty merge worktree preserved:"),
+                    out::path(checkout.display())
+                );
+                continue;
+            }
+            remove_git_worktree(std::path::Path::new(repo_path), &checkout, force)?;
+            println!(
+                "{} {}",
+                out::movement("removed"),
+                out::path(checkout.display())
+            );
+            removed += 1;
+        }
+    }
+    remove_empty_dir(root.join(".knit/merge-worktrees"));
+    if removed == 0 {
+        println!("{}", out::muted("No clean merge worktrees to remove."));
+    }
+    Ok(())
 }

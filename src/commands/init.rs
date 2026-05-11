@@ -273,11 +273,13 @@ knit publish github create --base backend=stable --base frontend=main
 Use `knit merge` for local integration into staging branches or compatibility bundles:
 
 ```sh
-knit merge feature-a --into staging
+knit merge feature-a --into staging --fetch
 knit bundle compat feature-a feature-b --title "feature a b compat"
 knit merge feature-a --into feature-a-b-compat
 knit merge feature-b --into feature-a-b-compat --manual
+knit merge status
 knit merge --continue
+knit merge push
 ```
 
 ## Useful Commands
@@ -289,9 +291,17 @@ knit merge --continue
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.
+- `knit bundle archive <bundle>` marks completed bundle artifacts as archived.
+- `knit bundle restore <bundle>` makes an archived bundle available again.
+- `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/`.
 - `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
 - `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.
+- `knit merge <bundle> --into <branch> --fetch --push` refreshes and pushes branch targets after all local merges succeed.
+- `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
+- `knit doctor` checks workspace JSON, stale locks, and missing paths.
+- `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
+- `knit config set advice false` disables sparse `Next:` advice.
 - `knit switch <bundle>` is the short alias for bundle switching.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit.

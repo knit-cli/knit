@@ -16,6 +16,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
   "kind": "ChangeGroup",
   "id": "venue-capacity",
   "title": "venue capacity",
+  "state": "open",
   "createdAt": "2026-05-05T00:00:00.000Z",
   "updatedAt": "2026-05-05T00:00:00.000Z",
   "headNodeId": "kg_20260505_abc123",
@@ -31,6 +32,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 - `nodes` is the append-only-ish feature ledger.
 - `headNodeId` points at the latest ledger node.
 - `publications` records provider metadata for published tracked branches.
+- `state` is `open`, `closed`, `archived`, or `deleted`; the timestamp fields are present when that lifecycle transition has happened.
 
 ## Repo Entry
 
@@ -92,9 +94,10 @@ Current node types:
 - `land.update`
 - `revert.group`
 - `feature.landed`
+- `feature.closed`
 - `repo.removed`
 
-`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`. `feature.closed` nodes include an optional `reason`.
 
 `repoChanges` records how a repo moved:
 
@@ -176,13 +179,20 @@ The `baseBranch` field is the PR target recorded by the provider. `knit land` us
       "checkoutPath": ".knit/merge-worktrees/staging/backend",
       "beforeSha": "abc123",
       "afterSha": "def456",
-      "status": "succeeded"
+      "status": "succeeded",
+      "pushedAt": "2026-05-11T00:10:00.000Z",
+      "pushedSha": "def456",
+      "pushRemote": "origin"
     }
   ]
 }
 ```
 
-Merge run files are operational logs. For branch targets, the branch checkout is stored under `.knit/merge-worktrees/<target>/<repo>/`. For bundle targets, a successful run advances the target bundle's feature branches and appends a `git.observed` node to the target bundle.
+Merge run files are operational logs. For branch targets, the branch checkout is stored under `.knit/merge-worktrees/<target>/<repo>/`. `knit merge --push` and `knit merge push` record push state on each branch-target step. For bundle targets, a successful run advances the target bundle's feature branches and appends a `git.observed` node to the target bundle.
+
+## Schemas And Migration
+
+Knit ships JSON Schema files under `schemas/` and prints them with `knit schema print <name>`. The Rust models remain the source of truth for reading and writing workspace files. `knit migrate` rewrites older additive JSON files into the current shape, while `knit migrate --check` reports files that would be changed.
 
 ## Landing Plans And Runs
 

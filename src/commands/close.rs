@@ -1,5 +1,5 @@
 use crate::ids::node_id;
-use crate::model::BundleNode;
+use crate::model::{BundleNode, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED};
 use crate::output as out;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use crate::time::now_iso;
@@ -8,18 +8,27 @@ use anyhow::{bail, Result};
 pub fn close_bundle(reason: Option<&str>) -> Result<()> {
     let reason = normalize_reason(reason)?;
     let mut active = load_active_bundle_for_update()?;
+    if active.bundle.state.as_deref() == Some(BUNDLE_STATE_ARCHIVED) {
+        bail!(
+            "Bundle {} is archived. Restore it before closing.",
+            active.bundle.id
+        );
+    }
 
-    if active
-        .bundle
-        .nodes
-        .last()
-        .is_some_and(|node| node.node_type == "feature.closed")
+    if active.bundle.state.as_deref() == Some(BUNDLE_STATE_CLOSED)
+        || active
+            .bundle
+            .nodes
+            .last()
+            .is_some_and(|node| node.node_type == "feature.closed")
     {
         bail!("Bundle {} is already closed.", active.bundle.id);
     }
 
     let now = now_iso();
     let id = node_id("close");
+    active.bundle.state = Some(BUNDLE_STATE_CLOSED.to_string());
+    active.bundle.closed_at = Some(now.clone());
     active
         .bundle
         .nodes

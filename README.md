@@ -109,9 +109,12 @@ knit bundle
 knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove <repo-id>...
-knit bundle list [--all] [--archived]
+knit bundle list [--all] [--archived] [--deleted]
 knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
+knit bundle archive <bundle>
+knit bundle restore <bundle>
+knit bundle delete <bundle> --force
 knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
 knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
@@ -125,7 +128,7 @@ knit bundle print
 knit bundle validate
 knit checkpoint "<note>"
 knit close [--reason <reason>]
-knit clean [--plans] [--worktrees] [--all] [--force]
+knit clean [--plans] [--worktrees] [--closed] [--merge-worktrees] [--all] [--force]
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
@@ -139,9 +142,16 @@ knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>]
 knit land resume [--run <path>]
 knit land status [--run <path>]
-knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--manual]
+knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--fetch] [--push] [--set-upstream] [--manual]
+knit merge status [--run <id-or-path>]
+knit merge show [--run <id-or-path>]
+knit merge push [--run <id-or-path>] [--repo <repo-id>]... [--set-upstream]
 knit merge --continue
 knit merge --abort
+knit config set advice true|false
+knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
+knit doctor
+knit migrate [--check]
 knit sync
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -225,10 +235,12 @@ The close node shows up in `knit log` and `knit show HEAD`. It is a ledger marke
 ```sh
 knit clean --plans
 knit clean --worktrees
+knit clean --closed --worktrees
+knit clean --merge-worktrees
 knit clean --all
 ```
 
-`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
+`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. `--closed --worktrees` applies that cleanup to closed and archived bundles. `--merge-worktrees` removes clean branch-target merge worktrees for succeeded or aborted merge runs. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
@@ -324,6 +336,8 @@ knit merge x-y-compat --into feature-y
 
 For branch targets, Knit creates or reuses managed checkouts under `.knit/merge-worktrees/<target>/<repo>/`. A merge run is recorded under `.knit/merge-runs/`. By default, if any repo conflicts, Knit aborts the failed merge and resets every repo touched by that run back to its pre-run SHA, so the run behaves all-or-none from Knit’s point of view. Pass `--manual` when you want to resolve the conflicted repo yourself; after resolving and committing in the printed checkout, run `knit merge --continue`, or use `knit merge --abort` to roll back the run.
 
+Use `--fetch` to refresh branch targets from `origin/<target>` before merging. Use `--push` to push branch targets only after every local merge step succeeds, or push later with `knit merge push`. `knit merge status` and `knit merge show` inspect recorded merge runs and their per-repo push state.
+
 When the target is another bundle, successful merges update that bundle's feature branches and append a `git.observed` node to the target bundle. This makes compatibility workflows explicit without inventing project-level branch targets:
 
 ```sh
@@ -399,6 +413,10 @@ Typical node types:
 
 `publications` records provider metadata for published branches. It is useful for linking the GitHub PR set that belongs to the bundle, but it is not the source of truth for code state; git branches, SHAs, and bundle nodes remain the source of truth.
 
+`knit schema print <name>` prints bundled JSON Schemas. `knit doctor` validates workspace JSON and repairable local state such as stale locks, missing repo paths, and missing recorded worktrees. `knit migrate` rewrites older additive JSON files into the current shape; `knit migrate --check` reports what would change without writing.
+
+Sparse advice is enabled by default for new workspaces. It prints a `Next:` line only when Knit detects an interrupted or incomplete state, such as a manual merge conflict. Use `knit config set advice false` or `KNIT_ADVICE=0` to suppress it.
+
 ## Current Limitations
 
 - Knit is not a database transaction layer. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
@@ -417,7 +435,7 @@ Typical node types:
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
 - `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.
-- Bundle schema validation is currently serde-based, not a standalone JSON Schema file.
+- JSON Schema files are bundled for workspace artifacts; `knit doctor` uses serde-backed validation and structural checks.
 - Knit does not run LLMs, MCP servers, or review agents.
 
 ## Manual Test With Toy Repos

@@ -4,6 +4,10 @@ pub const SCHEMA_VERSION: &str = "0.1";
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
 pub const CHECKOUT_MODE_WORKTREE: &str = "worktree";
 pub const CHECKOUT_MODE_IN_PLACE: &str = "inPlace";
+pub const BUNDLE_STATE_OPEN: &str = "open";
+pub const BUNDLE_STATE_CLOSED: &str = "closed";
+pub const BUNDLE_STATE_ARCHIVED: &str = "archived";
+pub const BUNDLE_STATE_DELETED: &str = "deleted";
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,6 +17,8 @@ pub struct KnitConfig {
     pub active_bundle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_project: Option<String>,
+    #[serde(default = "default_advice")]
+    pub advice: bool,
 }
 
 impl KnitConfig {
@@ -21,6 +27,7 @@ impl KnitConfig {
             schema_version: SCHEMA_VERSION.to_string(),
             active_bundle: Some(active_bundle),
             active_project: None,
+            advice: true,
         }
     }
 
@@ -29,8 +36,13 @@ impl KnitConfig {
             schema_version: SCHEMA_VERSION.to_string(),
             active_bundle: None,
             active_project: Some(active_project),
+            advice: true,
         }
     }
+}
+
+fn default_advice() -> bool {
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -107,6 +119,14 @@ pub struct ChangeGroup {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub closed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deleted_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
@@ -129,6 +149,10 @@ impl ChangeGroup {
             kind: CHANGE_GROUP_KIND.to_string(),
             id,
             title,
+            state: Some(BUNDLE_STATE_OPEN.to_string()),
+            closed_at: None,
+            archived_at: None,
+            deleted_at: None,
             project_id: None,
             created_at: now.clone(),
             updated_at: now,

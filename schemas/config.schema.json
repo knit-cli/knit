@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit config",
+  "type": "object",
+  "required": ["schemaVersion"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "activeBundle": { "type": "string" },
+    "activeProject": { "type": "string" },
+    "advice": { "type": "boolean" }
+  }
+}

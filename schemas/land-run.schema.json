@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit land run",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "planId", "bundleId", "status", "steps"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "KnitLandRun" },
+    "status": { "type": "string" },
+    "steps": { "type": "array" }
+  }
+}

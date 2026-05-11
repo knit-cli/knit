@@ -109,6 +109,12 @@ pub enum Commands {
         /// Remove generated worktrees for the resolved bundle.
         #[arg(long)]
         worktrees: bool,
+        /// Clean selected generated state for closed and archived bundles.
+        #[arg(long)]
+        closed: bool,
+        /// Remove clean merge worktrees for completed merge runs.
+        #[arg(long = "merge-worktrees")]
+        merge_worktrees: bool,
         /// Remove all cleanable generated state.
         #[arg(long)]
         all: bool,
@@ -196,6 +202,21 @@ pub enum Commands {
         /// Leave conflicts for manual resolution instead of rolling back this merge run.
         #[arg(long)]
         manual: bool,
+        /// Fetch origin/<target> before preparing branch-target merge checkouts.
+        #[arg(long)]
+        fetch: bool,
+        /// Push branch-target merge checkouts after the full run succeeds.
+        #[arg(long)]
+        push: bool,
+        /// Set upstream while pushing branch-target merge checkouts.
+        #[arg(long)]
+        set_upstream: bool,
+        /// Merge run id or path for status/show/push actions.
+        #[arg(long)]
+        run: Option<String>,
+        /// Repo ids to push when using `knit merge push`.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
         /// Continue the latest manual merge run after conflicts have been resolved and committed.
         #[arg(long = "continue")]
         continue_run: bool,
@@ -250,6 +271,24 @@ pub enum Commands {
     Show {
         /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
         target: String,
+    },
+    /// Manage Knit workspace config.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Print bundled JSON schemas.
+    Schema {
+        #[command(subcommand)]
+        command: SchemaCommand,
+    },
+    /// Validate Knit workspace state and report repairable issues.
+    Doctor,
+    /// Upgrade workspace JSON files to the current additive schema.
+    Migrate {
+        /// Report required migrations without writing files.
+        #[arg(long)]
+        check: bool,
     },
 }
 
@@ -307,9 +346,12 @@ pub enum BundleCommand {
         /// Include every bundle state.
         #[arg(long)]
         all: bool,
-        /// Include archived bundles. Reserved for future archive support.
+        /// Include archived bundles.
         #[arg(long)]
         archived: bool,
+        /// Include deleted bundles.
+        #[arg(long)]
+        deleted: bool,
     },
     /// Switch the fallback bundle for this workspace or folder.
     Switch {
@@ -327,6 +369,24 @@ pub enum BundleCommand {
         /// Optional reason to record on the close node.
         #[arg(long)]
         reason: Option<String>,
+    },
+    /// Mark a bundle archived while keeping its JSON artifact.
+    Archive {
+        /// Bundle id to archive.
+        bundle: String,
+    },
+    /// Restore an archived bundle to open or closed state.
+    Restore {
+        /// Bundle id to restore.
+        bundle: String,
+    },
+    /// Move a bundle JSON artifact to .knit/deleted/bundles/.
+    Delete {
+        /// Bundle id to delete.
+        bundle: String,
+        /// Required to delete a bundle artifact.
+        #[arg(long)]
+        force: bool,
     },
     /// Create a compatibility bundle from the union of repos in source bundles.
     Compat {
@@ -386,6 +446,26 @@ pub enum ProjectCommand {
     Show {
         /// Project name. Defaults to the active project.
         name: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ConfigCommand {
+    /// Set a Knit config value.
+    Set {
+        /// Config key. Currently only `advice`.
+        key: String,
+        /// Config value.
+        value: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum SchemaCommand {
+    /// Print a bundled JSON Schema.
+    Print {
+        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config.
+        name: String,
     },
 }
 

@@ -15,6 +15,8 @@ src/
     checkpoint.rs
     clean.rs
     close.rs
+    config.rs
+    doctor.rs
     init.rs
     project.rs
     land.rs
@@ -33,10 +35,12 @@ src/
     commit.rs
     log.rs
     revert.rs
+    schema.rs
     git_passthrough.rs
   providers/
     github.rs     provider-specific forge operations through gh
   checkout.rs   checkout mode helpers and in-place branch guards
+  advice.rs     sparse next-step advice helpers
   model.rs      project, config, context, bundle / ChangeGroup data structures
   store.rs      .knit config, context, project, and bundle persistence
   git.rs        git subprocess helpers
@@ -63,6 +67,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `commands/publish.rs` owns the user-facing publish workflow. Provider-specific calls live in `providers/`, starting with `providers/github.rs`.
 - `commands/land.rs` owns landing plan/run orchestration. It reads publication metadata, writes `.knit/land-plans/` and `.knit/land-runs/`, and appends `feature.landed` only after every step succeeds.
 - `commands/merge.rs` owns local bundle/ref integration into target branches or other bundles. It writes `.knit/merge-runs/`, uses managed branch checkouts under `.knit/merge-worktrees/`, rolls back failed non-manual runs to their pre-run SHAs, and records target-bundle merges as `git.observed`.
+- `commands/doctor.rs` owns workspace validation and additive JSON migrations. `commands/schema.rs` prints bundled JSON Schemas for Knit artifacts.
 - `providers/` owns forge-specific subprocess behavior such as GitHub PR view/check/merge through `gh`. Provider modules should expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.

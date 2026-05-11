@@ -1,12 +1,15 @@
 use crate::model::{
-    BundleNode, ChangeGroup, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
+    BundleNode, ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
+    BUNDLE_STATE_OPEN, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
     SCHEMA_VERSION,
 };
 use crate::output as out;
 use crate::store::{
-    bundle_exists, find_knit_root, load_active_bundle, read_json, set_folder_active_bundle,
-    set_workspace_active_bundle,
+    bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
+    load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
+    write_json,
 };
+use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::OsStr;
@@ -78,26 +81,39 @@ pub fn validate_bundle() -> Result<()> {
     bail!("bundle validation failed with {} error(s)", errors.len());
 }
 
-pub fn list_bundles(_all: bool, _archived: bool) -> Result<()> {
+pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let dir = root.join(".knit/bundles");
-    if !dir.exists() {
+    let deleted_dir = root.join(".knit/deleted/bundles");
+    if !dir.exists() && !deleted_dir.exists() {
         println!("{}", out::muted("No bundles."));
         return Ok(());
     }
 
     let active_id = load_active_bundle().ok().map(|active| active.bundle.id);
-    let mut entries = fs::read_dir(&dir)
-        .with_context(|| format!("failed to read {}", dir.display()))?
-        .filter_map(|entry| entry.ok())
-        .map(|entry| entry.path())
-        .filter(|path| path.extension() == Some(OsStr::new("json")))
-        .collect::<Vec<_>>();
+    let mut entries = Vec::new();
+    if dir.exists() {
+        entries.extend(bundle_json_paths(&dir)?);
+    }
+    if all || deleted {
+        if deleted_dir.exists() {
+            entries.extend(bundle_json_paths(&deleted_dir)?);
+        }
+    }
     entries.sort();
 
     for path in entries {
         let bundle: ChangeGroup = read_json(&path)?;
+        let state = bundle_state(&bundle);
+        if !all {
+            if state == BUNDLE_STATE_ARCHIVED && !archived {
+                continue;
+            }
+            if state == BUNDLE_STATE_DELETED && !deleted {
+                continue;
+            }
+        }
         let marker = if active_id.as_deref() == Some(bundle.id.as_str()) {
             "*"
         } else {
@@ -107,11 +123,20 @@ pub fn list_bundles(_all: bool, _archived: bool) -> Result<()> {
             "{} {} {:<8} {} repo(s)",
             marker,
             out::node(&bundle.id),
-            bundle_state(&bundle),
+            state,
             bundle.repos.len()
         );
     }
     Ok(())
+}
+
+fn bundle_json_paths(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
+    Ok(fs::read_dir(dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(OsStr::new("json")))
+        .collect())
 }
 
 pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()> {
@@ -123,6 +148,10 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
     let bundle_id = crate::ids::slugify(bundle_id);
     if !bundle_exists(&root, &bundle_id) {
         bail!("No Knit bundle named `{bundle_id}` found.");
+    }
+    let bundle: ChangeGroup = read_json(&stored_bundle_path(&root, &bundle_id))?;
+    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
+        bail!("Bundle `{bundle_id}` is archived. Run `knit bundle restore {bundle_id}` first.");
     }
 
     if here {
@@ -153,13 +182,109 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
     Ok(())
 }
 
-fn bundle_state(bundle: &ChangeGroup) -> &'static str {
-    if bundle
-        .nodes
-        .iter()
-        .any(|node| node.node_type == "feature.closed")
-    {
-        "closed"
+pub fn archive_bundle(bundle_id: &str) -> Result<()> {
+    let root = current_root()?;
+    let bundle_id = crate::ids::slugify(bundle_id);
+    let path = stored_bundle_path(&root, &bundle_id);
+    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    let now = now_iso();
+    bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
+    bundle.archived_at = Some(now.clone());
+    bundle.updated_at = now;
+    write_json(&path, &bundle)?;
+    clear_active_if_matches(&root, &bundle_id)?;
+    println!(
+        "{} {}",
+        out::heading("Archived bundle:"),
+        out::node(&bundle_id)
+    );
+    Ok(())
+}
+
+pub fn restore_bundle(bundle_id: &str) -> Result<()> {
+    let root = current_root()?;
+    let bundle_id = crate::ids::slugify(bundle_id);
+    let path = stored_bundle_path(&root, &bundle_id);
+    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    if bundle_state(&bundle) != BUNDLE_STATE_ARCHIVED {
+        bail!("Bundle `{bundle_id}` is not archived.");
+    }
+    let restored_state = if has_closed_node(&bundle) {
+        BUNDLE_STATE_CLOSED
+    } else {
+        BUNDLE_STATE_OPEN
+    };
+    bundle.state = Some(restored_state.to_string());
+    bundle.archived_at = None;
+    bundle.updated_at = now_iso();
+    write_json(&path, &bundle)?;
+    println!(
+        "{} {} ({})",
+        out::heading("Restored bundle:"),
+        out::node(&bundle_id),
+        restored_state
+    );
+    Ok(())
+}
+
+pub fn delete_bundle(bundle_id: &str, force: bool) -> Result<()> {
+    if !force {
+        bail!("Deleting a bundle requires --force.");
+    }
+    let root = current_root()?;
+    let bundle_id = crate::ids::slugify(bundle_id);
+    let path = stored_bundle_path(&root, &bundle_id);
+    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    let now = now_iso();
+    bundle.state = Some(BUNDLE_STATE_DELETED.to_string());
+    bundle.deleted_at = Some(now.clone());
+    bundle.updated_at = now;
+    let deleted_dir = root.join(".knit/deleted/bundles");
+    fs::create_dir_all(&deleted_dir)
+        .with_context(|| format!("failed to create {}", deleted_dir.display()))?;
+    let deleted_path = deleted_dir.join(format!("{bundle_id}.bundle.json"));
+    write_json(&deleted_path, &bundle)?;
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    clear_active_if_matches(&root, &bundle_id)?;
+    println!(
+        "{} {} {}",
+        out::heading("Deleted bundle:"),
+        out::node(&bundle_id),
+        out::path(deleted_path.display())
+    );
+    Ok(())
+}
+
+fn current_root() -> Result<std::path::PathBuf> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    find_knit_root(&cwd).context("No Knit workspace found.")
+}
+
+fn load_existing_bundle(path: &std::path::Path, bundle_id: &str) -> Result<ChangeGroup> {
+    if !path.exists() {
+        bail!("No Knit bundle named `{bundle_id}` found.");
+    }
+    read_json(path)
+}
+
+fn clear_active_if_matches(root: &std::path::Path, bundle_id: &str) -> Result<()> {
+    let mut config = load_config(root)?;
+    if config.active_bundle.as_deref() == Some(bundle_id) {
+        config.active_bundle = None;
+        save_config(root, &config)?;
+    }
+    Ok(())
+}
+
+pub fn bundle_state(bundle: &ChangeGroup) -> &'static str {
+    match bundle.state.as_deref() {
+        Some(BUNDLE_STATE_ARCHIVED) => return BUNDLE_STATE_ARCHIVED,
+        Some(BUNDLE_STATE_DELETED) => return BUNDLE_STATE_DELETED,
+        Some(BUNDLE_STATE_CLOSED) => return BUNDLE_STATE_CLOSED,
+        _ => {}
+    }
+    if has_closed_node(bundle) {
+        BUNDLE_STATE_CLOSED
     } else if bundle
         .nodes
         .iter()
@@ -167,8 +292,15 @@ fn bundle_state(bundle: &ChangeGroup) -> &'static str {
     {
         "landed"
     } else {
-        "open"
+        BUNDLE_STATE_OPEN
     }
+}
+
+fn has_closed_node(bundle: &ChangeGroup) -> bool {
+    bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.closed")
 }
 
 fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {

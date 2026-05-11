@@ -119,12 +119,21 @@ To test local integration into a staging branch:
 git -C ../backend branch staging
 git -C ../frontend branch staging
 
-knit merge venue-capacity --into staging
+knit merge venue-capacity --into staging --fetch
+knit merge status
 knit bundle compat venue-capacity backend-only --title "venue backend compat"
 knit merge venue-capacity --into venue-backend-compat
 ```
 
-Expected result: branch-target merges use `.knit/merge-worktrees/staging/<repo>/`, write `.knit/merge-runs/<run-id>.json`, and either merge every repo in the run or roll back the run to the pre-merge SHAs. Bundle-target merges update the target bundle branches and append a `git.observed` node to that target bundle.
+Expected result: branch-target merges use `.knit/merge-worktrees/staging/<repo>/`, write `.knit/merge-runs/<run-id>.json`, and either merge every repo in the run or roll back the run to the pre-merge SHAs. `knit merge status` shows the run and per-repo checkout paths. Bundle-target merges update the target bundle branches and append a `git.observed` node to that target bundle.
+
+To inspect and repair workspace metadata:
+
+```sh
+knit schema print bundle
+knit doctor
+knit migrate --check
+```
 
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
