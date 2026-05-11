@@ -1,7 +1,8 @@
+use crate::advice;
 use crate::checkout::is_in_place;
 use crate::git::{
-    branch_exists, current_branch, git_output, git_output_optional, is_git_worktree, ref_exists,
-    resolve_base_ref, rev_list, rev_parse,
+    branch_exists, current_branch, git_output, git_output_optional, is_ancestor, is_git_worktree,
+    ref_exists, resolve_base_ref, rev_list, rev_parse,
 };
 use crate::ids::{node_id, slugify};
 use crate::model::{
@@ -12,6 +13,7 @@ use crate::output as out;
 use crate::store::{
     acquire_named_lock, bundle_exists, bundle_path, find_knit_root, load_active_bundle,
     load_config, read_json, relative_path_for_storage, save_config, write_json, ActiveBundle,
+    KnitLock,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -30,6 +32,7 @@ const RUN_RUNNING: &str = "running";
 const RUN_SUCCEEDED: &str = "succeeded";
 const RUN_CONFLICTED: &str = "conflicted";
 const RUN_ABORTED: &str = "aborted";
+const RUN_PUSH_FAILED: &str = "push_failed";
 const TARGET_BRANCH: &str = "branch";
 const TARGET_BUNDLE: &str = "bundle";
 
@@ -51,6 +54,12 @@ struct MergeRun {
     target_bundle_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     target_node_id: Option<String>,
+    #[serde(default)]
+    fetch_requested: bool,
+    #[serde(default)]
+    push_requested: bool,
+    #[serde(default)]
+    set_upstream: bool,
     steps: Vec<MergeRunStep>,
 }
 
@@ -69,6 +78,12 @@ struct MergeRunStep {
     status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pushed_at: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pushed_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    push_remote: Option<String>,
 }
 
 struct SourcePlan {
@@ -94,9 +109,24 @@ pub fn merge_command(
     source: Option<&str>,
     into: Option<&str>,
     manual: bool,
+    fetch: bool,
+    push: bool,
+    set_upstream: bool,
+    run: Option<&str>,
+    repos: &[String],
     continue_run: bool,
     abort: bool,
 ) -> Result<()> {
+    let root = current_knit_root()?;
+    if into.is_none() {
+        match source {
+            Some("status") => return show_merge_status(&root, run),
+            Some("show") => return show_merge_run_json(&root, run),
+            Some("push") => return push_recorded_merge_run(&root, run, repos, set_upstream),
+            _ => {}
+        }
+    }
+
     let selected_modes =
         usize::from(source.is_some()) + usize::from(continue_run) + usize::from(abort);
     if selected_modes != 1 {
@@ -109,7 +139,6 @@ pub fn merge_command(
         bail!("--into and --manual are only valid when starting a merge run.");
     }
 
-    let root = current_knit_root()?;
     if abort {
         return abort_latest_merge(&root);
     }
@@ -122,6 +151,9 @@ pub fn merge_command(
         source.expect("validated"),
         into.expect("validated"),
         manual,
+        fetch,
+        push,
+        set_upstream,
     )
 }
 
@@ -172,9 +204,21 @@ pub fn create_compat_bundle(
     create_compat_bundle_from_sources(&root, &title, &source_bundles, materialize, in_place, force)
 }
 
-fn start_merge(root: &Path, source: &str, into: &str, manual: bool) -> Result<()> {
+fn start_merge(
+    root: &Path,
+    source: &str,
+    into: &str,
+    manual: bool,
+    fetch: bool,
+    push: bool,
+    set_upstream: bool,
+) -> Result<()> {
     let source_plan = resolve_source_plan(root, source)?;
     let target_plan = resolve_target_plan(root, into)?;
+    if push && target_plan.bundle_id().is_some() {
+        bail!("`knit merge --push` only supports branch targets. Use `knit push --bundle {into}` for bundle targets.");
+    }
+    let _locks = acquire_merge_locks(root, &source_plan, &target_plan)?;
     let run_id = node_id("merge");
     let run_path = merge_run_path(root, &run_id);
     let now = now_iso();
@@ -191,6 +235,9 @@ fn start_merge(root: &Path, source: &str, into: &str, manual: bool) -> Result<()
         source_bundle_id: source_plan.bundle_id.clone(),
         target_bundle_id: target_plan.bundle_id().map(ToString::to_string),
         target_node_id: None,
+        fetch_requested: fetch,
+        push_requested: push,
+        set_upstream,
         steps: Vec::new(),
     };
 
@@ -204,15 +251,20 @@ fn start_merge(root: &Path, source: &str, into: &str, manual: bool) -> Result<()
             .refs_by_repo
             .get(&repo.id)
             .with_context(|| format!("{}: no source ref resolved", repo.id))?;
-        let step = prepare_merge_step(root, &target_plan, repo, source_ref)?;
+        let step = prepare_merge_step(root, &target_plan, repo, source_ref, fetch)?;
         run.steps.push(step);
     }
     write_json(&run_path, &run)?;
 
-    apply_pending_merge_steps(root, &run_path, &mut run)
+    apply_pending_merge_steps(root, &run_path, &mut run, target_plan.bundle_id().is_some())
 }
 
-fn apply_pending_merge_steps(root: &Path, run_path: &Path, run: &mut MergeRun) -> Result<()> {
+fn apply_pending_merge_steps(
+    root: &Path,
+    run_path: &Path,
+    run: &mut MergeRun,
+    target_bundle_lock_held: bool,
+) -> Result<()> {
     let mut failures = Vec::new();
     for index in 0..run.steps.len() {
         if run.steps[index].status != STEP_PENDING {
@@ -242,6 +294,13 @@ fn apply_pending_merge_steps(root: &Path, run_path: &Path, run: &mut MergeRun) -
                     out::repo(&run.steps[index].repo_id),
                     out::danger("conflict"),
                     out::path(&run.steps[index].checkout_path)
+                );
+                advice::print(
+                    root,
+                    format!(
+                        "resolve conflicts in {}, then run `knit merge --continue` or `knit merge --abort`.",
+                        run.steps[index].checkout_path
+                    ),
                 );
                 bail!(
                     "Merge stopped for manual conflict resolution. Resolve and commit in {}, then run `knit merge --continue`, or run `knit merge --abort`.",
@@ -279,7 +338,15 @@ fn apply_pending_merge_steps(root: &Path, run_path: &Path, run: &mut MergeRun) -
     }
 
     if run.steps.iter().all(|step| step.status == STEP_SUCCEEDED) {
-        finalize_target_bundle(root, run)?;
+        finalize_target_bundle(root, run, target_bundle_lock_held)?;
+        if run.push_requested {
+            if let Err(error) = push_merge_run_steps(root, run, &[], run.set_upstream) {
+                run.status = RUN_PUSH_FAILED.to_string();
+                run.updated_at = now_iso();
+                write_json(run_path, run)?;
+                bail!("Merge succeeded locally, but push failed:\n{error:#}");
+            }
+        }
         run.status = RUN_SUCCEEDED.to_string();
         run.updated_at = now_iso();
         write_json(run_path, run)?;
@@ -350,6 +417,7 @@ fn apply_merge_step(
 
 fn continue_latest_merge(root: &Path) -> Result<()> {
     let (run_path, mut run) = latest_merge_run(root, &[RUN_CONFLICTED])?;
+    let _locks = acquire_run_locks(root, &run)?;
     let Some(index) = run
         .steps
         .iter()
@@ -405,11 +473,13 @@ fn continue_latest_merge(root: &Path) -> Result<()> {
     run.status = RUN_RUNNING.to_string();
     run.updated_at = now_iso();
     write_json(&run_path, &run)?;
-    apply_pending_merge_steps(root, &run_path, &mut run)
+    let target_bundle_lock_held = run.target_bundle_id.is_some();
+    apply_pending_merge_steps(root, &run_path, &mut run, target_bundle_lock_held)
 }
 
 fn abort_latest_merge(root: &Path) -> Result<()> {
     let (run_path, mut run) = latest_merge_run(root, &[RUN_CONFLICTED, RUN_RUNNING])?;
+    let _locks = acquire_run_locks(root, &run)?;
     rollback_merge_run(root, &mut run)?;
     run.status = RUN_ABORTED.to_string();
     run.updated_at = now_iso();
@@ -440,9 +510,12 @@ fn prepare_merge_step(
     target: &TargetPlan,
     source_repo: &RepoEntry,
     source_ref: &str,
+    fetch: bool,
 ) -> Result<MergeRunStep> {
     let checkout = match target {
-        TargetPlan::Branch { branch, .. } => prepare_branch_checkout(root, source_repo, branch)?,
+        TargetPlan::Branch { branch, .. } => {
+            prepare_branch_checkout(root, source_repo, branch, fetch)?
+        }
         TargetPlan::Bundle { bundle, .. } => {
             let target_repo = bundle
                 .repos
@@ -487,11 +560,22 @@ fn prepare_merge_step(
         after_sha: None,
         status: STEP_PENDING.to_string(),
         message: None,
+        pushed_at: None,
+        pushed_sha: None,
+        push_remote: None,
     })
 }
 
-fn prepare_branch_checkout(root: &Path, repo: &RepoEntry, branch: &str) -> Result<PathBuf> {
+fn prepare_branch_checkout(
+    root: &Path,
+    repo: &RepoEntry,
+    branch: &str,
+    fetch: bool,
+) -> Result<PathBuf> {
     let repo_root = PathBuf::from(&repo.path);
+    if fetch {
+        fetch_target_branch(&repo_root, &repo.id, branch)?;
+    }
     let worktree_path = root
         .join(".knit/merge-worktrees")
         .join(slugify(branch))
@@ -516,6 +600,9 @@ fn prepare_branch_checkout(root: &Path, repo: &RepoEntry, branch: &str) -> Resul
                 out::branch(branch)
             );
         }
+        if fetch {
+            fast_forward_target(&worktree_path, &repo.id, branch)?;
+        }
         return Ok(worktree_path);
     }
 
@@ -534,9 +621,17 @@ fn prepare_branch_checkout(root: &Path, repo: &RepoEntry, branch: &str) -> Resul
                 OsString::from(branch),
             ],
         ) {
-            Ok(_) => return Ok(worktree_path),
+            Ok(_) => {
+                if fetch {
+                    fast_forward_target(&worktree_path, &repo.id, branch)?;
+                }
+                return Ok(worktree_path);
+            }
             Err(error) => {
                 if current_branch(&repo_root)?.as_deref() == Some(branch) {
+                    if fetch {
+                        fast_forward_target(&repo_root, &repo.id, branch)?;
+                    }
                     return Ok(repo_root);
                 }
                 return Err(error).with_context(|| {
@@ -567,7 +662,32 @@ fn prepare_branch_checkout(root: &Path, repo: &RepoEntry, branch: &str) -> Resul
         ],
     )
     .with_context(|| format!("{}: failed to create merge worktree for {branch}", repo.id))?;
+    if fetch {
+        fast_forward_target(&worktree_path, &repo.id, branch)?;
+    }
     Ok(worktree_path)
+}
+
+fn fetch_target_branch(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
+    let refspec = format!("{branch}:refs/remotes/origin/{branch}");
+    git_output(repo_root, ["fetch", "origin", refspec.as_str()])
+        .with_context(|| format!("{repo_id}: failed to fetch origin/{branch}"))?;
+    Ok(())
+}
+
+fn fast_forward_target(checkout: &Path, repo_id: &str, branch: &str) -> Result<()> {
+    let remote = format!("origin/{branch}");
+    let head = rev_parse(checkout, "HEAD")?;
+    let fetched = rev_parse(checkout, &remote)?;
+    if head != fetched {
+        if !is_ancestor(checkout, &head, &fetched) {
+            bail!("{repo_id}: {branch} has local commits not in origin/{branch}.");
+        }
+        git_output(checkout, ["reset", "--hard", remote.as_str()]).with_context(|| {
+            format!("{repo_id}: failed to fast-forward {branch} from origin/{branch}")
+        })?;
+    }
+    Ok(())
 }
 
 fn resolve_source_plan(root: &Path, source: &str) -> Result<SourcePlan> {
@@ -672,14 +792,22 @@ impl TargetPlan {
     }
 }
 
-fn finalize_target_bundle(root: &Path, run: &mut MergeRun) -> Result<()> {
+fn finalize_target_bundle(
+    root: &Path,
+    run: &mut MergeRun,
+    target_bundle_lock_held: bool,
+) -> Result<()> {
     let Some(target_bundle_id) = &run.target_bundle_id else {
         return Ok(());
     };
     if run.target_node_id.is_some() {
         return Ok(());
     }
-    let _lock = acquire_named_lock(root, target_bundle_id)?;
+    let _lock = if target_bundle_lock_held {
+        None
+    } else {
+        Some(acquire_named_lock(root, target_bundle_id)?)
+    };
     let target_path = bundle_path(root, target_bundle_id);
     let mut bundle: ChangeGroup = read_json(&target_path)?;
     let mut changes = Vec::new();
@@ -851,7 +979,7 @@ fn latest_merge_run(root: &Path, statuses: &[&str]) -> Result<(PathBuf, MergeRun
             continue;
         }
         let run: MergeRun = read_json(&path)?;
-        if statuses.iter().any(|status| *status == run.status) {
+        if statuses.is_empty() || statuses.iter().any(|status| *status == run.status) {
             candidates.push((path, run));
         }
     }
@@ -860,6 +988,245 @@ fn latest_merge_run(root: &Path, statuses: &[&str]) -> Result<(PathBuf, MergeRun
         .into_iter()
         .max_by(|(_, left), (_, right)| left.created_at.cmp(&right.created_at))
         .context("No matching merge run found.")
+}
+
+fn show_merge_status(root: &Path, run_selector: Option<&str>) -> Result<()> {
+    let (path, run) = resolve_merge_run(root, run_selector, &[])?;
+    println!(
+        "{} {} {}",
+        out::heading("Merge run"),
+        out::node(&run.id),
+        out::status(&run.status)
+    );
+    println!("{} {} -> {}", out::heading("Flow:"), run.source, run.into);
+    println!(
+        "{} {}",
+        out::heading("Run file:"),
+        out::path(path.display())
+    );
+    println!();
+    println!(
+        "{}  {}  {}  {}  {}  {}",
+        out::header_field("repo", 14),
+        out::header_field("target", 18),
+        out::header_field("status", 12),
+        out::header_field("before", 8),
+        out::header_field("after", 8),
+        out::heading("checkout")
+    );
+    for step in &run.steps {
+        println!(
+            "{}  {}  {}  {}  {}  {}",
+            out::repo_field(&step.repo_id, 14),
+            out::branch_field(&step.target, 18),
+            out::status(&format!("{:<12}", step.status)),
+            out::sha(short_or_dash(&step.before_sha)),
+            out::sha(step.after_sha.as_deref().map(short_sha).unwrap_or("-")),
+            out::path(&step.checkout_path)
+        );
+        if let Some(pushed_sha) = &step.pushed_sha {
+            println!(
+                "  pushed {} {}",
+                out::sha(short_sha(pushed_sha)),
+                step.pushed_at.as_deref().unwrap_or("")
+            );
+        } else if step.target_kind == TARGET_BRANCH && step.status == STEP_SUCCEEDED {
+            println!("  {}", out::muted("not pushed"));
+        }
+        if let Some(message) = &step.message {
+            println!(
+                "  {}",
+                out::danger(message.lines().next().unwrap_or(message))
+            );
+        }
+    }
+    if run.status == RUN_CONFLICTED {
+        advice::print(
+            root,
+            "`knit merge --continue` after resolving conflicts, or `knit merge --abort`.",
+        );
+    }
+    Ok(())
+}
+
+fn show_merge_run_json(root: &Path, run_selector: Option<&str>) -> Result<()> {
+    let (_, run) = resolve_merge_run(root, run_selector, &[])?;
+    println!("{}", serde_json::to_string_pretty(&run)?);
+    Ok(())
+}
+
+fn push_recorded_merge_run(
+    root: &Path,
+    run_selector: Option<&str>,
+    repos: &[String],
+    set_upstream: bool,
+) -> Result<()> {
+    let (path, mut run) = resolve_merge_run(root, run_selector, &[RUN_SUCCEEDED, RUN_PUSH_FAILED])?;
+    let _locks = acquire_run_locks(root, &run)?;
+    push_merge_run_steps(root, &mut run, repos, set_upstream)?;
+    run.status = RUN_SUCCEEDED.to_string();
+    run.updated_at = now_iso();
+    write_json(&path, &run)?;
+    Ok(())
+}
+
+fn push_merge_run_steps(
+    root: &Path,
+    run: &mut MergeRun,
+    repos: &[String],
+    set_upstream: bool,
+) -> Result<()> {
+    let repo_filter = repos
+        .iter()
+        .map(|repo| slugify(repo))
+        .collect::<BTreeSet<_>>();
+    let mut failures = Vec::new();
+    let mut eligible = 0usize;
+    for step in &mut run.steps {
+        if step.target_kind != TARGET_BRANCH {
+            continue;
+        }
+        if !repo_filter.is_empty() && !repo_filter.contains(&step.repo_id) {
+            continue;
+        }
+        eligible += 1;
+        if step.status != STEP_SUCCEEDED {
+            failures.push(format!(
+                "{}: step is {}, expected succeeded",
+                step.repo_id, step.status
+            ));
+            continue;
+        }
+        let Some(after_sha) = &step.after_sha else {
+            failures.push(format!("{}: no afterSha recorded", step.repo_id));
+            continue;
+        };
+        let checkout = resolve_stored_path(root, &step.checkout_path);
+        let head = match rev_parse(&checkout, "HEAD") {
+            Ok(head) => head,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", step.repo_id));
+                continue;
+            }
+        };
+        if head != *after_sha {
+            failures.push(format!(
+                "{}: checkout HEAD {} does not match merge run afterSha {}",
+                step.repo_id,
+                short_sha(&head),
+                short_sha(after_sha)
+            ));
+            continue;
+        }
+        let mut args = vec![OsString::from("push")];
+        if set_upstream {
+            args.push(OsString::from("-u"));
+        }
+        args.push(OsString::from("origin"));
+        args.push(OsString::from(&step.target));
+        match git_output(&checkout, args) {
+            Ok(_) => {
+                let now = now_iso();
+                step.pushed_at = Some(now);
+                step.pushed_sha = Some(after_sha.clone());
+                step.push_remote = Some("origin".to_string());
+                println!(
+                    "{}: {} origin/{} {}",
+                    out::repo(&step.repo_id),
+                    out::movement("pushed"),
+                    step.target,
+                    out::sha(short_sha(after_sha))
+                );
+            }
+            Err(error) => failures.push(format!("{}: {error:#}", step.repo_id)),
+        }
+    }
+    if !failures.is_empty() {
+        bail!("merge push failed:\n{}", failures.join("\n"));
+    }
+    if eligible == 0 {
+        bail!("Merge run has no branch-target steps to push.");
+    }
+    Ok(())
+}
+
+fn resolve_merge_run(
+    root: &Path,
+    selector: Option<&str>,
+    statuses: &[&str],
+) -> Result<(PathBuf, MergeRun)> {
+    if let Some(selector) = selector {
+        let path = resolve_merge_run_selector(root, selector);
+        let run: MergeRun = read_json(&path)?;
+        if !statuses.is_empty() && !statuses.iter().any(|status| *status == run.status) {
+            bail!(
+                "Merge run {} is {}, expected one of {}.",
+                run.id,
+                run.status,
+                statuses.join(", ")
+            );
+        }
+        return Ok((path, run));
+    }
+    latest_merge_run(root, statuses)
+}
+
+fn resolve_merge_run_selector(root: &Path, selector: &str) -> PathBuf {
+    let path = PathBuf::from(selector);
+    if path.exists() {
+        return path;
+    }
+    root.join(".knit/merge-runs")
+        .join(format!("{}.json", selector.trim_end_matches(".json")))
+}
+
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
+fn short_or_dash(sha: &str) -> &str {
+    if sha.is_empty() {
+        "-"
+    } else {
+        short_sha(sha)
+    }
+}
+
+fn acquire_merge_locks(
+    root: &Path,
+    source: &SourcePlan,
+    target: &TargetPlan,
+) -> Result<Vec<KnitLock>> {
+    let mut locks = Vec::new();
+    if let Some(bundle_id) = target.bundle_id() {
+        locks.push(acquire_named_lock(root, bundle_id)?);
+    }
+    for repo in &source.repos {
+        locks.push(acquire_named_lock(
+            root,
+            &format!("merge-{}-{}", slugify(target.label()), slugify(&repo.id)),
+        )?);
+    }
+    Ok(locks)
+}
+
+fn acquire_run_locks(root: &Path, run: &MergeRun) -> Result<Vec<KnitLock>> {
+    let mut locks = Vec::new();
+    if let Some(bundle_id) = &run.target_bundle_id {
+        locks.push(acquire_named_lock(root, bundle_id)?);
+    }
+    for step in &run.steps {
+        if matches!(
+            step.status.as_str(),
+            STEP_SUCCEEDED | STEP_CONFLICTED | STEP_PENDING
+        ) {
+            locks.push(acquire_named_lock(
+                root,
+                &format!("merge-{}-{}", slugify(&run.into), slugify(&step.repo_id)),
+            )?);
+        }
+    }
+    Ok(locks)
 }
 
 fn load_bundle(root: &Path, bundle_id: &str) -> Result<ChangeGroup> {

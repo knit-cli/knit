@@ -1,3 +1,4 @@
+pub mod advice;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
@@ -17,7 +18,8 @@ pub mod tracking;
 use anyhow::Result;
 
 pub use cli::{
-    BundleCommand, Cli, Commands, GithubPublishCommand, LandCommand, ProjectCommand, PublishCommand,
+    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
+    PublishCommand, SchemaCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -82,13 +84,22 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_worktree,
             }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
             Some(BundleCommand::Remove { repo_ids }) => commands::remove_repos(&repo_ids),
-            Some(BundleCommand::List { all, archived }) => commands::list_bundles(all, archived),
+            Some(BundleCommand::List {
+                all,
+                archived,
+                deleted,
+            }) => commands::list_bundles(all, archived, deleted),
             Some(BundleCommand::Switch {
                 bundle,
                 workspace,
                 here,
             }) => commands::switch_bundle(&bundle, workspace, here),
             Some(BundleCommand::Close { reason }) => commands::close_bundle(reason.as_deref()),
+            Some(BundleCommand::Archive { bundle }) => commands::archive_bundle(&bundle),
+            Some(BundleCommand::Restore { bundle }) => commands::restore_bundle(&bundle),
+            Some(BundleCommand::Delete { bundle, force }) => {
+                commands::delete_bundle(&bundle, force)
+            }
             Some(BundleCommand::Compat {
                 sources,
                 title,
@@ -120,9 +131,11 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Clean {
             plans,
             worktrees,
+            closed,
+            merge_worktrees,
             all,
             force,
-        } => commands::clean_generated(plans, worktrees, all, force),
+        } => commands::clean_generated(plans, worktrees, closed, merge_worktrees, all, force),
         Commands::Stage {
             repos,
             intent_to_add,
@@ -191,12 +204,22 @@ pub fn run(cli: Cli) -> Result<()> {
             source,
             into,
             manual,
+            fetch,
+            push,
+            set_upstream,
+            run,
+            repos,
             continue_run,
             abort,
         } => commands::merge_command(
             source.as_deref(),
             into.as_deref(),
             manual,
+            fetch,
+            push,
+            set_upstream,
+            run.as_deref(),
+            &repos,
             continue_run,
             abort,
         ),
@@ -213,5 +236,13 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::revert_target(&target, apply),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { target } => commands::show_target(&target),
+        Commands::Config { command } => match command {
+            ConfigCommand::Set { key, value } => commands::set_config_value(&key, &value),
+        },
+        Commands::Schema { command } => match command {
+            SchemaCommand::Print { name } => commands::print_schema(&name),
+        },
+        Commands::Doctor => commands::doctor_workspace(),
+        Commands::Migrate { check } => commands::migrate_workspace(check),
     }
 }

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit bundle",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "title", "createdAt", "updatedAt", "repos", "commitGroups", "nodes"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "ChangeGroup" },
+    "id": { "type": "string" },
+    "title": { "type": "string" },
+    "state": { "enum": ["open", "closed", "archived", "deleted"] },
+    "repos": { "type": "array" },
+    "commitGroups": { "type": "array" },
+    "nodes": { "type": "array" },
+    "publications": { "type": "array" }
+  }
+}

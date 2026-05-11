@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit project",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "createdAt", "updatedAt", "repos"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "KnitProject" },
+    "id": { "type": "string" },
+    "repos": { "type": "array" }
+  }
+}

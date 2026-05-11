@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit merge run",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "source", "into", "status", "steps"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "KnitMergeRun" },
+    "status": { "type": "string" },
+    "steps": { "type": "array" }
+  }
+}

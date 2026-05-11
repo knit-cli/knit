@@ -894,6 +894,18 @@ fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()
                 if step.command.is_empty() {
                     bail!("run step `{}` must provide command", step.id);
                 }
+                let cwd = step
+                    .cwd
+                    .as_deref()
+                    .map(|cwd| resolve_stored_path(&active.root, cwd))
+                    .unwrap_or_else(|| active.root.clone());
+                if !cwd.exists() {
+                    bail!(
+                        "run step `{}` cwd does not exist: {}",
+                        step.id,
+                        cwd.display()
+                    );
+                }
             }
             step_type => bail!("unknown land step type `{step_type}` in `{}`", step.id),
         }
@@ -929,6 +941,38 @@ fn preflight_publications(
             continue;
         }
         ensure_open_and_ready(repo_id, &pr)?;
+        if step.step_type == STEP_WAIT_CHECKS || step.wait_for_checks.unwrap_or(true) {
+            let runs = github::check_runs(
+                &cwd,
+                &publication.url,
+                step.required_checks_only
+                    .or(step.required_only)
+                    .unwrap_or(true),
+            )?;
+            ensure_checks_ready(repo_id, &runs)?;
+        }
+    }
+    Ok(())
+}
+
+fn ensure_checks_ready(repo_id: &str, runs: &[github::CheckRun]) -> Result<()> {
+    let failed = runs
+        .iter()
+        .filter(|run| {
+            matches!(run.bucket.as_deref(), Some("fail" | "cancel"))
+                || matches!(run.state.as_deref(), Some("FAILURE" | "CANCELLED"))
+        })
+        .map(|run| run.name.as_str())
+        .collect::<Vec<_>>();
+    if !failed.is_empty() {
+        bail!("{repo_id}: required checks failed: {}", failed.join(", "));
+    }
+    let pending = runs.iter().any(|run| {
+        !matches!(run.bucket.as_deref(), Some("pass" | "skipping"))
+            && !matches!(run.state.as_deref(), Some("SUCCESS" | "SKIPPED"))
+    });
+    if pending {
+        bail!("{repo_id}: required checks are pending.");
     }
     Ok(())
 }

@@ -1,0 +1,11 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit land plan",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "id", "provider", "bundleId", "steps"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "KnitLandPlan" },
+    "steps": { "type": "array" }
+  }
+}
