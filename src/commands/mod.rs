@@ -9,6 +9,7 @@ pub mod git_passthrough;
 pub mod init;
 pub mod land;
 pub mod log;
+pub mod project;
 pub mod publish;
 pub mod pull;
 pub mod push;
@@ -20,7 +21,9 @@ pub mod sync;
 pub mod track;
 pub mod worktree;
 
-pub use bundle::{bundle_path, print_bundle, validate_bundle};
+pub use bundle::{
+    bundle_path, list_bundles, print_bundle, show_current_bundle, switch_bundle, validate_bundle,
+};
 pub use checkpoint::record_checkpoint;
 pub use clean::clean_generated;
 pub use close::close_bundle;
@@ -28,11 +31,12 @@ pub use commit::commit_staged;
 pub use diff::show_diff;
 pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
-pub use init::init_bundle;
+pub use init::{init_bundle, start_bundle};
 pub use land::{
     apply_land_plan, generate_land_plan, resume_land_run, show_land_status, update_land_branches,
 };
 pub use log::{show_log, show_target};
+pub use project::{add_project_repo, init_project, list_projects, show_project};
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,
 };
@@ -43,5 +47,5 @@ pub use revert::revert_target;
 pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;
-pub use track::track_repos;
+pub use track::{track_repo_selectors, track_repos};
 pub use worktree::create_worktrees;

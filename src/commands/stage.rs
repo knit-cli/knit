@@ -73,7 +73,7 @@ fn resolve_stage_targets<'a>(
     args: &[String],
 ) -> Result<(Vec<&'a RepoEntry>, Vec<String>)> {
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     if !explicit_repos.is_empty() {

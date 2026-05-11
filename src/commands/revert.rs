@@ -89,7 +89,7 @@ fn apply_revert(target: &str) -> Result<()> {
     let plan: RevertPlan = read_json(&path)?;
     if plan.bundle_id != active.bundle.id {
         bail!(
-            "Revert plan belongs to bundle {}, but active bundle is {}.",
+            "Revert plan belongs to bundle {}, but resolved bundle is {}.",
             plan.bundle_id,
             active.bundle.id
         );

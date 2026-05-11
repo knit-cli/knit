@@ -26,13 +26,18 @@ Gloss reads a bundle later and produces review/ranking/explanation output. Gloss
 
 ## Storage
 
-Knit stores local state under the directory where `knit init` runs:
+Knit stores local state under the directory where `knit project init`, `knit bundle start`, or `knit init` first creates a workspace:
 
 ```txt
 .knit/
   config.json
+  contexts.json
   bundles/
     <slug>.bundle.json
+  projects/
+    <project>.project.json
+  locks/
+    <bundle>.lock
   land-plans/
     <slug>.land.json
   land-runs/
@@ -44,15 +49,25 @@ Knit stores local state under the directory where `knit init` runs:
       <repo-name>/
 ```
 
-The bundle file is the source of truth. `config.json` only tracks the active bundle for convenience.
+The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths and optional folder contexts let multiple agents work in parallel bundles without fighting over one global active bundle.
 
 ## Quickstart
 
 From a workspace folder that sits beside your local repos:
 
 ```sh
-knit init "venue capacity" --agents
-knit track ../backend ../frontend ../scraper
+knit project init venues
+knit project add backend ../backend
+knit project add frontend ../frontend
+knit project add scraper ../scraper --observe
+knit bundle start "venue capacity" --agents
+```
+
+For one-off work without a project, start a bundle and add repos directly:
+
+```sh
+knit bundle start "venue capacity"
+knit bundle add ../backend ../frontend ../scraper
 ```
 
 Make changes inside the generated worktrees, add the files, then inspect and commit:
@@ -70,15 +85,28 @@ For a one-step stage-and-commit:
 knit commit --stage -m "Add venue capacity integration"
 ```
 
-The active bundle is printed by `knit init` and lives at:
+The created bundle is printed by `knit bundle start` and lives at:
 
 ```txt
 .knit/bundles/venue-capacity.bundle.json
 ```
 
+Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then generated worktree paths such as `.knit/worktrees/<bundle>/<repo>`, then folder contexts from `knit bundle switch --here`, and finally the workspace fallback bundle. This lets parallel agents work in different Knit worktrees without sharing one mutable active bundle.
+
 ## Commands
 
 ```sh
+knit project init <name>
+knit project add <repo-id> <repo-path> [--base <branch>] [--observe]
+knit project list
+knit project show [name]
+knit bundle
+knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents]
+knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
+knit bundle remove <repo-id>...
+knit bundle list [--all] [--archived]
+knit bundle switch <bundle> [--workspace|--here]
+knit bundle close [--reason <reason>]
 knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
@@ -115,19 +143,42 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
 
-`knit track` accepts one or more repo paths. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
+`knit init`, `knit track`, `knit remove`, and `knit close` are aliases for the bundle workflow.
 
-Use `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the workspace. The file explains the core Knit workflow for coding agents and points them at the main commands. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+## Projects And Bundles
 
-Use `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
+Projects are optional repo templates. They remove the repetitive step of adding the same repo set for every bundle:
+
+```sh
+knit project init venues
+knit project add backend ../backend
+knit project add frontend ../frontend
+knit project add docs ../docs --observe
+```
+
+Default project repos are included by `knit bundle start`; observed repos are available by id but are not branched or tracked until added explicitly:
+
+```sh
+knit bundle start "venue capacity"
+knit bundle add docs
+```
+
+Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
+
+`knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
+
+Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the workspace. The file explains projects, bundles, parallel worktrees, and the core Knit commands for coding agents. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+
+Use `knit bundle add --in-place` or `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
 Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
 
 `knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
-`knit bundle` inspects the existing `.bundle.json` / `ChangeGroup` artifact. It does not produce a separate review object:
+`knit bundle` shows the resolved bundle. `knit bundle path`, `print`, and `validate` inspect the existing `.bundle.json` / `ChangeGroup` artifact. They do not produce a separate review object:
 
 ```sh
+knit bundle
 knit bundle path
 knit bundle print
 knit bundle validate
@@ -135,7 +186,7 @@ knit bundle validate
 
 Gloss should read this bundle and inspect the referenced repos, branches, and SHAs directly.
 
-`knit checkpoint "<note>"` appends a non-git ledger node to the active bundle. It is useful when the feature has meaningful state that is not ready for a git commit yet:
+`knit checkpoint "<note>"` appends a non-git ledger node to the resolved bundle. It is useful when the feature has meaningful state that is not ready for a git commit yet:
 
 ```sh
 knit checkpoint "frontend wired, backend pending"
@@ -160,7 +211,7 @@ knit clean --worktrees
 knit clean --all
 ```
 
-`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the active bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
+`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
@@ -174,7 +225,7 @@ knit add --intent-to-add frontend new-file.ts
 
 `knit stage` is kept as an alias for `knit add`, because Git also accepts `git stage` as an alias for `git add`.
 
-`knit status` shows ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
+`knit status` shows the resolved bundle source, ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
 
 `knit diff` shows cross-repo diffs against each repo's recorded `baseSha`. It follows `git diff`: committed, staged, and unstaged tracked-file changes are shown, while untracked files are not shown until they are added to the index. Use `knit status` or `knit git status --short` to see untracked files. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
 
@@ -312,8 +363,8 @@ Typical node types:
 ## V0 Limitations
 
 - Knit v0 is not perfectly transactional. If one repo commit succeeds and a later repo commit fails, Knit reports the failure but does not roll back the earlier commit.
-- `knit track` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
-- Knit uses a simple `.knit/knit.lock` file to prevent concurrent bundle writes. If a process crashes, a stale lock may need manual removal.
+- `knit bundle add` is atomic-ish for bundle writes, but branch/worktree creation can still partially succeed before a later git operation fails.
+- Knit uses named lock files under `.knit/locks/` to prevent concurrent writes to the same bundle or project. If a process crashes, a stale lock may need manual removal.
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.

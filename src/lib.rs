@@ -16,15 +16,29 @@ pub mod tracking;
 
 use anyhow::Result;
 
-pub use cli::{BundleCommand, Cli, Commands, GithubPublishCommand, LandCommand, PublishCommand};
+pub use cli::{
+    BundleCommand, Cli, Commands, GithubPublishCommand, LandCommand, ProjectCommand, PublishCommand,
+};
 
 pub fn run(cli: Cli) -> Result<()> {
+    store::set_bundle_override(cli.bundle);
     match cli.command {
         Commands::Init {
             title,
             force,
             agents,
         } => commands::init_bundle(&title, force, agents),
+        Commands::Project { command } => match command {
+            ProjectCommand::Init { name } => commands::init_project(&name),
+            ProjectCommand::Add {
+                repo_id,
+                repo_path,
+                base,
+                observe,
+            } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe),
+            ProjectCommand::List => commands::list_projects(),
+            ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+        },
         Commands::Track {
             repo_paths,
             base,
@@ -41,10 +55,49 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Remove { repo_ids } => commands::remove_repos(&repo_ids),
         Commands::Worktree => commands::create_worktrees(),
         Commands::Bundle { command } => match command {
-            BundleCommand::Path => commands::bundle_path(),
-            BundleCommand::Print => commands::print_bundle(),
-            BundleCommand::Validate => commands::validate_bundle(),
+            None => commands::show_current_bundle(),
+            Some(BundleCommand::Start {
+                title,
+                project,
+                repos,
+                all_repos,
+                no_worktree,
+                in_place,
+                force,
+                agents,
+            }) => commands::start_bundle(
+                &title,
+                project.as_deref(),
+                &repos,
+                all_repos,
+                !no_worktree,
+                in_place,
+                force,
+                agents,
+            ),
+            Some(BundleCommand::Add {
+                repos,
+                base,
+                in_place,
+                no_worktree,
+            }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
+            Some(BundleCommand::Remove { repo_ids }) => commands::remove_repos(&repo_ids),
+            Some(BundleCommand::List { all, archived }) => commands::list_bundles(all, archived),
+            Some(BundleCommand::Switch {
+                bundle,
+                workspace,
+                here,
+            }) => commands::switch_bundle(&bundle, workspace, here),
+            Some(BundleCommand::Close { reason }) => commands::close_bundle(reason.as_deref()),
+            Some(BundleCommand::Path) => commands::bundle_path(),
+            Some(BundleCommand::Print) => commands::print_bundle(),
+            Some(BundleCommand::Validate) => commands::validate_bundle(),
         },
+        Commands::Switch {
+            bundle,
+            workspace,
+            here,
+        } => commands::switch_bundle(&bundle, workspace, here),
         Commands::Checkpoint { message } => commands::record_checkpoint(&message),
         Commands::Close { reason } => commands::close_bundle(reason.as_deref()),
         Commands::Clean {

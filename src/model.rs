@@ -9,16 +9,94 @@ pub const CHECKOUT_MODE_IN_PLACE: &str = "inPlace";
 #[serde(rename_all = "camelCase")]
 pub struct KnitConfig {
     pub schema_version: String,
-    pub active_bundle: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_bundle: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_project: Option<String>,
 }
 
 impl KnitConfig {
     pub fn new(active_bundle: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_string(),
-            active_bundle,
+            active_bundle: Some(active_bundle),
+            active_project: None,
         }
     }
+
+    pub fn new_project(active_project: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            active_bundle: None,
+            active_project: Some(active_project),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnitProject {
+    pub schema_version: String,
+    pub kind: String,
+    pub id: String,
+    pub created_at: String,
+    pub updated_at: String,
+    #[serde(default)]
+    pub repos: Vec<ProjectRepoEntry>,
+}
+
+impl KnitProject {
+    pub fn new(id: String, now: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            kind: "KnitProject".to_string(),
+            id,
+            created_at: now.clone(),
+            updated_at: now,
+            repos: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepoEntry {
+    pub id: String,
+    pub path: String,
+    pub remote: Option<String>,
+    pub base_branch: String,
+    #[serde(default = "default_checkout_mode")]
+    pub checkout_mode: String,
+    #[serde(default = "default_include_by_default")]
+    pub include_by_default: bool,
+}
+
+fn default_include_by_default() -> bool {
+    true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnitContexts {
+    pub schema_version: String,
+    #[serde(default)]
+    pub contexts: Vec<KnitContextEntry>,
+}
+
+impl KnitContexts {
+    pub fn new() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            contexts: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnitContextEntry {
+    pub path: String,
+    pub active_bundle: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -28,6 +106,8 @@ pub struct ChangeGroup {
     pub kind: String,
     pub id: String,
     pub title: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_id: Option<String>,
     pub created_at: String,
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -49,6 +129,7 @@ impl ChangeGroup {
             kind: CHANGE_GROUP_KIND.to_string(),
             id,
             title,
+            project_id: None,
             created_at: now.clone(),
             updated_at: now,
             head_node_id,

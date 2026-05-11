@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 pub fn fetch_repos(selectors: &[String], all: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;

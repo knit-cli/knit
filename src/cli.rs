@@ -6,6 +6,9 @@ use std::path::PathBuf;
 #[command(name = "knit")]
 #[command(about = "Git for cross-repo feature work")]
 pub struct Cli {
+    /// Resolve commands against this bundle instead of cwd or workspace context.
+    #[arg(long, global = true, value_name = "BUNDLE")]
+    pub bundle: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -16,14 +19,19 @@ pub enum Commands {
     Init {
         /// Human-readable feature title.
         title: String,
-        /// Replace an existing active bundle with the same slug.
+        /// Replace an existing bundle with the same slug.
         #[arg(long)]
         force: bool,
         /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
         #[arg(long)]
         agents: bool,
     },
-    /// Track local git repositories in the active bundle and materialize checkouts.
+    /// Manage reusable project repo templates.
+    Project {
+        #[command(subcommand)]
+        command: ProjectCommand,
+    },
+    /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
         /// Paths to local git repositories.
         #[arg(required = true)]
@@ -54,29 +62,40 @@ pub enum Commands {
     },
     /// Stop tracking repositories. Leaves git branches/checkouts in place.
     Untrack {
-        /// Repo ids to remove from the active bundle.
+        /// Repo ids to remove from the resolved bundle.
         #[arg(required = true)]
         repo_ids: Vec<String>,
     },
     /// Remove repositories from bundle tracking. Alias for untrack.
     Remove {
-        /// Repo ids to remove from the active bundle.
+        /// Repo ids to remove from the resolved bundle.
         #[arg(required = true)]
         repo_ids: Vec<String>,
     },
-    /// Create per-repo worktrees for the active bundle.
+    /// Create per-repo worktrees for the resolved bundle.
     Worktree,
-    /// Inspect the active bundle artifact.
+    /// Inspect the resolved bundle artifact.
     Bundle {
         #[command(subcommand)]
-        command: BundleCommand,
+        command: Option<BundleCommand>,
     },
-    /// Add a non-git note to the active bundle ledger.
+    /// Switch the fallback bundle for this workspace or folder.
+    Switch {
+        /// Bundle id to make active.
+        bundle: String,
+        /// Set the workspace fallback bundle.
+        #[arg(long, conflicts_with = "here")]
+        workspace: bool,
+        /// Set the fallback bundle for the current folder.
+        #[arg(long)]
+        here: bool,
+    },
+    /// Add a non-git note to the resolved bundle ledger.
     Checkpoint {
         /// Checkpoint note to record.
         message: String,
     },
-    /// Mark the active bundle closed without mutating git state.
+    /// Mark the resolved bundle closed without mutating git state.
     Close {
         /// Optional reason to record on the close node.
         #[arg(long)]
@@ -87,7 +106,7 @@ pub enum Commands {
         /// Remove stored revert plans.
         #[arg(long)]
         plans: bool,
-        /// Remove generated worktrees for the active bundle.
+        /// Remove generated worktrees for the resolved bundle.
         #[arg(long)]
         worktrees: bool,
         /// Remove all cleanable generated state.
@@ -111,7 +130,7 @@ pub enum Commands {
         /// Optional repo selectors or pathspecs.
         args: Vec<String>,
     },
-    /// Show status for all repos in the active bundle.
+    /// Show status for all repos in the resolved bundle.
     Status,
     /// Show cross-repo diffs against each repo base.
     Diff {
@@ -219,12 +238,114 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum BundleCommand {
-    /// Print the active bundle file path.
+    /// Create a new feature bundle.
+    Start {
+        /// Human-readable feature title.
+        title: String,
+        /// Project template to use. Defaults to the active project when present.
+        #[arg(long)]
+        project: Option<String>,
+        /// Project repo id to include. Repeat to include several repos.
+        #[arg(long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Include every project repo, including observed repos.
+        #[arg(long)]
+        all_repos: bool,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+        /// Use each original repo checkout directly instead of creating a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
+        /// Replace an existing bundle with the same slug.
+        #[arg(long)]
+        force: bool,
+        /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
+        #[arg(long)]
+        agents: bool,
+    },
+    /// Add repos or project repo ids to the current bundle.
+    Add {
+        /// Paths to local git repositories or project repo ids.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Override the inferred base branch for raw repo paths.
+        #[arg(long)]
+        base: Option<String>,
+        /// Use each original repo checkout directly instead of creating a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+    },
+    /// Remove repos from bundle tracking.
+    Remove {
+        /// Repo ids to remove from the current bundle.
+        #[arg(required = true)]
+        repo_ids: Vec<String>,
+    },
+    /// List bundles in the workspace.
+    List {
+        /// Include every bundle state.
+        #[arg(long)]
+        all: bool,
+        /// Include archived bundles. Reserved for future archive support.
+        #[arg(long)]
+        archived: bool,
+    },
+    /// Switch the fallback bundle for this workspace or folder.
+    Switch {
+        /// Bundle id to make active.
+        bundle: String,
+        /// Set the workspace fallback bundle.
+        #[arg(long, conflicts_with = "here")]
+        workspace: bool,
+        /// Set the fallback bundle for the current folder.
+        #[arg(long)]
+        here: bool,
+    },
+    /// Mark the current bundle closed without mutating git state.
+    Close {
+        /// Optional reason to record on the close node.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Print the resolved bundle file path.
     Path,
-    /// Print the active bundle JSON.
+    /// Print the resolved bundle JSON.
     Print,
-    /// Validate the active bundle structure.
+    /// Validate the resolved bundle structure.
     Validate,
+}
+
+#[derive(Subcommand)]
+pub enum ProjectCommand {
+    /// Create a project repo template.
+    Init {
+        /// Project name.
+        name: String,
+    },
+    /// Add or update a repo in the active project.
+    Add {
+        /// Stable repo id inside the project.
+        repo_id: String,
+        /// Path to a local git repository.
+        repo_path: PathBuf,
+        /// Override the inferred base branch.
+        #[arg(long)]
+        base: Option<String>,
+        /// Keep this repo out of default bundle starts.
+        #[arg(long)]
+        observe: bool,
+    },
+    /// List projects in this workspace.
+    List,
+    /// Print a project JSON artifact.
+    Show {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -317,7 +438,7 @@ pub enum GithubPublishCommand {
         #[arg(long)]
         all: bool,
     },
-    /// Show recorded PRs for the active bundle.
+    /// Show recorded PRs for the resolved bundle.
     Status {
         /// Optional repo ids or paths to limit PR status.
         repos: Vec<String>,

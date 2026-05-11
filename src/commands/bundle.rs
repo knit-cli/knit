@@ -3,9 +3,43 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::store::load_active_bundle;
+use crate::store::{
+    bundle_exists, find_knit_root, load_active_bundle, read_json, set_folder_active_bundle,
+    set_workspace_active_bundle,
+};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
+use std::fs;
+
+pub fn show_current_bundle() -> Result<()> {
+    let active = load_active_bundle()?;
+    println!(
+        "{} {}",
+        out::heading("Bundle:"),
+        out::node(&active.bundle.id)
+    );
+    println!(
+        "{} {}",
+        out::heading("Resolved from:"),
+        active.resolution_source.label()
+    );
+    println!("{} {}", out::heading("Title:"), active.bundle.title);
+    if let Some(project_id) = &active.bundle.project_id {
+        println!("{} {}", out::heading("Project:"), out::repo(project_id));
+    }
+    println!(
+        "{} {}",
+        out::heading("Path:"),
+        out::path(active.bundle_path.display())
+    );
+    println!(
+        "{} {} repo(s)",
+        out::heading("Repos:"),
+        active.bundle.repos.len()
+    );
+    Ok(())
+}
 
 pub fn bundle_path() -> Result<()> {
     let active = load_active_bundle()?;
@@ -42,6 +76,99 @@ pub fn validate_bundle() -> Result<()> {
         println!("  - {error}");
     }
     bail!("bundle validation failed with {} error(s)", errors.len());
+}
+
+pub fn list_bundles(_all: bool, _archived: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        println!("{}", out::muted("No bundles."));
+        return Ok(());
+    }
+
+    let active_id = load_active_bundle().ok().map(|active| active.bundle.id);
+    let mut entries = fs::read_dir(&dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(OsStr::new("json")))
+        .collect::<Vec<_>>();
+    entries.sort();
+
+    for path in entries {
+        let bundle: ChangeGroup = read_json(&path)?;
+        let marker = if active_id.as_deref() == Some(bundle.id.as_str()) {
+            "*"
+        } else {
+            " "
+        };
+        println!(
+            "{} {} {:<8} {} repo(s)",
+            marker,
+            out::node(&bundle.id),
+            bundle_state(&bundle),
+            bundle.repos.len()
+        );
+    }
+    Ok(())
+}
+
+pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()> {
+    if workspace && here {
+        bail!("Use either --workspace or --here, not both.");
+    }
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let bundle_id = crate::ids::slugify(bundle_id);
+    if !bundle_exists(&root, &bundle_id) {
+        bail!("No Knit bundle named `{bundle_id}` found.");
+    }
+
+    if here {
+        set_folder_active_bundle(&root, &cwd, &bundle_id)?;
+        println!(
+            "{} {} {}",
+            out::heading("Folder bundle:"),
+            out::node(&bundle_id),
+            out::path(crate::store::relative_path_for_storage(&root, &cwd))
+        );
+    } else if workspace || cwd == root {
+        set_workspace_active_bundle(&root, &bundle_id)?;
+        println!(
+            "{} {}",
+            out::heading("Active bundle:"),
+            out::node(&bundle_id)
+        );
+    } else {
+        set_folder_active_bundle(&root, &cwd, &bundle_id)?;
+        println!(
+            "{} {} {}",
+            out::heading("Folder bundle:"),
+            out::node(&bundle_id),
+            out::path(crate::store::relative_path_for_storage(&root, &cwd))
+        );
+    }
+
+    Ok(())
+}
+
+fn bundle_state(bundle: &ChangeGroup) -> &'static str {
+    if bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.closed")
+    {
+        "closed"
+    } else if bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.landed")
+    {
+        "landed"
+    } else {
+        "open"
+    }
 }
 
 fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {
