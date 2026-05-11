@@ -1,3 +1,5 @@
+use crate::checkout::is_in_place;
+use crate::git::{branch_exists, current_branch, git_output};
 use crate::model::{
     BundleNode, ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
     BUNDLE_STATE_OPEN, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
@@ -7,13 +9,14 @@ use crate::output as out;
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
     load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
-    write_json,
+    write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::fs;
+use std::path::PathBuf;
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;
@@ -227,7 +230,13 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn delete_bundle(bundle_id: &str, force: bool) -> Result<()> {
+pub fn delete_bundle(
+    bundle_id: &str,
+    force: bool,
+    worktrees: bool,
+    branches: bool,
+    force_branches: bool,
+) -> Result<()> {
     if !force {
         bail!("Deleting a bundle requires --force.");
     }
@@ -235,6 +244,20 @@ pub fn delete_bundle(bundle_id: &str, force: bool) -> Result<()> {
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    if force_branches && !branches {
+        bail!("Use --branches with --force-branches.");
+    }
+    if branches && !worktrees {
+        bail!("Deleting local branches requires --worktrees so generated checkouts are removed first.");
+    }
+    if worktrees {
+        let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
+        crate::commands::clean::clean_worktrees_for_bundle(&mut active, force)?;
+        bundle = active.bundle;
+    }
+    if branches {
+        delete_local_feature_branches(&bundle, force_branches)?;
+    }
     let now = now_iso();
     bundle.state = Some(BUNDLE_STATE_DELETED.to_string());
     bundle.deleted_at = Some(now.clone());
@@ -252,6 +275,66 @@ pub fn delete_bundle(bundle_id: &str, force: bool) -> Result<()> {
         out::node(&bundle_id),
         out::path(deleted_path.display())
     );
+    Ok(())
+}
+
+fn delete_local_feature_branches(bundle: &ChangeGroup, force: bool) -> Result<()> {
+    let mut failures = Vec::new();
+    for repo in &bundle.repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            println!(
+                "{}: {}",
+                out::repo(&repo.id),
+                out::muted("no feature branch recorded")
+            );
+            continue;
+        };
+        let repo_root = PathBuf::from(&repo.path);
+        if !repo_root.exists() {
+            failures.push(format!(
+                "{}: original repo path is missing, cannot delete {}",
+                repo.id, branch
+            ));
+            continue;
+        }
+        if is_in_place(repo) && current_branch(&repo_root)?.as_deref() == Some(branch) {
+            failures.push(format!(
+                "{}: {} is checked out in the source repo; switch branches before deleting it",
+                repo.id, branch
+            ));
+            continue;
+        }
+        if !branch_exists(&repo_root, branch) {
+            println!(
+                "{}: {} {}",
+                out::repo(&repo.id),
+                out::muted("branch already missing"),
+                out::branch(branch)
+            );
+            continue;
+        }
+        let delete_flag = if force { "-D" } else { "-d" };
+        let args = vec![
+            OsString::from("branch"),
+            OsString::from(delete_flag),
+            OsString::from(branch),
+        ];
+        match git_output(&repo_root, args) {
+            Ok(_) => println!(
+                "{}: {} {}",
+                out::repo(&repo.id),
+                out::movement("removed"),
+                out::branch(branch)
+            ),
+            Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "failed to delete feature branches:\n{}",
+            failures.join("\n")
+        );
+    }
     Ok(())
 }
 

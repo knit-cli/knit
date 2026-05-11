@@ -293,7 +293,8 @@ knit merge push
 - `knit bundle list` shows workspace bundles.
 - `knit bundle archive <bundle>` marks completed bundle artifacts as archived.
 - `knit bundle restore <bundle>` makes an archived bundle available again.
-- `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/`.
+- `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
+- `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
 - `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
 - `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.
 - `knit merge <bundle> --into <branch> --fetch --push` refreshes and pushes branch targets after all local merges succeed.

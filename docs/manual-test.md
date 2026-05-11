@@ -135,6 +135,14 @@ knit doctor
 knit migrate --check
 ```
 
+To discard a throwaway bundle and its generated local state:
+
+```sh
+knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
+```
+
+Expected result: the bundle JSON moves to `.knit/deleted/bundles/`, generated worktrees under `.knit/worktrees/<bundle>/` are removed, and local `knit/<bundle>` branches are deleted from the source repos. Remote branches are preserved.
+
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
 ```sh

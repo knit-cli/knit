@@ -114,7 +114,7 @@ knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
 knit bundle archive <bundle>
 knit bundle restore <bundle>
-knit bundle delete <bundle> --force
+knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches]
 knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
 knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
@@ -229,6 +229,17 @@ knit close --reason "merged"
 ```
 
 The close node shows up in `knit log` and `knit show HEAD`. It is a ledger marker only.
+
+`knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
+
+```sh
+knit bundle delete documentation-quick-wins --force
+knit bundle delete documentation-quick-wins --force --worktrees
+knit bundle delete documentation-quick-wins --force --worktrees --branches
+knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
+```
+
+`--branches` uses `git branch -d`, so it refuses to delete branches with unmerged commits. `--force-branches` uses `git branch -D`. Knit only deletes local feature branches recorded by the bundle; remote branches are not deleted.
 
 `knit clean` removes only Knit-generated local state after an explicit target flag. It never deletes source repos or git branches:
 
@@ -431,7 +442,7 @@ Sparse advice is enabled by default for new workspaces. It prints a `Next:` line
 - `knit publish github create` is not perfectly transactional. Branch pushes, PR creation, and PR body updates happen sequentially. If phase two fails after PRs are created, run `knit publish github sync`.
 - `knit land` currently supports only GitHub PR publications through the `gh` CLI. A GitHub PR merge lands into that PR's base branch. Remote PR merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
 - `knit land plan` never executes local commands. `run` steps execute only during `apply` or `resume`.
-- `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place.
+- `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place. `knit bundle delete --worktrees --branches --force-branches` is the explicit local discard path for a bundle's generated worktrees and local feature branches.
 - `knit commit` only looks for staged changes inside tracked checkouts.
 - `knit revert --apply` preflights all affected repos before writing, but cross-repo revert commits are still created sequentially. If a conflict or commit failure happens after an earlier repo succeeds, inspect the affected repos manually before retrying.
 - `knit revert` cannot restore historical `repo.removed` nodes yet because older bundle nodes did not store the full removed repo record.

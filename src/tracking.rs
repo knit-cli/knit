@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::git::{is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
-use crate::model::{BundleNode, RepoChange, RepoEntry};
+use crate::model::{BundleNode, ChangeGroup, RepoChange, RepoEntry};
 use crate::store::ActiveBundle;
 use crate::time::now_iso;
 use anyhow::{Context, Result};
@@ -16,7 +16,7 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
         };
         let after_sha = rev_parse(&worktree_dir, "HEAD")
             .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?;
-        let before_sha = repo.head_sha.clone().or_else(|| repo.base_sha.clone());
+        let before_sha = latest_recorded_head_sha(&active.bundle, repo);
 
         if before_sha.as_deref() == Some(after_sha.as_str()) {
             continue;
@@ -31,6 +31,56 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
     }
 
     Ok(changes)
+}
+
+pub fn latest_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Option<String> {
+    ledger_recorded_head_sha(bundle, repo)
+        .or_else(|| repo.head_sha.clone())
+        .or_else(|| repo.base_sha.clone())
+}
+
+pub fn ledger_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Option<String> {
+    let mut head = None;
+
+    for node in &bundle.nodes {
+        for change in &node.repo_changes {
+            if change.repo_id == repo.id {
+                head = Some(change.after_sha.clone());
+            }
+        }
+        for commit in &node.commits {
+            if commit.repo_id == repo.id {
+                head = Some(commit.sha.clone());
+            }
+        }
+        if node.commits.is_empty() {
+            if let Some(group_id) = &node.commit_group_id {
+                if let Some(group) = bundle
+                    .commit_groups
+                    .iter()
+                    .find(|group| &group.id == group_id)
+                {
+                    for commit in &group.commits {
+                        if commit.repo_id == repo.id {
+                            head = Some(commit.sha.clone());
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if bundle.nodes.is_empty() {
+        for group in &bundle.commit_groups {
+            for commit in &group.commits {
+                if commit.repo_id == repo.id {
+                    head = Some(commit.sha.clone());
+                }
+            }
+        }
+    }
+
+    head
 }
 
 pub fn status_note(change: &RepoChange) -> String {
