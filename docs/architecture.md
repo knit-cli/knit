@@ -18,6 +18,7 @@ src/
     init.rs
     project.rs
     land.rs
+    merge.rs
     track.rs
     remove.rs
     worktree.rs
@@ -61,6 +62,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `commands/bundle.rs` owns bundle inspection, listing, switching, and validation. It must not create a second review handoff object.
 - `commands/publish.rs` owns the user-facing publish workflow. Provider-specific calls live in `providers/`, starting with `providers/github.rs`.
 - `commands/land.rs` owns landing plan/run orchestration. It reads publication metadata, writes `.knit/land-plans/` and `.knit/land-runs/`, and appends `feature.landed` only after every step succeeds.
+- `commands/merge.rs` owns local bundle/ref integration into target branches or other bundles. It writes `.knit/merge-runs/`, uses managed branch checkouts under `.knit/merge-worktrees/`, rolls back failed non-manual runs to their pre-run SHAs, and records target-bundle merges as `git.observed`.
 - `providers/` owns forge-specific subprocess behavior such as GitHub PR view/check/merge through `gh`. Provider modules should expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.

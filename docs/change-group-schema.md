@@ -148,6 +148,42 @@ Rewind example:
 
 Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each PR body. Future providers can use the same array with a different `provider` and `kind`, for example GitLab merge requests.
 
+The `baseBranch` field is the PR target recorded by the provider. `knit land` uses provider PR metadata, so a GitHub PR lands into the same base branch shown on GitHub.
+
+## Merge Runs
+
+`knit merge` writes operational run files under `.knit/merge-runs/`:
+
+```json
+{
+  "schemaVersion": "0.1",
+  "kind": "KnitMergeRun",
+  "id": "merge_20260511_ab12cd",
+  "source": "feature-x",
+  "into": "staging",
+  "manual": false,
+  "status": "succeeded",
+  "sourceBundleId": "feature-x",
+  "createdAt": "2026-05-11T00:00:00.000Z",
+  "updatedAt": "2026-05-11T00:00:00.000Z",
+  "steps": [
+    {
+      "repoId": "backend",
+      "repoPath": "/repos/backend",
+      "sourceRef": "knit/feature-x",
+      "target": "staging",
+      "targetKind": "branch",
+      "checkoutPath": ".knit/merge-worktrees/staging/backend",
+      "beforeSha": "abc123",
+      "afterSha": "def456",
+      "status": "succeeded"
+    }
+  ]
+}
+```
+
+Merge run files are operational logs. For branch targets, the branch checkout is stored under `.knit/merge-worktrees/<target>/<repo>/`. For bundle targets, a successful run advances the target bundle's feature branches and appends a `git.observed` node to the target bundle.
+
 ## Landing Plans And Runs
 
 `knit land plan` writes an editable plan under `.knit/land-plans/`:

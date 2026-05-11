@@ -9,6 +9,7 @@ pub mod git_passthrough;
 pub mod init;
 pub mod land;
 pub mod log;
+pub mod merge;
 pub mod project;
 pub mod publish;
 pub mod pull;
@@ -36,6 +37,7 @@ pub use land::{
     apply_land_plan, generate_land_plan, resume_land_run, show_land_status, update_land_branches,
 };
 pub use log::{show_log, show_target};
+pub use merge::{create_compat_bundle, merge_command};
 pub use project::{add_project_repo, init_project, list_projects, show_project};
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,
