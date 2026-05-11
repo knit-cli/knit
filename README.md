@@ -321,6 +321,16 @@ knit publish github status
 
 Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
 
+After PRs are approved, keep the workflow on the Knit bundle:
+
+```sh
+knit publish github status
+knit land plan
+knit land apply
+```
+
+Do not use `gh pr merge` for Knit-owned bundles, and do not use `knit merge --into main` as a substitute for PR landing unless you explicitly want direct branch integration instead of PR landing.
+
 `knit land` coordinates landing the recorded cross-repo PR set. It is provider-neutral at the command boundary, but GitHub is the only provider implemented today:
 
 ```sh
@@ -331,7 +341,7 @@ knit land status
 knit land resume
 ```
 
-`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR with `squash`, waits for required checks, and does not delete feature branches. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
+`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `squash`, waits for required checks, and does not delete feature branches. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 

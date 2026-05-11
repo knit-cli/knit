@@ -1160,6 +1160,18 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let status = knit(&workspace, ["publish", "github", "status"]);
     assert!(status.contains("#101"));
     assert!(status.contains("#202"));
+    assert!(status.contains("not landed"));
+    assert!(status.contains("Next:"));
+    assert!(status.contains("knit land plan"));
+
+    let knit_status = knit(&workspace, ["status"]);
+    assert!(knit_status.contains("Publications:"));
+    assert!(knit_status.contains("not landed"));
+    assert!(knit_status.contains("knit land plan"));
+
+    let land_plan = knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    assert!(land_plan.contains("Lands into:"));
+    assert!(land_plan.contains("GitHub PR base branch"));
 
     fs::remove_dir_all(root).unwrap();
 }
