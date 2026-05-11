@@ -1,12 +1,12 @@
 # Manual Test
 
-This smoke test uses two toy git repos and one Knit workspace.
+This smoke test uses two default toy git repos, one observed toy git repo, and one Knit workspace.
 
 ```sh
 mkdir -p /tmp/knit-smoke
 cd /tmp/knit-smoke
 
-mkdir backend frontend workspace
+mkdir backend frontend docs workspace
 git -C backend init
 git -C backend checkout -b main
 git -C backend config user.email knit@example.test
@@ -23,13 +23,25 @@ printf "frontend\n" > frontend/app.txt
 git -C frontend add app.txt
 git -C frontend commit -m "Initial frontend"
 
+git -C docs init
+git -C docs checkout -b main
+git -C docs config user.email knit@example.test
+git -C docs config user.name "Knit Smoke"
+printf "docs\n" > docs/app.txt
+git -C docs add app.txt
+git -C docs commit -m "Initial docs"
+
 cd workspace
-knit init "venue capacity"
-knit track ../backend ../frontend
+knit project init venues
+knit project add backend ../backend
+knit project add frontend ../frontend
+knit project add docs ../docs --observe
+knit bundle start "venue capacity"
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
 
+knit bundle
 knit status
 knit diff --stat
 knit git status --short
@@ -45,8 +57,10 @@ knit log -1
 
 Expected result:
 
+- `.knit/projects/venues.project.json` exists with `backend` and `frontend` included by default and `docs` observed.
 - `.knit/bundles/venue-capacity.bundle.json` exists.
-- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit track`.
+- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit bundle start`.
+- `.knit/worktrees/venue-capacity/backend` and `.knit/worktrees/venue-capacity/frontend` exist, while `docs` is not tracked until explicitly added.
 - `knit add` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged checkout.
 - `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
@@ -79,6 +93,25 @@ knit log
 ```
 
 Expected result: `knit status` reports `rewound commits: 1` for `frontend`, `knit sync` appends another `git.observed` node with `movement: "rewound"` and `droppedCommits`, and `knit log` shows the rewind.
+
+To test parallel bundles over the same repo:
+
+```sh
+knit bundle start "backend only" --repo backend
+knit bundle list
+
+knit status
+knit status --bundle venue-capacity
+knit status --bundle backend-only
+
+cd .knit/worktrees/venue-capacity/backend
+knit status
+
+cd ../../../backend-only/backend
+knit status
+```
+
+Expected result: the same source `backend` repo has both `knit/venue-capacity` and `knit/backend-only` branches, each generated worktree resolves its own bundle from cwd, and `--bundle` overrides cwd/workspace context.
 
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 

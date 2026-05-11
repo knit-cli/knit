@@ -11,9 +11,10 @@ pub fn show_status() -> Result<()> {
     let active = load_active_bundle()?;
     let unrecorded = detect_unrecorded_changes(&active)?;
     println!(
-        "{} {}\n",
+        "{} {} ({})\n",
         out::heading("Bundle:"),
-        out::node(&active.bundle.id)
+        out::node(&active.bundle.id),
+        active.resolution_source.label()
     );
     println!(
         "{} {} {} {} {}",

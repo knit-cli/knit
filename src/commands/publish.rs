@@ -27,7 +27,7 @@ pub fn create_github_publications(
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
@@ -73,7 +73,7 @@ pub fn create_github_publications(
 pub fn sync_github_publications(selectors: &[String], all: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
@@ -88,7 +88,7 @@ pub fn sync_github_publications(selectors: &[String], all: bool) -> Result<()> {
 pub fn show_github_publication_status(selectors: &[String], all: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
@@ -399,6 +399,7 @@ mod tests {
             kind: CHANGE_GROUP_KIND.to_string(),
             id: "venue-capacity".to_string(),
             title: "venue capacity".to_string(),
+            project_id: None,
             created_at: "2026-05-05T00:00:00.000Z".to_string(),
             updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             head_node_id: None,

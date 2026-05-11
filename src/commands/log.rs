@@ -248,7 +248,7 @@ pub fn show_target(target: &str) -> Result<()> {
         return show_node(&active, node);
     }
 
-    show_legacy_group(&active, target)
+    show_commit_group(&active, target)
 }
 
 fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
@@ -438,7 +438,7 @@ fn repo_dir_for_show(active: &ActiveBundle, repo_id: &str) -> Option<PathBuf> {
     worktree.exists().then_some(worktree)
 }
 
-fn show_legacy_group(active: &ActiveBundle, commit_group_id: &str) -> Result<()> {
+fn show_commit_group(active: &ActiveBundle, commit_group_id: &str) -> Result<()> {
     let group = active
         .bundle
         .commit_groups
@@ -446,12 +446,12 @@ fn show_legacy_group(active: &ActiveBundle, commit_group_id: &str) -> Result<()>
         .find(|group| group.id == commit_group_id)
         .with_context(|| format!("No commit group found for {commit_group_id}"))?;
 
-    print_legacy_header(group);
+    print_commit_group_header(group);
     show_commit_refs(active, &group.commits)?;
 
     Ok(())
 }
 
-fn print_legacy_header(group: &CommitGroup) {
+fn print_commit_group_header(group: &CommitGroup) {
     println!("{}  {}\n", out::node(&group.id), group.message);
 }

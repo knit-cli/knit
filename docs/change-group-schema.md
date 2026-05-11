@@ -27,7 +27,7 @@ The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 ```
 
 - `repos` is the current tracked repo state.
-- `commitGroups` is the compatibility list of logical cross-repo commits.
+- `commitGroups` is the flat list of logical cross-repo commits.
 - `nodes` is the append-only-ish feature ledger.
 - `headNodeId` points at the latest ledger node.
 - `publications` records provider metadata for published tracked branches.

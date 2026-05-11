@@ -21,7 +21,7 @@ pub fn pull_repos(
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;

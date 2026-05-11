@@ -227,7 +227,7 @@ pub fn update_land_branches(
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
-        bail!("The active bundle has no repos. Run `knit track <repo-path>` first.");
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
     let targets = indexes
@@ -873,7 +873,7 @@ fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()
     }
     if plan.bundle_id != active.bundle.id {
         bail!(
-            "Land plan belongs to bundle {}, but active bundle is {}.",
+            "Land plan belongs to bundle {}, but resolved bundle is {}.",
             plan.bundle_id,
             active.bundle.id
         );

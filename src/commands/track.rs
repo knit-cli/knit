@@ -3,7 +3,9 @@ use crate::git::{
     current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
 };
 use crate::ids::{node_id, slugify, unique_repo_id};
-use crate::model::{BundleNode, RepoEntry, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE};
+use crate::model::{
+    BundleNode, ProjectRepoEntry, RepoEntry, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
+};
 use crate::output as out;
 use crate::paths::same_path;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
@@ -12,12 +14,13 @@ use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
-struct RepoPlan {
-    name: String,
+pub struct RepoPlan {
+    desired_id: String,
     path: String,
     remote: Option<String>,
     base_branch: String,
     base_sha: String,
+    checkout_mode: String,
 }
 
 pub fn track_repos(
@@ -27,7 +30,67 @@ pub fn track_repos(
     in_place: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
-    let plans = resolve_repo_plans(repo_paths, base_override)?;
+    let checkout_mode = if in_place {
+        CHECKOUT_MODE_IN_PLACE
+    } else {
+        CHECKOUT_MODE_WORKTREE
+    };
+    let plans = resolve_repo_plans(repo_paths, base_override, checkout_mode)?;
+    apply_repo_plans(&mut active, plans, materialize)?;
+    save_active_bundle(&active)?;
+    Ok(())
+}
+
+pub fn track_repo_selectors(
+    selectors: &[String],
+    base_override: Option<&str>,
+    materialize: bool,
+    in_place: bool,
+) -> Result<()> {
+    let mut active = load_active_bundle_for_update()?;
+    let checkout_mode = if in_place {
+        CHECKOUT_MODE_IN_PLACE
+    } else {
+        CHECKOUT_MODE_WORKTREE
+    };
+    let mut plans = Vec::new();
+    for selector in selectors {
+        if let Some(plan) = resolve_project_selector(&active, selector, in_place)? {
+            plans.push(plan);
+        } else {
+            plans.push(resolve_repo_plan(
+                Path::new(selector),
+                base_override,
+                None,
+                checkout_mode,
+            )?);
+        }
+    }
+    ensure_unique_paths(&plans)?;
+    apply_repo_plans(&mut active, plans, materialize)?;
+    save_active_bundle(&active)?;
+    Ok(())
+}
+
+pub fn track_project_repos(
+    active: &mut crate::store::ActiveBundle,
+    repos: &[ProjectRepoEntry],
+    materialize: bool,
+    in_place: bool,
+) -> Result<()> {
+    let plans = repos
+        .iter()
+        .map(|repo| resolve_project_repo_plan(repo, in_place))
+        .collect::<Result<Vec<_>>>()?;
+    ensure_unique_paths(&plans)?;
+    apply_repo_plans(active, plans, materialize)
+}
+
+fn apply_repo_plans(
+    active: &mut crate::store::ActiveBundle,
+    plans: Vec<RepoPlan>,
+    materialize: bool,
+) -> Result<()> {
     let mut touched_repo_ids = Vec::new();
 
     for plan in plans {
@@ -41,9 +104,7 @@ pub fn track_repos(
             existing.remote = plan.remote;
             existing.base_branch = plan.base_branch;
             existing.base_sha = Some(plan.base_sha);
-            if in_place {
-                existing.checkout_mode = CHECKOUT_MODE_IN_PLACE.to_string();
-            }
+            existing.checkout_mode = plan.checkout_mode;
             touched_repo_ids.push(existing.id.clone());
             println!(
                 "{} {} ({})",
@@ -54,18 +115,13 @@ pub fn track_repos(
             continue;
         }
 
-        let desired_id = slugify(&plan.name);
-        let repo_id = unique_repo_id(&active.bundle, &desired_id);
+        let repo_id = unique_repo_id(&active.bundle, &plan.desired_id);
         active.bundle.repos.push(RepoEntry {
             id: repo_id.clone(),
             path: plan.path,
             remote: plan.remote,
             base_branch: plan.base_branch,
-            checkout_mode: if in_place {
-                CHECKOUT_MODE_IN_PLACE.to_string()
-            } else {
-                CHECKOUT_MODE_WORKTREE.to_string()
-            },
+            checkout_mode: plan.checkout_mode,
             base_sha: Some(plan.base_sha),
             feature_branch: None,
             worktree_path: None,
@@ -73,6 +129,10 @@ pub fn track_repos(
         });
         println!("{} {}", out::movement("added"), out::repo(&repo_id));
         touched_repo_ids.push(repo_id);
+    }
+
+    if touched_repo_ids.is_empty() {
+        return Ok(());
     }
 
     let now = now_iso();
@@ -84,7 +144,7 @@ pub fn track_repos(
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
 
     if materialize {
-        let materialized_repo_ids = materialize_repos(&mut active, Some(&touched_repo_ids))?;
+        let materialized_repo_ids = materialize_repos(active, Some(&touched_repo_ids))?;
         let now = now_iso();
         active.bundle.nodes.push(BundleNode::worktrees_materialized(
             node_id("worktree"),
@@ -95,31 +155,31 @@ pub fn track_repos(
     }
 
     active.bundle.updated_at = now_iso();
-    save_active_bundle(&active)?;
     Ok(())
 }
 
 fn resolve_repo_plans(
     repo_paths: &[PathBuf],
     base_override: Option<&str>,
+    checkout_mode: &str,
 ) -> Result<Vec<RepoPlan>> {
     let mut plans: Vec<RepoPlan> = Vec::new();
 
     for repo_path in repo_paths {
-        let plan = resolve_repo_plan(repo_path, base_override)?;
-        if plans
-            .iter()
-            .any(|existing| same_path(&existing.path, &plan.path))
-        {
-            bail!("Repo {} was provided more than once.", plan.path);
-        }
+        let plan = resolve_repo_plan(repo_path, base_override, None, checkout_mode)?;
         plans.push(plan);
     }
 
+    ensure_unique_paths(&plans)?;
     Ok(plans)
 }
 
-fn resolve_repo_plan(repo_path: &Path, base_override: Option<&str>) -> Result<RepoPlan> {
+fn resolve_repo_plan(
+    repo_path: &Path,
+    base_override: Option<&str>,
+    desired_id: Option<String>,
+    checkout_mode: &str,
+) -> Result<RepoPlan> {
     let repo_root = git_root(repo_path)?;
     let name = repo_root
         .file_name()
@@ -137,10 +197,66 @@ fn resolve_repo_plan(repo_path: &Path, base_override: Option<&str>) -> Result<Re
     let base_sha = rev_parse(&repo_root, &base_ref)?;
 
     Ok(RepoPlan {
-        name,
+        desired_id: desired_id.unwrap_or_else(|| slugify(&name)),
         path,
         remote,
         base_branch,
         base_sha,
+        checkout_mode: checkout_mode.to_string(),
     })
+}
+
+fn resolve_project_selector(
+    active: &crate::store::ActiveBundle,
+    selector: &str,
+    in_place: bool,
+) -> Result<Option<RepoPlan>> {
+    let Some(project_id) = &active.bundle.project_id else {
+        return Ok(None);
+    };
+    let project_path = active
+        .root
+        .join(".knit/projects")
+        .join(format!("{project_id}.project.json"));
+    if !project_path.exists() {
+        return Ok(None);
+    }
+    let project: crate::model::KnitProject = crate::store::read_json(&project_path)?;
+    let Some(repo) = project.repos.iter().find(|repo| repo.id == selector) else {
+        return Ok(None);
+    };
+    Ok(Some(resolve_project_repo_plan(repo, in_place)?))
+}
+
+fn resolve_project_repo_plan(repo: &ProjectRepoEntry, in_place: bool) -> Result<RepoPlan> {
+    let checkout_mode = if in_place {
+        CHECKOUT_MODE_IN_PLACE.to_string()
+    } else {
+        repo.checkout_mode.clone()
+    };
+    let repo_root = git_root(Path::new(&repo.path))?;
+    let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
+    let base_sha = rev_parse(&repo_root, &base_ref)
+        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    Ok(RepoPlan {
+        desired_id: repo.id.clone(),
+        path: repo_root.to_string_lossy().to_string(),
+        remote: repo.remote.clone(),
+        base_branch: repo.base_branch.clone(),
+        base_sha,
+        checkout_mode,
+    })
+}
+
+fn ensure_unique_paths(plans: &[RepoPlan]) -> Result<()> {
+    for (index, plan) in plans.iter().enumerate() {
+        if plans
+            .iter()
+            .skip(index + 1)
+            .any(|existing| same_path(&existing.path, &plan.path))
+        {
+            bail!("Repo {} was provided more than once.", plan.path);
+        }
+    }
+    Ok(())
 }

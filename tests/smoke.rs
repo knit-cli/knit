@@ -19,7 +19,9 @@ fn init_can_generate_agents_tutorial() {
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(agents.contains("This is a Knit workspace"));
     assert!(agents.contains("knit status"));
-    assert!(agents.contains("knit track"));
+    assert!(agents.contains("knit project init"));
+    assert!(agents.contains("knit bundle start"));
+    assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit commit --stage"));
     assert!(agents.contains("gloss prepare"));
 
@@ -45,6 +47,144 @@ fn init_can_generate_agents_tutorial() {
     );
     let rerun = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert_eq!(rerun.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_default_repos_start_bundle_without_track() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let scraper = root.join("scraper");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    init_repo(&scraper, "scraper");
+
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        [
+            "project",
+            "add",
+            "scraper",
+            scraper.to_str().unwrap(),
+            "--observe",
+        ],
+    );
+    assert!(knit(&workspace, ["project", "list"]).contains("arbient"));
+    assert!(knit(&workspace, ["project", "show"]).contains("\"id\": \"arbient\""));
+
+    knit(&workspace, ["bundle", "start", "project feature"]);
+
+    assert!(workspace
+        .join(".knit/worktrees/project-feature/backend")
+        .exists());
+    assert!(workspace
+        .join(".knit/worktrees/project-feature/frontend")
+        .exists());
+    assert!(!workspace
+        .join(".knit/worktrees/project-feature/scraper")
+        .exists());
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/project-feature.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle["projectId"].as_str(), Some("arbient"));
+    assert_eq!(bundle["repos"].as_array().unwrap().len(), 2);
+    assert_eq!(bundle["repos"][0]["id"].as_str(), Some("backend"));
+    assert_eq!(bundle["repos"][1]["id"].as_str(), Some("frontend"));
+
+    let list = knit(&workspace, ["bundle", "list"]);
+    assert!(list.contains("project-feature"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_start_and_add_support_ad_hoc_work() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "ad hoc"]);
+    assert!(knit(&workspace, ["bundle"]).contains("Bundle: ad-hoc"));
+    let empty_bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/ad-hoc.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(empty_bundle["repos"].as_array().unwrap().len(), 0);
+
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    assert!(workspace.join(".knit/worktrees/ad-hoc/backend").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    let subdir = workspace.join("subdir");
+    fs::create_dir_all(&workspace).unwrap();
+    fs::create_dir_all(&subdir).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "fix a"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "start", "fix b"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+
+    let fix_a = workspace.join(".knit/worktrees/fix-a/backend");
+    let fix_b = workspace.join(".knit/worktrees/fix-b/backend");
+    assert!(fix_a.exists());
+    assert!(fix_b.exists());
+    assert_eq!(
+        git(&fix_a, ["branch", "--show-current"]).trim(),
+        "knit/fix-a"
+    );
+    assert_eq!(
+        git(&fix_b, ["branch", "--show-current"]).trim(),
+        "knit/fix-b"
+    );
+
+    let fix_a_status = knit(&fix_a, ["status"]);
+    assert!(fix_a_status.contains("Bundle: fix-a (cwd)"));
+    let fix_b_status = knit(&fix_b, ["status"]);
+    assert!(fix_b_status.contains("Bundle: fix-b (cwd)"));
+
+    assert!(knit(&workspace, ["--bundle", "fix-b", "status"]).contains("Bundle: fix-b (explicit)"));
+    assert!(
+        knit_with_env(&workspace, ["status"], &[("KNIT_BUNDLE", "fix-b")])
+            .contains("Bundle: fix-b (env)")
+    );
+
+    knit(&workspace, ["switch", "fix-a"]);
+    assert!(knit(&workspace, ["status"]).contains("Bundle: fix-a (workspace)"));
+
+    knit(&subdir, ["switch", "fix-b"]);
+    assert!(knit(&subdir, ["status"]).contains("Bundle: fix-b (folder)"));
+    assert!(knit(&workspace, ["status"]).contains("Bundle: fix-a (workspace)"));
+
+    knit(&fix_a, ["switch", "fix-b", "--here"]);
+    assert!(knit(&fix_a, ["status"]).contains("Bundle: fix-a (cwd)"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1260,6 +1400,19 @@ where
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
     command.args(args).current_dir(cwd);
+    run(command)
+}
+
+fn knit_with_env<I, S>(cwd: &Path, args: I, env: &[(&str, &str)]) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command.args(args).current_dir(cwd);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     run(command)
 }
 
