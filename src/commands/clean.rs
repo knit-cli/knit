@@ -39,7 +39,7 @@ pub fn clean_generated(
             clean_closed_bundle_worktrees(force)?;
         } else {
             let mut active = load_active_bundle_for_update()?;
-            clean_worktrees_for_active_bundle(&mut active, force)?;
+            clean_worktrees_for_bundle(&mut active, force)?;
             active.bundle.updated_at = now_iso();
             save_active_bundle(&active)?;
         }
@@ -63,7 +63,7 @@ fn clean_revert_plans(active: &ActiveBundle) -> Result<()> {
     Ok(())
 }
 
-fn clean_worktrees_for_active_bundle(active: &mut ActiveBundle, force: bool) -> Result<()> {
+pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool) -> Result<()> {
     if active.bundle.repos.is_empty() {
         println!("{}", out::muted("No repos are tracked in this bundle."));
         return Ok(());
@@ -185,7 +185,7 @@ fn clean_closed_bundle_worktrees(force: bool) -> Result<()> {
             continue;
         }
         let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
-        clean_worktrees_for_active_bundle(&mut active, force)?;
+        clean_worktrees_for_bundle(&mut active, force)?;
         active.bundle.updated_at = now_iso();
         write_json(&path, &active.bundle)?;
         cleaned += 1;

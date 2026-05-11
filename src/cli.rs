@@ -387,6 +387,15 @@ pub enum BundleCommand {
         /// Required to delete a bundle artifact.
         #[arg(long)]
         force: bool,
+        /// Remove clean generated worktrees for this bundle before deleting the artifact.
+        #[arg(long)]
+        worktrees: bool,
+        /// Delete local feature branches for this bundle after generated worktrees are removed.
+        #[arg(long)]
+        branches: bool,
+        /// Use `git branch -D` instead of `git branch -d` for local feature branches.
+        #[arg(long = "force-branches", requires = "branches")]
+        force_branches: bool,
     },
     /// Create a compatibility bundle from the union of repos in source bundles.
     Compat {

@@ -97,9 +97,13 @@ pub fn run(cli: Cli) -> Result<()> {
             Some(BundleCommand::Close { reason }) => commands::close_bundle(reason.as_deref()),
             Some(BundleCommand::Archive { bundle }) => commands::archive_bundle(&bundle),
             Some(BundleCommand::Restore { bundle }) => commands::restore_bundle(&bundle),
-            Some(BundleCommand::Delete { bundle, force }) => {
-                commands::delete_bundle(&bundle, force)
-            }
+            Some(BundleCommand::Delete {
+                bundle,
+                force,
+                worktrees,
+                branches,
+                force_branches,
+            }) => commands::delete_bundle(&bundle, force, worktrees, branches, force_branches),
             Some(BundleCommand::Compat {
                 sources,
                 title,

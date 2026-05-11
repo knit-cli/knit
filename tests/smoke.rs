@@ -137,6 +137,69 @@ fn bundle_start_and_add_support_ad_hoc_work() {
 }
 
 #[test]
+fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "start", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "feature\n",
+    )
+    .unwrap();
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Add venue capacity integration"],
+    );
+
+    let bundle_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let mut bundle = read_bundle(&workspace);
+    let base_sha = bundle["repos"][0]["baseSha"].as_str().unwrap().to_string();
+    let group_sha = bundle["commitGroups"][0]["commits"][0]["sha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        bundle["repos"][0]["headSha"].as_str(),
+        Some(group_sha.as_str())
+    );
+
+    bundle["repos"][0]["headSha"] = json!(base_sha);
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+
+    let status = knit(&workspace, ["status"]);
+    assert!(!status.contains("unrecorded commits"));
+
+    let sync = knit(&workspace, ["sync"]);
+    assert!(sync.contains("No unrecorded git commits found."));
+    let log = knit(&workspace, ["log"]);
+    assert!(log.contains("Add venue capacity integration"));
+    assert!(!log.contains("observed git changes"));
+
+    let doctor = knit_fails(&workspace, ["doctor"]);
+    assert!(doctor.contains("headSha projection differs from ledger"));
+    let migrate_check = knit_fails(&workspace, ["migrate", "--check"]);
+    assert!(migrate_check.contains("need migration"));
+    knit(&workspace, ["migrate"]);
+    let repaired = read_bundle(&workspace);
+    assert_eq!(
+        repaired["repos"][0]["headSha"].as_str(),
+        Some(group_sha.as_str())
+    );
+    assert!(knit(&workspace, ["doctor"]).contains("Knit doctor: ok"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -1580,6 +1643,68 @@ fn clean_removes_plans_and_generated_worktrees_only() {
 
     knit(&workspace, ["worktree"]);
     assert!(worktree.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_delete_can_remove_generated_worktrees_and_force_delete_branches() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "throwaway"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let worktree = workspace.join(".knit/worktrees/throwaway/backend");
+    append_line(&worktree.join("app.txt"), "throwaway change");
+    knit(&workspace, ["commit", "--stage", "-m", "Throwaway change"]);
+    assert!(git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+
+    let safe_delete = knit_fails(
+        &workspace,
+        [
+            "bundle",
+            "delete",
+            "throwaway",
+            "--force",
+            "--worktrees",
+            "--branches",
+        ],
+    );
+    assert!(safe_delete.contains("failed to delete feature branches"));
+    assert!(workspace
+        .join(".knit/bundles/throwaway.bundle.json")
+        .exists());
+    assert!(!worktree.exists());
+    assert!(git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+
+    let forced_delete = knit(
+        &workspace,
+        [
+            "bundle",
+            "delete",
+            "throwaway",
+            "--force",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(forced_delete.contains("Deleted bundle"));
+    assert!(!workspace
+        .join(".knit/bundles/throwaway.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/throwaway.bundle.json")
+        .exists());
+    assert!(!git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+    let deleted: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/deleted/bundles/throwaway.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(deleted["repos"][0]["worktreePath"].is_null());
 
     fs::remove_dir_all(root).unwrap();
 }

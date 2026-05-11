@@ -5,6 +5,7 @@ use crate::model::{
 };
 use crate::output as out;
 use crate::store::{find_knit_root, read_json, write_json};
+use crate::tracking::ledger_recorded_head_sha;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::fs;
@@ -211,6 +212,17 @@ fn inspect_bundle_paths(root: &Path, issues: &mut Vec<String>) {
                     ));
                 }
             }
+            if let Some(ledger_head) = ledger_recorded_head_sha(&bundle, repo) {
+                if repo.head_sha.as_deref() != Some(ledger_head.as_str()) {
+                    issues.push(format!(
+                        "{}:{} headSha projection differs from ledger: {} != {}",
+                        bundle.id,
+                        repo.id,
+                        repo.head_sha.as_deref().unwrap_or("(none)"),
+                        ledger_head
+                    ));
+                }
+            }
         }
     }
 }
@@ -255,6 +267,21 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
                 bundle.closed_at = Some(close_node.created_at.clone());
             } else {
                 bundle.state = Some(BUNDLE_STATE_OPEN.to_string());
+            }
+        }
+        let projected_heads = bundle
+            .repos
+            .iter()
+            .map(|repo| (repo.id.clone(), ledger_recorded_head_sha(&bundle, repo)))
+            .collect::<Vec<_>>();
+        for (repo_id, head) in projected_heads {
+            let Some(head) = head else {
+                continue;
+            };
+            if let Some(repo) = bundle.repos.iter_mut().find(|repo| repo.id == repo_id) {
+                if repo.head_sha.as_deref() != Some(head.as_str()) {
+                    repo.head_sha = Some(head);
+                }
             }
         }
         let after = format!("{}\n", serde_json::to_string_pretty(&bundle)?);
