@@ -268,7 +268,18 @@ Publish PRs against their intended GitHub base branch:
 knit publish github create
 knit publish github create --base release
 knit publish github create --base backend=stable --base frontend=main
+knit publish github status
 ```
+
+After the PRs are approved, land through Knit:
+
+```sh
+knit land plan
+knit land apply
+knit land status
+```
+
+`knit land` lands each recorded PR into its GitHub PR base branch. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
 Use `knit merge` for local integration into staging branches or compatibility bundles:
 
@@ -300,6 +311,7 @@ knit merge push
 - `knit merge <bundle> --into <branch> --fetch --push` refreshes and pushes branch targets after all local merges succeed.
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
+- `knit land plan` and `knit land apply` are the post-approval PR landing path.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.

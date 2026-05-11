@@ -212,6 +212,12 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         out::heading("Land plan:"),
         out::path(plan_path.display())
     );
+    if plan.provider == "github" {
+        println!(
+            "{} each recorded GitHub PR base branch",
+            out::heading("Lands into:")
+        );
+    }
     for step in &plan.steps {
         print_planned_step(&active, step);
     }
@@ -1078,6 +1084,12 @@ fn print_plan(plan: &LandPlan, path: &Path) {
         out::heading("Plan file:"),
         out::path(path.display())
     );
+    if plan.provider == "github" {
+        println!(
+            "{} each recorded GitHub PR base branch",
+            out::heading("Lands into:")
+        );
+    }
     println!();
     for step in &plan.steps {
         println!(
@@ -1109,6 +1121,12 @@ fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {
         out::heading("Run file:"),
         out::path(path.display())
     );
+    if run.provider == "github" {
+        println!(
+            "{} each recorded GitHub PR base branch",
+            out::heading("Lands into:")
+        );
+    }
     println!();
     for step in &run.steps {
         println!(

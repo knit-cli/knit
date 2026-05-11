@@ -1,3 +1,4 @@
+use crate::advice;
 use crate::checkout::checkout_dir;
 use crate::git::{current_branch, git_output, git_output_optional, rev_parse};
 use crate::ids::short_sha;
@@ -127,8 +128,43 @@ pub fn show_github_publication_status(selectors: &[String], all: bool) -> Result
             );
         }
     }
+    print_landing_advice(&active);
 
     Ok(())
+}
+
+fn print_landing_advice(active: &ActiveBundle) {
+    if active.bundle.publications.is_empty() || has_landed_node(&active.bundle) {
+        return;
+    }
+    let github_prs = active
+        .bundle
+        .publications
+        .iter()
+        .filter(|publication| {
+            publication.provider == "github" && publication.kind == "pull_request"
+        })
+        .count();
+    if github_prs == 0 {
+        return;
+    }
+    println!();
+    println!(
+        "{} {} GitHub PR(s) recorded, not landed",
+        out::heading("Landing:"),
+        github_prs
+    );
+    advice::print(
+        &active.root,
+        "after PR approval, use `knit land plan` and `knit land apply`; `knit land` merges each recorded PR into its GitHub PR base branch.",
+    );
+}
+
+fn has_landed_node(bundle: &ChangeGroup) -> bool {
+    bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.landed")
 }
 
 fn create_or_reuse_pr(
