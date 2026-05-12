@@ -138,21 +138,23 @@ knit migrate --check
 To discard a throwaway bundle and its generated local state:
 
 ```sh
+knit close --reason "merged"
+knit status
 knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
 ```
 
-Expected result: the bundle JSON moves to `.knit/deleted/bundles/`, generated worktrees under `.knit/worktrees/<bundle>/` are removed, and local `knit/<bundle>` branches are deleted from the source repos. Remote branches are preserved.
+Expected result: after `close`, `knit status` still shows the closed bundle's generated worktrees and local feature branches. After `bundle delete --worktrees --branches`, the bundle JSON moves to `.knit/deleted/bundles/`, generated worktrees under `.knit/worktrees/<bundle>/` are removed, and local `knit/<bundle>` branches are deleted from the source repos. Remote branches are preserved.
 
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
 ```sh
 knit publish github create --base main --no-sync
-knit land plan
+knit land
 knit land status
 ```
 
-Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Only run `knit land apply` against PRs you are comfortable merging. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`; after fixing the failed step, run `knit land resume`.
+Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Bare `knit land` creates or shows the plan but does not execute it. Only run `knit land apply` against PRs you are comfortable merging. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`; after fixing the failed step, run `knit land resume`.
 
-After PR approval, use `knit land plan` and `knit land apply`. Do not land Knit-owned PRs with `gh pr merge`, and do not use `knit merge --into main` as a PR landing substitute.
+After PR approval and a land/release instruction, use `knit land`, inspect or edit the plan, then run `knit land apply`. Do not land Knit-owned PRs with `gh pr merge`, and do not use `knit merge --into main` as a PR landing substitute.
 
 Knit is not a database transaction layer. If a commit succeeds in one repo and fails in another, inspect the affected repos manually before retrying.

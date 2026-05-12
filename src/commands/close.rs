@@ -1,3 +1,4 @@
+use crate::advice;
 use crate::ids::node_id;
 use crate::model::{BundleNode, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED};
 use crate::output as out;
@@ -43,6 +44,18 @@ pub fn close_bundle(reason: Option<&str>) -> Result<()> {
         out::node(&active.bundle.id)
     );
     println!("{} {}", out::heading("Node:"), out::node(&id));
+    println!(
+        "{} {}",
+        out::heading("Preserved:"),
+        "worktrees and local feature branches"
+    );
+    advice::print(
+        &active.root,
+        format!(
+            "to leave a clean local workspace, run `knit bundle delete {} --force --worktrees --branches` (add `--force-branches` if the branches are not merged locally).",
+            active.bundle.id
+        ),
+    );
     Ok(())
 }
 

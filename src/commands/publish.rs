@@ -156,7 +156,7 @@ fn print_landing_advice(active: &ActiveBundle) {
     );
     advice::print(
         &active.root,
-        "after PR approval, use `knit land plan` and `knit land apply`; `knit land` merges each recorded PR into its GitHub PR base branch.",
+        "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection.",
     );
 }
 

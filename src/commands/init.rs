@@ -271,15 +271,20 @@ knit publish github create --base backend=stable --base frontend=main
 knit publish github status
 ```
 
-After the PRs are approved, land through Knit:
+When the PRs are approved and the user says to land, merge, release, ship, or continue after review, start landing through Knit:
 
 ```sh
-knit land plan
+knit land
+```
+
+Inspect or edit the plan, then execute it explicitly:
+
+```sh
 knit land apply
 knit land status
 ```
 
-`knit land` lands each recorded PR into its GitHub PR base branch. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
+Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
 Use `knit merge` for local integration into staging branches or compatibility bundles:
 
@@ -311,7 +316,7 @@ knit merge push
 - `knit merge <bundle> --into <branch> --fetch --push` refreshes and pushes branch targets after all local merges succeed.
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
-- `knit land plan` and `knit land apply` are the post-approval PR landing path.
+- `knit land` creates or shows the landing plan; `knit land apply` executes it.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
@@ -321,6 +326,8 @@ knit merge push
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit checkpoint "note"` records non-Git progress in the bundle ledger.
 - `knit close --reason "merged"` marks the bundle closed without deleting branches or worktrees.
+- `knit status` still shows a closed bundle's worktrees and branches while they remain on disk.
+- `knit clean --closed --worktrees` removes generated worktrees for closed bundles while preserving local feature branches.
 
 Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
 
