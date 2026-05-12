@@ -284,7 +284,7 @@ knit land apply
 knit land status
 ```
 
-Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
+Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
 Use `knit merge` for local integration into staging branches or compatibility bundles:
 

@@ -276,7 +276,7 @@ knit add --intent-to-add frontend new-file.ts
 
 `knit status` shows the resolved bundle source, ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
 
-`knit diff` shows cross-repo diffs against each repo's recorded `baseSha`. It follows `git diff`: committed, staged, and unstaged tracked-file changes are shown, while untracked files are not shown until they are added to the index. Use `knit status` or `knit git status --short` to see untracked files. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
+`knit diff` prints the resolved bundle and source, then shows cross-repo diffs against each repo's recorded `baseSha`. It follows `git diff`: committed, staged, and unstaged tracked-file changes are shown, while untracked files are not shown until they are added to the index. Use `knit status` or `knit git status --short` to see untracked files. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
 
 ```sh
 knit diff
@@ -350,7 +350,7 @@ knit land status
 knit land resume
 ```
 
-`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `squash`, waits for required checks, and does not delete feature branches. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
+`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `squash`, waits for required checks, and does not delete feature branches. In Knit, a PR with no required checks has passed the required-check gate. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
 
 Bare `knit land` is safe: it creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. Execute the plan explicitly with `knit land apply` after inspection.
 

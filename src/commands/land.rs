@@ -1244,7 +1244,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str) {
 
 fn check_status_label(runs: &[github::CheckRun]) -> String {
     if runs.is_empty() {
-        return out::muted("no_required_checks");
+        return out::ok("passed (no required checks)");
     }
     let failed = runs.iter().filter(|run| {
         matches!(run.bucket.as_deref(), Some("fail" | "cancel"))
