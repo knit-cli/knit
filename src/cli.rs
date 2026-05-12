@@ -187,10 +187,10 @@ pub enum Commands {
         #[command(subcommand)]
         target: PublishCommand,
     },
-    /// Plan and execute cross-repo PR landing.
+    /// Create or show the landing plan. Use `knit land apply` to execute it.
     Land {
         #[command(subcommand)]
-        command: LandCommand,
+        command: Option<LandCommand>,
     },
     /// Merge a bundle or branch into another branch or bundle.
     Merge {

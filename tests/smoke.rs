@@ -1162,16 +1162,17 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     assert!(status.contains("#202"));
     assert!(status.contains("not landed"));
     assert!(status.contains("Next:"));
-    assert!(status.contains("knit land plan"));
+    assert!(status.contains("knit land"));
 
     let knit_status = knit(&workspace, ["status"]);
     assert!(knit_status.contains("Publications:"));
     assert!(knit_status.contains("not landed"));
-    assert!(knit_status.contains("knit land plan"));
+    assert!(knit_status.contains("knit land"));
 
-    let land_plan = knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(land_plan.contains("Lands into:"));
     assert!(land_plan.contains("GitHub PR base branch"));
+    assert!(land_plan.contains("knit land apply"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1275,12 +1276,18 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(missing_plan.contains("No land plan found"));
 
-    let plan = knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    let plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(plan.contains("Land plan"));
     assert!(plan.contains("merge-backend"));
     assert!(plan.contains("merge-frontend"));
+    assert!(plan.contains("knit land apply"));
     let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
     assert!(plan_path.exists());
+    assert!(!fake_gh_dir.join("merge-order.txt").exists());
+
+    let existing_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(existing_plan.contains("Land plan"));
+    assert!(!fake_gh_dir.join("merge-order.txt").exists());
 
     let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(apply.contains("Feature landed"));
@@ -1582,6 +1589,15 @@ fn close_records_feature_closed_node_without_git_state() {
 
     let close = knit(&workspace, ["close", "--reason", "merged"]);
     assert!(close.contains("Closed bundle"));
+    assert!(close.contains("Preserved"));
+    assert!(close.contains("worktrees and local feature branches"));
+    assert!(close.contains("knit bundle delete venue-capacity --force --worktrees --branches"));
+
+    let status = knit(&workspace, ["status"]);
+    assert!(status.contains("State: closed"));
+    assert!(status.contains("knit/venue-capacity"));
+    assert!(status.contains(".knit/worktrees/venue-capacity/backend"));
+    assert!(status.contains("ledger marker only"));
 
     let log = knit(&workspace, ["log", "-1"]);
     assert!(log.contains("closed"));

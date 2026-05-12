@@ -1,3 +1,4 @@
+use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::git::{current_branch, git_output, is_ancestor, rev_list, rev_parse};
 use crate::ids::node_id;
@@ -142,7 +143,42 @@ pub fn generate_land_plan(provider: &str, out_path: Option<&Path>, force: bool) 
     }
     write_json(&path, &plan)?;
     print_plan(&plan, &path);
+    advice::print(
+        &active.root,
+        "inspect or edit this plan, then run `knit land apply` when you are ready to execute it.",
+    );
     Ok(())
+}
+
+pub fn land_default() -> Result<()> {
+    let active = load_active_bundle()?;
+    if let Some(path) = resolve_land_run_path(&active, None)? {
+        let run: LandRun = read_json(&path)?;
+        print_run_status(&active, &run, &path);
+        if run.status == STATUS_SUCCEEDED {
+            return Ok(());
+        }
+        advice::print(
+            &active.root,
+            "fix the failed or incomplete step, then run `knit land resume` when you are ready to continue execution.",
+        );
+        return Ok(());
+    }
+
+    let plan_path = default_plan_path(&active);
+    if plan_path.exists() {
+        let plan: LandPlan = read_json(&plan_path)?;
+        validate_plan_for_bundle(&active, &plan)?;
+        print_plan(&plan, &plan_path);
+        advice::print(
+            &active.root,
+            "inspect or edit this plan, then run `knit land apply` when you are ready to execute it.",
+        );
+        return Ok(());
+    }
+
+    drop(active);
+    generate_land_plan("github", None, false)
 }
 
 pub fn apply_land_plan(plan_path: Option<&Path>) -> Result<()> {

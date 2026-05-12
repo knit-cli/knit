@@ -188,21 +188,22 @@ pub fn run(cli: Cli) -> Result<()> {
             },
         },
         Commands::Land { command } => match command {
-            LandCommand::Plan {
+            None => commands::land_default(),
+            Some(LandCommand::Plan {
                 provider,
                 out,
                 force,
-            } => commands::generate_land_plan(&provider, out.as_deref(), force),
-            LandCommand::Apply { plan } => commands::apply_land_plan(plan.as_deref()),
-            LandCommand::Resume { run } => commands::resume_land_run(run.as_deref()),
-            LandCommand::Status { run } => commands::show_land_status(run.as_deref()),
-            LandCommand::Update {
+            }) => commands::generate_land_plan(&provider, out.as_deref(), force),
+            Some(LandCommand::Apply { plan }) => commands::apply_land_plan(plan.as_deref()),
+            Some(LandCommand::Resume { run }) => commands::resume_land_run(run.as_deref()),
+            Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
+            Some(LandCommand::Update {
                 repos,
                 all,
                 push,
                 set_upstream,
                 continue_merge,
-            } => commands::update_land_branches(&repos, all, push, set_upstream, continue_merge),
+            }) => commands::update_land_branches(&repos, all, push, set_upstream, continue_merge),
         },
         Commands::Merge {
             source,

@@ -1,8 +1,9 @@
 use crate::advice;
 use crate::checkout::{checkout_dir, checkout_display_path, checkout_mode_label, is_in_place};
+use crate::commands::bundle::bundle_state;
 use crate::git::current_branch;
 use crate::git::git_output;
-use crate::model::PublicationEntry;
+use crate::model::{PublicationEntry, BUNDLE_STATE_CLOSED};
 use crate::output as out;
 use crate::status::status_label;
 use crate::store::load_active_bundle;
@@ -12,12 +13,14 @@ use anyhow::Result;
 pub fn show_status() -> Result<()> {
     let active = load_active_bundle()?;
     let unrecorded = detect_unrecorded_changes(&active)?;
+    let state = bundle_state(&active.bundle);
     println!(
-        "{} {} ({})\n",
+        "{} {} ({})",
         out::heading("Bundle:"),
         out::node(&active.bundle.id),
         active.resolution_source.label()
     );
+    println!("{} {}\n", out::heading("State:"), out::status(state));
     println!(
         "{} {} {} {} {}",
         out::header_field("repo", 14),
@@ -75,8 +78,28 @@ pub fn show_status() -> Result<()> {
     }
 
     print_publication_summary(&active);
+    print_closed_summary(&active, state);
 
     Ok(())
+}
+
+fn print_closed_summary(active: &crate::store::ActiveBundle, state: &str) {
+    if state != BUNDLE_STATE_CLOSED {
+        return;
+    }
+    println!();
+    println!(
+        "{} {}",
+        out::heading("Closed:"),
+        "ledger marker only; generated worktrees and local feature branches are preserved."
+    );
+    advice::print(
+        &active.root,
+        format!(
+            "to remove this bundle's local generated state, run `knit bundle delete {} --force --worktrees --branches` (add `--force-branches` if needed).",
+            active.bundle.id
+        ),
+    );
 }
 
 fn print_publication_summary(active: &crate::store::ActiveBundle) {
@@ -103,7 +126,7 @@ fn print_publication_summary(active: &crate::store::ActiveBundle) {
     );
     advice::print(
         &active.root,
-        "after PR approval, run `knit land plan`, inspect it, then `knit land apply`; do not use `gh pr merge` for Knit-owned bundles.",
+        "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection; do not use `gh pr merge`.",
     );
 }
 
