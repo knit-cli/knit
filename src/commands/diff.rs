@@ -14,6 +14,12 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
+    println!(
+        "{} {} ({})\n",
+        out::heading("Bundle:"),
+        out::node(&active.bundle.id),
+        active.resolution_source.label()
+    );
 
     let repos = resolve_repos(&active, selectors)?;
     let mut shown = 0usize;
@@ -55,7 +61,11 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
     }
 
     if shown == 0 && selectors.is_empty() {
-        println!("{}", out::ok("No diffs found."));
+        println!(
+            "{} {}",
+            out::ok("No diffs found in bundle"),
+            out::node(&active.bundle.id)
+        );
     }
 
     Ok(())

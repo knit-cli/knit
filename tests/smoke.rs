@@ -630,12 +630,14 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(all_git_status.contains("== scraper"));
 
     let diff_stat = knit(&workspace, ["diff", "--stat"]);
+    assert!(diff_stat.contains("Bundle: venue-capacity (workspace)"));
     assert!(diff_stat.contains("== backend"));
     assert!(diff_stat.contains("== frontend"));
     assert!(diff_stat.contains("== scraper"));
     assert!(diff_stat.contains("app.txt"));
 
     let frontend_diff = knit(&workspace, ["diff", "frontend"]);
+    assert!(frontend_diff.contains("Bundle: venue-capacity (workspace)"));
     assert!(frontend_diff.contains("capacity frontend ui"));
     assert!(!frontend_diff.contains("untracked.txt"));
     assert!(!frontend_diff.contains("capacity backend api"));
@@ -1540,6 +1542,70 @@ fn land_apply_stops_when_required_checks_fail() {
 }
 
 #[test]
+fn land_apply_treats_no_required_checks_as_ready() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "docs cleanup"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/docs-cleanup/backend/app.txt"),
+        "docs cleanup landing",
+    );
+    knit(&workspace, ["commit", "--stage", "-m", "Docs cleanup"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(plan.contains("Land plan"));
+    let plan_json: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/land-plans/docs-cleanup.land.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan_json["steps"][0]["waitForChecks"].as_bool(), Some(true));
+
+    let status = knit_with_fake_gh_env(
+        &workspace,
+        ["land", "status"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_NO_REQUIRED_CHECKS_ERROR", "1")],
+    );
+    assert!(status.contains("checks passed (no required checks)"));
+    assert!(!status.contains("checks unavailable"));
+
+    let apply = knit_with_fake_gh_env(
+        &workspace,
+        ["land", "apply"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_NO_REQUIRED_CHECKS_ERROR", "1")],
+    );
+    assert!(apply.contains("Feature landed"));
+    let run_status = knit_with_fake_gh_env(
+        &workspace,
+        ["land", "status"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_NO_REQUIRED_CHECKS_ERROR", "1")],
+    );
+    assert!(run_status.contains("checks passed (no required checks)"));
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.trim(), "backend");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn checkpoint_records_non_git_ledger_note() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
@@ -2117,6 +2183,10 @@ case "$sub" in
     printf '%s\n' "$url"
     ;;
   checks)
+    if [ "${GH_FAKE_NO_REQUIRED_CHECKS_ERROR:-0}" = "1" ]; then
+      echo "no required checks reported" >&2
+      exit 1
+    fi
     if [ "${GH_FAKE_CHECKS_FAIL:-0}" = "1" ]; then
       printf '[{"name":"test","state":"FAILURE","bucket":"fail"}]\n'
     else

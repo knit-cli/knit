@@ -228,9 +228,20 @@ pub fn check_runs(cwd: &Path, url: &str, required_only: bool) -> Result<Vec<Chec
     match gh_output(cwd, args, None) {
         Ok(output) if output.trim().is_empty() => Ok(Vec::new()),
         Ok(output) => serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON"),
-        Err(error) if error.to_string().to_lowercase().contains("no checks") => Ok(Vec::new()),
+        Err(error) if is_no_checks_error(&error) => Ok(Vec::new()),
         Err(error) => Err(error),
     }
+}
+
+fn is_no_checks_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("no checks")
+        || message.contains("no required checks")
+        || message.contains("no required status checks")
+        || message.contains("no check runs")
+        || message.contains("no check suites")
+        || message.contains("no checks reported")
+        || message.contains("no required checks reported")
 }
 
 pub fn wait_for_checks(
@@ -250,7 +261,7 @@ pub fn wait_for_checks(
         match state {
             ChecksState::NoChecks => {
                 return Ok(CheckWaitSummary {
-                    status: "no_required_checks".to_string(),
+                    status: "passed (no required checks)".to_string(),
                     runs,
                 })
             }
