@@ -15,7 +15,7 @@ pub mod store;
 pub mod time;
 pub mod tracking;
 
-use anyhow::Result;
+use anyhow::{bail, Result};
 
 pub use cli::{
     BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
@@ -53,8 +53,14 @@ pub fn run(cli: Cli) -> Result<()> {
             update,
             args,
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
-        Commands::Untrack { repo_ids } => commands::remove_repos(&repo_ids),
-        Commands::Remove { repo_ids } => commands::remove_repos(&repo_ids),
+        Commands::Untrack { repo_ids, repos } => {
+            let repo_ids = remove_repo_ids(repo_ids, repos)?;
+            commands::remove_repos(&repo_ids)
+        }
+        Commands::Remove { repo_ids, repos } => {
+            let repo_ids = remove_repo_ids(repo_ids, repos)?;
+            commands::remove_repos(&repo_ids)
+        }
         Commands::Worktree => commands::create_worktrees(),
         Commands::Bundle { command } => match command {
             None => commands::show_current_bundle(),
@@ -83,7 +89,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 in_place,
                 no_worktree,
             }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
-            Some(BundleCommand::Remove { repo_ids }) => commands::remove_repos(&repo_ids),
+            Some(BundleCommand::Remove { repo_ids, repos }) => {
+                let repo_ids = remove_repo_ids(repo_ids, repos)?;
+                commands::remove_repos(&repo_ids)
+            }
             Some(BundleCommand::List {
                 all,
                 archived,
@@ -250,4 +259,12 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Doctor => commands::doctor_workspace(),
         Commands::Migrate { check } => commands::migrate_workspace(check),
     }
+}
+
+fn remove_repo_ids(repo_ids: Vec<String>, repos: Vec<String>) -> Result<Vec<String>> {
+    let repo_ids = repo_ids.into_iter().chain(repos).collect::<Vec<_>>();
+    if repo_ids.is_empty() {
+        bail!("Pass at least one repo id, for example `knit bundle remove --repo backend`.");
+    }
+    Ok(repo_ids)
 }

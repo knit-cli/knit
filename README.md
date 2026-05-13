@@ -108,7 +108,7 @@ knit project show [name]
 knit bundle
 knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
-knit bundle remove <repo-id>...
+knit bundle remove [<repo-id>...] [--repo <repo-id>]...
 knit bundle list [--all] [--archived] [--deleted]
 knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
@@ -120,8 +120,8 @@ knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit stage [-r <repo>] [-N] [-u] [repo-or-pathspec...]
-knit untrack <repo-id>...
-knit remove <repo-id>...
+knit untrack [<repo-id>...] [--repo <repo-id>]...
+knit remove [<repo-id>...] [--repo <repo-id>]...
 knit worktree
 knit bundle path
 knit bundle print
@@ -421,7 +421,7 @@ Knit-Bundle: <bundle-id>
 
 The bundle records the full mapping from logical commit group to repo commit SHAs.
 
-`knit untrack <repo-id>...` removes repos from bundle tracking and appends a `repo.removed` node. It intentionally leaves existing git branches and checkouts in place. `knit remove` remains as an alias.
+`knit bundle remove --repo <repo-id>` removes repos from bundle tracking and appends a `repo.removed` node. Positional repo ids are also accepted, as in `knit bundle remove backend frontend`. It intentionally leaves existing git branches and checkouts in place. `knit untrack` and `knit remove` remain as top-level aliases.
 
 ## Bundle Nodes
 

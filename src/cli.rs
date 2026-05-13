@@ -63,14 +63,18 @@ pub enum Commands {
     /// Stop tracking repositories. Leaves git branches/checkouts in place.
     Untrack {
         /// Repo ids to remove from the resolved bundle.
-        #[arg(required = true)]
         repo_ids: Vec<String>,
+        /// Repo ids to remove from the resolved bundle.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
     },
     /// Remove repositories from bundle tracking. Alias for untrack.
     Remove {
         /// Repo ids to remove from the resolved bundle.
-        #[arg(required = true)]
         repo_ids: Vec<String>,
+        /// Repo ids to remove from the resolved bundle.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
     },
     /// Create per-repo worktrees for the resolved bundle.
     Worktree,
@@ -338,8 +342,10 @@ pub enum BundleCommand {
     /// Remove repos from bundle tracking.
     Remove {
         /// Repo ids to remove from the current bundle.
-        #[arg(required = true)]
         repo_ids: Vec<String>,
+        /// Repo ids to remove from the current bundle.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
     },
     /// List bundles in the workspace.
     List {

@@ -703,7 +703,7 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(shorthand_log.contains("observed git changes"));
     assert!(!shorthand_log.contains("Add venue capacity integration"));
 
-    knit(&workspace, ["remove", "scraper"]);
+    knit(&workspace, ["bundle", "remove", "--repo", "scraper"]);
 
     let bundle = read_bundle(&workspace);
     assert_eq!(bundle["kind"], "ChangeGroup");
