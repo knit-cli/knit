@@ -1097,6 +1097,14 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
         .iter()
         .filter_map(|repo_id| publication_for_repo(&active.bundle, repo_id))
         .map(|publication| publication.url.clone())
+        .chain(
+            run.steps
+                .iter()
+                .filter(|step| step.repo_id.is_some())
+                .filter_map(|step| step.publication_url.clone()),
+        )
+        .collect::<BTreeSet<_>>()
+        .into_iter()
         .collect::<Vec<_>>();
     active.bundle.nodes.push(BundleNode::feature_landed(
         node_id("land"),
@@ -1172,7 +1180,7 @@ fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {
             step.detail.as_deref().unwrap_or("")
         );
         if let Some(repo_id) = &step.repo_id {
-            print_pr_status(active, repo_id);
+            print_pr_status(active, repo_id, step.publication_url.as_deref());
         }
         if let Some(stderr) = &step.stderr {
             if !stderr.trim().is_empty() {
@@ -1190,11 +1198,11 @@ fn print_planned_step(active: &ActiveBundle, step: &LandStep) {
         step.step_type
     );
     if let Some(repo_id) = &step.repo_id {
-        print_pr_status(active, repo_id);
+        print_pr_status(active, repo_id, None);
     }
 }
 
-fn print_pr_status(active: &ActiveBundle, repo_id: &str) {
+fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_url: Option<&str>) {
     let Some(repo) = active.bundle.repos.iter().find(|repo| repo.id == repo_id) else {
         println!(
             "  {} {}",
@@ -1211,7 +1219,10 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str) {
         );
         return;
     };
-    let Some(publication) = publication_for_repo(&active.bundle, repo_id) else {
+    let publication_url = publication_for_repo(&active.bundle, repo_id)
+        .map(|publication| publication.url.as_str())
+        .or(fallback_publication_url);
+    let Some(publication_url) = publication_url else {
         println!(
             "  {} {}",
             out::repo(repo_id),
@@ -1219,7 +1230,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str) {
         );
         return;
     };
-    match github::view_pr(&cwd, &publication.url) {
+    match github::view_pr(&cwd, publication_url) {
         Ok(pr) => {
             println!(
                 "  {} #{} {} {}",
@@ -1228,7 +1239,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str) {
                 out::status(pr.state.as_deref().unwrap_or("UNKNOWN")),
                 pr.url
             );
-            match github::check_runs(&cwd, &publication.url, true) {
+            match github::check_runs(&cwd, publication_url, true) {
                 Ok(runs) => println!("    checks {}", check_status_label(&runs)),
                 Err(error) => println!("    {} {}", out::danger("checks unavailable:"), error),
             }

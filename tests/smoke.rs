@@ -1309,6 +1309,18 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
     assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
 
+    let mut stale_bundle = read_bundle(&workspace);
+    stale_bundle["publications"] = json!([]);
+    fs::write(
+        workspace.join(".knit/bundles/venue-capacity.bundle.json"),
+        format!("{}\n", serde_json::to_string_pretty(&stale_bundle).unwrap()),
+    )
+    .unwrap();
+    let stale_status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
+    assert!(!stale_status.contains("publication missing"));
+    assert!(stale_status.contains("https://github.com/acme/backend/pull/101"));
+    assert!(stale_status.contains("https://github.com/acme/frontend/pull/202"));
+
     fs::remove_dir_all(root).unwrap();
 }
 
