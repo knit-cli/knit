@@ -9,9 +9,6 @@ pub struct Cli {
     /// Resolve commands against this bundle instead of cwd or workspace context.
     #[arg(long, global = true, value_name = "BUNDLE")]
     pub bundle: Option<String>,
-    /// Resolve and update per-agent bundle context with this agent id.
-    #[arg(long, global = true, value_name = "AGENT")]
-    pub agent: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -33,11 +30,6 @@ pub enum Commands {
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
-    },
-    /// Show or update per-agent bundle context.
-    Agent {
-        #[command(subcommand)]
-        command: Option<AgentCommand>,
     },
     /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
@@ -523,19 +515,6 @@ pub enum ProjectRunCommandCli {
 }
 
 #[derive(Subcommand)]
-pub enum AgentCommand {
-    /// Show the current agent context.
-    Show,
-    /// Set the current agent's active bundle.
-    Switch {
-        /// Bundle id to make active for this agent.
-        bundle: String,
-    },
-    /// Clear the current agent context.
-    Clear,
-}
-
-#[derive(Subcommand)]
 pub enum ConfigCommand {
     /// Set a Knit config value.
     Set {
@@ -550,7 +529,7 @@ pub enum ConfigCommand {
 pub enum SchemaCommand {
     /// Print a bundled JSON Schema.
     Print {
-        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config, agent-context.
+        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config.
         name: String,
     },
 }

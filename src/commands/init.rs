@@ -3,7 +3,7 @@ use crate::model::{ChangeGroup, KnitConfig};
 use crate::output as out;
 use crate::store::{
     bundle_path as stored_bundle_path, find_knit_root, load_config, save_active_bundle,
-    save_config, set_agent_active_bundle, write_json, ActiveBundle,
+    save_config, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -58,13 +58,9 @@ pub fn start_bundle(
     fs::create_dir_all(&bundle_dir).context("failed to create .knit/bundles")?;
     fs::create_dir_all(&worktree_dir).context("failed to create .knit/worktrees")?;
     fs::create_dir_all(knit_dir.join("projects")).context("failed to create .knit/projects")?;
-    fs::create_dir_all(knit_dir.join("agents")).context("failed to create .knit/agents")?;
 
-    let current_agent = crate::store::current_agent_id();
     let mut config = if knit_dir.join("config.json").exists() {
         load_config(&root)?
-    } else if current_agent.is_some() {
-        KnitConfig::new_workspace()
     } else {
         KnitConfig::new(bundle_id.clone())
     };
@@ -73,16 +69,11 @@ pub fn start_bundle(
     bundle.project_id = project_id.clone();
     write_json(&bundle_path, &bundle)?;
 
-    if current_agent.is_none() || config.active_bundle.is_none() {
-        config.active_bundle = Some(bundle_id.clone());
-    }
+    config.active_bundle = Some(bundle_id.clone());
     if let Some(project_id) = &project_id {
         config.active_project = Some(project_id.clone());
     }
     save_config(&root, &config)?;
-    if let Some(agent_id) = &current_agent {
-        set_agent_active_bundle(&root, agent_id, &bundle_id)?;
-    }
 
     if let Some(project_id) = &project_id {
         let selected = select_project_repos(&root, project_id, repo_ids, all_repos)?;
@@ -252,8 +243,6 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
-When an agent id is available through `--agent`, `KNIT_AGENT`, or Codex's `CODEX_THREAD_ID`, `knit bundle start` and `knit bundle switch` update that agent's `.knit/agents/<agent>.agent.json` context instead of changing the shared workspace fallback. Use `knit agent` to inspect it, and use `knit bundle switch <bundle> --workspace` only when the shared fallback should change.
-
 Make code changes inside Knit checkouts, usually under:
 
 ```txt
@@ -324,8 +313,7 @@ knit merge push
 - `knit bundle restore <bundle>` makes an archived bundle available again.
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
-- `knit bundle switch <bundle>` changes the current agent, workspace, or folder fallback bundle.
-- `knit agent` shows the current agent's active bundle; `knit agent clear` removes it.
+- `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
 - `knit run --repo <repo> -- <command>` runs a one-off command inside a tracked checkout.
 - `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.
@@ -345,7 +333,7 @@ knit merge push
 - `knit status` still shows a closed bundle's worktrees and branches while they remain on disk.
 - `knit clean --closed --worktrees` removes generated worktrees for closed bundles while preserving local feature branches.
 
-Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then agent context, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
+Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
 
 Aliases such as `knit init "feature title"` and `knit track ../backend` are also supported.
 

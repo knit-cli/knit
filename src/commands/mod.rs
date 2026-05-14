@@ -1,4 +1,3 @@
-pub mod agent;
 pub mod bundle;
 pub mod checkpoint;
 pub mod clean;
@@ -27,7 +26,6 @@ pub mod sync;
 pub mod track;
 pub mod worktree;
 
-pub use agent::{clear_agent_context, show_agent_context, switch_agent_bundle};
 pub use bundle::{
     archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, restore_bundle,
     show_current_bundle, switch_bundle, validate_bundle,

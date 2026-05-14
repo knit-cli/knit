@@ -40,15 +40,6 @@ impl KnitConfig {
             advice: true,
         }
     }
-
-    pub fn new_workspace() -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            active_bundle: None,
-            active_project: None,
-            advice: true,
-        }
-    }
 }
 
 fn default_advice() -> bool {
@@ -134,28 +125,6 @@ impl KnitContexts {
 pub struct KnitContextEntry {
     pub path: String,
     pub active_bundle: String,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnitAgentContext {
-    pub schema_version: String,
-    pub kind: String,
-    pub id: String,
-    pub active_bundle: String,
-    pub updated_at: String,
-}
-
-impl KnitAgentContext {
-    pub fn new(id: String, active_bundle: String, now: String) -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            kind: "KnitAgentContext".to_string(),
-            id,
-            active_bundle,
-            updated_at: now,
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -18,13 +18,12 @@ pub mod tracking;
 use anyhow::{bail, Result};
 
 pub use cli::{
-    AgentCommand, BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, SchemaCommand,
+    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
+    ProjectRunCommandCli, PublishCommand, SchemaCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
-    store::set_agent_override(cli.agent);
     match cli.command {
         Commands::Init {
             title,
@@ -56,11 +55,6 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
-        },
-        Commands::Agent { command } => match command {
-            None | Some(AgentCommand::Show) => commands::show_agent_context(),
-            Some(AgentCommand::Switch { bundle }) => commands::switch_agent_bundle(&bundle),
-            Some(AgentCommand::Clear) => commands::clear_agent_context(),
         },
         Commands::Track {
             repo_paths,
