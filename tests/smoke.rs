@@ -254,6 +254,44 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
 }
 
 #[test]
+fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "test"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "start", "test2"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    assert!(knit(&workspace, ["status"]).contains("Bundle: test2 (workspace)"));
+
+    let test_checkout = workspace.join(".knit/worktrees/test/backend");
+    fs::write(test_checkout.join("test.md"), "test\n").unwrap();
+    let commit = knit(&test_checkout, ["commit", "--stage", "-m", "Add test"]);
+    assert!(commit.contains("Recorded commit group"));
+
+    let test_bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/test.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    let test2_bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/test2.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(test_bundle["commitGroups"].as_array().unwrap().len(), 1);
+    assert_eq!(test2_bundle["commitGroups"].as_array().unwrap().len(), 0);
+    assert!(test_checkout.join("test.md").exists());
+    assert!(!workspace
+        .join(".knit/worktrees/test2/backend/test.md")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn run_executes_named_project_commands_in_bundle_worktrees() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
