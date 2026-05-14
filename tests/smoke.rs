@@ -22,6 +22,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit project init"));
     assert!(agents.contains("knit bundle start"));
     assert!(agents.contains("knit bundle add"));
+    assert!(agents.contains("knit bundle remove --repo"));
     assert!(agents.contains("knit commit --stage"));
     assert!(agents.contains("gloss prepare"));
 

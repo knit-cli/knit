@@ -303,6 +303,7 @@ knit merge push
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle start "Feature title"` creates a bundle.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
+- `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
