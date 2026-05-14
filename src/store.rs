@@ -1,4 +1,7 @@
-use crate::model::{ChangeGroup, KnitConfig, KnitContexts};
+use crate::model::{
+    ChangeGroup, KnitConfig, KnitContexts, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED,
+    BUNDLE_STATE_DELETED,
+};
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs::{self, OpenOptions};
@@ -75,12 +78,22 @@ fn load_active_bundle_inner(lock_for_update: bool) -> Result<ActiveBundle> {
     let bundle_path = root
         .join(".knit/bundles")
         .join(format!("{bundle_id}.bundle.json"));
+    let bundle: ChangeGroup = read_json(&bundle_path)?;
+    if lock_for_update {
+        ensure_root_workspace_fallback_is_unambiguous(
+            &root,
+            &cwd,
+            &bundle_id,
+            &resolution_source,
+            &bundle,
+            "update",
+        )?;
+    }
     let lock = if lock_for_update {
         Some(acquire_bundle_lock(&root, &bundle_id)?)
     } else {
         None
     };
-    let bundle: ChangeGroup = read_json(&bundle_path)?;
 
     Ok(ActiveBundle {
         root,
@@ -240,6 +253,79 @@ fn resolve_bundle_id(
     }
 
     bail!("No active Knit bundle found. Run `knit bundle start \"feature title\"` first.")
+}
+
+pub fn ensure_workspace_fallback_status_is_unambiguous(active: &ActiveBundle) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    ensure_root_workspace_fallback_is_unambiguous(
+        &active.root,
+        &cwd,
+        &active.bundle.id,
+        &active.resolution_source,
+        &active.bundle,
+        "show status for",
+    )
+}
+
+fn ensure_root_workspace_fallback_is_unambiguous(
+    root: &Path,
+    cwd: &Path,
+    bundle_id: &str,
+    resolution_source: &BundleResolutionSource,
+    bundle: &ChangeGroup,
+    action: &str,
+) -> Result<()> {
+    if resolution_source != &BundleResolutionSource::Config || cwd != root {
+        return Ok(());
+    }
+    if bundle.repos.is_empty() {
+        return Ok(());
+    }
+
+    let open_bundles = open_bundle_ids(root)?;
+    if open_bundles.len() <= 1 {
+        return Ok(());
+    }
+
+    bail!(
+        "Refusing to {action} bundle `{bundle_id}` from the workspace root via the shared workspace fallback because multiple open bundles exist: {}. Use the same command with `--bundle {bundle_id}`, run from `.knit/worktrees/{bundle_id}/<repo>/`, or close/archive bundles you are not using.",
+        open_bundles.join(", ")
+    )
+}
+
+fn open_bundle_ids(root: &Path) -> Result<Vec<String>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut ids = Vec::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read bundle directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let bundle: ChangeGroup = read_json(&path)?;
+        if is_open_bundle(&bundle) {
+            ids.push(bundle.id);
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
+fn is_open_bundle(bundle: &ChangeGroup) -> bool {
+    match bundle.state.as_deref() {
+        Some(BUNDLE_STATE_ARCHIVED | BUNDLE_STATE_CLOSED | BUNDLE_STATE_DELETED) => return false,
+        _ => {}
+    }
+
+    !bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.closed" || node.node_type == "feature.landed")
 }
 
 fn ensure_bundle_exists(root: &Path, bundle_id: &str) -> Result<()> {
