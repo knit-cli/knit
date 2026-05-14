@@ -9,6 +9,9 @@ pub struct Cli {
     /// Resolve commands against this bundle instead of cwd or workspace context.
     #[arg(long, global = true, value_name = "BUNDLE")]
     pub bundle: Option<String>,
+    /// Resolve and update per-agent bundle context with this agent id.
+    #[arg(long, global = true, value_name = "AGENT")]
+    pub agent: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -30,6 +33,11 @@ pub enum Commands {
     Project {
         #[command(subcommand)]
         command: ProjectCommand,
+    },
+    /// Show or update per-agent bundle context.
+    Agent {
+        #[command(subcommand)]
+        command: Option<AgentCommand>,
     },
     /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
@@ -185,6 +193,23 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
+    },
+    /// Run a project command inside resolved bundle checkouts.
+    Run {
+        /// Configured project command name. Omit when passing a raw command after --.
+        name: Option<String>,
+        /// Target repo id or path. Overrides configured repos for named commands.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Run against every tracked repo.
+        #[arg(long)]
+        all: bool,
+        /// List configured commands for the active bundle's project.
+        #[arg(long)]
+        list: bool,
+        /// Raw command to execute, for example `knit run -r web -- docker compose up`.
+        #[arg(last = true, allow_hyphen_values = true)]
+        args: Vec<OsString>,
     },
     /// Publish tracked feature branches to a code hosting provider.
     Publish {
@@ -462,6 +487,52 @@ pub enum ProjectCommand {
         /// Project name. Defaults to the active project.
         name: Option<String>,
     },
+    /// Manage named commands that `knit run` can execute.
+    Command {
+        #[command(subcommand)]
+        command: ProjectRunCommandCli,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ProjectRunCommandCli {
+    /// Add or replace a named project command.
+    Set {
+        /// Command name used by `knit run <name>`.
+        name: String,
+        /// Repo id to run in. Repeat for multiple repos.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Subdirectory inside each resolved checkout.
+        #[arg(long)]
+        cwd: Option<PathBuf>,
+        /// Environment variable to set, as KEY=VALUE. Repeat for several variables.
+        #[arg(long = "env", value_name = "KEY=VALUE")]
+        env: Vec<String>,
+        /// Command and args to execute.
+        #[arg(required = true, trailing_var_arg = true, allow_hyphen_values = true)]
+        command: Vec<OsString>,
+    },
+    /// List project commands.
+    List,
+    /// Remove a project command.
+    Remove {
+        /// Command name.
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AgentCommand {
+    /// Show the current agent context.
+    Show,
+    /// Set the current agent's active bundle.
+    Switch {
+        /// Bundle id to make active for this agent.
+        bundle: String,
+    },
+    /// Clear the current agent context.
+    Clear,
 }
 
 #[derive(Subcommand)]
@@ -479,7 +550,7 @@ pub enum ConfigCommand {
 pub enum SchemaCommand {
     /// Print a bundled JSON Schema.
     Print {
-        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config.
+        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config, agent-context.
         name: String,
     },
 }

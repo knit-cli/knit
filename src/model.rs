@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: &str = "0.1";
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
@@ -39,6 +40,15 @@ impl KnitConfig {
             advice: true,
         }
     }
+
+    pub fn new_workspace() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            active_bundle: None,
+            active_project: None,
+            advice: true,
+        }
+    }
 }
 
 fn default_advice() -> bool {
@@ -55,6 +65,8 @@ pub struct KnitProject {
     pub updated_at: String,
     #[serde(default)]
     pub repos: Vec<ProjectRepoEntry>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commands: BTreeMap<String, ProjectRunCommand>,
 }
 
 impl KnitProject {
@@ -66,6 +78,7 @@ impl KnitProject {
             created_at: now.clone(),
             updated_at: now,
             repos: Vec::new(),
+            commands: BTreeMap::new(),
         }
     }
 }
@@ -81,6 +94,18 @@ pub struct ProjectRepoEntry {
     pub checkout_mode: String,
     #[serde(default = "default_include_by_default")]
     pub include_by_default: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRunCommand {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
 }
 
 fn default_include_by_default() -> bool {
@@ -109,6 +134,28 @@ impl KnitContexts {
 pub struct KnitContextEntry {
     pub path: String,
     pub active_bundle: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnitAgentContext {
+    pub schema_version: String,
+    pub kind: String,
+    pub id: String,
+    pub active_bundle: String,
+    pub updated_at: String,
+}
+
+impl KnitAgentContext {
+    pub fn new(id: String, active_bundle: String, now: String) -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            kind: "KnitAgentContext".to_string(),
+            id,
+            active_bundle,
+            updated_at: now,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

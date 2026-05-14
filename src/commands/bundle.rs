@@ -8,8 +8,8 @@ use crate::model::{
 use crate::output as out;
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
-    load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
-    write_json, ActiveBundle,
+    load_config, read_json, save_config, set_agent_active_bundle, set_folder_active_bundle,
+    set_workspace_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -157,6 +157,7 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
         bail!("Bundle `{bundle_id}` is archived. Run `knit bundle restore {bundle_id}` first.");
     }
 
+    let current_agent = crate::store::current_agent_id();
     if here {
         set_folder_active_bundle(&root, &cwd, &bundle_id)?;
         println!(
@@ -164,6 +165,14 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
             out::heading("Folder bundle:"),
             out::node(&bundle_id),
             out::path(crate::store::relative_path_for_storage(&root, &cwd))
+        );
+    } else if let Some(agent_id) = current_agent.filter(|_| !workspace) {
+        let agent_id = set_agent_active_bundle(&root, &agent_id, &bundle_id)?;
+        println!(
+            "{} {} {}",
+            out::heading("Agent bundle:"),
+            out::node(&bundle_id),
+            out::muted(format!("agent {agent_id}"))
         );
     } else if workspace || cwd == root {
         set_workspace_active_bundle(&root, &bundle_id)?;
@@ -356,6 +365,7 @@ fn clear_active_if_matches(root: &std::path::Path, bundle_id: &str) -> Result<()
         config.active_bundle = None;
         save_config(root, &config)?;
     }
+    crate::store::clear_agent_contexts_for_bundle(root, bundle_id)?;
     Ok(())
 }
 

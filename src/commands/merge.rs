@@ -12,8 +12,8 @@ use crate::model::{
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, bundle_exists, bundle_path, find_knit_root, load_active_bundle,
-    load_config, read_json, relative_path_for_storage, save_config, write_json, ActiveBundle,
-    KnitLock,
+    load_config, read_json, relative_path_for_storage, save_config, set_agent_active_bundle,
+    write_json, ActiveBundle, KnitLock,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -887,9 +887,15 @@ fn create_compat_bundle_from_sources(
     }
     write_json(&path, &bundle)?;
 
+    let current_agent = crate::store::current_agent_id();
     let mut config = load_config(root)?;
-    config.active_bundle = Some(bundle_id.clone());
+    if current_agent.is_none() || config.active_bundle.is_none() {
+        config.active_bundle = Some(bundle_id.clone());
+    }
     save_config(root, &config)?;
+    if let Some(agent_id) = &current_agent {
+        set_agent_active_bundle(root, agent_id, &bundle_id)?;
+    }
 
     if materialize && !bundle.repos.is_empty() {
         let mut active = ActiveBundle::unlocked(root.to_path_buf(), path.clone(), bundle);

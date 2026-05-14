@@ -1,6 +1,8 @@
 use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
 use crate::ids::slugify;
-use crate::model::{KnitConfig, KnitProject, ProjectRepoEntry, CHECKOUT_MODE_WORKTREE};
+use crate::model::{
+    KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, CHECKOUT_MODE_WORKTREE,
+};
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, find_knit_root, load_config, project_path, read_json, save_config,
@@ -8,7 +10,9 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsStr;
+use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
@@ -128,8 +132,118 @@ pub fn show_project(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn set_project_run_command(
+    name: &str,
+    repos: &[String],
+    cwd: Option<&Path>,
+    env: &[String],
+    command: &[OsString],
+) -> Result<()> {
+    if command.is_empty() {
+        bail!("Pass a command after the name, for example `knit project command set dev -- docker compose up`.");
+    }
+    let cwd_root = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd_root).context("No Knit workspace found.")?;
+    let project_id = active_project_id(&root)?;
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    let mut project: KnitProject = read_json(&path)?;
+    let command_name = slugify(name);
+    let env = parse_env(env)?;
+    let command = command
+        .iter()
+        .map(|value| value.to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let cwd = cwd.map(|path| path.to_string_lossy().to_string());
+
+    project.commands.insert(
+        command_name.clone(),
+        ProjectRunCommand {
+            repos: repos.iter().map(|repo| slugify(repo)).collect(),
+            cwd,
+            command,
+            env,
+        },
+    );
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+    println!(
+        "{} {}",
+        out::heading("Project command:"),
+        out::repo(command_name)
+    );
+    Ok(())
+}
+
+pub fn list_project_run_commands() -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let project_id = active_project_id(&root)?;
+    let project: KnitProject = read_json(&project_path(&root, &project_id))?;
+    if project.commands.is_empty() {
+        println!("{}", out::muted("No project commands."));
+        return Ok(());
+    }
+
+    for (name, command) in project.commands {
+        let repo_label = if command.repos.is_empty() {
+            "(select at run time)".to_string()
+        } else {
+            command.repos.join(",")
+        };
+        println!(
+            "{} {} {}",
+            out::repo(name),
+            out::muted(repo_label),
+            command.command.join(" ")
+        );
+    }
+    Ok(())
+}
+
+pub fn remove_project_run_command(name: &str) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let project_id = active_project_id(&root)?;
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    let mut project: KnitProject = read_json(&path)?;
+    let command_name = slugify(name);
+    if project.commands.remove(&command_name).is_none() {
+        bail!("Project command `{command_name}` does not exist.");
+    }
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+    println!(
+        "{} {}",
+        out::heading("Removed project command:"),
+        out::repo(command_name)
+    );
+    Ok(())
+}
+
 pub fn load_project_by_id(root: &Path, project_id: &str) -> Result<KnitProject> {
     read_json(&project_path(root, project_id))
+}
+
+fn active_project_id(root: &Path) -> Result<String> {
+    load_config(root)?
+        .active_project
+        .context("No active Knit project. Run `knit project init <name>` first.")
+}
+
+fn parse_env(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut env = BTreeMap::new();
+    for value in values {
+        let Some((key, variable_value)) = value.split_once('=') else {
+            bail!("Environment entries must use KEY=VALUE syntax: {value}");
+        };
+        if key.trim().is_empty() {
+            bail!("Environment variable names cannot be empty.");
+        }
+        env.insert(key.to_string(), variable_value.to_string());
+    }
+    Ok(env)
 }
 
 fn resolve_project_repo(
