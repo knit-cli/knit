@@ -24,7 +24,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit bundle remove --repo"));
     assert!(agents.contains("knit --bundle feature-a commit"));
-    assert!(agents.contains("knit commit --stage"));
+    assert!(agents.contains("knit --bundle feature-a commit --stage"));
     assert!(agents.contains("gloss prepare"));
 
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
@@ -116,7 +116,7 @@ fn project_default_repos_start_bundle_without_track() {
 }
 
 #[test]
-fn agents_flag_writes_managed_guidance_into_generated_worktrees() {
+fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let frontend = root.join("frontend");
@@ -136,8 +136,9 @@ fn agents_flag_writes_managed_guidance_into_generated_worktrees() {
         ["project", "add", "frontend", frontend.to_str().unwrap()],
     );
 
-    let start = knit(&workspace, ["bundle", "start", "agent docs", "--agents"]);
+    let start = knit(&workspace, ["bundle", "start", "agent docs"]);
     assert!(start.contains("Worktree AGENTS.md: 2 repo worktree(s)"));
+    assert!(!workspace.join("AGENTS.md").exists());
 
     let backend_agents_path = workspace.join(".knit/worktrees/agent-docs/backend/AGENTS.md");
     let frontend_agents_path = workspace.join(".knit/worktrees/agent-docs/frontend/AGENTS.md");
@@ -145,7 +146,8 @@ fn agents_flag_writes_managed_guidance_into_generated_worktrees() {
     assert!(backend_agents.contains("Knit Worktree Guide"));
     assert!(backend_agents.contains("bundle `agent-docs`"));
     assert!(backend_agents.contains("repo `backend`"));
-    assert!(backend_agents.contains("knit --bundle agent-docs commit"));
+    assert!(backend_agents.contains("knit commit --stage"));
+    assert!(!backend_agents.contains("knit --bundle"));
     assert!(backend_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
     assert!(frontend_agents_path.exists());
     assert!(git(
@@ -160,7 +162,18 @@ fn agents_flag_writes_managed_guidance_into_generated_worktrees() {
     let updated = fs::read_to_string(&backend_agents_path).unwrap();
     assert!(updated.contains("repo guidance"));
     assert_eq!(updated.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
-    assert!(updated.contains("knit --bundle agent-docs status"));
+    assert!(updated.contains("knit status"));
+    assert!(!updated.contains("knit --bundle"));
+    assert!(workspace.join("AGENTS.md").exists());
+
+    let second_start = knit(&workspace, ["bundle", "start", "agent docs two"]);
+    assert!(second_start.contains("Worktree AGENTS.md: 2 repo worktree(s)"));
+    let second_agents =
+        fs::read_to_string(workspace.join(".knit/worktrees/agent-docs-two/backend/AGENTS.md"))
+            .unwrap();
+    assert!(second_agents.contains("bundle `agent-docs-two`"));
+    assert!(second_agents.contains("knit commit --stage"));
+    assert!(!second_agents.contains("knit --bundle"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -184,6 +197,10 @@ fn bundle_start_and_add_support_ad_hoc_work() {
 
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     assert!(workspace.join(".knit/worktrees/ad-hoc/backend").exists());
+    let worktree_agents =
+        fs::read_to_string(workspace.join(".knit/worktrees/ad-hoc/backend/AGENTS.md")).unwrap();
+    assert!(worktree_agents.contains("bundle `ad-hoc`"));
+    assert!(!worktree_agents.contains("knit --bundle"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -291,7 +308,8 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
             .contains("Bundle: fix-b (env)")
     );
 
-    knit(&workspace, ["switch", "fix-a"]);
+    assert!(knit_fails(&workspace, ["switch", "fix-a"]).contains("without --workspace"));
+    knit(&workspace, ["switch", "fix-a", "--workspace"]);
     assert!(knit(&workspace, ["status"]).contains("Bundle: fix-a (workspace)"));
 
     knit(&subdir, ["switch", "fix-b"]);

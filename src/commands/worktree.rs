@@ -1,4 +1,5 @@
 use crate::checkout::is_in_place;
+use crate::commands::agents::{print_worktree_agents_summary, write_worktree_agents_md};
 use crate::git::{
     branch_exists, current_branch, git_output, is_git_worktree, resolve_base_ref, rev_parse,
 };
@@ -19,6 +20,8 @@ pub fn create_worktrees() -> Result<()> {
     }
 
     let materialized_repo_ids = materialize_repos(&mut active, None)?;
+    let worktree_agents = write_worktree_agents_md(&active)?;
+    print_worktree_agents_summary(&worktree_agents);
     let now = now_iso();
     active.bundle.nodes.push(BundleNode::worktrees_materialized(
         node_id("worktree"),
