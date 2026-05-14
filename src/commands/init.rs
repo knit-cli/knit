@@ -243,6 +243,12 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
+For coding agents, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If a command must run from the workspace root, pass the bundle explicitly:
+
+```sh
+knit --bundle feature-a commit --stage -m "Describe the feature change"
+```
+
 Make code changes inside Knit checkouts, usually under:
 
 ```txt

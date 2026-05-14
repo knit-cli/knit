@@ -209,6 +209,12 @@ Bundles are the branch-like feature units. The same source repo can appear in ma
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
+For coding agents, "move into the checkout" means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If a command must run from the workspace root, pass the bundle explicitly:
+
+```sh
+knit --bundle fix-a commit --stage -m "Describe the feature change"
+```
+
 Compatibility bundles are ordinary bundles created from the union of repos in other bundles. They do not have a special target branch; use them as integration branches when two feature bundles need to be made compatible before either one lands:
 
 ```sh
