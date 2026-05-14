@@ -310,11 +310,12 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
 
     assert!(knit_fails(&workspace, ["switch", "fix-a"]).contains("without --workspace"));
     knit(&workspace, ["switch", "fix-a", "--workspace"]);
-    assert!(knit(&workspace, ["status"]).contains("Bundle: fix-a (workspace)"));
+    assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
+    assert!(knit(&workspace, ["--bundle", "fix-a", "status"]).contains("Bundle: fix-a (explicit)"));
 
     knit(&subdir, ["switch", "fix-b"]);
     assert!(knit(&subdir, ["status"]).contains("Bundle: fix-b (folder)"));
-    assert!(knit(&workspace, ["status"]).contains("Bundle: fix-a (workspace)"));
+    assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
 
     knit(&fix_a, ["switch", "fix-b", "--here"]);
     assert!(knit(&fix_a, ["status"]).contains("Bundle: fix-a (cwd)"));
@@ -335,10 +336,15 @@ fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     knit(&workspace, ["bundle", "start", "test2"]);
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
-    assert!(knit(&workspace, ["status"]).contains("Bundle: test2 (workspace)"));
+    assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
 
     let test_checkout = workspace.join(".knit/worktrees/test/backend");
     fs::write(test_checkout.join("test.md"), "test\n").unwrap();
+    assert!(
+        knit_fails(&workspace, ["commit", "--stage", "-m", "Add test"])
+            .contains("multiple open bundles")
+    );
+
     let commit = knit(&test_checkout, ["commit", "--stage", "-m", "Add test"]);
     assert!(commit.contains("Recorded commit group"));
 
@@ -430,7 +436,17 @@ fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
         "feature x\n",
     )
     .unwrap();
-    knit(&workspace, ["commit", "--stage", "-m", "Feature X"]);
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-x",
+            "commit",
+            "--stage",
+            "-m",
+            "Feature X",
+        ],
+    );
 
     knit(&workspace, ["bundle", "start", "feature y"]);
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
@@ -439,7 +455,17 @@ fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
         "feature y\n",
     )
     .unwrap();
-    knit(&workspace, ["commit", "--stage", "-m", "Feature Y"]);
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-y",
+            "commit",
+            "--stage",
+            "-m",
+            "Feature Y",
+        ],
+    );
 
     let first_merge = knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
     assert!(first_merge.contains("Merged"));
@@ -480,7 +506,17 @@ fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
         "feature x\n",
     )
     .unwrap();
-    knit(&workspace, ["commit", "--stage", "-m", "Feature X"]);
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-x",
+            "commit",
+            "--stage",
+            "-m",
+            "Feature X",
+        ],
+    );
 
     knit(&workspace, ["bundle", "start", "feature y"]);
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
@@ -489,7 +525,17 @@ fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
         "feature y\n",
     )
     .unwrap();
-    knit(&workspace, ["commit", "--stage", "-m", "Feature Y"]);
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-y",
+            "commit",
+            "--stage",
+            "-m",
+            "Feature Y",
+        ],
+    );
 
     knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
     let staging = workspace.join(".knit/merge-worktrees/staging/backend");

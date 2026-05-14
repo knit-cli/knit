@@ -6,12 +6,13 @@ use crate::git::git_output;
 use crate::model::{PublicationEntry, BUNDLE_STATE_CLOSED};
 use crate::output as out;
 use crate::status::status_label;
-use crate::store::load_active_bundle;
+use crate::store::{ensure_workspace_fallback_status_is_unambiguous, load_active_bundle};
 use crate::tracking::{detect_unrecorded_changes, status_note};
 use anyhow::Result;
 
 pub fn show_status() -> Result<()> {
     let active = load_active_bundle()?;
+    ensure_workspace_fallback_status_is_unambiguous(&active)?;
     let unrecorded = detect_unrecorded_changes(&active)?;
     let state = bundle_state(&active.bundle);
     println!(
