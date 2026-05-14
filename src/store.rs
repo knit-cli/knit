@@ -1,6 +1,4 @@
-use crate::ids::slugify;
-use crate::model::{ChangeGroup, KnitAgentContext, KnitConfig, KnitContexts};
-use crate::time::now_iso;
+use crate::model::{ChangeGroup, KnitConfig, KnitContexts};
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fs::{self, OpenOptions};
@@ -8,7 +6,6 @@ use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
 
 static BUNDLE_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
-static AGENT_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
 
 pub struct ActiveBundle {
     pub root: PathBuf,
@@ -35,7 +32,6 @@ pub enum BundleResolutionSource {
     Explicit,
     Env,
     Worktree,
-    Agent,
     Context,
     Config,
 }
@@ -46,7 +42,6 @@ impl BundleResolutionSource {
             Self::Explicit => "explicit",
             Self::Env => "env",
             Self::Worktree => "cwd",
-            Self::Agent => "agent",
             Self::Context => "folder",
             Self::Config => "workspace",
         }
@@ -61,10 +56,6 @@ pub fn set_bundle_override(bundle_id: Option<String>) {
     *BUNDLE_OVERRIDE
         .lock()
         .expect("bundle override lock poisoned") = bundle_id;
-}
-
-pub fn set_agent_override(agent_id: Option<String>) {
-    *AGENT_OVERRIDE.lock().expect("agent override lock poisoned") = agent_id;
 }
 
 pub fn load_active_bundle() -> Result<ActiveBundle> {
@@ -122,11 +113,6 @@ pub fn project_path(root: &Path, project_id: &str) -> PathBuf {
         .join(format!("{project_id}.project.json"))
 }
 
-pub fn agent_path(root: &Path, agent_id: &str) -> PathBuf {
-    root.join(".knit/agents")
-        .join(format!("{}.agent.json", slugify(agent_id)))
-}
-
 pub fn bundle_exists(root: &Path, bundle_id: &str) -> bool {
     bundle_path(root, bundle_id).exists()
 }
@@ -152,79 +138,6 @@ pub fn set_workspace_active_bundle(root: &Path, bundle_id: &str) -> Result<()> {
     let mut config = load_config(root)?;
     config.active_bundle = Some(bundle_id.to_string());
     save_config(root, &config)
-}
-
-pub fn current_agent_id() -> Option<String> {
-    if let Some(agent_id) = AGENT_OVERRIDE
-        .lock()
-        .expect("agent override lock poisoned")
-        .clone()
-    {
-        return normalize_agent_id(&agent_id);
-    }
-
-    std::env::var("KNIT_AGENT")
-        .ok()
-        .and_then(|value| normalize_agent_id(&value))
-        .or_else(|| {
-            std::env::var("CODEX_THREAD_ID")
-                .ok()
-                .and_then(|value| normalize_agent_id(&value))
-        })
-}
-
-pub fn set_agent_active_bundle(root: &Path, agent_id: &str, bundle_id: &str) -> Result<String> {
-    let agent_id = slugify(agent_id);
-    let path = agent_path(root, &agent_id);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create Knit agent directory {}", parent.display())
-        })?;
-    }
-    let context = KnitAgentContext::new(agent_id.clone(), bundle_id.to_string(), now_iso());
-    write_json(&path, &context)?;
-    Ok(agent_id)
-}
-
-pub fn clear_agent_active_bundle(root: &Path, agent_id: &str) -> Result<()> {
-    let path = agent_path(root, agent_id);
-    if path.exists() {
-        fs::remove_file(&path)
-            .with_context(|| format!("failed to remove Knit agent context {}", path.display()))?;
-    }
-    Ok(())
-}
-
-pub fn clear_agent_contexts_for_bundle(root: &Path, bundle_id: &str) -> Result<()> {
-    let dir = root.join(".knit/agents");
-    if !dir.exists() {
-        return Ok(());
-    }
-
-    for entry in fs::read_dir(&dir).with_context(|| format!("failed to read {}", dir.display()))? {
-        let entry = entry?;
-        let path = entry.path();
-        if path.extension().and_then(|value| value.to_str()) != Some("json") {
-            continue;
-        }
-        let context: KnitAgentContext = read_json(&path)?;
-        if context.active_bundle == bundle_id {
-            fs::remove_file(&path).with_context(|| {
-                format!("failed to remove Knit agent context {}", path.display())
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-pub fn load_agent_context(root: &Path, agent_id: &str) -> Result<Option<KnitAgentContext>> {
-    let path = agent_path(root, agent_id);
-    if path.exists() {
-        Ok(Some(read_json(&path)?))
-    } else {
-        Ok(None)
-    }
 }
 
 pub fn set_folder_active_bundle(root: &Path, path: &Path, bundle_id: &str) -> Result<()> {
@@ -316,13 +229,6 @@ fn resolve_bundle_id(
         return Ok((bundle_id, BundleResolutionSource::Worktree));
     }
 
-    if let Some(agent_id) = current_agent_id() {
-        if let Some(context) = load_agent_context(root, &agent_id)? {
-            ensure_bundle_exists(root, &context.active_bundle)?;
-            return Ok((context.active_bundle, BundleResolutionSource::Agent));
-        }
-    }
-
     if let Some(bundle_id) = resolve_context_bundle(root, cwd)? {
         ensure_bundle_exists(root, &bundle_id)?;
         return Ok((bundle_id, BundleResolutionSource::Context));
@@ -334,15 +240,6 @@ fn resolve_bundle_id(
     }
 
     bail!("No active Knit bundle found. Run `knit bundle start \"feature title\"` first.")
-}
-
-fn normalize_agent_id(value: &str) -> Option<String> {
-    let value = value.trim();
-    if value.is_empty() {
-        None
-    } else {
-        Some(slugify(value))
-    }
 }
 
 fn ensure_bundle_exists(root: &Path, bundle_id: &str) -> Result<()> {

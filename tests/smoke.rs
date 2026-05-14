@@ -254,68 +254,6 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
 }
 
 #[test]
-fn agent_context_keeps_project_root_bundles_isolated() {
-    let root = unique_temp_dir();
-    let backend = root.join("backend");
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    init_repo(&backend, "backend");
-    knit(&workspace, ["project", "init", "arbient"]);
-    knit(
-        &workspace,
-        ["project", "add", "backend", backend.to_str().unwrap()],
-    );
-
-    knit_with_env(
-        &workspace,
-        ["bundle", "start", "feature alpha"],
-        &[("KNIT_AGENT", "codex-a")],
-    );
-    knit_with_env(
-        &workspace,
-        ["bundle", "start", "feature beta"],
-        &[("KNIT_AGENT", "codex-b")],
-    );
-
-    assert!(
-        knit_with_env(&workspace, ["status"], &[("KNIT_AGENT", "codex-a")])
-            .contains("Bundle: feature-alpha (agent)")
-    );
-    assert!(
-        knit_with_env(&workspace, ["status"], &[("KNIT_AGENT", "codex-b")])
-            .contains("Bundle: feature-beta (agent)")
-    );
-    assert!(knit(&workspace, ["status"]).contains("Bundle: feature-alpha (workspace)"));
-
-    knit_with_env(
-        &workspace,
-        ["switch", "feature-beta"],
-        &[("KNIT_AGENT", "codex-a")],
-    );
-    assert!(
-        knit_with_env(&workspace, ["agent"], &[("KNIT_AGENT", "codex-a")]).contains("feature-beta")
-    );
-    assert!(
-        knit_with_env(&workspace, ["status"], &[("KNIT_AGENT", "codex-b")])
-            .contains("Bundle: feature-beta (agent)")
-    );
-
-    knit_with_env(
-        &workspace,
-        ["switch", "feature-alpha", "--workspace"],
-        &[("KNIT_AGENT", "codex-b")],
-    );
-    assert!(
-        knit_with_env(&workspace, ["status"], &[("KNIT_AGENT", "codex-b")])
-            .contains("Bundle: feature-beta (agent)")
-    );
-    assert!(knit(&workspace, ["status"]).contains("Bundle: feature-alpha (workspace)"));
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn run_executes_named_project_commands_in_bundle_worktrees() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -2108,11 +2046,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("KNIT_AGENT");
+    command.args(args).current_dir(cwd);
     run(command)
 }
 
@@ -2122,11 +2056,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("KNIT_AGENT");
+    command.args(args).current_dir(cwd);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -2139,11 +2069,7 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command
-        .args(args)
-        .current_dir(cwd)
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("KNIT_AGENT");
+    command.args(args).current_dir(cwd);
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
@@ -2178,8 +2104,6 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("KNIT_AGENT")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
@@ -2213,8 +2137,6 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env_remove("CODEX_THREAD_ID")
-        .env_remove("KNIT_AGENT")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
