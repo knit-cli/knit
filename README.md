@@ -209,9 +209,11 @@ Bundles are the branch-like feature units. The same source repo can appear in ma
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
-For coding agents, "move into the checkout" means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If a command must run from the workspace root, pass the bundle explicitly:
+For coding agents, "move into the checkout" means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. Once an agent is working on a known bundle, it should prefer explicit `--bundle <bundle>` on bundle-scoped Knit commands unless the tool call's cwd is definitely inside that bundle's worktree:
 
 ```sh
+knit --bundle fix-a status
+knit --bundle fix-a add
 knit --bundle fix-a commit --stage -m "Describe the feature change"
 ```
 
