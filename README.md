@@ -36,6 +36,8 @@ Knit stores local state under the directory where `knit project init`, `knit bun
     <slug>.bundle.json
   projects/
     <project>.project.json
+  agents/
+    <agent>.agent.json
   locks/
     <bundle>.lock
   merge-runs/
@@ -54,7 +56,7 @@ Knit stores local state under the directory where `knit project init`, `knit bun
       <repo-name>/
 ```
 
-The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths and optional folder contexts let multiple agents work in parallel bundles without fighting over one global active bundle.
+The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths, per-agent context, and optional folder contexts let multiple agents work in parallel bundles without fighting over one global active bundle.
 
 ## Quickstart
 
@@ -65,6 +67,7 @@ knit project init venues
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add scraper ../scraper --observe
+knit project command set dev --repo frontend -- docker compose up
 knit bundle start "venue capacity" --agents
 ```
 
@@ -96,15 +99,21 @@ The created bundle is printed by `knit bundle start` and lives at:
 .knit/bundles/venue-capacity.bundle.json
 ```
 
-Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then generated worktree paths such as `.knit/worktrees/<bundle>/<repo>`, then folder contexts from `knit bundle switch --here`, and finally the workspace fallback bundle. This lets parallel agents work in different Knit worktrees without sharing one mutable active bundle.
+Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then generated worktree paths such as `.knit/worktrees/<bundle>/<repo>`, then per-agent context from `--agent`, `KNIT_AGENT`, or Codex's `CODEX_THREAD_ID`, then folder contexts from `knit bundle switch --here`, and finally the workspace fallback bundle. This lets parallel agents work from the same project folder without sharing one mutable active bundle.
 
 ## Commands
 
 ```sh
 knit project init <name>
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe]
+knit project command set <name> [--repo <repo>]... [--cwd <path>] [--env KEY=VALUE]... -- <command> [args...]
+knit project command list
+knit project command remove <name>
 knit project list
 knit project show [name]
+knit agent
+knit agent switch <bundle>
+knit agent clear
 knit bundle
 knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
@@ -134,6 +143,9 @@ knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
 knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [repo-id-or-path...]
+knit run <project-command> [--repo <repo>]... [--all]
+knit run [--repo <repo>] [--all] -- <command> [args...]
+knit run --list
 knit publish github create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [repo-id-or-path...]
 knit publish github sync [repo-id-or-path...]
 knit publish github status [repo-id-or-path...]
@@ -150,7 +162,7 @@ knit merge push [--run <id-or-path>] [--repo <repo-id>]... [--set-upstream]
 knit merge --continue
 knit merge --abort
 knit config set advice true|false
-knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
+knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config|agent-context>
 knit doctor
 knit migrate [--check]
 knit sync
@@ -176,6 +188,21 @@ knit project add frontend ../frontend
 knit project add docs ../docs --observe
 ```
 
+Projects can also define commands that run inside bundle checkouts:
+
+```sh
+knit project command set dev --repo frontend -- docker compose up
+knit project command set api-test --repo backend -- cargo test
+knit run dev
+knit run api-test
+```
+
+`knit run <name>` resolves the active bundle, enters the configured repo worktree, sets `KNIT_ROOT`, `KNIT_BUNDLE`, `KNIT_REPO`, and `KNIT_CHECKOUT`, then executes the command without a shell. For one-off commands, pass the command after `--`:
+
+```sh
+knit run --repo backend -- docker compose ps
+```
+
 Default project repos are included by `knit bundle start`; observed repos are available by id but are not branched or tracked until added explicitly:
 
 ```sh
@@ -184,6 +211,8 @@ knit bundle add docs
 ```
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
+
+When an agent id is available through `--agent`, `KNIT_AGENT`, or Codex's `CODEX_THREAD_ID`, `knit bundle start` and `knit bundle switch` update `.knit/agents/<agent>.agent.json` instead of stealing the workspace fallback bundle from other agents. Use `--workspace` with `knit bundle switch` when you intentionally want to change the shared fallback.
 
 Compatibility bundles are ordinary bundles created from the union of repos in other bundles. They do not have a special target branch; use them as integration branches when two feature bundles need to be made compatible before either one lands:
 

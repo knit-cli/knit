@@ -18,12 +18,13 @@ pub mod tracking;
 use anyhow::{bail, Result};
 
 pub use cli::{
-    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
-    PublishCommand, SchemaCommand,
+    AgentCommand, BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand,
+    ProjectCommand, ProjectRunCommandCli, PublishCommand, SchemaCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
+    store::set_agent_override(cli.agent);
     match cli.command {
         Commands::Init {
             title,
@@ -40,6 +41,26 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+            ProjectCommand::Command { command } => match command {
+                ProjectRunCommandCli::Set {
+                    name,
+                    repos,
+                    cwd,
+                    env,
+                    command,
+                } => {
+                    commands::set_project_run_command(&name, &repos, cwd.as_deref(), &env, &command)
+                }
+                ProjectRunCommandCli::List => commands::list_project_run_commands(),
+                ProjectRunCommandCli::Remove { name } => {
+                    commands::remove_project_run_command(&name)
+                }
+            },
+        },
+        Commands::Agent { command } => match command {
+            None | Some(AgentCommand::Show) => commands::show_agent_context(),
+            Some(AgentCommand::Switch { bundle }) => commands::switch_agent_bundle(&bundle),
+            Some(AgentCommand::Clear) => commands::clear_agent_context(),
         },
         Commands::Track {
             repo_paths,
@@ -170,6 +191,13 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             set_upstream,
         } => commands::push_repos(&repos, all, set_upstream),
+        Commands::Run {
+            name,
+            repos,
+            all,
+            list,
+            args,
+        } => commands::run_project_command(name.as_deref(), &repos, all, list, &args),
         Commands::Publish { target } => match target {
             PublishCommand::Github { command } => match command {
                 GithubPublishCommand::Create {

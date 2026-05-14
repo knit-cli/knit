@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod bundle;
 pub mod checkpoint;
 pub mod clean;
@@ -18,6 +19,7 @@ pub mod pull;
 pub mod push;
 pub mod remove;
 pub mod revert;
+pub mod run;
 pub mod schema;
 pub mod stage;
 pub mod status;
@@ -25,6 +27,7 @@ pub mod sync;
 pub mod track;
 pub mod worktree;
 
+pub use agent::{clear_agent_context, show_agent_context, switch_agent_bundle};
 pub use bundle::{
     archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, restore_bundle,
     show_current_bundle, switch_bundle, validate_bundle,
@@ -45,7 +48,10 @@ pub use land::{
 };
 pub use log::{show_log, show_target};
 pub use merge::{create_compat_bundle, merge_command};
-pub use project::{add_project_repo, init_project, list_projects, show_project};
+pub use project::{
+    add_project_repo, init_project, list_project_run_commands, list_projects,
+    remove_project_run_command, set_project_run_command, show_project,
+};
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,
 };
@@ -53,6 +59,7 @@ pub use pull::pull_repos;
 pub use push::push_repos;
 pub use remove::remove_repos;
 pub use revert::revert_target;
+pub use run::run_project_command;
 pub use schema::print_schema;
 pub use stage::stage_paths;
 pub use status::show_status;
