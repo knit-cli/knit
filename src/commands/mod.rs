@@ -1,3 +1,4 @@
+pub mod agents;
 pub mod bundle;
 pub mod checkpoint;
 pub mod clean;

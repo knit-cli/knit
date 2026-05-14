@@ -209,13 +209,15 @@ Bundles are the branch-like feature units. The same source repo can appear in ma
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
-For coding agents, "move into the checkout" means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. Once an agent is working on a known bundle, it should prefer explicit `--bundle <bundle>` on bundle-scoped Knit commands unless the tool call's cwd is definitely inside that bundle's worktree:
+For coding agents in the source workspace, "move into the checkout" means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
 ```sh
 knit --bundle fix-a status
 knit --bundle fix-a add
 knit --bundle fix-a commit --stage -m "Describe the feature change"
 ```
+
+Do not use bare `knit switch <bundle>` from the workspace root to recover context. Root-level switching requires `--workspace` so changing the shared fallback is always deliberate.
 
 Compatibility bundles are ordinary bundles created from the union of repos in other bundles. They do not have a special target branch; use them as integration branches when two feature bundles need to be made compatible before either one lands:
 
@@ -227,7 +229,9 @@ knit merge feature-y --into x-y-compat --manual
 
 `knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 
-Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the workspace. The file explains projects, bundles, parallel worktrees, and the core Knit commands for coding agents. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+Generated worktrees get a local `AGENTS.md` by default. That worktree guide assumes the agent opened the worktree folder directly, so its examples rely on cwd and do not include `--bundle`.
+
+Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
 
 Use `knit bundle add --in-place` or `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 

@@ -1,7 +1,8 @@
-use crate::checkout::{checkout_dir, is_in_place};
-use crate::git::git_output;
+use crate::commands::agents::{
+    print_worktree_agents_summary, upsert_managed_section, write_worktree_agents_md,
+};
 use crate::ids::slugify;
-use crate::model::{ChangeGroup, KnitConfig, RepoEntry};
+use crate::model::{ChangeGroup, KnitConfig};
 use crate::output as out;
 use crate::store::{
     bundle_path as stored_bundle_path, find_knit_root, load_config, read_json, save_active_bundle,
@@ -10,10 +11,7 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::{Path, PathBuf};
-
-const KNIT_AGENTS_BEGIN: &str = "<!-- BEGIN KNIT AGENTS -->";
-const KNIT_AGENTS_END: &str = "<!-- END KNIT AGENTS -->";
+use std::path::Path;
 
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
     start_bundle(title, None, &[], false, true, false, force, agents)
@@ -40,7 +38,6 @@ pub fn start_bundle(
     let bundle_dir = knit_dir.join("bundles");
     let worktree_dir = knit_dir.join("worktrees").join(&bundle_id);
     let bundle_path = stored_bundle_path(&root, &bundle_id);
-
     if bundle_path.exists() && !force {
         if agents {
             let bundle: ChangeGroup = read_json(&bundle_path)?;
@@ -103,16 +100,17 @@ pub fn start_bundle(
 
     if agents {
         let agents_path = write_agents_md(&root)?;
-        let bundle: ChangeGroup = read_json(&bundle_path)?;
-        let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
-        let worktree_agents = write_worktree_agents_md(&active)?;
         println!(
             "{} {}",
             out::heading("AGENTS.md:"),
             out::path(agents_path.display())
         );
-        print_worktree_agents_summary(&worktree_agents);
     }
+
+    let bundle: ChangeGroup = read_json(&bundle_path)?;
+    let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
+    let worktree_agents = write_worktree_agents_md(&active)?;
+    print_worktree_agents_summary(&worktree_agents);
 
     Ok(())
 }
@@ -185,107 +183,6 @@ fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn write_worktree_agents_md(active: &ActiveBundle) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for repo in &active.bundle.repos {
-        if is_in_place(repo) {
-            continue;
-        }
-        let Some(checkout) = checkout_dir(active, repo) else {
-            continue;
-        };
-        let path = checkout.join("AGENTS.md");
-        let section = worktree_agents_section(active, repo, &checkout);
-        let next = if path.exists() {
-            let existing = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read existing {}", path.display()))?;
-            upsert_managed_section(&existing, &section)
-        } else {
-            format!("# AGENTS.md\n\n{section}")
-        };
-        fs::write(&path, next).with_context(|| {
-            format!(
-                "failed to write Knit worktree guidance at {}",
-                path.display()
-            )
-        })?;
-        exclude_worktree_agents(&checkout)?;
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
-fn exclude_worktree_agents(checkout: &Path) -> Result<()> {
-    let exclude_path = git_output(checkout, ["rev-parse", "--git-path", "info/exclude"])
-        .context("failed to locate git exclude file")?;
-    let exclude_path = resolve_checkout_path(checkout, exclude_path.trim());
-    if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create git exclude parent {}", parent.display()))?;
-    }
-    let mut text = if exclude_path.exists() {
-        fs::read_to_string(&exclude_path)
-            .with_context(|| format!("failed to read {}", exclude_path.display()))?
-    } else {
-        String::new()
-    };
-    if !text.lines().any(|line| line.trim() == "AGENTS.md") {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("AGENTS.md\n");
-        fs::write(&exclude_path, text)
-            .with_context(|| format!("failed to write {}", exclude_path.display()))?;
-    }
-    Ok(())
-}
-
-fn resolve_checkout_path(checkout: &Path, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        checkout.join(path)
-    }
-}
-
-fn print_worktree_agents_summary(paths: &[PathBuf]) {
-    if !paths.is_empty() {
-        println!(
-            "{} {} repo worktree(s)",
-            out::heading("Worktree AGENTS.md:"),
-            paths.len()
-        );
-    }
-}
-
-fn upsert_managed_section(existing: &str, section: &str) -> String {
-    if let Some(start) = existing.find(KNIT_AGENTS_BEGIN) {
-        if let Some(end_offset) = existing[start..].find(KNIT_AGENTS_END) {
-            let end = start + end_offset + KNIT_AGENTS_END.len();
-            let mut next = String::new();
-            next.push_str(&existing[..start]);
-            next.push_str(section.trim_end());
-            next.push_str(&existing[end..]);
-            return ensure_trailing_newline(next);
-        }
-    }
-
-    let mut next = existing.trim_end().to_string();
-    if !next.is_empty() {
-        next.push_str("\n\n");
-    }
-    next.push_str(section);
-    ensure_trailing_newline(next)
-}
-
-fn ensure_trailing_newline(mut text: String) -> String {
-    if !text.ends_with('\n') {
-        text.push('\n');
-    }
-    text
-}
-
 fn agents_section() -> &'static str {
     r#"<!-- BEGIN KNIT AGENTS -->
 ## Knit Workspace Guide
@@ -327,13 +224,15 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
-For coding agents, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. Once an agent is working on a known bundle, prefer explicit `--bundle <bundle>` on bundle-scoped Knit commands unless the tool call's cwd is definitely inside that bundle's worktree:
+For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
 ```sh
 knit --bundle feature-a status
 knit --bundle feature-a add
 knit --bundle feature-a commit --stage -m "Describe the feature change"
 ```
+
+Do not use bare `knit switch <bundle>` from the workspace root to recover context. Root-level switching requires `--workspace` so changing the shared fallback is always deliberate.
 
 Make code changes inside Knit checkouts, usually under:
 
@@ -344,15 +243,15 @@ Make code changes inside Knit checkouts, usually under:
 Inspect, stage, and commit cross-repo work:
 
 ```sh
-knit diff
-knit add
-knit commit -m "Describe the feature change"
+knit --bundle feature-a diff
+knit --bundle feature-a add
+knit --bundle feature-a commit -m "Describe the feature change"
 ```
 
 For a one-step stage and commit:
 
 ```sh
-knit commit --stage -m "Describe the feature change"
+knit --bundle feature-a commit --stage -m "Describe the feature change"
 ```
 
 Publish PRs against their intended GitHub base branch:
@@ -441,60 +340,4 @@ gloss view
 ```
 <!-- END KNIT AGENTS -->
 "#
-}
-
-fn worktree_agents_section(active: &ActiveBundle, repo: &RepoEntry, checkout: &Path) -> String {
-    let checkout_display = checkout
-        .strip_prefix(&active.root)
-        .unwrap_or(checkout)
-        .display()
-        .to_string();
-    let repo_worktrees = active
-        .bundle
-        .repos
-        .iter()
-        .filter(|repo| !is_in_place(repo))
-        .filter_map(|repo| {
-            repo.worktree_path
-                .as_ref()
-                .map(|path| (repo.id.as_str(), path))
-        })
-        .map(|(repo_id, path)| format!("- `{repo_id}`: `{path}`"))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    format!(
-        r#"<!-- BEGIN KNIT AGENTS -->
-## Knit Worktree Guide
-
-This checkout belongs to Knit bundle `{bundle}` and repo `{repo}`.
-
-```txt
-{checkout}
-```
-
-Make this folder the actual cwd/workdir for repo-local tool calls. If a tool call runs from the workspace root or from another repo, pass the bundle explicitly:
-
-```sh
-knit --bundle {bundle} status
-knit --bundle {bundle} add
-knit --bundle {bundle} commit --stage -m "Describe the feature change"
-```
-
-Sibling worktrees for this bundle:
-
-{repo_worktrees}
-
-Do not edit the original source checkout for feature work unless the bundle was created with `--in-place`.
-<!-- END KNIT AGENTS -->
-"#,
-        bundle = active.bundle.id,
-        repo = repo.id,
-        checkout = checkout_display,
-        repo_worktrees = if repo_worktrees.is_empty() {
-            "(none)".to_string()
-        } else {
-            repo_worktrees
-        }
-    )
 }

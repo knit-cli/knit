@@ -165,12 +165,16 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
             out::node(&bundle_id),
             out::path(crate::store::relative_path_for_storage(&root, &cwd))
         );
-    } else if workspace || cwd == root {
+    } else if workspace {
         set_workspace_active_bundle(&root, &bundle_id)?;
         println!(
             "{} {}",
             out::heading("Active bundle:"),
             out::node(&bundle_id)
+        );
+    } else if cwd == root {
+        bail!(
+            "Refusing to switch the shared workspace fallback without --workspace. Use `knit switch {bundle_id} --workspace`, `knit switch {bundle_id} --here`, run from the target worktree, or pass `--bundle {bundle_id}` to a single command."
         );
     } else {
         set_folder_active_bundle(&root, &cwd, &bundle_id)?;
