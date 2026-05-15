@@ -256,6 +256,12 @@ For a one-step stage and commit:
 knit --bundle feature-a commit --stage -m "Describe the feature change"
 ```
 
+Push the bundle's feature branches after committing:
+
+```sh
+knit --bundle feature-a push --set-upstream
+```
+
 Publish PRs against their intended GitHub base branch:
 
 ```sh
@@ -320,6 +326,7 @@ knit merge push
 - `knit switch <bundle>` is the short alias for bundle switching.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit.
+- `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit checkpoint "note"` records non-Git progress in the bundle ledger.
 - `knit close --reason "merged"` marks the bundle closed without deleting branches or worktrees.

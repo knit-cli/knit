@@ -458,6 +458,9 @@ pub enum ProjectCommand {
     Init {
         /// Project name.
         name: String,
+        /// Write or refresh project-specific AGENTS.md guidance.
+        #[arg(long)]
+        agents: bool,
     },
     /// Add or update a repo in the active project.
     Add {
@@ -471,11 +474,19 @@ pub enum ProjectCommand {
         /// Keep this repo out of default bundle starts.
         #[arg(long)]
         observe: bool,
+        /// Write or refresh project-specific AGENTS.md guidance.
+        #[arg(long)]
+        agents: bool,
     },
     /// List projects in this workspace.
     List,
     /// Print a project JSON artifact.
     Show {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+    },
+    /// Write or refresh project-specific AGENTS.md guidance.
+    Agents {
         /// Project name. Defaults to the active project.
         name: Option<String>,
     },
