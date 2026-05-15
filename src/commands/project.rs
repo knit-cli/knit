@@ -1,3 +1,4 @@
+use crate::commands::agents::write_project_agents_md;
 use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
 use crate::ids::slugify;
 use crate::model::{
@@ -16,7 +17,7 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
 
-pub fn init_project(name: &str) -> Result<()> {
+pub fn init_project(name: &str, agents: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).unwrap_or(cwd);
     let project_id = slugify(name);
@@ -28,6 +29,16 @@ pub fn init_project(name: &str) -> Result<()> {
 
     let path = project_path(&root, &project_id);
     if path.exists() {
+        if agents {
+            let project: KnitProject = read_json(&path)?;
+            let agents_path = write_project_agents_md(&root, &project)?;
+            println!(
+                "{} {}",
+                out::heading("Project AGENTS.md:"),
+                out::path(agents_path.display())
+            );
+            return Ok(());
+        }
         bail!("Project {} already exists.", out::path(path.display()));
     }
 
@@ -44,6 +55,14 @@ pub fn init_project(name: &str) -> Result<()> {
 
     println!("{} {}", out::heading("Project:"), out::repo(&project_id));
     println!("{} {}", out::heading("Path:"), out::path(path.display()));
+    if agents {
+        let agents_path = write_project_agents_md(&root, &project)?;
+        println!(
+            "{} {}",
+            out::heading("Project AGENTS.md:"),
+            out::path(agents_path.display())
+        );
+    }
     Ok(())
 }
 
@@ -52,6 +71,7 @@ pub fn add_project_repo(
     repo_path: &Path,
     base: Option<&str>,
     observe: bool,
+    agents: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd)
@@ -80,6 +100,32 @@ pub fn add_project_repo(
 
     project.updated_at = now_iso();
     write_json(&path, &project)?;
+    if agents {
+        let agents_path = write_project_agents_md(&root, &project)?;
+        println!(
+            "{} {}",
+            out::heading("Project AGENTS.md:"),
+            out::path(agents_path.display())
+        );
+    }
+    Ok(())
+}
+
+pub fn refresh_project_agents(name: Option<&str>) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+    let project_id = name
+        .map(slugify)
+        .or(config.active_project)
+        .context("No project selected. Pass a project name or run `knit project init <name>`.")?;
+    let project: KnitProject = read_json(&project_path(&root, &project_id))?;
+    let agents_path = write_project_agents_md(&root, &project)?;
+    println!(
+        "{} {}",
+        out::heading("Project AGENTS.md:"),
+        out::path(agents_path.display())
+    );
     Ok(())
 }
 

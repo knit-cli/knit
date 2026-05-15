@@ -102,8 +102,9 @@ Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, 
 ## Commands
 
 ```sh
-knit project init <name>
-knit project add <repo-id> <repo-path> [--base <branch>] [--observe]
+knit project init <name> [--agents]
+knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
+knit project agents [name]
 knit project command set <name> [--repo <repo>]... [--cwd <path>] [--env KEY=VALUE]... -- <command> [args...]
 knit project command list
 knit project command remove <name>
@@ -215,6 +216,7 @@ For coding agents in the source workspace, "move into the checkout" means each s
 knit --bundle fix-a status
 knit --bundle fix-a add
 knit --bundle fix-a commit --stage -m "Describe the feature change"
+knit --bundle fix-a push --set-upstream
 ```
 
 Do not use bare `knit switch <bundle>` from the workspace root to recover context. Root-level switching requires `--workspace` so changing the shared fallback is always deliberate.
@@ -233,7 +235,7 @@ knit merge feature-y --into x-y-compat --manual
 
 Generated worktrees get a local `AGENTS.md` by default. That worktree guide assumes the agent opened the worktree folder directly, so its examples rely on cwd and do not include `--bundle`.
 
-Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit project init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
 
 Use `knit bundle add --in-place` or `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 

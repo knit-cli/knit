@@ -25,6 +25,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle remove --repo"));
     assert!(agents.contains("knit --bundle feature-a commit"));
     assert!(agents.contains("knit --bundle feature-a commit --stage"));
+    assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
     assert!(agents.contains("gloss prepare"));
 
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
@@ -116,6 +117,64 @@ fn project_default_repos_start_bundle_without_track() {
 }
 
 #[test]
+fn project_agents_are_generated_from_project_json() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    fs::write(
+        workspace.join("AGENTS.md"),
+        "custom guidance\n\n## Arbient Knit Project\n\nThat command should add all four Arbient repos by default:\n\n- `backend`\n\n<!-- BEGIN GLOSS AGENTS -->\nkeep this\n<!-- END GLOSS AGENTS -->\n",
+    )
+    .unwrap();
+
+    let refresh = knit(&workspace, ["project", "init", "arbient", "--agents"]);
+    assert!(refresh.contains("Project AGENTS.md"));
+    let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("custom guidance"));
+    assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: arbient -->"));
+    assert!(agents.contains("That command adds these default repos from the project data:"));
+    assert!(agents.contains("- `backend`"));
+    assert!(!agents.contains("all four Arbient repos"));
+    assert!(agents.contains("<!-- BEGIN GLOSS AGENTS -->"));
+    assert!(
+        agents.contains("<!-- END KNIT PROJECT AGENTS: arbient -->\n<!-- BEGIN GLOSS AGENTS -->")
+    );
+
+    knit(
+        &workspace,
+        [
+            "project",
+            "add",
+            "frontend",
+            frontend.to_str().unwrap(),
+            "--agents",
+        ],
+    );
+    let updated = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert_eq!(
+        updated
+            .matches("<!-- BEGIN KNIT PROJECT AGENTS: arbient -->")
+            .count(),
+        1
+    );
+    assert!(updated.contains("- `backend`"));
+    assert!(updated.contains("- `frontend`"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -147,6 +206,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(backend_agents.contains("bundle `agent-docs`"));
     assert!(backend_agents.contains("repo `backend`"));
     assert!(backend_agents.contains("knit commit --stage"));
+    assert!(backend_agents.contains("knit push --set-upstream"));
     assert!(!backend_agents.contains("knit --bundle"));
     assert!(backend_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
     assert!(frontend_agents_path.exists());
@@ -163,6 +223,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(updated.contains("repo guidance"));
     assert_eq!(updated.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
     assert!(updated.contains("knit status"));
+    assert!(updated.contains("knit push --set-upstream"));
     assert!(!updated.contains("knit --bundle"));
     assert!(workspace.join("AGENTS.md").exists());
 
@@ -173,6 +234,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
             .unwrap();
     assert!(second_agents.contains("bundle `agent-docs-two`"));
     assert!(second_agents.contains("knit commit --stage"));
+    assert!(second_agents.contains("knit push --set-upstream"));
     assert!(!second_agents.contains("knit --bundle"));
 
     fs::remove_dir_all(root).unwrap();

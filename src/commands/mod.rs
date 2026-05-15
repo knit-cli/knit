@@ -49,7 +49,7 @@ pub use log::{show_log, show_target};
 pub use merge::{create_compat_bundle, merge_command};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects,
-    remove_project_run_command, set_project_run_command, show_project,
+    refresh_project_agents, remove_project_run_command, set_project_run_command, show_project,
 };
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,

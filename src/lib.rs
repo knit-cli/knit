@@ -31,15 +31,17 @@ pub fn run(cli: Cli) -> Result<()> {
             agents,
         } => commands::init_bundle(&title, force, agents),
         Commands::Project { command } => match command {
-            ProjectCommand::Init { name } => commands::init_project(&name),
+            ProjectCommand::Init { name, agents } => commands::init_project(&name, agents),
             ProjectCommand::Add {
                 repo_id,
                 repo_path,
                 base,
                 observe,
-            } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe),
+                agents,
+            } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+            ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
             ProjectCommand::Command { command } => match command {
                 ProjectRunCommandCli::Set {
                     name,
