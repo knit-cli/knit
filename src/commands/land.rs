@@ -1,14 +1,17 @@
 use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
-use crate::git::{current_branch, git_output, is_ancestor, rev_list, rev_parse};
-use crate::ids::node_id;
-use crate::model::{BundleNode, PublicationEntry, RepoChange, RepoEntry, SCHEMA_VERSION};
+use crate::git::{current_branch, git_output, is_ancestor, is_git_worktree, rev_list, rev_parse};
+use crate::ids::{node_id, slugify};
+use crate::model::{
+    BundleNode, KnitProject, ProjectLandingMergePlan, PublicationEntry, RepoChange, RepoEntry,
+    SCHEMA_VERSION,
+};
 use crate::output as out;
 use crate::providers::github::{self, publication_for_repo, PullRequest};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
-    load_active_bundle, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
-    ActiveBundle,
+    load_active_bundle, load_active_bundle_for_update, load_config, project_path, read_json,
+    save_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -24,10 +27,14 @@ const LAND_RUN_KIND: &str = "KnitLandRun";
 const STEP_MERGE_PR: &str = "merge_pr";
 const STEP_WAIT_CHECKS: &str = "wait_checks";
 const STEP_RUN: &str = "run";
+const STEP_DEPLOY: &str = "deploy";
 const STATUS_PENDING: &str = "pending";
 const STATUS_RUNNING: &str = "running";
 const STATUS_SUCCEEDED: &str = "succeeded";
 const STATUS_FAILED: &str = "failed";
+const DEFAULT_LAND_PROVIDER: &str = "github";
+const DEPLOY_MODE_COMMAND: &str = "command";
+const DEPLOY_MODE_PUSH: &str = "push";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -37,6 +44,8 @@ struct LandPlan {
     id: String,
     provider: String,
     bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    source_project_id: Option<String>,
     created_at: String,
     steps: Vec<LandStep>,
 }
@@ -71,6 +80,20 @@ struct LandStep {
     command: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    deployment_mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    checkout: Option<LandCheckout>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct LandCheckout {
+    branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    update: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,10 +147,14 @@ struct StepOutcome {
     exit_code: Option<i32>,
 }
 
-pub fn generate_land_plan(provider: &str, out_path: Option<&Path>, force: bool) -> Result<()> {
-    ensure_provider(provider)?;
+pub fn generate_land_plan(
+    provider: Option<&str>,
+    out_path: Option<&Path>,
+    force: bool,
+) -> Result<()> {
     let active = load_active_bundle()?;
     let plan = build_default_plan(&active, provider)?;
+    validate_plan_for_bundle(&active, &plan)?;
     let path = out_path
         .map(resolve_user_path)
         .unwrap_or_else(|| default_plan_path(&active));
@@ -178,7 +205,7 @@ pub fn land_default() -> Result<()> {
     }
 
     drop(active);
-    generate_land_plan("github", None, false)
+    generate_land_plan(None, None, false)
 }
 
 pub fn apply_land_plan(plan_path: Option<&Path>) -> Result<()> {
@@ -339,10 +366,20 @@ pub fn update_land_branches(
     Ok(())
 }
 
-fn build_default_plan(active: &ActiveBundle, provider: &str) -> Result<LandPlan> {
+fn build_default_plan(active: &ActiveBundle, requested_provider: Option<&str>) -> Result<LandPlan> {
+    let project = load_project_for_bundle(active)?;
+    let landing = project
+        .as_ref()
+        .and_then(|project| project.landing.as_ref());
+    let provider = requested_provider
+        .or_else(|| landing.and_then(|landing| landing.provider.as_deref()))
+        .unwrap_or(DEFAULT_LAND_PROVIDER)
+        .to_string();
+    ensure_provider(&provider)?;
+    let merge = landing.map(|landing| &landing.merge);
     let mut steps = Vec::new();
     let mut previous: Option<String> = None;
-    for repo in &active.bundle.repos {
+    for repo in ordered_merge_repos(active, merge) {
         if publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
@@ -353,23 +390,26 @@ fn build_default_plan(active: &ActiveBundle, provider: &str) -> Result<LandPlan>
             step_type: STEP_MERGE_PR.to_string(),
             needs,
             repo_id: Some(repo.id.clone()),
-            method: Some("squash".to_string()),
-            wait_for_checks: Some(true),
-            required_checks_only: Some(true),
-            delete_branch: Some(false),
+            method: Some(merge_method(merge)),
+            wait_for_checks: Some(merge_wait_for_checks(merge)),
+            required_checks_only: Some(merge_required_checks_only(merge)),
+            delete_branch: Some(merge_delete_branch(merge)),
             required_only: None,
-            timeout_seconds: Some(1800),
-            interval_seconds: Some(10),
+            timeout_seconds: Some(merge_timeout_seconds(merge)),
+            interval_seconds: Some(merge_interval_seconds(merge)),
             cwd: None,
             command: Vec::new(),
             env: BTreeMap::new(),
+            deployment_mode: None,
+            checkout: None,
         });
         previous = Some(id);
     }
+    append_project_deployments(active, landing, &mut steps)?;
 
     if steps.is_empty() {
         bail!(
-            "No GitHub PR publications are recorded for this bundle. Run `knit publish github create` first."
+            "No GitHub PR publications or project landing deployments are available for this bundle. Run `knit publish github create` first or configure project landing deployments."
         );
     }
 
@@ -377,11 +417,178 @@ fn build_default_plan(active: &ActiveBundle, provider: &str) -> Result<LandPlan>
         schema_version: SCHEMA_VERSION.to_string(),
         kind: LAND_PLAN_KIND.to_string(),
         id: format!("land-{}", active.bundle.id),
-        provider: provider.to_string(),
+        provider,
         bundle_id: active.bundle.id.clone(),
+        source_project_id: project.map(|project| project.id),
         created_at: now_iso(),
         steps,
     })
+}
+
+fn load_project_for_bundle(active: &ActiveBundle) -> Result<Option<KnitProject>> {
+    let config = load_config(&active.root)?;
+    let Some(project_id) = active
+        .bundle
+        .project_id
+        .as_deref()
+        .or(config.active_project.as_deref())
+    else {
+        return Ok(None);
+    };
+    read_json(&project_path(&active.root, project_id)).map(Some)
+}
+
+fn ordered_merge_repos<'a>(
+    active: &'a ActiveBundle,
+    merge: Option<&ProjectLandingMergePlan>,
+) -> Vec<&'a RepoEntry> {
+    let mut repos = Vec::new();
+    let mut seen = BTreeSet::new();
+    if let Some(merge) = merge {
+        for repo_id in &merge.repo_order {
+            if let Some(repo) = active.bundle.repos.iter().find(|repo| repo.id == *repo_id) {
+                if seen.insert(repo.id.clone()) {
+                    repos.push(repo);
+                }
+            }
+        }
+    }
+
+    if merge
+        .and_then(|merge| merge.include_unlisted)
+        .unwrap_or(true)
+    {
+        for repo in &active.bundle.repos {
+            if seen.insert(repo.id.clone()) {
+                repos.push(repo);
+            }
+        }
+    }
+
+    repos
+}
+
+fn merge_method(merge: Option<&ProjectLandingMergePlan>) -> String {
+    merge
+        .and_then(|merge| merge.method.clone())
+        .unwrap_or_else(|| "squash".to_string())
+}
+
+fn merge_wait_for_checks(merge: Option<&ProjectLandingMergePlan>) -> bool {
+    merge
+        .and_then(|merge| merge.wait_for_checks)
+        .unwrap_or(true)
+}
+
+fn merge_required_checks_only(merge: Option<&ProjectLandingMergePlan>) -> bool {
+    merge
+        .and_then(|merge| merge.required_checks_only)
+        .unwrap_or(true)
+}
+
+fn merge_delete_branch(merge: Option<&ProjectLandingMergePlan>) -> bool {
+    merge.and_then(|merge| merge.delete_branch).unwrap_or(false)
+}
+
+fn merge_timeout_seconds(merge: Option<&ProjectLandingMergePlan>) -> u64 {
+    merge
+        .and_then(|merge| merge.timeout_seconds)
+        .unwrap_or(1800)
+}
+
+fn merge_interval_seconds(merge: Option<&ProjectLandingMergePlan>) -> u64 {
+    merge.and_then(|merge| merge.interval_seconds).unwrap_or(10)
+}
+
+fn append_project_deployments(
+    active: &ActiveBundle,
+    landing: Option<&crate::model::ProjectLandingPlan>,
+    steps: &mut Vec<LandStep>,
+) -> Result<()> {
+    let Some(landing) = landing else {
+        return Ok(());
+    };
+    let merge_step_ids = steps
+        .iter()
+        .filter(|step| step.step_type == STEP_MERGE_PR)
+        .filter_map(|step| Some((step.repo_id.clone()?, step.id.clone())))
+        .collect::<BTreeMap<_, _>>();
+    let last_merge = steps
+        .iter()
+        .rev()
+        .find(|step| step.step_type == STEP_MERGE_PR)
+        .map(|step| step.id.clone());
+    let mut previous_deploy: Option<String> = None;
+
+    for deployment in &landing.deployments {
+        if let Some(repo_id) = &deployment.repo_id {
+            if !active.bundle.repos.iter().any(|repo| repo.id == *repo_id) {
+                continue;
+            }
+        }
+        let mode = deployment.mode.clone().unwrap_or_else(|| {
+            if deployment.command.is_empty() {
+                DEPLOY_MODE_PUSH.to_string()
+            } else {
+                DEPLOY_MODE_COMMAND.to_string()
+            }
+        });
+        let needs = if deployment.needs.is_empty() {
+            default_deployment_needs(
+                deployment.repo_id.as_deref(),
+                previous_deploy.as_deref(),
+                last_merge.as_deref(),
+                &merge_step_ids,
+            )
+        } else {
+            deployment.needs.clone()
+        };
+        let checkout = deployment.checkout.as_ref().map(|checkout| LandCheckout {
+            branch: checkout.branch.clone(),
+            remote: checkout.remote.clone(),
+            update: checkout.update.clone(),
+        });
+        steps.push(LandStep {
+            id: deployment.id.clone(),
+            step_type: STEP_DEPLOY.to_string(),
+            needs,
+            repo_id: deployment.repo_id.clone(),
+            method: None,
+            wait_for_checks: None,
+            required_checks_only: None,
+            delete_branch: None,
+            required_only: None,
+            timeout_seconds: None,
+            interval_seconds: None,
+            cwd: deployment.cwd.clone(),
+            command: deployment.command.clone(),
+            env: deployment.env.clone(),
+            deployment_mode: Some(mode),
+            checkout,
+        });
+        previous_deploy = Some(deployment.id.clone());
+    }
+
+    Ok(())
+}
+
+fn default_deployment_needs(
+    repo_id: Option<&str>,
+    previous_deploy: Option<&str>,
+    last_merge: Option<&str>,
+    merge_step_ids: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut needs = Vec::new();
+    if let Some(previous_deploy) = previous_deploy {
+        needs.push(previous_deploy.to_string());
+    } else if let Some(last_merge) = last_merge {
+        needs.push(last_merge.to_string());
+    } else if let Some(repo_id) = repo_id {
+        if let Some(merge_step) = merge_step_ids.get(repo_id) {
+            needs.push(merge_step.clone());
+        }
+    }
+    needs
 }
 
 struct LandUpdateTarget {
@@ -756,6 +963,7 @@ fn execute_step(
         STEP_MERGE_PR => execute_merge_pr(active, plan, step),
         STEP_WAIT_CHECKS => execute_wait_checks(active, step),
         STEP_RUN => execute_run_command(active, step),
+        STEP_DEPLOY => execute_deployment(active, step),
         step_type => bail!("unknown land step type `{step_type}`"),
     }
 }
@@ -900,6 +1108,215 @@ fn execute_run_command(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
     })
 }
 
+fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutcome> {
+    let mode = step
+        .deployment_mode
+        .as_deref()
+        .unwrap_or(if step.command.is_empty() {
+            DEPLOY_MODE_PUSH
+        } else {
+            DEPLOY_MODE_COMMAND
+        });
+    validate_deployment_mode(mode)?;
+    let repo_id = required_repo_id(step)?;
+
+    if mode == DEPLOY_MODE_PUSH {
+        if !step.command.is_empty() {
+            bail!(
+                "deploy step `{}` uses push mode and must not provide command",
+                step.id
+            );
+        }
+        return Ok(StepOutcome {
+            success: true,
+            detail: format!("{repo_id} deployment triggered by merge"),
+            publication_url: None,
+            stdout: None,
+            stderr: None,
+            exit_code: None,
+        });
+    }
+
+    if step.command.is_empty() {
+        bail!(
+            "deploy step `{}` must provide command in command mode",
+            step.id
+        );
+    }
+
+    let (cwd, checkout_detail) = deployment_cwd(active, repo_id, step)?;
+    let output = Command::new(&step.command[0])
+        .args(&step.command[1..])
+        .current_dir(&cwd)
+        .envs(&step.env)
+        .env("KNIT_ROOT", &active.root)
+        .env("KNIT_BUNDLE", &active.bundle.id)
+        .env("KNIT_REPO", repo_id)
+        .env("KNIT_DEPLOY_CHECKOUT", &cwd)
+        .output()
+        .with_context(|| {
+            format!(
+                "failed to run deploy `{}` in {}",
+                step.command.join(" "),
+                cwd.display()
+            )
+        })?;
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let exit_code = output.status.code();
+    let success = output.status.success();
+    let detail = if success {
+        format!("deployed {repo_id} from {checkout_detail}")
+    } else {
+        format!(
+            "deploy `{}` exited with {}",
+            step.command.join(" "),
+            exit_code
+                .map(|code| code.to_string())
+                .unwrap_or_else(|| "signal".to_string())
+        )
+    };
+
+    Ok(StepOutcome {
+        success,
+        detail,
+        publication_url: None,
+        stdout: non_empty(stdout),
+        stderr: non_empty(stderr),
+        exit_code,
+    })
+}
+
+fn deployment_cwd(
+    active: &ActiveBundle,
+    repo_id: &str,
+    step: &LandStep,
+) -> Result<(PathBuf, String)> {
+    let (base, detail) = if let Some(checkout) = &step.checkout {
+        let path = prepare_deployment_checkout(active, repo_id, checkout)?;
+        let remote = checkout.remote.as_deref().unwrap_or("origin");
+        (path, format!("{remote}/{}", checkout.branch))
+    } else {
+        let (_, _, cwd) = repo_context(active, repo_id)?;
+        (cwd, "bundle checkout".to_string())
+    };
+    let cwd = step
+        .cwd
+        .as_deref()
+        .map(|cwd| resolve_subdir(&base, cwd))
+        .unwrap_or(base);
+    if !cwd.exists() {
+        bail!(
+            "deploy step `{}` cwd does not exist: {}",
+            step.id,
+            cwd.display()
+        );
+    }
+    Ok((cwd, detail))
+}
+
+fn prepare_deployment_checkout(
+    active: &ActiveBundle,
+    repo_id: &str,
+    checkout: &LandCheckout,
+) -> Result<PathBuf> {
+    if checkout.branch.trim().is_empty() {
+        bail!("deploy checkout branch must not be empty");
+    }
+    let repo = active
+        .bundle
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("{repo_id}: repo is not tracked in this bundle"))?;
+    let repo_root = PathBuf::from(&repo.path);
+    if !repo_root.exists() {
+        bail!(
+            "{}: original repo path is missing: {}",
+            repo_id,
+            repo_root.display()
+        );
+    }
+
+    let remote = checkout.remote.as_deref().unwrap_or("origin");
+    let update = checkout.update.as_deref().unwrap_or("fetch");
+    validate_deploy_checkout_update(update)?;
+    let path = active
+        .root
+        .join(".knit/land-worktrees")
+        .join(&active.bundle.id)
+        .join(repo_id)
+        .join(slugify(&checkout.branch));
+
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+
+    let target_ref = if update == "none" {
+        format!("{remote}/{}", checkout.branch)
+    } else {
+        fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
+        "FETCH_HEAD".to_string()
+    };
+
+    if path.exists() {
+        if !is_git_worktree(&path) {
+            bail!(
+                "{}: deployment checkout path exists but is not a git worktree: {}",
+                repo_id,
+                path.display()
+            );
+        }
+        ensure_deploy_checkout_clean(repo_id, &path)?;
+        git_output(
+            &path,
+            [
+                OsString::from("checkout"),
+                OsString::from("--detach"),
+                OsString::from(&target_ref),
+            ],
+        )?;
+    } else {
+        git_output(
+            &repo_root,
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--detach"),
+                path.as_os_str().to_os_string(),
+                OsString::from(&target_ref),
+            ],
+        )?;
+    }
+
+    Ok(path)
+}
+
+fn fetch_deploy_branch(repo_root: &Path, remote: &str, branch: &str) -> Result<()> {
+    git_output(
+        repo_root,
+        [
+            OsString::from("fetch"),
+            OsString::from(remote),
+            OsString::from(branch),
+        ],
+    )?;
+    Ok(())
+}
+
+fn ensure_deploy_checkout_clean(repo_id: &str, path: &Path) -> Result<()> {
+    let status = git_output(path, ["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        bail!(
+            "{}: deployment checkout has uncommitted changes in {}",
+            repo_id,
+            path.display()
+        );
+    }
+    Ok(())
+}
+
 fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()> {
     if plan.schema_version != SCHEMA_VERSION {
         bail!(
@@ -947,6 +1364,46 @@ fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()
                         step.id,
                         cwd.display()
                     );
+                }
+            }
+            STEP_DEPLOY => {
+                required_repo_id(step)?;
+                let mode = step
+                    .deployment_mode
+                    .as_deref()
+                    .unwrap_or(if step.command.is_empty() {
+                        DEPLOY_MODE_PUSH
+                    } else {
+                        DEPLOY_MODE_COMMAND
+                    });
+                validate_deployment_mode(mode)?;
+                if mode == DEPLOY_MODE_COMMAND && step.command.is_empty() {
+                    bail!("deploy step `{}` must provide command", step.id);
+                }
+                if mode == DEPLOY_MODE_PUSH && !step.command.is_empty() {
+                    bail!(
+                        "deploy step `{}` uses push mode and must not provide command",
+                        step.id
+                    );
+                }
+                if let Some(checkout) = &step.checkout {
+                    if checkout.branch.trim().is_empty() {
+                        bail!(
+                            "deploy step `{}` checkout branch must not be empty",
+                            step.id
+                        );
+                    }
+                    validate_deploy_checkout_update(checkout.update.as_deref().unwrap_or("fetch"))?;
+                } else if let Some(cwd) = &step.cwd {
+                    let (_, _, checkout) = repo_context(active, required_repo_id(step)?)?;
+                    let cwd = resolve_subdir(&checkout, cwd);
+                    if !cwd.exists() {
+                        bail!(
+                            "deploy step `{}` cwd does not exist: {}",
+                            step.id,
+                            cwd.display()
+                        );
+                    }
                 }
             }
             step_type => bail!("unknown land step type `{step_type}` in `{}`", step.id),
@@ -1140,10 +1597,7 @@ fn print_plan(plan: &LandPlan, path: &Path) {
             "{} {} {}",
             out::node(&step.id),
             out::heading(&step.step_type),
-            step.repo_id
-                .as_deref()
-                .map(out::repo)
-                .unwrap_or_else(|| step.command.join(" "))
+            planned_step_target(step)
         );
         if !step.needs.is_empty() {
             println!("  needs {}", step.needs.join(", "));
@@ -1199,6 +1653,31 @@ fn print_planned_step(active: &ActiveBundle, step: &LandStep) {
     );
     if let Some(repo_id) = &step.repo_id {
         print_pr_status(active, repo_id, None);
+    }
+}
+
+fn planned_step_target(step: &LandStep) -> String {
+    match step.step_type.as_str() {
+        STEP_DEPLOY => {
+            let repo = step
+                .repo_id
+                .as_deref()
+                .map(out::repo)
+                .unwrap_or_else(|| out::muted("workspace"));
+            let mode = step.deployment_mode.as_deref().unwrap_or_else(|| {
+                if step.command.is_empty() {
+                    DEPLOY_MODE_PUSH
+                } else {
+                    DEPLOY_MODE_COMMAND
+                }
+            });
+            format!("{repo} {mode}")
+        }
+        _ => step
+            .repo_id
+            .as_deref()
+            .map(out::repo)
+            .unwrap_or_else(|| step.command.join(" ")),
     }
 }
 
@@ -1354,6 +1833,20 @@ fn validate_merge_method(method: &str) -> Result<()> {
     Ok(())
 }
 
+fn validate_deployment_mode(mode: &str) -> Result<()> {
+    if !matches!(mode, DEPLOY_MODE_COMMAND | DEPLOY_MODE_PUSH) {
+        bail!("unknown deployment mode `{mode}`; expected command or push");
+    }
+    Ok(())
+}
+
+fn validate_deploy_checkout_update(update: &str) -> Result<()> {
+    if !matches!(update, "fetch" | "pull" | "none") {
+        bail!("unknown deploy checkout update `{update}`; expected fetch, pull, or none");
+    }
+    Ok(())
+}
+
 fn ensure_open_and_ready(repo_id: &str, pr: &PullRequest) -> Result<()> {
     if pr.is_draft.unwrap_or(false) {
         bail!("{repo_id}: PR #{} is a draft.", pr.number);
@@ -1410,7 +1903,13 @@ fn latest_run_path(active: &ActiveBundle) -> Result<Option<PathBuf>> {
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .collect::<Vec<_>>();
     paths.sort();
-    Ok(paths.pop())
+    for path in paths.into_iter().rev() {
+        let run: LandRun = read_json(&path)?;
+        if run.bundle_id == active.bundle.id {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
 fn resolve_user_path(path: &Path) -> PathBuf {
@@ -1429,6 +1928,15 @@ fn resolve_stored_path(root: &Path, path: &str) -> PathBuf {
         path
     } else {
         root.join(path)
+    }
+}
+
+fn resolve_subdir(base: &Path, subdir: &str) -> PathBuf {
+    let path = PathBuf::from(subdir);
+    if path.is_absolute() {
+        path
+    } else {
+        base.join(path)
     }
 }
 
@@ -1466,6 +1974,8 @@ mod tests {
             cwd: Some(".".to_string()),
             command: vec!["true".to_string()],
             env: BTreeMap::new(),
+            deployment_mode: None,
+            checkout: None,
         }
     }
 
@@ -1536,5 +2046,50 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("waiting"));
+    }
+
+    #[test]
+    fn latest_run_path_ignores_other_bundles() {
+        let root = std::env::temp_dir().join(format!(
+            "knit-land-run-test-{}-{}",
+            std::process::id(),
+            safe_timestamp()
+        ));
+        let run_dir = root.join(".knit/land-runs");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let active = ActiveBundle::unlocked(
+            root.clone(),
+            root.join(".knit/bundles/target.bundle.json"),
+            crate::model::ChangeGroup::new("target".to_string(), "target".to_string(), now_iso()),
+        );
+        write_test_run(&run_dir.join("001.run.json"), "other");
+        write_test_run(&run_dir.join("002.run.json"), "target");
+        write_test_run(&run_dir.join("003.run.json"), "other");
+
+        let path = latest_run_path(&active).unwrap().unwrap();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("002.run.json")
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn write_test_run(path: &Path, bundle_id: &str) {
+        let run = LandRun {
+            schema_version: SCHEMA_VERSION.to_string(),
+            kind: LAND_RUN_KIND.to_string(),
+            id: format!("run-{bundle_id}"),
+            plan_id: "plan".to_string(),
+            bundle_id: bundle_id.to_string(),
+            provider: github::PROVIDER.to_string(),
+            plan_path: "plan.json".to_string(),
+            status: STATUS_SUCCEEDED.to_string(),
+            created_at: now_iso(),
+            updated_at: now_iso(),
+            steps: Vec::new(),
+        };
+        let text = serde_json::to_string_pretty(&run).unwrap();
+        std::fs::write(path, format!("{text}\n")).unwrap();
     }
 }
