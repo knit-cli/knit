@@ -31,6 +31,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Manage KnitHub API remotes.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
     /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
         /// Paths to local git repositories.
@@ -450,6 +455,15 @@ pub enum BundleCommand {
     Print,
     /// Validate the resolved bundle structure.
     Validate,
+    /// Push the resolved bundle JSON artifact to a KnitHub remote.
+    Push {
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+        /// Project id or slug to attach the bundle to. Defaults to the bundle project or active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -484,6 +498,14 @@ pub enum ProjectCommand {
     Show {
         /// Project name. Defaults to the active project.
         name: Option<String>,
+    },
+    /// Push the project JSON shape and repositories to a KnitHub remote.
+    Push {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
     },
     /// Write or refresh project-specific AGENTS.md guidance.
     Agents {
@@ -522,6 +544,42 @@ pub enum ProjectRunCommandCli {
     Remove {
         /// Command name.
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    /// Add or replace a named KnitHub API remote.
+    Add {
+        /// Remote name, for example `knithub`.
+        name: String,
+        /// KnitHub base URL, for example `http://localhost:4000` or `https://api.knithub.example`.
+        url: String,
+        /// Optional KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN for shared workspaces.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// List configured remotes.
+    List,
+    /// Show a configured remote.
+    Show {
+        /// Remote name.
+        name: String,
+    },
+    /// Remove a configured remote.
+    Remove {
+        /// Remote name.
+        name: String,
+    },
+    /// Store or clear a token for a remote.
+    Token {
+        /// Remote name.
+        name: String,
+        /// Token value. Omit with --clear.
+        token: Option<String>,
+        /// Remove the stored token.
+        #[arg(long)]
+        clear: bool,
     },
 }
 

@@ -7,6 +7,18 @@
     "schemaVersion": { "const": "0.1" },
     "activeBundle": { "type": "string" },
     "activeProject": { "type": "string" },
-    "advice": { "type": "boolean" }
+    "advice": { "type": "boolean" },
+    "remotes": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["url"],
+        "properties": {
+          "url": { "type": "string" },
+          "token": { "type": "string" }
+        },
+        "additionalProperties": false
+      }
+    }
   }
 }

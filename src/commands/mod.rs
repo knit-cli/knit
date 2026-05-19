@@ -17,6 +17,7 @@ pub mod project;
 pub mod publish;
 pub mod pull;
 pub mod push;
+pub mod remote;
 pub mod remove;
 pub mod revert;
 pub mod run;
@@ -56,6 +57,10 @@ pub use publish::{
 };
 pub use pull::pull_repos;
 pub use push::push_repos;
+pub use remote::{
+    add_remote, list_remotes, push_bundle_to_remote, push_project_to_remote, remove_remote,
+    set_remote_token, show_remote,
+};
 pub use remove::remove_repos;
 pub use revert::revert_target;
 pub use run::run_project_command;

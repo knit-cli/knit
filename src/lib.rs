@@ -19,7 +19,7 @@ use anyhow::{bail, Result};
 
 pub use cli::{
     BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
-    ProjectRunCommandCli, PublishCommand, SchemaCommand,
+    ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -41,6 +41,9 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+            ProjectCommand::Push { name, remote } => {
+                commands::push_project_to_remote(name.as_deref(), &remote)
+            }
             ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
             ProjectCommand::Command { command } => match command {
                 ProjectRunCommandCli::Set {
@@ -57,6 +60,17 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
+        },
+        Commands::Remote { command } => match command {
+            RemoteCommand::Add { name, url, token } => {
+                commands::add_remote(&name, &url, token.as_deref())
+            }
+            RemoteCommand::List => commands::list_remotes(),
+            RemoteCommand::Show { name } => commands::show_remote(&name),
+            RemoteCommand::Remove { name } => commands::remove_remote(&name),
+            RemoteCommand::Token { name, token, clear } => {
+                commands::set_remote_token(&name, token.as_deref(), clear)
+            }
         },
         Commands::Track {
             repo_paths,
@@ -150,6 +164,9 @@ pub fn run(cli: Cli) -> Result<()> {
             Some(BundleCommand::Path) => commands::bundle_path(),
             Some(BundleCommand::Print) => commands::print_bundle(),
             Some(BundleCommand::Validate) => commands::validate_bundle(),
+            Some(BundleCommand::Push { remote, project }) => {
+                commands::push_bundle_to_remote(&remote, project.as_deref())
+            }
         },
         Commands::Switch {
             bundle,
