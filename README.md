@@ -47,6 +47,10 @@ Knit stores local state under the directory where `knit project init`, `knit bun
     <slug>.land.json
   land-runs/
     <plan-id>-<timestamp>.run.json
+  land-worktrees/
+    <slug>/
+      <repo-name>/
+        <branch>/
   revert-plans/
     <node-id>.json
   worktrees/
@@ -198,6 +202,36 @@ knit run api-test
 ```sh
 knit run --repo backend -- docker compose ps
 ```
+
+Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
+
+```json
+{
+  "landing": {
+    "provider": "github",
+    "merge": {
+      "repoOrder": ["arbient-odds-store", "scrapers", "betsnitch", "arbient-engine", "betsnitch-frontend"],
+      "method": "squash",
+      "requiredChecksOnly": true
+    },
+    "deployments": [
+      {
+        "id": "deploy-betsnitch",
+        "repoId": "betsnitch",
+        "checkout": { "branch": "main", "remote": "origin", "update": "pull" },
+        "command": ["fly", "deploy"]
+      },
+      {
+        "id": "deploy-frontend",
+        "repoId": "betsnitch-frontend",
+        "mode": "push"
+      }
+    ]
+  }
+}
+```
+
+Deployment entries are first-class landing steps. Command deployments run without a shell unless the command explicitly invokes one, and a deployment checkout uses a managed `.knit/land-worktrees/<bundle>/<repo>/<branch>/` checkout so the feature worktree is not switched away from its Knit branch. `update: "pull"` and `update: "fetch"` both refresh the managed checkout from the configured remote branch before running the command.
 
 Default project repos are included by `knit bundle start`; observed repos are available by id but are not branched or tracked until added explicitly:
 
@@ -390,13 +424,13 @@ knit land status
 knit land resume
 ```
 
-`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. The default plan is linear in repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `squash`, waits for required checks, and does not delete feature branches. In Knit, a PR with no required checks has passed the required-check gate. You can edit the plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, or insert local `run` steps such as deploy commands. `run.command` is an argv array; use `["sh", "-lc", "..."]` when you intentionally need shell behavior.
+`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. Without a project landing template, the default plan is linear in bundle repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `squash`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `merge` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
 
 Bare `knit land` is safe: it creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. Execute the plan explicitly with `knit land apply` after inspection.
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs.
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs.
 
 `knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
 

@@ -226,7 +226,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 provider,
                 out,
                 force,
-            }) => commands::generate_land_plan(&provider, out.as_deref(), force),
+            }) => commands::generate_land_plan(provider.as_deref(), out.as_deref(), force),
             Some(LandCommand::Apply { plan }) => commands::apply_land_plan(plan.as_deref()),
             Some(LandCommand::Resume { run }) => commands::resume_land_run(run.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
