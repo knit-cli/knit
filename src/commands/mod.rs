@@ -58,8 +58,8 @@ pub use publish::{
 pub use pull::pull_repos;
 pub use push::push_repos;
 pub use remote::{
-    add_remote, list_remotes, push_bundle_to_remote, push_project_to_remote, remove_remote,
-    set_remote_token, show_remote,
+    add_remote, clone_project_from_remote, list_remotes, pull_remote_state, push_bundle_to_remote,
+    push_project_to_remote, remove_remote, set_remote_token, show_remote,
 };
 pub use remove::remove_repos;
 pub use revert::revert_target;

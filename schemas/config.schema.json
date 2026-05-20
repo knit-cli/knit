@@ -7,6 +7,7 @@
     "schemaVersion": { "const": "0.1" },
     "activeBundle": { "type": "string" },
     "activeProject": { "type": "string" },
+    "syncRemote": { "type": "string" },
     "advice": { "type": "boolean" },
     "remotes": {
       "type": "object",

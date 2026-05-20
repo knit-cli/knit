@@ -36,6 +36,28 @@ pub enum Commands {
         #[command(subcommand)]
         command: RemoteCommand,
     },
+    /// Clone a KnitHub project export into a local Knit workspace.
+    Clone {
+        /// Project id or slug on the KnitHub remote.
+        project: String,
+        /// Directory to create. Defaults to the project slug.
+        target: Option<PathBuf>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+        /// KnitHub base URL. Required outside an existing configured workspace unless KNITHUB_URL is set.
+        #[arg(long)]
+        url: Option<String>,
+        /// KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN.
+        #[arg(long)]
+        token: Option<String>,
+        /// Bundle to make active after clone. Defaults to the latest open exported bundle.
+        #[arg(long = "active-bundle")]
+        active_bundle: Option<String>,
+        /// Only write project and bundle JSON; do not create feature worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+    },
     /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
         /// Paths to local git repositories.
@@ -179,6 +201,12 @@ pub enum Commands {
         /// Pull the tracked feature checkouts instead of original/base repo paths.
         #[arg(long)]
         feature: bool,
+        /// Also pull the current bundle artifact from a KnitHub remote. With no value, uses `knithub`.
+        #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "knithub")]
+        remote: Option<String>,
+        /// Skip configured KnitHub remote sync for this pull.
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Push tracked feature branches.
     Push {

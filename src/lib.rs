@@ -72,6 +72,23 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::set_remote_token(&name, token.as_deref(), clear)
             }
         },
+        Commands::Clone {
+            project,
+            target,
+            remote,
+            url,
+            token,
+            active_bundle,
+            no_worktree,
+        } => commands::clone_project_from_remote(
+            &project,
+            target.as_deref(),
+            &remote,
+            url.as_deref(),
+            token.as_deref(),
+            active_bundle.as_deref(),
+            !no_worktree,
+        ),
         Commands::Track {
             repo_paths,
             base,
@@ -198,7 +215,12 @@ pub fn run(cli: Cli) -> Result<()> {
             rebase,
             force,
             feature,
-        } => commands::pull_repos(&repos, all, rebase, force, feature),
+            remote,
+            no_remote,
+        } => {
+            commands::pull_repos(&repos, all, rebase, force, feature)?;
+            commands::pull_remote_state(remote.as_deref(), no_remote)
+        }
         Commands::Push {
             repos,
             all,
