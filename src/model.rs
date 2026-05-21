@@ -18,8 +18,12 @@ pub struct KnitConfig {
     pub active_bundle: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub active_project: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sync_remote: Option<String>,
     #[serde(default = "default_advice")]
     pub advice: bool,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub remotes: BTreeMap<String, KnitRemote>,
 }
 
 impl KnitConfig {
@@ -28,7 +32,9 @@ impl KnitConfig {
             schema_version: SCHEMA_VERSION.to_string(),
             active_bundle: Some(active_bundle),
             active_project: None,
+            sync_remote: None,
             advice: true,
+            remotes: BTreeMap::new(),
         }
     }
 
@@ -37,13 +43,23 @@ impl KnitConfig {
             schema_version: SCHEMA_VERSION.to_string(),
             active_bundle: None,
             active_project: Some(active_project),
+            sync_remote: None,
             advice: true,
+            remotes: BTreeMap::new(),
         }
     }
 }
 
 fn default_advice() -> bool {
     true
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct KnitRemote {
+    pub url: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
