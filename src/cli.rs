@@ -31,6 +31,33 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Manage KnitHub API remotes.
+    Remote {
+        #[command(subcommand)]
+        command: RemoteCommand,
+    },
+    /// Clone a KnitHub project export into a local Knit workspace.
+    Clone {
+        /// Project id or slug on the KnitHub remote.
+        project: String,
+        /// Directory to create. Defaults to the project slug.
+        target: Option<PathBuf>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+        /// KnitHub base URL. Required outside an existing configured workspace unless KNITHUB_URL is set.
+        #[arg(long)]
+        url: Option<String>,
+        /// KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN.
+        #[arg(long)]
+        token: Option<String>,
+        /// Bundle to make active after clone. Defaults to the latest open exported bundle.
+        #[arg(long = "active-bundle")]
+        active_bundle: Option<String>,
+        /// Only write project and bundle JSON; do not create feature worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+    },
     /// Track local git repositories in the resolved bundle and materialize checkouts.
     Track {
         /// Paths to local git repositories.
@@ -174,6 +201,12 @@ pub enum Commands {
         /// Pull the tracked feature checkouts instead of original/base repo paths.
         #[arg(long)]
         feature: bool,
+        /// Also pull the current bundle artifact from a KnitHub remote. With no value, uses `knithub`.
+        #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "knithub")]
+        remote: Option<String>,
+        /// Skip configured KnitHub remote sync for this pull.
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Push tracked feature branches.
     Push {
@@ -450,6 +483,15 @@ pub enum BundleCommand {
     Print,
     /// Validate the resolved bundle structure.
     Validate,
+    /// Push the resolved bundle JSON artifact to a KnitHub remote.
+    Push {
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+        /// Project id or slug to attach the bundle to. Defaults to the bundle project or active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -484,6 +526,14 @@ pub enum ProjectCommand {
     Show {
         /// Project name. Defaults to the active project.
         name: Option<String>,
+    },
+    /// Push the project JSON shape and repositories to a KnitHub remote.
+    Push {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
     },
     /// Write or refresh project-specific AGENTS.md guidance.
     Agents {
@@ -522,6 +572,42 @@ pub enum ProjectRunCommandCli {
     Remove {
         /// Command name.
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum RemoteCommand {
+    /// Add or replace a named KnitHub API remote.
+    Add {
+        /// Remote name, for example `knithub`.
+        name: String,
+        /// KnitHub base URL, for example `http://localhost:4000` or `https://api.knithub.example`.
+        url: String,
+        /// Optional KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN for shared workspaces.
+        #[arg(long)]
+        token: Option<String>,
+    },
+    /// List configured remotes.
+    List,
+    /// Show a configured remote.
+    Show {
+        /// Remote name.
+        name: String,
+    },
+    /// Remove a configured remote.
+    Remove {
+        /// Remote name.
+        name: String,
+    },
+    /// Store or clear a token for a remote.
+    Token {
+        /// Remote name.
+        name: String,
+        /// Token value. Omit with --clear.
+        token: Option<String>,
+        /// Remove the stored token.
+        #[arg(long)]
+        clear: bool,
     },
 }
 
