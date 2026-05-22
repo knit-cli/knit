@@ -178,6 +178,33 @@ pub fn show_project(name: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+pub fn remove_project(name: &str, force: bool) -> Result<()> {
+    if !force {
+        bail!("Removing a project requires --force.");
+    }
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let project_id = slugify(name);
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    if !path.exists() {
+        bail!("No Knit project named `{project_id}` found.");
+    }
+
+    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    let mut config = load_config(&root)?;
+    if config.active_project.as_deref() == Some(project_id.as_str()) {
+        config.active_project = None;
+        save_config(&root, &config)?;
+    }
+    println!(
+        "{} {}",
+        out::heading("Removed project:"),
+        out::repo(project_id)
+    );
+    Ok(())
+}
+
 pub fn set_project_run_command(
     name: &str,
     repos: &[String],

@@ -41,6 +41,7 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+            ProjectCommand::Remove { name, force } => commands::remove_project(&name, force),
             ProjectCommand::Push { name, remote } => {
                 commands::push_project_to_remote(name.as_deref(), &remote)
             }
@@ -146,6 +147,34 @@ pub fn run(cli: Cli) -> Result<()> {
                 archived,
                 deleted,
             }) => commands::list_bundles(all, archived, deleted),
+            Some(BundleCommand::Prune {
+                apply,
+                force,
+                refresh,
+                no_refresh,
+                all,
+                worktrees,
+                branches,
+                force_branches,
+                remote_branches,
+                remote_bundles,
+            }) => {
+                let refresh = refresh || !no_refresh;
+                let worktrees = all || worktrees;
+                let branches = all || branches;
+                let force_branches = all || force_branches;
+                let remote_branches = all || remote_branches;
+                let remote_bundles = all || remote_bundles;
+                commands::prune_merged_bundles(
+                    apply || force,
+                    refresh,
+                    worktrees,
+                    branches,
+                    force_branches,
+                    remote_branches,
+                    remote_bundles,
+                )
+            }
             Some(BundleCommand::Switch {
                 bundle,
                 workspace,
@@ -160,7 +189,17 @@ pub fn run(cli: Cli) -> Result<()> {
                 worktrees,
                 branches,
                 force_branches,
-            }) => commands::delete_bundle(&bundle, force, worktrees, branches, force_branches),
+                remote_branches,
+            }) => commands::delete_bundle(
+                &bundle,
+                force,
+                worktrees,
+                branches,
+                force_branches,
+                remote_branches,
+                false,
+                None,
+            ),
             Some(BundleCommand::Compat {
                 sources,
                 title,
@@ -199,6 +238,34 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::switch_bundle(&bundle, workspace, here),
         Commands::Checkpoint { message } => commands::record_checkpoint(&message),
         Commands::Close { reason } => commands::close_bundle(reason.as_deref()),
+        Commands::Prune {
+            apply,
+            force,
+            refresh,
+            no_refresh,
+            all,
+            worktrees,
+            branches,
+            force_branches,
+            remote_branches,
+            remote_bundles,
+        } => {
+            let refresh = refresh || !no_refresh;
+            let worktrees = all || worktrees;
+            let branches = all || branches;
+            let force_branches = all || force_branches;
+            let remote_branches = all || remote_branches;
+            let remote_bundles = all || remote_bundles;
+            commands::prune_merged_bundles(
+                apply || force,
+                refresh,
+                worktrees,
+                branches,
+                force_branches,
+                remote_branches,
+                remote_bundles,
+            )
+        }
         Commands::Clean {
             plans,
             worktrees,

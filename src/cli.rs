@@ -132,6 +132,40 @@ pub enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
+    /// Delete fully merged bundle artifacts and selected branch/worktree state.
+    Prune {
+        /// Apply pruning after listing candidate bundles.
+        #[arg(long)]
+        apply: bool,
+        /// Deprecated alias for --apply.
+        #[arg(long)]
+        #[arg(hide = true)]
+        force: bool,
+        /// Refresh recorded PR states from GitHub before deciding. This is the default.
+        #[arg(long, conflicts_with = "no_refresh")]
+        refresh: bool,
+        /// Use only cached recorded PR states without querying GitHub.
+        #[arg(long)]
+        no_refresh: bool,
+        /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
+        #[arg(long)]
+        all: bool,
+        /// Remove generated worktrees for each pruned bundle before deleting the artifact.
+        #[arg(long)]
+        worktrees: bool,
+        /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
+        #[arg(long)]
+        branches: bool,
+        /// Use `git branch -D` instead of `git branch -d` for local feature branches.
+        #[arg(long = "force-branches", requires = "branches")]
+        force_branches: bool,
+        /// Delete matching feature branches from origin.
+        #[arg(long = "remote-branches", requires = "branches")]
+        remote_branches: bool,
+        /// Delete matching KnitHub remote bundle records.
+        #[arg(long = "remote-bundles")]
+        remote_bundles: bool,
+    },
     /// Remove Knit-generated local state.
     Clean {
         /// Remove stored revert plans.
@@ -425,6 +459,40 @@ pub enum BundleCommand {
         #[arg(long)]
         deleted: bool,
     },
+    /// Delete bundles whose tracked GitHub PRs are all merged.
+    Prune {
+        /// Apply pruning after listing candidate bundles.
+        #[arg(long)]
+        apply: bool,
+        /// Deprecated alias for --apply.
+        #[arg(long)]
+        #[arg(hide = true)]
+        force: bool,
+        /// Refresh recorded PR states from GitHub before deciding. This is the default.
+        #[arg(long, conflicts_with = "no_refresh")]
+        refresh: bool,
+        /// Use only cached recorded PR states without querying GitHub.
+        #[arg(long)]
+        no_refresh: bool,
+        /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
+        #[arg(long)]
+        all: bool,
+        /// Remove generated worktrees for each pruned bundle before deleting the artifact.
+        #[arg(long)]
+        worktrees: bool,
+        /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
+        #[arg(long)]
+        branches: bool,
+        /// Use `git branch -D` instead of `git branch -d` for local feature branches.
+        #[arg(long = "force-branches", requires = "branches")]
+        force_branches: bool,
+        /// Delete matching feature branches from origin.
+        #[arg(long = "remote-branches", requires = "branches")]
+        remote_branches: bool,
+        /// Delete matching KnitHub remote bundle records.
+        #[arg(long = "remote-bundles")]
+        remote_bundles: bool,
+    },
     /// Switch the fallback bundle for this workspace or folder.
     Switch {
         /// Bundle id to make active.
@@ -468,6 +536,9 @@ pub enum BundleCommand {
         /// Use `git branch -D` instead of `git branch -d` for local feature branches.
         #[arg(long = "force-branches", requires = "branches")]
         force_branches: bool,
+        /// Delete matching feature branches from origin.
+        #[arg(long = "remote-branches", requires = "branches")]
+        remote_branches: bool,
     },
     /// Create a compatibility bundle from the union of repos in source bundles.
     Compat {
@@ -559,6 +630,14 @@ pub enum ProjectCommand {
     Show {
         /// Project name. Defaults to the active project.
         name: Option<String>,
+    },
+    /// Remove a project template JSON artifact.
+    Remove {
+        /// Project name.
+        name: String,
+        /// Required to remove the project artifact.
+        #[arg(long)]
+        force: bool,
     },
     /// Push the project JSON shape and repositories to a KnitHub remote.
     Push {

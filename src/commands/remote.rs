@@ -81,6 +81,7 @@ struct RemoteExportRepository {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteExportBundle {
+    id: String,
     slug: String,
     lifecycle_state: String,
     current_artifact: Option<RemoteExportArtifact>,
@@ -384,6 +385,51 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result
         out::movement("pulled"),
         out::repo(&remote_bundle.slug),
         out::muted(&artifact.artifact_hash)
+    );
+    Ok(())
+}
+
+pub fn delete_bundle_from_remote(
+    _root: &Path,
+    config: &KnitConfig,
+    bundle: &ChangeGroup,
+) -> Result<()> {
+    let remote_name = config
+        .sync_remote
+        .clone()
+        .or_else(|| config.remotes.contains_key("knithub").then(|| "knithub".to_string()))
+        .context("No KnitHub sync remote configured. Run `knit remote add knithub <url>` or use explicit prune flags instead of --all.")?;
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let project_id = bundle
+        .project_id
+        .clone()
+        .or_else(|| config.active_project.clone())
+        .context("No project selected for remote bundle cleanup. Set activeProject or record projectId on the bundle.")?;
+    let export = fetch_project_export(remote, &token, &project_id)?;
+    let Some(remote_bundle) = export.bundles.iter().find(|remote_bundle| {
+        remote_bundle.slug == bundle.id && remote_bundle.lifecycle_state != "deleted"
+    }) else {
+        println!(
+            "{}: {}",
+            out::node(&bundle.id),
+            out::muted("remote bundle already missing")
+        );
+        return Ok(());
+    };
+
+    let deleted: RemoteBundle = request_json(
+        remote,
+        &token,
+        "DELETE",
+        &format!("/bundles/{}", remote_bundle.id),
+        None,
+    )?;
+    println!(
+        "{}: {} {}",
+        out::node(&bundle.id),
+        out::movement("deleted remote bundle"),
+        out::muted(format!("{remote_name}/{}", deleted.slug))
     );
     Ok(())
 }

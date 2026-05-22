@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -23,6 +23,13 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle start"));
     assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit bundle remove --repo"));
+    assert!(agents.contains("knit bundle prune"));
+    assert!(agents.contains("knit prune --apply --worktrees --branches"));
+    assert!(agents.contains("knit prune --apply --all"));
+    assert!(agents.contains("--remote-branches"));
+    assert!(agents.contains("matching KnitHub remote bundle records"));
+    assert!(agents.contains("requires a token with `bundle:delete`"));
+    assert!(agents.contains("knit project remove <project> --force"));
     assert!(agents.contains("knit --bundle feature-a commit"));
     assert!(agents.contains("knit --bundle feature-a commit --stage"));
     assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
@@ -114,6 +121,37 @@ fn project_default_repos_start_bundle_without_track() {
 
     let list = knit(&workspace, ["bundle", "list"]);
     assert!(list.contains("project-feature"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_remove_deletes_template_and_clears_active_project() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    let project_path = workspace.join(".knit/projects/arbient.project.json");
+    assert!(project_path.exists());
+    let refused = knit_fails(&workspace, ["project", "remove", "arbient"]);
+    assert!(refused.contains("requires --force"));
+
+    let removed = knit(&workspace, ["project", "remove", "arbient", "--force"]);
+    assert!(removed.contains("Removed project"));
+    assert!(!project_path.exists());
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert!(config.get("activeProject").is_none());
+    assert!(!knit(&workspace, ["project", "list"]).contains("arbient"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2371,6 +2409,192 @@ fn bundle_delete_can_remove_generated_worktrees_and_force_delete_branches() {
 }
 
 #[test]
+fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["init", "merged cleanup"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications(&workspace, "merged-cleanup", "MERGED");
+
+    knit(&workspace, ["bundle", "start", "open cleanup"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications(&workspace, "open-cleanup", "OPEN");
+
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(preview.contains("Merged bundle candidates"));
+    assert!(preview.contains("merged-cleanup"));
+    assert!(!preview.contains("open-cleanup"));
+    assert!(workspace
+        .join(".knit/bundles/merged-cleanup.bundle.json")
+        .exists());
+
+    let pruned = knit(
+        &workspace,
+        [
+            "bundle",
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--worktrees",
+            "--branches",
+        ],
+    );
+    assert!(pruned.contains("Deleted bundle"));
+    assert!(pruned.contains("Pruned"));
+    assert!(!workspace
+        .join(".knit/bundles/merged-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/merged-cleanup.bundle.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/worktrees/merged-cleanup/backend")
+        .exists());
+    assert!(
+        !git(&backend, ["branch", "--list", "knit/merged-cleanup"]).contains("knit/merged-cleanup")
+    );
+
+    assert!(workspace
+        .join(".knit/bundles/open-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/worktrees/open-cleanup/backend")
+        .exists());
+    assert!(git(&backend, ["branch", "--list", "knit/open-cleanup"]).contains("knit/open-cleanup"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_prune_refreshes_stale_publication_states_by_default() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications(&workspace, "venue-capacity", "OPEN");
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("merged-frontend"), "").unwrap();
+
+    let preview = knit_with_fake_gh(&workspace, ["bundle", "prune"], &fake_bin, &fake_gh_dir);
+    assert!(preview.contains("Merged bundle candidates"));
+    assert!(preview.contains("venue-capacity"));
+
+    let bundle = read_bundle(&workspace);
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|publication| publication["state"].as_str() == Some("MERGED")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "remote cleanup"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/remote-cleanup/backend");
+    append_line(&feature.join("app.txt"), "remote cleanup change");
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Remote cleanup change"],
+    );
+    git(&feature, ["push", "origin", "knit/remote-cleanup"]);
+    assert!(git_success(
+        &backend_remote,
+        ["rev-parse", "--verify", "refs/heads/knit/remote-cleanup"],
+    ));
+    assert!(git_success(
+        &backend,
+        [
+            "rev-parse",
+            "--verify",
+            "refs/remotes/origin/knit/remote-cleanup",
+        ],
+    ));
+
+    write_bundle_publications(&workspace, "remote-cleanup", "MERGED");
+    let preview = knit(&workspace, ["prune", "--no-refresh", "--all"]);
+    assert!(preview.contains("knit prune --apply --all"));
+
+    let pruned = knit(
+        &workspace,
+        [
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+            "--remote-branches",
+        ],
+    );
+    assert!(pruned.contains("Deleted bundle"));
+    assert!(pruned.contains("origin/knit/remote-cleanup"));
+    assert!(!feature.exists());
+    assert!(!git_success(
+        &backend,
+        ["rev-parse", "--verify", "refs/heads/knit/remote-cleanup"],
+    ));
+    assert!(!git_success(
+        &backend_remote,
+        ["rev-parse", "--verify", "refs/heads/knit/remote-cleanup"],
+    ));
+    assert!(!git_success(
+        &backend,
+        [
+            "rev-parse",
+            "--verify",
+            "refs/remotes/origin/knit/remote-cleanup",
+        ],
+    ));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_feature_checkout_records_observed_git_movement() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
@@ -2541,6 +2765,41 @@ fn read_bundle(workspace: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
 
+fn write_bundle_publications(workspace: &Path, bundle_id: &str, state: &str) {
+    let path = workspace
+        .join(".knit/bundles")
+        .join(format!("{bundle_id}.bundle.json"));
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let publications = bundle["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .enumerate()
+        .map(|(index, repo)| {
+            let repo_id = repo["id"].as_str().unwrap();
+            let head_branch = repo["featureBranch"].as_str().unwrap();
+            let base_branch = repo["baseBranch"].as_str().unwrap();
+            json!({
+                "repoId": repo_id,
+                "provider": "github",
+                "kind": "pull_request",
+                "number": (index + 1) as u64,
+                "url": format!("https://github.com/acme/{repo_id}/pull/{}", index + 1),
+                "baseBranch": base_branch,
+                "headBranch": head_branch,
+                "state": state,
+                "updatedAt": "2026-05-22T00:00:00.000Z"
+            })
+        })
+        .collect::<Vec<_>>();
+    bundle["publications"] = json!(publications);
+    fs::write(
+        path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+}
+
 fn knit<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -2660,6 +2919,17 @@ where
     let mut command = Command::new("git");
     command.args(args).current_dir(cwd);
     run(command)
+}
+
+fn git_success<I, S>(cwd: &Path, args: I) -> bool
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new("git");
+    command.args(args).current_dir(cwd);
+    command.stdout(Stdio::null()).stderr(Stdio::null());
+    command.status().unwrap().success()
 }
 
 fn run(mut command: Command) -> String {

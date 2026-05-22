@@ -321,7 +321,14 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle restore <bundle>` makes an archived bundle available again.
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
+- `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
+- `knit bundle prune` refreshes GitHub PR states and lists bundles where every tracked repo has a recorded merged PR.
+- `knit bundle prune --no-refresh` performs the same scan using cached recorded PR states only.
+- `knit prune --apply --worktrees --branches` is the short form for deleting fully merged bundle artifacts and their generated local state.
+- `knit prune --apply --all` removes fully merged bundle artifacts, generated worktrees, local feature branches, matching `origin` branches, and matching KnitHub remote bundle records.
+- Remote bundle cleanup uses the configured KnitHub sync remote and requires a token with `bundle:delete`.
 - `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
+- `knit project remove <project> --force` removes a reusable project template artifact.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
 - `knit run --repo <repo> -- <command>` runs a one-off command inside a tracked checkout.
 - `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.

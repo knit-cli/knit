@@ -114,6 +114,7 @@ knit project command list
 knit project command remove <name>
 knit project list
 knit project show [name]
+knit project remove <name> --force
 knit bundle
 knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
@@ -123,7 +124,9 @@ knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
 knit bundle archive <bundle>
 knit bundle restore <bundle>
-knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches]
+knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
+knit prune [--no-refresh] [--apply] [--all] [--worktrees] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
+knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
 knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
 knit bundle split <source-bundle> <selector>... [--title <title>] [--repo <repo>]... [--force]
 knit init "<title>" [--force] [--agents]
@@ -322,9 +325,21 @@ knit bundle delete documentation-quick-wins --force
 knit bundle delete documentation-quick-wins --force --worktrees
 knit bundle delete documentation-quick-wins --force --worktrees --branches
 knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
+knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches --remote-branches
 ```
 
-`--branches` uses `git branch -d`, so it refuses to delete branches with unmerged commits. `--force-branches` uses `git branch -D`. Knit only deletes local feature branches recorded by the bundle; remote branches are not deleted.
+`--branches` uses `git branch -d`, so it refuses to delete branches with unmerged commits. `--force-branches` uses `git branch -D`. Knit only deletes local feature branches recorded by the bundle unless `--remote-branches` is also passed, which deletes the matching recorded feature branches from `origin` and removes local `origin/<branch>` tracking refs when present.
+
+`knit prune` scans workspace bundles and lists candidates where every tracked repo has a recorded GitHub PR for that repo's feature branch and every PR state is `MERGED`. It refreshes recorded PR states from GitHub before deciding, and only lists candidates unless `--apply` is passed. Add `--no-refresh` for a cached/offline scan. `--all` is a cleanup preset for generated worktrees, local feature branches, forced local branch deletion, matching `origin` branches, and matching KnitHub remote bundle records. `knit bundle prune` is the longer namespaced form:
+
+```sh
+knit bundle prune
+knit bundle prune --no-refresh
+knit prune --apply --worktrees --branches
+knit prune --apply --all
+```
+
+Remote bundle cleanup uses the configured KnitHub sync remote, requires a token with `bundle:delete`, and marks matching remote bundle records deleted. Use explicit flags instead of `--all` when you want local/Git branch cleanup but want to preserve KnitHub bundle history.
 
 So the common cleanup distinction is:
 
