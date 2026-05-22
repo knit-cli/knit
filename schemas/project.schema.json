@@ -7,6 +7,8 @@
     "schemaVersion": { "const": "0.1" },
     "kind": { "const": "KnitProject" },
     "id": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
     "repos": { "type": "array" },
     "commands": {
       "type": "object",
@@ -30,6 +32,72 @@
           }
         }
       }
+    },
+    "landing": {
+      "type": "object",
+      "properties": {
+        "provider": { "enum": ["github"] },
+        "merge": {
+          "type": "object",
+          "properties": {
+            "repoOrder": {
+              "type": "array",
+              "items": { "type": "string" }
+            },
+            "includeUnlisted": { "type": "boolean" },
+            "method": { "enum": ["squash", "merge", "rebase"] },
+            "waitForChecks": { "type": "boolean" },
+            "requiredChecksOnly": { "type": "boolean" },
+            "deleteBranch": { "type": "boolean" },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "intervalSeconds": { "type": "integer", "minimum": 1 }
+          },
+          "additionalProperties": false
+        },
+        "deployments": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["id"],
+            "anyOf": [
+              { "required": ["repoId"] },
+              { "required": ["repo"] }
+            ],
+            "properties": {
+              "id": { "type": "string", "minLength": 1 },
+              "repoId": { "type": "string" },
+              "repo": { "type": "string" },
+              "mode": { "enum": ["command", "push"] },
+              "needs": {
+                "type": "array",
+                "items": { "type": "string" }
+              },
+              "checkout": {
+                "type": "object",
+                "required": ["branch"],
+                "properties": {
+                  "branch": { "type": "string", "minLength": 1 },
+                  "remote": { "type": "string" },
+                  "update": { "enum": ["fetch", "pull", "none"] }
+                },
+                "additionalProperties": false
+              },
+              "cwd": { "type": "string" },
+              "command": {
+                "type": "array",
+                "items": { "type": "string" },
+                "minItems": 1
+              },
+              "env": {
+                "type": "object",
+                "additionalProperties": { "type": "string" }
+              }
+            },
+            "additionalProperties": false
+          }
+        }
+      },
+      "additionalProperties": false
     }
   }
 }

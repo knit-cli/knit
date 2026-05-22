@@ -645,8 +645,8 @@ pub enum LandCommand {
     /// Generate an editable landing plan from recorded publications.
     Plan {
         /// Landing provider to target. GitHub is the only provider implemented.
-        #[arg(long, default_value = "github")]
-        provider: String,
+        #[arg(long)]
+        provider: Option<String>,
         /// Write the generated plan to a custom path.
         #[arg(long)]
         out: Option<PathBuf>,

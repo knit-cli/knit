@@ -6,6 +6,61 @@
   "properties": {
     "schemaVersion": { "const": "0.1" },
     "kind": { "const": "KnitLandPlan" },
-    "steps": { "type": "array" }
+    "provider": { "enum": ["github"] },
+    "bundleId": { "type": "string" },
+    "sourceProjectId": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "steps": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "object",
+        "required": ["id", "type"],
+        "allOf": [
+          {
+            "if": { "properties": { "type": { "const": "deploy" } } },
+            "then": { "required": ["repoId"] }
+          }
+        ],
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "type": { "enum": ["merge_pr", "wait_checks", "run", "deploy"] },
+          "needs": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "repoId": { "type": "string" },
+          "method": { "enum": ["squash", "merge", "rebase"] },
+          "waitForChecks": { "type": "boolean" },
+          "requiredChecksOnly": { "type": "boolean" },
+          "deleteBranch": { "type": "boolean" },
+          "requiredOnly": { "type": "boolean" },
+          "timeoutSeconds": { "type": "integer", "minimum": 1 },
+          "intervalSeconds": { "type": "integer", "minimum": 1 },
+          "cwd": { "type": "string" },
+          "command": {
+            "type": "array",
+            "items": { "type": "string" },
+            "minItems": 1
+          },
+          "env": {
+            "type": "object",
+            "additionalProperties": { "type": "string" }
+          },
+          "deploymentMode": { "enum": ["command", "push"] },
+          "checkout": {
+            "type": "object",
+            "required": ["branch"],
+            "properties": {
+              "branch": { "type": "string", "minLength": 1 },
+              "remote": { "type": "string" },
+              "update": { "enum": ["fetch", "pull", "none"] }
+            },
+            "additionalProperties": false
+          }
+        },
+        "additionalProperties": false
+      }
+    }
   }
 }

@@ -74,6 +74,8 @@ pub struct KnitProject {
     pub repos: Vec<ProjectRepoEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands: BTreeMap<String, ProjectRunCommand>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<ProjectLandingPlan>,
 }
 
 impl KnitProject {
@@ -86,6 +88,7 @@ impl KnitProject {
             updated_at: now,
             repos: Vec::new(),
             commands: BTreeMap::new(),
+            landing: None,
         }
     }
 }
@@ -113,6 +116,68 @@ pub struct ProjectRunCommand {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingPlan {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    #[serde(default)]
+    pub merge: ProjectLandingMergePlan,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployments: Vec<ProjectLandingDeployment>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingMergePlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repo_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub include_unlisted: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub method: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait_for_checks: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub required_checks_only: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub delete_branch: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingDeployment {
+    pub id: String,
+    #[serde(default, alias = "repo", skip_serializing_if = "Option::is_none")]
+    pub repo_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub needs: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkout: Option<ProjectLandingCheckout>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cwd: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub command: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingCheckout {
+    pub branch: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<String>,
 }
 
 fn default_include_by_default() -> bool {

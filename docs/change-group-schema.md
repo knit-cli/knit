@@ -205,6 +205,7 @@ Knit ships JSON Schema files under `schemas/` and prints them with `knit schema 
   "id": "land-venue-capacity",
   "provider": "github",
   "bundleId": "venue-capacity",
+  "sourceProjectId": "venues",
   "createdAt": "2026-05-05T00:00:00.000Z",
   "steps": [
     {
@@ -217,15 +218,19 @@ Knit ships JSON Schema files under `schemas/` and prints them with `knit schema 
       "deleteBranch": false
     },
     {
-      "id": "deploy",
-      "type": "run",
-      "cwd": "../deploy",
+      "id": "deploy-backend",
+      "type": "deploy",
+      "repoId": "backend",
+      "deploymentMode": "command",
+      "checkout": { "branch": "main", "remote": "origin", "update": "pull" },
       "command": ["bin/deploy", "staging"],
       "needs": ["merge-backend"]
     }
   ]
 }
 ```
+
+Project files can carry a reusable `landing` template with merge priority, merge defaults, and deployment entries. The generated land plan is still bundle-local and editable, so a one-off release can alter dependencies, commands, checkout branches, or deployment modes without changing the project default. `deploy` steps are structured: `deploymentMode: "command"` runs an argv command, while `deploymentMode: "push"` records a deployment triggered by the merge itself.
 
 `knit land apply` and `knit land resume` write run logs under `.knit/land-runs/`. Run files are operational logs, not the source of truth for code state. The bundle records only the final `feature.landed` summary node after every step succeeds.
 

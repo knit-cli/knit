@@ -259,6 +259,7 @@ fn project_agents_section(project: &KnitProject) -> String {
             observed_repos.join("\n")
         )
     };
+    let landing_section = project_landing_agents_section(project);
 
     format!(
         r#"{begin}
@@ -288,13 +289,94 @@ For narrower or unusual work, inspect the project first and then choose repo ids
 knit project show {project_id}
 knit bundle start "feature title" --project {project_id} --repo <repo-id>
 ```
+{landing_section}
 {end}
 "#,
         begin = begin,
         end = end,
         project_id = project.id,
         default_repos = default_repos,
-        observed_section = observed_section
+        observed_section = observed_section,
+        landing_section = landing_section
+    )
+}
+
+fn project_landing_agents_section(project: &KnitProject) -> String {
+    let Some(landing) = &project.landing else {
+        return String::new();
+    };
+
+    let merge_order = if landing.merge.repo_order.is_empty() {
+        "(bundle repo order)".to_string()
+    } else {
+        landing
+            .merge
+            .repo_order
+            .iter()
+            .map(|repo| format!("- `{repo}`"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let merge_method = landing.merge.method.as_deref().unwrap_or("squash");
+    let required_checks = landing.merge.required_checks_only.unwrap_or(true);
+    let deployments = if landing.deployments.is_empty() {
+        "- (none)".to_string()
+    } else {
+        landing
+            .deployments
+            .iter()
+            .map(|deployment| {
+                let repo = deployment
+                    .repo_id
+                    .as_deref()
+                    .map(|repo| format!(" repo `{repo}`"))
+                    .unwrap_or_default();
+                let mode = deployment.mode.as_deref().unwrap_or_else(|| {
+                    if deployment.command.is_empty() {
+                        "push"
+                    } else {
+                        "command"
+                    }
+                });
+                let checkout = deployment
+                    .checkout
+                    .as_ref()
+                    .map(|checkout| {
+                        let remote = checkout.remote.as_deref().unwrap_or("origin");
+                        let update = checkout.update.as_deref().unwrap_or("fetch");
+                        format!(" from `{remote}/{}` with `{update}`", checkout.branch)
+                    })
+                    .unwrap_or_default();
+                let command = if deployment.command.is_empty() {
+                    String::new()
+                } else {
+                    format!(": `{}`", deployment.command.join(" "))
+                };
+                format!(
+                    "- `{id}`{repo} uses `{mode}`{checkout}{command}",
+                    id = deployment.id
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    format!(
+        r#"
+This project defines a default landing template. `knit land` expands it into `.knit/land-plans/<bundle>.land.json`; inspect or edit that per-bundle plan before `knit land apply`.
+
+Configured landing merge order:
+
+{merge_order}
+
+Merge defaults: method `{merge_method}`, required checks only `{required_checks}`.
+
+Configured deployment steps:
+
+{deployments}
+
+Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan.
+"#
     )
 }
 
