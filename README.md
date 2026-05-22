@@ -125,6 +125,7 @@ knit bundle archive <bundle>
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches]
 knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
+knit bundle split <source-bundle> <selector>... [--title <title>] [--repo <repo>]... [--force]
 knit init "<title>" [--force] [--agents]
 knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
@@ -264,6 +265,15 @@ knit bundle compat feature-x feature-y --title "x y compat"
 knit merge feature-x --into x-y-compat
 knit merge feature-y --into x-y-compat --manual
 ```
+
+When a bundle has grown messy or a previously used PR head branch is no longer a good publishing unit, split selected recorded commits into a fresh bundle instead of continuing to pile onto the old one:
+
+```sh
+knit bundle split feature-x HEAD~1 --title "feature x clean follow-up"
+knit bundle split feature-x abc123 def456 --repo backend --repo frontend --title "feature x api"
+```
+
+`knit bundle split` creates a normal new bundle, materializes the selected repos, cherry-picks the requested source bundle commits, and records the resulting destination commits as observed git movement. If you already have a destination bundle, use `knit cherrypick --from <source-bundle> <selector>...` directly.
 
 `knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 

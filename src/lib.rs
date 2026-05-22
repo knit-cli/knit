@@ -178,6 +178,13 @@ pub fn run(cli: Cli) -> Result<()> {
                 in_place,
                 force,
             ),
+            Some(BundleCommand::Split {
+                source,
+                targets,
+                title,
+                repos,
+                force,
+            }) => commands::split_bundle(&source, title.as_deref(), &targets, &repos, force),
             Some(BundleCommand::Path) => commands::bundle_path(),
             Some(BundleCommand::Print) => commands::print_bundle(),
             Some(BundleCommand::Validate) => commands::validate_bundle(),
@@ -300,6 +307,12 @@ pub fn run(cli: Cli) -> Result<()> {
             continue_run,
             abort,
         ),
+        Commands::CherryPick {
+            from_bundle,
+            targets,
+            repos,
+            dry_run,
+        } => commands::cherrypick_from_bundle(&from_bundle, &targets, &repos, dry_run),
         Commands::Sync => commands::sync_bundle(),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {

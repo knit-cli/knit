@@ -278,6 +278,22 @@ pub enum Commands {
         #[arg(long)]
         abort: bool,
     },
+    /// Cherry-pick commits recorded in another Knit bundle into the resolved bundle.
+    #[command(name = "cherrypick", alias = "cherry-pick")]
+    CherryPick {
+        /// Source bundle id to copy recorded commits from.
+        #[arg(long = "from", value_name = "BUNDLE")]
+        from_bundle: String,
+        /// Source bundle selectors: node id, commit group id, git SHA, HEAD, or HEAD~N.
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// Limit cherry-picks to one or more repo ids or paths.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Show what would be cherry-picked without changing git or bundle state.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Record git commits that happened outside Knit.
     Sync,
     /// Commit staged changes across tracked checkouts.
@@ -473,6 +489,23 @@ pub enum BundleCommand {
         /// Use each original repo checkout directly instead of creating a Knit worktree.
         #[arg(long)]
         in_place: bool,
+        /// Replace an existing bundle with the same slug.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Create a new bundle from selected commits in another bundle.
+    Split {
+        /// Source bundle id to split from.
+        source: String,
+        /// Source bundle selectors to cherry-pick into the new bundle.
+        #[arg(required = true)]
+        targets: Vec<String>,
+        /// Title for the new bundle. Defaults to "<source title> split".
+        #[arg(long)]
+        title: Option<String>,
+        /// Limit the new bundle and cherry-picks to one or more repo ids or paths.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
         /// Replace an existing bundle with the same slug.
         #[arg(long)]
         force: bool,
