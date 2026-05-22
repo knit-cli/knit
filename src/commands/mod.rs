@@ -30,8 +30,8 @@ pub mod track;
 pub mod worktree;
 
 pub use bundle::{
-    archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, restore_bundle,
-    show_current_bundle, switch_bundle, validate_bundle,
+    archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
+    restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
 };
 pub use checkpoint::record_checkpoint;
 pub use cherrypick::{cherrypick_from_bundle, split_bundle};
@@ -52,7 +52,8 @@ pub use log::{show_log, show_target};
 pub use merge::{create_compat_bundle, merge_command};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects,
-    refresh_project_agents, remove_project_run_command, set_project_run_command, show_project,
+    refresh_project_agents, remove_project, remove_project_run_command, set_project_run_command,
+    show_project,
 };
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,

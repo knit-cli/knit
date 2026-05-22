@@ -1,11 +1,12 @@
 use crate::checkout::is_in_place;
-use crate::git::{branch_exists, current_branch, git_output};
+use crate::git::{branch_exists, current_branch, git_output, git_output_optional, ref_exists};
 use crate::model::{
     BundleNode, ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
     BUNDLE_STATE_OPEN, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
     SCHEMA_VERSION,
 };
 use crate::output as out;
+use crate::providers::github;
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
     load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
@@ -16,7 +17,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;
@@ -133,6 +134,178 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
     Ok(())
 }
 
+struct PruneCandidate {
+    id: String,
+    repo_count: usize,
+}
+
+pub fn prune_merged_bundles(
+    apply: bool,
+    refresh: bool,
+    worktrees: bool,
+    branches: bool,
+    force_branches: bool,
+    remote_branches: bool,
+    remote_bundles: bool,
+) -> Result<()> {
+    if force_branches && !branches {
+        bail!("Use --branches with --force-branches.");
+    }
+    if remote_branches && !branches {
+        bail!("Use --branches with --remote-branches.");
+    }
+    if branches && !worktrees {
+        bail!(
+            "Pruning local branches requires --worktrees so generated checkouts are removed first."
+        );
+    }
+
+    let root = current_root()?;
+    let config = if remote_bundles {
+        Some(load_config(&root)?)
+    } else {
+        None
+    };
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        println!("{}", out::muted("No bundles."));
+        return Ok(());
+    }
+
+    let mut entries = bundle_json_paths(&dir)?;
+    entries.sort();
+    let mut candidates = Vec::new();
+    for path in entries {
+        let mut bundle: ChangeGroup = read_json(&path)?;
+        if merged_bundle_candidate(&path, &mut bundle, refresh)? {
+            candidates.push(PruneCandidate {
+                id: bundle.id.clone(),
+                repo_count: bundle.repos.len(),
+            });
+        }
+    }
+
+    if candidates.is_empty() {
+        println!("{}", out::muted("No fully merged bundles to prune."));
+        return Ok(());
+    }
+
+    println!("{}", out::heading("Merged bundle candidates:"));
+    for candidate in &candidates {
+        println!(
+            "  {} {} repo(s)",
+            out::node(&candidate.id),
+            candidate.repo_count
+        );
+    }
+
+    if !apply {
+        println!();
+        println!(
+            "{}",
+            out::warn(format!(
+                "Run `{}` to delete these bundle artifacts.",
+                suggested_prune_apply_command(
+                    worktrees,
+                    branches,
+                    force_branches,
+                    remote_branches,
+                    remote_bundles,
+                )
+            ))
+        );
+        return Ok(());
+    }
+
+    let mut pruned = 0usize;
+    for candidate in candidates {
+        delete_bundle(
+            &candidate.id,
+            true,
+            worktrees,
+            branches,
+            force_branches,
+            remote_branches,
+            remote_bundles,
+            config.as_ref(),
+        )?;
+        pruned += 1;
+    }
+
+    println!("{} {} merged bundle(s)", out::heading("Pruned:"), pruned);
+    Ok(())
+}
+
+fn merged_bundle_candidate(path: &Path, bundle: &mut ChangeGroup, refresh: bool) -> Result<bool> {
+    if bundle.repos.is_empty() {
+        return Ok(false);
+    }
+
+    let repos = bundle.repos.clone();
+    let mut all_merged = true;
+    for repo in repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            all_merged = false;
+            continue;
+        };
+        let Some(publication) = github::publication_for_repo(bundle, &repo.id).cloned() else {
+            all_merged = false;
+            continue;
+        };
+
+        if refresh {
+            let pr = github::view_pr(Path::new(&repo.path), &publication.url)
+                .with_context(|| format!("{}: failed to refresh {}", bundle.id, publication.url))?;
+            github::upsert_publication(bundle, &repo, &pr);
+        }
+
+        let publication = github::publication_for_repo(bundle, &repo.id)
+            .expect("publication was checked before optional refresh");
+        if publication.head_branch != branch || !publication_state_is_merged(&publication.state) {
+            all_merged = false;
+        }
+    }
+
+    if refresh {
+        write_json(path, bundle)?;
+    }
+
+    Ok(all_merged)
+}
+
+fn publication_state_is_merged(state: &str) -> bool {
+    state.eq_ignore_ascii_case("merged")
+}
+
+fn suggested_prune_apply_command(
+    worktrees: bool,
+    branches: bool,
+    force_branches: bool,
+    remote_branches: bool,
+    remote_bundles: bool,
+) -> String {
+    if worktrees && branches && force_branches && remote_branches && remote_bundles {
+        return "knit prune --apply --all".to_string();
+    }
+    let mut command = vec!["knit", "prune", "--apply"];
+    if worktrees {
+        command.push("--worktrees");
+    }
+    if branches {
+        command.push("--branches");
+    }
+    if force_branches {
+        command.push("--force-branches");
+    }
+    if remote_branches {
+        command.push("--remote-branches");
+    }
+    if remote_bundles {
+        command.push("--remote-bundles");
+    }
+    command.join(" ")
+}
+
 fn bundle_json_paths(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
     Ok(fs::read_dir(dir)
         .with_context(|| format!("failed to read {}", dir.display()))?
@@ -240,6 +413,9 @@ pub fn delete_bundle(
     worktrees: bool,
     branches: bool,
     force_branches: bool,
+    remote_branches: bool,
+    remote_bundles: bool,
+    config: Option<&crate::model::KnitConfig>,
 ) -> Result<()> {
     if !force {
         bail!("Deleting a bundle requires --force.");
@@ -251,8 +427,22 @@ pub fn delete_bundle(
     if force_branches && !branches {
         bail!("Use --branches with --force-branches.");
     }
+    if remote_branches && !branches {
+        bail!("Use --branches with --remote-branches.");
+    }
     if branches && !worktrees {
         bail!("Deleting local branches requires --worktrees so generated checkouts are removed first.");
+    }
+    if remote_bundles {
+        let loaded_config;
+        let config = match config {
+            Some(config) => config,
+            None => {
+                loaded_config = load_config(&root)?;
+                &loaded_config
+            }
+        };
+        crate::commands::remote::delete_bundle_from_remote(&root, config, &bundle)?;
     }
     if worktrees {
         let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
@@ -261,6 +451,9 @@ pub fn delete_bundle(
     }
     if branches {
         delete_local_feature_branches(&bundle, force_branches)?;
+    }
+    if remote_branches {
+        delete_remote_feature_branches(&bundle)?;
     }
     let now = now_iso();
     bundle.state = Some(BUNDLE_STATE_DELETED.to_string());
@@ -339,6 +532,112 @@ fn delete_local_feature_branches(bundle: &ChangeGroup, force: bool) -> Result<()
             failures.join("\n")
         );
     }
+    Ok(())
+}
+
+fn delete_remote_feature_branches(bundle: &ChangeGroup) -> Result<()> {
+    let mut failures = Vec::new();
+    for repo in &bundle.repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            println!(
+                "{}: {}",
+                out::repo(&repo.id),
+                out::muted("no feature branch recorded")
+            );
+            continue;
+        };
+        let repo_root = PathBuf::from(&repo.path);
+        if !repo_root.exists() {
+            failures.push(format!(
+                "{}: original repo path is missing, cannot delete origin/{}",
+                repo.id, branch
+            ));
+            continue;
+        }
+        match delete_remote_feature_branch(&repo_root, &repo.id, branch) {
+            Ok(()) => {}
+            Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
+        }
+    }
+    if !failures.is_empty() {
+        bail!(
+            "failed to delete remote feature branches:\n{}",
+            failures.join("\n")
+        );
+    }
+    Ok(())
+}
+
+fn delete_remote_feature_branch(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
+    git_output_optional(repo_root, ["remote", "get-url", "origin"])?.with_context(|| {
+        format!(
+            "{}: no `origin` remote configured in {}",
+            repo_id,
+            repo_root.display()
+        )
+    })?;
+
+    let remote = format!("origin/{branch}");
+    let remote_heads = git_output(
+        repo_root,
+        [
+            OsString::from("ls-remote"),
+            OsString::from("--heads"),
+            OsString::from("origin"),
+            OsString::from(branch),
+        ],
+    )?;
+    if remote_heads.trim().is_empty() {
+        println!(
+            "{}: {} {}",
+            out::repo(repo_id),
+            out::muted("remote branch already missing"),
+            out::branch(&remote)
+        );
+        delete_remote_tracking_ref(repo_root, repo_id, branch)?;
+        return Ok(());
+    }
+
+    git_output(
+        repo_root,
+        [
+            OsString::from("push"),
+            OsString::from("origin"),
+            OsString::from("--delete"),
+            OsString::from(branch),
+        ],
+    )?;
+    println!(
+        "{}: {} {}",
+        out::repo(repo_id),
+        out::movement("removed"),
+        out::branch(&remote)
+    );
+    delete_remote_tracking_ref(repo_root, repo_id, branch)?;
+    Ok(())
+}
+
+fn delete_remote_tracking_ref(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
+    let remote = format!("origin/{branch}");
+    let remote_ref = format!("refs/remotes/{remote}");
+    if !ref_exists(repo_root, &remote_ref) {
+        return Ok(());
+    }
+    git_output(
+        repo_root,
+        [
+            OsString::from("branch"),
+            OsString::from("-r"),
+            OsString::from("-d"),
+            OsString::from(&remote),
+        ],
+    )?;
+    println!(
+        "{}: {} {}",
+        out::repo(repo_id),
+        out::movement("removed"),
+        out::branch(remote)
+    );
     Ok(())
 }
 
