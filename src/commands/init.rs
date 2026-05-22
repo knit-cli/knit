@@ -298,6 +298,13 @@ knit merge --continue
 knit merge push
 ```
 
+Use `knit bundle split` or `knit cherrypick` to move selected recorded commits out of a messy bundle and into a fresh one:
+
+```sh
+knit bundle split feature-a HEAD~1 --title "feature a clean follow-up"
+knit cherrypick --from feature-a --repo backend abc123
+```
+
 ## Useful Commands
 
 - `knit bundle` shows the resolved bundle and where it came from.
@@ -305,6 +312,8 @@ knit merge push
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
 - `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
+- `knit bundle split <bundle> <selector>...` creates a fresh bundle and cherry-picks selected source commits into it.
+- `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.

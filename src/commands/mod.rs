@@ -1,6 +1,7 @@
 pub mod agents;
 pub mod bundle;
 pub mod checkpoint;
+pub mod cherrypick;
 pub mod clean;
 pub mod close;
 pub mod commit;
@@ -33,6 +34,7 @@ pub use bundle::{
     show_current_bundle, switch_bundle, validate_bundle,
 };
 pub use checkpoint::record_checkpoint;
+pub use cherrypick::{cherrypick_from_bundle, split_bundle};
 pub use clean::clean_generated;
 pub use close::close_bundle;
 pub use commit::commit_staged;
