@@ -330,7 +330,7 @@ knit bundle delete documentation-quick-wins --force --worktrees --branches --for
 
 `--branches` uses `git branch -d`, so it refuses to delete branches with unmerged commits. `--force-branches` uses `git branch -D`. Knit only deletes local feature branches recorded by the bundle unless `--remote-branches` is also passed, which deletes the matching recorded feature branches from `origin` and removes local `origin/<branch>` tracking refs when present.
 
-`knit prune` scans workspace bundles and lists candidates where every tracked repo has a recorded GitHub PR for that repo's feature branch and every PR state is `MERGED`. It refreshes recorded PR states from GitHub before deciding, and only lists candidates unless `--apply` is passed. Add `--no-refresh` for a cached/offline scan. `--all` is a cleanup preset for generated worktrees, local feature branches, forced local branch deletion, matching `origin` branches, and matching KnitHub remote bundle records. `knit bundle prune` is the longer namespaced form:
+`knit prune` scans workspace bundles and lists dead-work candidates: clean bundles with no recorded open PRs. Existing PR records are refreshed from GitHub before deciding, missing PR records are allowed, and dirty generated checkouts keep the bundle alive. Add `--no-refresh` for a cached/offline scan. `--worktrees` also removes orphaned `.knit/worktrees/<bundle>` directories that no longer have bundle artifacts when they contain no pending files. `--all` is a cleanup preset for generated worktrees, local feature branches, forced local branch deletion, matching `origin` branches, and matching KnitHub remote bundle records. `knit bundle prune` is the longer namespaced form:
 
 ```sh
 knit bundle prune

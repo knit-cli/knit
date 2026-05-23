@@ -137,6 +137,12 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
 struct PruneCandidate {
     id: String,
     repo_count: usize,
+    reason: &'static str,
+}
+
+struct OrphanWorktree {
+    id: String,
+    path: PathBuf,
 }
 
 pub fn prune_merged_bundles(
@@ -177,26 +183,48 @@ pub fn prune_merged_bundles(
     let mut candidates = Vec::new();
     for path in entries {
         let mut bundle: ChangeGroup = read_json(&path)?;
-        if merged_bundle_candidate(&path, &mut bundle, refresh)? {
+        if let Some(reason) = dead_work_candidate(&root, &path, &mut bundle, refresh)? {
             candidates.push(PruneCandidate {
                 id: bundle.id.clone(),
                 repo_count: bundle.repos.len(),
+                reason,
             });
         }
     }
+    let orphan_worktrees = if worktrees {
+        orphan_worktree_candidates(&root)?
+    } else {
+        Vec::new()
+    };
 
-    if candidates.is_empty() {
-        println!("{}", out::muted("No fully merged bundles to prune."));
+    if candidates.is_empty() && orphan_worktrees.is_empty() {
+        println!(
+            "{}",
+            out::muted("No dead bundles or orphan worktrees to prune.")
+        );
         return Ok(());
     }
 
-    println!("{}", out::heading("Merged bundle candidates:"));
-    for candidate in &candidates {
-        println!(
-            "  {} {} repo(s)",
-            out::node(&candidate.id),
-            candidate.repo_count
-        );
+    if !candidates.is_empty() {
+        println!("{}", out::heading("Dead bundle candidates:"));
+        for candidate in &candidates {
+            println!(
+                "  {} {} repo(s), {}",
+                out::node(&candidate.id),
+                candidate.repo_count,
+                out::muted(candidate.reason)
+            );
+        }
+    }
+    if !orphan_worktrees.is_empty() {
+        println!("{}", out::heading("Orphan worktree candidates:"));
+        for orphan in &orphan_worktrees {
+            println!(
+                "  {} {}",
+                out::node(&orphan.id),
+                out::path(orphan.path.display())
+            );
+        }
     }
 
     if !apply {
@@ -231,38 +259,78 @@ pub fn prune_merged_bundles(
         )?;
         pruned += 1;
     }
+    let mut removed_orphans = 0usize;
+    for orphan in orphan_worktrees {
+        remove_orphan_worktree(&orphan, force_branches)?;
+        removed_orphans += 1;
+    }
 
-    println!("{} {} merged bundle(s)", out::heading("Pruned:"), pruned);
+    println!("{} {} bundle(s)", out::heading("Pruned:"), pruned);
+    if removed_orphans > 0 {
+        println!(
+            "{} {} orphan worktree dir(s)",
+            out::heading("Removed:"),
+            removed_orphans
+        );
+    }
     Ok(())
 }
 
-fn merged_bundle_candidate(path: &Path, bundle: &mut ChangeGroup, refresh: bool) -> Result<bool> {
-    if bundle.repos.is_empty() {
-        return Ok(false);
-    }
-
+fn dead_work_candidate(
+    root: &Path,
+    path: &Path,
+    bundle: &mut ChangeGroup,
+    refresh: bool,
+) -> Result<Option<&'static str>> {
     let repos = bundle.repos.clone();
-    let mut all_merged = true;
+    let mut saw_publication = false;
+    let mut saw_merged_publication = false;
+    let mut saw_open_publication = false;
+    let mut saw_pending_changes = false;
     for repo in repos {
-        let Some(branch) = repo.feature_branch.as_deref() else {
-            all_merged = false;
-            continue;
-        };
-        let Some(publication) = github::publication_for_repo(bundle, &repo.id).cloned() else {
-            all_merged = false;
-            continue;
-        };
+        let branch = repo.feature_branch.as_deref();
+        let mut publication = github::publication_for_repo(bundle, &repo.id).cloned();
 
         if refresh {
-            let pr = github::view_pr(Path::new(&repo.path), &publication.url)
-                .with_context(|| format!("{}: failed to refresh {}", bundle.id, publication.url))?;
-            github::upsert_publication(bundle, &repo, &pr);
+            if let Some(existing) = publication.as_ref() {
+                let pr =
+                    github::view_pr(Path::new(&repo.path), &existing.url).with_context(|| {
+                        format!("{}: failed to refresh {}", bundle.id, existing.url)
+                    })?;
+                github::upsert_publication(bundle, &repo, &pr);
+                publication = github::publication_for_repo(bundle, &repo.id).cloned();
+            } else if let Some(branch) = branch {
+                if let Some(pr) =
+                    github::find_existing_pr(Path::new(&repo.path), branch, &repo.base_branch)
+                        .with_context(|| {
+                            format!(
+                                "{}: failed to check for an existing PR for {}",
+                                bundle.id, branch
+                            )
+                        })?
+                {
+                    github::upsert_publication(bundle, &repo, &pr);
+                    publication = github::publication_for_repo(bundle, &repo.id).cloned();
+                }
+            }
         }
 
-        let publication = github::publication_for_repo(bundle, &repo.id)
-            .expect("publication was checked before optional refresh");
-        if publication.head_branch != branch || !publication_state_is_merged(&publication.state) {
-            all_merged = false;
+        if checkout_has_pending_changes(root, &repo)? {
+            saw_pending_changes = true;
+        }
+
+        let Some(publication) = publication else {
+            continue;
+        };
+        saw_publication = true;
+        if Some(publication.head_branch.as_str()) != branch {
+            saw_open_publication = true;
+            continue;
+        }
+        if publication_state_is_merged(&publication.state) {
+            saw_merged_publication = true;
+        } else if !publication_state_is_closed(&publication.state) {
+            saw_open_publication = true;
         }
     }
 
@@ -270,11 +338,150 @@ fn merged_bundle_candidate(path: &Path, bundle: &mut ChangeGroup, refresh: bool)
         write_json(path, bundle)?;
     }
 
-    Ok(all_merged)
+    if saw_pending_changes || saw_open_publication {
+        return Ok(None);
+    }
+    if saw_merged_publication {
+        return Ok(Some("recorded PRs are merged"));
+    }
+    if saw_publication {
+        return Ok(Some("no open PRs and no pending changes"));
+    }
+    Ok(Some("no recorded PRs and no pending changes"))
 }
 
 fn publication_state_is_merged(state: &str) -> bool {
     state.eq_ignore_ascii_case("merged")
+}
+
+fn publication_state_is_closed(state: &str) -> bool {
+    state.eq_ignore_ascii_case("closed")
+}
+
+fn checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) -> Result<bool> {
+    let Some(path) = checkout_path(root, repo) else {
+        return Ok(false);
+    };
+    path_has_pending_changes(&path)
+}
+
+fn checkout_path(root: &Path, repo: &crate::model::RepoEntry) -> Option<PathBuf> {
+    if is_in_place(repo) {
+        return Some(PathBuf::from(&repo.path));
+    }
+    repo.worktree_path
+        .as_deref()
+        .map(|path| resolve_path(root, path))
+}
+
+fn resolve_path(root: &Path, path: &str) -> PathBuf {
+    let path = PathBuf::from(path);
+    if path.is_absolute() {
+        path
+    } else {
+        root.join(path)
+    }
+}
+
+fn path_has_pending_changes(path: &Path) -> Result<bool> {
+    if !path.exists() {
+        return Ok(false);
+    }
+    if crate::git::is_git_worktree(path) {
+        let status = git_output(path, ["status", "--short"])?;
+        return Ok(!status.trim().is_empty());
+    }
+    if path.is_file() {
+        return Ok(true);
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        if path_has_pending_changes(&entry?.path())? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
+    let worktrees_dir = root.join(".knit/worktrees");
+    if !worktrees_dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&worktrees_dir)
+        .with_context(|| format!("failed to read {}", worktrees_dir.display()))?
+    {
+        let entry = entry?;
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = entry.file_name().to_string_lossy().to_string();
+        if id.starts_with('.') || bundle_exists(root, &id) {
+            continue;
+        }
+        if path_has_pending_changes(&path)? {
+            println!(
+                "{}: {} {}",
+                out::node(&id),
+                out::muted("orphan worktree has pending files, preserved"),
+                out::path(path.display())
+            );
+            continue;
+        }
+        candidates.push(OrphanWorktree { id, path });
+    }
+    candidates.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok(candidates)
+}
+
+fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
+    let worktrees = git_worktrees_under(&orphan.path)?;
+    for worktree in worktrees {
+        remove_git_worktree_from_self(&worktree, force)?;
+    }
+    if orphan.path.exists() {
+        fs::remove_dir_all(&orphan.path)
+            .with_context(|| format!("failed to remove {}", orphan.path.display()))?;
+    }
+    println!(
+        "{}: {} {}",
+        out::node(&orphan.id),
+        out::movement("removed orphan worktree"),
+        out::path(orphan.path.display())
+    );
+    Ok(())
+}
+
+fn git_worktrees_under(path: &Path) -> Result<Vec<PathBuf>> {
+    let mut worktrees = Vec::new();
+    collect_git_worktrees(path, &mut worktrees)?;
+    worktrees.sort();
+    Ok(worktrees)
+}
+
+fn collect_git_worktrees(path: &Path, worktrees: &mut Vec<PathBuf>) -> Result<()> {
+    if !path.is_dir() {
+        return Ok(());
+    }
+    if crate::git::is_git_worktree(path) {
+        worktrees.push(path.to_path_buf());
+        return Ok(());
+    }
+    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
+        collect_git_worktrees(&entry?.path(), worktrees)?;
+    }
+    Ok(())
+}
+
+fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
+    let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
+    if force {
+        args.push(OsString::from("--force"));
+    }
+    args.push(worktree.as_os_str().to_os_string());
+    git_output(worktree, args)?;
+    Ok(())
 }
 
 fn suggested_prune_apply_command(

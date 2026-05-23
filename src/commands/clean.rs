@@ -127,7 +127,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         bail!("failed to clean worktrees:\n{}", failures.join("\n"));
     }
 
-    remove_empty_dir(active.root.join(".knit/worktrees").join(&active.bundle.id));
+    remove_empty_dirs(active.root.join(".knit/worktrees").join(&active.bundle.id));
     Ok(())
 }
 
@@ -161,7 +161,16 @@ fn remove_git_worktree(repo_root: &Path, worktree: &Path, force: bool) -> Result
     Ok(())
 }
 
-fn remove_empty_dir(path: PathBuf) {
+fn remove_empty_dirs(path: PathBuf) {
+    if !path.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(&path) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        remove_empty_dirs(entry.path());
+    }
     let _ = fs::remove_dir(path);
 }
 
@@ -255,7 +264,7 @@ fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
             removed += 1;
         }
     }
-    remove_empty_dir(root.join(".knit/merge-worktrees"));
+    remove_empty_dirs(root.join(".knit/merge-worktrees"));
     if removed == 0 {
         println!("{}", out::muted("No clean merge worktrees to remove."));
     }

@@ -132,7 +132,7 @@ pub enum Commands {
         #[arg(long)]
         reason: Option<String>,
     },
-    /// Delete fully merged bundle artifacts and selected branch/worktree state.
+    /// Delete dead bundle artifacts and selected branch/worktree state.
     Prune {
         /// Apply pruning after listing candidate bundles.
         #[arg(long)]
@@ -150,7 +150,7 @@ pub enum Commands {
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
-        /// Remove generated worktrees for each pruned bundle before deleting the artifact.
+        /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
         #[arg(long)]
         worktrees: bool,
         /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
@@ -459,7 +459,7 @@ pub enum BundleCommand {
         #[arg(long)]
         deleted: bool,
     },
-    /// Delete bundles whose tracked GitHub PRs are all merged.
+    /// Delete dead bundles whose PRs are merged, closed, missing, or absent.
     Prune {
         /// Apply pruning after listing candidate bundles.
         #[arg(long)]
@@ -477,7 +477,7 @@ pub enum BundleCommand {
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
-        /// Remove generated worktrees for each pruned bundle before deleting the artifact.
+        /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
         #[arg(long)]
         worktrees: bool,
         /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
