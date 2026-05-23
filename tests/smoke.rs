@@ -2441,7 +2441,7 @@ fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
     write_bundle_publications(&workspace, "open-cleanup", "OPEN");
 
     let preview = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
-    assert!(preview.contains("Merged bundle candidates"));
+    assert!(preview.contains("Dead bundle candidates"));
     assert!(preview.contains("merged-cleanup"));
     assert!(!preview.contains("open-cleanup"));
     assert!(workspace
@@ -2513,7 +2513,7 @@ fn bundle_prune_refreshes_stale_publication_states_by_default() {
     fs::write(fake_gh_dir.join("merged-frontend"), "").unwrap();
 
     let preview = knit_with_fake_gh(&workspace, ["bundle", "prune"], &fake_bin, &fake_gh_dir);
-    assert!(preview.contains("Merged bundle candidates"));
+    assert!(preview.contains("Dead bundle candidates"));
     assert!(preview.contains("venue-capacity"));
 
     let bundle = read_bundle(&workspace);
@@ -2522,6 +2522,116 @@ fn bundle_prune_refreshes_stale_publication_states_by_default() {
         .unwrap()
         .iter()
         .all(|publication| publication["state"].as_str() == Some("MERGED")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["init", "partial landed"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications_for_repos(&workspace, "partial-landed", "MERGED", &["backend"]);
+
+    knit(&workspace, ["bundle", "start", "abandoned cleanup"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+
+    knit(&workspace, ["bundle", "start", "dirty cleanup"]);
+    knit(&workspace, ["track", frontend.to_str().unwrap()]);
+    let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
+    append_line(&dirty_feature.join("app.txt"), "dirty local edit");
+
+    let preview = knit(&workspace, ["prune", "--no-refresh", "--worktrees"]);
+    assert!(preview.contains("partial-landed"));
+    assert!(preview.contains("recorded PRs are merged"));
+    assert!(preview.contains("abandoned-cleanup"));
+    assert!(preview.contains("no recorded PRs and no pending changes"));
+    assert!(!preview.contains("dirty-cleanup"));
+
+    let pruned = knit(
+        &workspace,
+        [
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(pruned.contains("partial-landed"));
+    assert!(pruned.contains("abandoned-cleanup"));
+    assert!(!workspace
+        .join(".knit/bundles/partial-landed.bundle.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/bundles/abandoned-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/partial-landed.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/abandoned-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/bundles/dirty-cleanup.bundle.json")
+        .exists());
+    assert!(dirty_feature.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "dirty active"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let active_feature = workspace.join(".knit/worktrees/dirty-active/backend");
+    append_line(&active_feature.join("app.txt"), "keep me");
+
+    let empty_orphan = workspace.join(".knit/worktrees/empty-orphan/nested/leaf");
+    fs::create_dir_all(&empty_orphan).unwrap();
+    let dirty_orphan = workspace.join(".knit/worktrees/dirty-orphan");
+    fs::create_dir_all(&dirty_orphan).unwrap();
+    fs::write(dirty_orphan.join("note.txt"), "untracked work\n").unwrap();
+
+    let preview = knit(&workspace, ["prune", "--no-refresh", "--worktrees"]);
+    assert!(preview.contains("Orphan worktree candidates"));
+    assert!(preview.contains("empty-orphan"));
+    assert!(preview.contains("dirty-orphan"));
+    assert!(preview.contains("pending files, preserved"));
+    assert!(!preview.contains("dirty-active"));
+
+    let pruned = knit(
+        &workspace,
+        ["prune", "--no-refresh", "--apply", "--worktrees"],
+    );
+    assert!(pruned.contains("removed orphan worktree"));
+    assert!(!workspace.join(".knit/worktrees/empty-orphan").exists());
+    assert!(dirty_orphan.exists());
+    assert!(active_feature.exists());
+    assert!(workspace
+        .join(".knit/bundles/dirty-active.bundle.json")
+        .exists());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2766,6 +2876,15 @@ fn read_bundle(workspace: &Path) -> Value {
 }
 
 fn write_bundle_publications(workspace: &Path, bundle_id: &str, state: &str) {
+    write_bundle_publications_for_repos(workspace, bundle_id, state, &[]);
+}
+
+fn write_bundle_publications_for_repos(
+    workspace: &Path,
+    bundle_id: &str,
+    state: &str,
+    repo_ids: &[&str],
+) {
     let path = workspace
         .join(".knit/bundles")
         .join(format!("{bundle_id}.bundle.json"));
@@ -2775,6 +2894,7 @@ fn write_bundle_publications(workspace: &Path, bundle_id: &str, state: &str) {
         .unwrap()
         .iter()
         .enumerate()
+        .filter(|(_, repo)| repo_ids.is_empty() || repo_ids.contains(&repo["id"].as_str().unwrap()))
         .map(|(index, repo)| {
             let repo_id = repo["id"].as_str().unwrap();
             let head_branch = repo["featureBranch"].as_str().unwrap();
