@@ -126,6 +126,15 @@ pub fn project_path(root: &Path, project_id: &str) -> PathBuf {
         .join(format!("{project_id}.project.json"))
 }
 
+pub fn org_path(root: &Path, org_id: &str) -> PathBuf {
+    root.join(".knit/orgs").join(format!("{org_id}.org.json"))
+}
+
+pub fn work_item_path(root: &Path, work_item_id: &str) -> PathBuf {
+    root.join(".knit/work-items")
+        .join(format!("{work_item_id}.work-item.json"))
+}
+
 pub fn bundle_exists(root: &Path, bundle_id: &str) -> bool {
     bundle_path(root, bundle_id).exists()
 }

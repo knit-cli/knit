@@ -541,6 +541,7 @@ mod tests {
                 title: None,
                 updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             }],
+            work_item_ids: Vec::new(),
         };
 
         let block = render_knit_pr_block(&bundle, Some("backend"));
