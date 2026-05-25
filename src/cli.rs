@@ -958,7 +958,7 @@ pub enum GithubPublishCommand {
         /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
         #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
         bases: Vec<String>,
-        /// Create PRs for every tracked repo. This is the default when no repos are passed.
+        /// Create PRs for every tracked repo instead of only repos with recorded bundle work.
         #[arg(long)]
         all: bool,
         /// Create draft PRs.
@@ -978,7 +978,7 @@ pub enum GithubPublishCommand {
     Sync {
         /// Optional repo ids or paths to limit PR sync.
         repos: Vec<String>,
-        /// Sync every tracked repo. This is the default when no repos are passed.
+        /// Sync every tracked repo instead of only repos with recorded bundle work or publications.
         #[arg(long)]
         all: bool,
     },
