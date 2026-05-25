@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const SCHEMA_VERSION: &str = "0.1";
+pub const DEFAULT_LANDING_MERGE_METHOD: &str = "merge";
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
 pub const CHECKOUT_MODE_WORKTREE: &str = "worktree";
 pub const CHECKOUT_MODE_IN_PLACE: &str = "inPlace";

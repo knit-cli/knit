@@ -4,7 +4,7 @@ use crate::git::{current_branch, git_output, is_ancestor, is_git_worktree, rev_l
 use crate::ids::{node_id, slugify};
 use crate::model::{
     BundleNode, KnitProject, ProjectLandingMergePlan, PublicationEntry, RepoChange, RepoEntry,
-    SCHEMA_VERSION,
+    DEFAULT_LANDING_MERGE_METHOD, SCHEMA_VERSION,
 };
 use crate::output as out;
 use crate::providers::github::{self, publication_for_repo, PullRequest};
@@ -471,7 +471,7 @@ fn ordered_merge_repos<'a>(
 fn merge_method(merge: Option<&ProjectLandingMergePlan>) -> String {
     merge
         .and_then(|merge| merge.method.clone())
-        .unwrap_or_else(|| "squash".to_string())
+        .unwrap_or_else(|| DEFAULT_LANDING_MERGE_METHOD.to_string())
 }
 
 fn merge_wait_for_checks(merge: Option<&ProjectLandingMergePlan>) -> bool {
@@ -1004,7 +1004,10 @@ fn execute_merge_pr(
         detail.push(format!("checks {}", summary.status));
     }
 
-    let method = step.method.as_deref().unwrap_or("squash");
+    let method = step
+        .method
+        .as_deref()
+        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
     github::merge_pr(
         &cwd,
         &publication.url,
@@ -1344,7 +1347,11 @@ fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()
         match step.step_type.as_str() {
             STEP_MERGE_PR => {
                 required_repo_id(step)?;
-                validate_merge_method(step.method.as_deref().unwrap_or("squash"))?;
+                validate_merge_method(
+                    step.method
+                        .as_deref()
+                        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD),
+                )?;
             }
             STEP_WAIT_CHECKS => {
                 required_repo_id(step)?;
