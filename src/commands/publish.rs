@@ -13,7 +13,7 @@ use crate::store::{
     load_active_bundle, load_active_bundle_for_update, save_active_bundle, ActiveBundle,
 };
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::Path;
 
@@ -33,7 +33,7 @@ pub fn create_github_publications(
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
-    let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let base_overrides = BaseOverrides::parse(bases)?;
     base_overrides.validate_tracked_repos(&active.bundle)?;
     let mut failures = Vec::new();
@@ -83,7 +83,7 @@ pub fn sync_github_publications(selectors: &[String], all: bool) -> Result<()> {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
-    let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let failures = sync_github_publications_for_indexes(&mut active, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
@@ -165,6 +165,75 @@ fn has_landed_node(bundle: &ChangeGroup) -> bool {
         .nodes
         .iter()
         .any(|node| node.node_type == "feature.landed")
+}
+
+fn resolve_publish_repo_indexes(
+    active: &ActiveBundle,
+    selectors: &[String],
+    all: bool,
+) -> Result<Vec<usize>> {
+    if all || !selectors.is_empty() {
+        return resolve_repo_indexes(active, selectors, all);
+    }
+
+    let repo_ids = publish_scope_repo_ids(&active.bundle);
+    if repo_ids.is_empty() {
+        bail!(
+            "No repos in bundle `{}` have recorded commits, repo changes, or publications. Pass repo selectors or --all to publish tracked repos anyway.",
+            active.bundle.id
+        );
+    }
+
+    let indexes = active
+        .bundle
+        .repos
+        .iter()
+        .enumerate()
+        .filter_map(|(index, repo)| repo_ids.contains(&repo.id).then_some(index))
+        .collect::<Vec<_>>();
+
+    if indexes.is_empty() {
+        bail!(
+            "Bundle `{}` has recorded work, but none of it matches the tracked repos.",
+            active.bundle.id
+        );
+    }
+
+    Ok(indexes)
+}
+
+fn publish_scope_repo_ids(bundle: &ChangeGroup) -> BTreeSet<String> {
+    let mut repo_ids = recorded_work_repo_ids(bundle);
+    repo_ids.extend(
+        bundle
+            .publications
+            .iter()
+            .filter(|publication| {
+                publication.provider == github::PROVIDER
+                    && publication.kind == github::PULL_REQUEST_KIND
+            })
+            .map(|publication| publication.repo_id.clone()),
+    );
+    repo_ids
+}
+
+fn recorded_work_repo_ids(bundle: &ChangeGroup) -> BTreeSet<String> {
+    let mut repo_ids = BTreeSet::new();
+
+    for group in &bundle.commit_groups {
+        repo_ids.extend(group.commits.iter().map(|commit| commit.repo_id.clone()));
+    }
+
+    for node in &bundle.nodes {
+        repo_ids.extend(node.commits.iter().map(|commit| commit.repo_id.clone()));
+        repo_ids.extend(
+            node.repo_changes
+                .iter()
+                .map(|repo_change| repo_change.repo_id.clone()),
+        );
+    }
+
+    repo_ids
 }
 
 fn create_or_reuse_pr(
@@ -425,7 +494,13 @@ fn render_knit_pr_block(bundle: &ChangeGroup, current_repo_id: Option<&str>) -> 
         "See the other PRs in this bundle:".to_string(),
     ];
 
-    for repo in &bundle.repos {
+    let repo_ids = publish_scope_repo_ids(bundle);
+    let scoped_repos = bundle
+        .repos
+        .iter()
+        .filter(|repo| repo_ids.is_empty() || repo_ids.contains(&repo.id));
+
+    for repo in scoped_repos {
         match publication_for_repo(bundle, &repo.id) {
             Some(pr) => {
                 let marker = if current_repo_id == Some(repo.id.as_str()) {
@@ -479,7 +554,9 @@ fn append_knit_pr_block(existing_body: &str, block: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION};
+    use crate::model::{
+        CommitGroup, CommitRef, PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION,
+    };
 
     #[test]
     fn managed_block_is_replaced_without_touching_user_body() {
@@ -526,8 +603,33 @@ mod tests {
                     worktree_path: None,
                     head_sha: None,
                 },
+                RepoEntry {
+                    id: "docs".to_string(),
+                    path: "/tmp/docs".to_string(),
+                    remote: None,
+                    base_branch: "main".to_string(),
+                    checkout_mode: "worktree".to_string(),
+                    base_sha: None,
+                    feature_branch: Some("knit/venue-capacity".to_string()),
+                    worktree_path: None,
+                    head_sha: None,
+                },
             ],
-            commit_groups: Vec::new(),
+            commit_groups: vec![CommitGroup {
+                id: "kg_123".to_string(),
+                message: "change backend and frontend".to_string(),
+                created_at: "2026-05-05T00:00:00.000Z".to_string(),
+                commits: vec![
+                    CommitRef {
+                        repo_id: "backend".to_string(),
+                        sha: "abc123".to_string(),
+                    },
+                    CommitRef {
+                        repo_id: "frontend".to_string(),
+                        sha: "def456".to_string(),
+                    },
+                ],
+            }],
             nodes: Vec::new(),
             publications: vec![PublicationEntry {
                 repo_id: "backend".to_string(),
@@ -548,6 +650,7 @@ mod tests {
         assert!(block.contains("This PR is part of Knit bundle `venue-capacity`."));
         assert!(block.contains("`backend`: https://github.com/acme/backend/pull/123 (this PR)"));
         assert!(block.contains("`frontend`: pending"));
+        assert!(!block.contains("`docs`: pending"));
 
         bundle.publications.push(PublicationEntry {
             repo_id: "frontend".to_string(),
@@ -563,5 +666,63 @@ mod tests {
         });
         let synced = render_knit_pr_block(&bundle, Some("backend"));
         assert!(synced.contains("`frontend`: https://github.com/acme/frontend/pull/456"));
+        assert!(!synced.contains("`docs`: pending"));
+    }
+
+    #[test]
+    fn publish_scope_excludes_tracked_repos_without_recorded_work() {
+        let bundle = ChangeGroup {
+            schema_version: SCHEMA_VERSION.to_string(),
+            kind: CHANGE_GROUP_KIND.to_string(),
+            id: "venue-capacity".to_string(),
+            title: "venue capacity".to_string(),
+            state: Some(crate::model::BUNDLE_STATE_OPEN.to_string()),
+            closed_at: None,
+            archived_at: None,
+            deleted_at: None,
+            project_id: None,
+            created_at: "2026-05-05T00:00:00.000Z".to_string(),
+            updated_at: "2026-05-05T00:00:00.000Z".to_string(),
+            head_node_id: None,
+            repos: vec![
+                RepoEntry {
+                    id: "backend".to_string(),
+                    path: "/tmp/backend".to_string(),
+                    remote: None,
+                    base_branch: "main".to_string(),
+                    checkout_mode: "worktree".to_string(),
+                    base_sha: None,
+                    feature_branch: Some("knit/venue-capacity".to_string()),
+                    worktree_path: None,
+                    head_sha: None,
+                },
+                RepoEntry {
+                    id: "docs".to_string(),
+                    path: "/tmp/docs".to_string(),
+                    remote: None,
+                    base_branch: "main".to_string(),
+                    checkout_mode: "worktree".to_string(),
+                    base_sha: None,
+                    feature_branch: Some("knit/venue-capacity".to_string()),
+                    worktree_path: None,
+                    head_sha: None,
+                },
+            ],
+            commit_groups: vec![CommitGroup {
+                id: "kg_123".to_string(),
+                message: "change backend".to_string(),
+                created_at: "2026-05-05T00:00:00.000Z".to_string(),
+                commits: vec![CommitRef {
+                    repo_id: "backend".to_string(),
+                    sha: "abc123".to_string(),
+                }],
+            }],
+            nodes: Vec::new(),
+            publications: Vec::new(),
+        };
+
+        let scope = publish_scope_repo_ids(&bundle);
+        assert!(scope.contains("backend"));
+        assert!(!scope.contains("docs"));
     }
 }
