@@ -1821,6 +1821,11 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert!(plan.contains("knit land apply"));
     let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
     assert!(plan_path.exists());
+    let generated_plan: Value =
+        serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let steps = generated_plan["steps"].as_array().unwrap();
+    assert_eq!(steps[0]["method"].as_str(), Some("merge"));
+    assert_eq!(steps[1]["method"].as_str(), Some("merge"));
     assert!(!fake_gh_dir.join("merge-order.txt").exists());
 
     let existing_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
@@ -1833,6 +1838,11 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert_eq!(
         order.lines().collect::<Vec<_>>(),
         vec!["backend", "frontend"]
+    );
+    let methods = fs::read_to_string(fake_gh_dir.join("merge-methods.txt")).unwrap();
+    assert_eq!(
+        methods.lines().collect::<Vec<_>>(),
+        vec!["backend --merge", "frontend --merge"]
     );
 
     let bundle = read_bundle(&workspace);
@@ -3222,6 +3232,13 @@ case "$sub" in
     tail="${url#https://github.com/acme/}"
     pr_repo="${tail%%/*}"
     printf '%s\n' "$pr_repo" >> "$GH_FAKE_DIR/merge-order.txt"
+    method=""
+    for arg in "$@"; do
+      case "$arg" in
+        --merge|--squash|--rebase) method="$arg" ;;
+      esac
+    done
+    printf '%s %s\n' "$pr_repo" "$method" >> "$GH_FAKE_DIR/merge-methods.txt"
     touch "$GH_FAKE_DIR/merged-$pr_repo"
     printf 'Merged pull request %s\n' "$url"
     ;;

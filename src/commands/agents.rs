@@ -1,6 +1,6 @@
 use crate::checkout::{checkout_dir, is_in_place};
 use crate::git::git_output;
-use crate::model::{KnitProject, RepoEntry};
+use crate::model::{KnitProject, RepoEntry, DEFAULT_LANDING_MERGE_METHOD};
 use crate::output as out;
 use crate::store::ActiveBundle;
 use anyhow::{Context, Result};
@@ -317,7 +317,11 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let merge_method = landing.merge.method.as_deref().unwrap_or("squash");
+    let merge_method = landing
+        .merge
+        .method
+        .as_deref()
+        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
     let required_checks = landing.merge.required_checks_only.unwrap_or(true);
     let deployments = if landing.deployments.is_empty() {
         "- (none)".to_string()

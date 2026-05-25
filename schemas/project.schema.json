@@ -45,7 +45,7 @@
               "items": { "type": "string" }
             },
             "includeUnlisted": { "type": "boolean" },
-            "method": { "enum": ["squash", "merge", "rebase"] },
+            "method": { "enum": ["squash", "merge", "rebase"], "default": "merge" },
             "waitForChecks": { "type": "boolean" },
             "requiredChecksOnly": { "type": "boolean" },
             "deleteBranch": { "type": "boolean" },
