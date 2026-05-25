@@ -212,7 +212,7 @@ Knit ships JSON Schema files under `schemas/` and prints them with `knit schema 
       "id": "merge-backend",
       "type": "merge_pr",
       "repoId": "backend",
-      "method": "squash",
+      "method": "merge",
       "waitForChecks": true,
       "requiredChecksOnly": true,
       "deleteBranch": false
