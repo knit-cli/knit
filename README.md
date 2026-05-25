@@ -579,6 +579,10 @@ See [docs/change-group-schema.md](docs/change-group-schema.md) for the current b
 
 See [docs/architecture.md](docs/architecture.md) for the module boundaries and test layout. `src/main.rs` is intentionally only the binary entry point; command logic lives in `src/commands/`, schema types in `src/model.rs`, persistence in `src/store.rs`, and git subprocess helpers in `src/git.rs`.
 
+## Active Work Items
+
+- `eb83e259-da29-4f80-a813-5ed08acd54cd` — update the docs with a comment about this work item
+
 ## Roadmap
 
 - Standalone JSON Schema for `ChangeGroup`
