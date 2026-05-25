@@ -126,6 +126,73 @@ fn project_default_repos_start_bundle_without_track() {
 }
 
 #[test]
+fn work_item_start_links_bundle_and_writes_prompt() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["org", "init", "acme"]);
+    knit(&workspace, ["project", "set-org", "acme"]);
+    knit(
+        &workspace,
+        [
+            "work-item",
+            "add",
+            "Dispatch approved work",
+            "--kind",
+            "feature",
+            "--description",
+            "Create the worktree and prompt.",
+            "--repo",
+            "backend",
+            "--accept",
+            "A bundle is linked",
+        ],
+    );
+    knit(
+        &workspace,
+        ["work-item", "approve", "dispatch-approved-work"],
+    );
+    knit(&workspace, ["work-item", "start", "dispatch-approved-work"]);
+
+    let item: Value = serde_json::from_str(
+        &fs::read_to_string(
+            workspace.join(".knit/work-items/dispatch-approved-work.work-item.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(item["planningStatus"].as_str(), Some("approved"));
+    assert_eq!(item["executionStatus"].as_str(), Some("claimed"));
+    assert_eq!(
+        item["bundleIds"][0].as_str(),
+        Some("dispatch-approved-work")
+    );
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/dispatch-approved-work.bundle.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["workItemIds"][0].as_str(),
+        Some("dispatch-approved-work")
+    );
+    assert!(workspace
+        .join(".knit/worktrees/dispatch-approved-work/WORK_ITEM.md")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_remove_deletes_template_and_clears_active_project() {
     let root = unique_temp_dir();
     let backend = root.join("backend");

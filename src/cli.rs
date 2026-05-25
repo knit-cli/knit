@@ -31,6 +31,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Manage org-level repo universes.
+    Org {
+        #[command(subcommand)]
+        command: OrgCommand,
+    },
+    /// Manage actionable work items.
+    WorkItem {
+        #[command(subcommand)]
+        command: WorkItemCommand,
+    },
     /// Manage KnitHub API remotes.
     Remote {
         #[command(subcommand)]
@@ -631,6 +641,11 @@ pub enum ProjectCommand {
         /// Project name. Defaults to the active project.
         name: Option<String>,
     },
+    /// Link a project to an org repo universe.
+    SetOrg {
+        /// Org name or id.
+        org: String,
+    },
     /// Remove a project template JSON artifact.
     Remove {
         /// Project name.
@@ -656,6 +671,137 @@ pub enum ProjectCommand {
     Command {
         #[command(subcommand)]
         command: ProjectRunCommandCli,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum OrgCommand {
+    /// Create an org artifact.
+    Init {
+        /// Org name.
+        name: String,
+    },
+    /// List org artifacts.
+    List,
+    /// Print an org JSON artifact.
+    Show {
+        /// Org name or id.
+        name: String,
+    },
+    /// Add or update a canonical org repo.
+    AddRepo {
+        /// Org name or id.
+        org: String,
+        /// Stable repo id inside the org.
+        repo_id: String,
+        /// Path to a local git repository.
+        repo_path: PathBuf,
+        /// Override the inferred base branch.
+        #[arg(long)]
+        base: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum WorkItemCommand {
+    /// Create a work item.
+    Add {
+        /// Work item title.
+        title: String,
+        /// Work item kind.
+        #[arg(long, default_value = "feature")]
+        kind: String,
+        /// Description or implementation prompt.
+        #[arg(long)]
+        description: Option<String>,
+        /// Project id. Defaults to active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Org id. Defaults from project when available.
+        #[arg(long)]
+        org: Option<String>,
+        /// Repo hint. Repeat for several repos.
+        #[arg(long = "repo", value_name = "REPO")]
+        repo_hints: Vec<String>,
+        /// Dependency work item id. Repeat for several dependencies.
+        #[arg(long = "depends-on", value_name = "WORK_ITEM")]
+        depends_on: Vec<String>,
+        /// Label. Repeat for several labels.
+        #[arg(long = "label", value_name = "LABEL")]
+        labels: Vec<String>,
+        /// Acceptance criterion. Repeat for several criteria.
+        #[arg(long = "accept", value_name = "TEXT")]
+        acceptance_criteria: Vec<String>,
+        /// Priority label.
+        #[arg(long)]
+        priority: Option<String>,
+    },
+    /// List work items.
+    List {
+        /// Project id filter. Defaults to all visible local work items.
+        #[arg(long)]
+        project: Option<String>,
+        /// Do not filter by project.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Print a work item JSON artifact.
+    Show {
+        /// Work item id.
+        id: String,
+    },
+    /// Update work item state or metadata.
+    Update {
+        /// Work item id.
+        id: String,
+        #[arg(long)]
+        title: Option<String>,
+        #[arg(long)]
+        description: Option<String>,
+        #[arg(long = "planning-status")]
+        planning_status: Option<String>,
+        #[arg(long = "execution-status")]
+        execution_status: Option<String>,
+        #[arg(long)]
+        lane: Option<String>,
+        #[arg(long)]
+        rank: Option<u32>,
+        #[arg(long = "rationale")]
+        planning_rationale: Option<String>,
+        #[arg(long)]
+        planner: Option<String>,
+        #[arg(long)]
+        target: Option<String>,
+        #[arg(long = "last-outcome")]
+        last_outcome: Option<String>,
+        #[arg(long = "depends-on", value_name = "WORK_ITEM")]
+        depends_on: Vec<String>,
+        #[arg(long = "repo", value_name = "REPO")]
+        repo_hints: Vec<String>,
+        #[arg(long = "bundle-id", value_name = "BUNDLE")]
+        bundle_ids: Vec<String>,
+    },
+    /// Mark a plotted work item approved for execution.
+    Approve {
+        /// Work item id.
+        id: String,
+    },
+    /// Print work items as JSON for planners.
+    Export {
+        /// Project id filter.
+        #[arg(long)]
+        project: Option<String>,
+        /// Do not filter by project.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Create a Knit bundle/worktree for the work item.
+    Start {
+        /// Work item id.
+        id: String,
+        /// Execution target label.
+        #[arg(long)]
+        target: Option<String>,
     },
 }
 

@@ -18,8 +18,9 @@ pub mod tracking;
 use anyhow::{bail, Result};
 
 pub use cli::{
-    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, ProjectCommand,
-    ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, OrgCommand,
+    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    WorkItemCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -41,6 +42,7 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
+            ProjectCommand::SetOrg { org } => commands::set_project_org(&org),
             ProjectCommand::Remove { name, force } => commands::remove_project(&name, force),
             ProjectCommand::Push { name, remote } => {
                 commands::push_project_to_remote(name.as_deref(), &remote)
@@ -61,6 +63,84 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
+        },
+        Commands::Org { command } => match command {
+            OrgCommand::Init { name } => commands::init_org(&name),
+            OrgCommand::List => commands::list_orgs(),
+            OrgCommand::Show { name } => commands::show_org(&name),
+            OrgCommand::AddRepo {
+                org,
+                repo_id,
+                repo_path,
+                base,
+            } => commands::add_org_repo(&org, &repo_id, &repo_path, base.as_deref()),
+        },
+        Commands::WorkItem { command } => match command {
+            WorkItemCommand::Add {
+                title,
+                kind,
+                description,
+                project,
+                org,
+                repo_hints,
+                depends_on,
+                labels,
+                acceptance_criteria,
+                priority,
+            } => commands::add_work_item(
+                &title,
+                &kind,
+                description.as_deref(),
+                project.as_deref(),
+                org.as_deref(),
+                &repo_hints,
+                &depends_on,
+                &labels,
+                &acceptance_criteria,
+                priority.as_deref(),
+            ),
+            WorkItemCommand::List { project, all } => {
+                commands::list_work_items(project.as_deref(), all)
+            }
+            WorkItemCommand::Show { id } => commands::show_work_item(&id),
+            WorkItemCommand::Update {
+                id,
+                title,
+                description,
+                planning_status,
+                execution_status,
+                lane,
+                rank,
+                planning_rationale,
+                planner,
+                target,
+                last_outcome,
+                depends_on,
+                repo_hints,
+                bundle_ids,
+            } => commands::update_work_item(
+                &id,
+                title.as_deref(),
+                description.as_deref(),
+                planning_status.as_deref(),
+                execution_status.as_deref(),
+                lane.as_deref(),
+                rank,
+                planning_rationale.as_deref(),
+                planner.as_deref(),
+                target.as_deref(),
+                last_outcome.as_deref(),
+                &depends_on,
+                &repo_hints,
+                &bundle_ids,
+            ),
+            WorkItemCommand::Approve { id } => commands::approve_work_item(&id),
+            WorkItemCommand::Export { project, all } => {
+                commands::export_work_items(project.as_deref(), all)
+            }
+            WorkItemCommand::Start { id, target } => {
+                commands::start_work_item(&id, target.as_deref())
+            }
         },
         Commands::Remote { command } => match command {
             RemoteCommand::Add { name, url, token } => {

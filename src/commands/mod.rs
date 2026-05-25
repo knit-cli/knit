@@ -14,6 +14,7 @@ pub mod init;
 pub mod land;
 pub mod log;
 pub mod merge;
+pub mod org;
 pub mod project;
 pub mod publish;
 pub mod pull;
@@ -27,6 +28,7 @@ pub mod stage;
 pub mod status;
 pub mod sync;
 pub mod track;
+pub mod workitem;
 pub mod worktree;
 
 pub use bundle::{
@@ -50,10 +52,11 @@ pub use land::{
 };
 pub use log::{show_log, show_target};
 pub use merge::{create_compat_bundle, merge_command};
+pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects,
-    refresh_project_agents, remove_project, remove_project_run_command, set_project_run_command,
-    show_project,
+    refresh_project_agents, remove_project, remove_project_run_command, set_project_org,
+    set_project_run_command, show_project,
 };
 pub use publish::{
     create_github_publications, show_github_publication_status, sync_github_publications,
@@ -72,4 +75,8 @@ pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;
 pub use track::{track_repo_selectors, track_repos};
+pub use workitem::{
+    add_work_item, approve_work_item, export_work_items, list_work_items, show_work_item,
+    start_work_item, update_work_item,
+};
 pub use worktree::create_worktrees;
