@@ -719,6 +719,7 @@ mod tests {
             }],
             nodes: Vec::new(),
             publications: Vec::new(),
+            work_item_ids: Vec::new(),
         };
 
         let scope = publish_scope_repo_ids(&bundle);

@@ -878,15 +878,24 @@ pub fn bundle_state(bundle: &ChangeGroup) -> &'static str {
     }
     if has_closed_node(bundle) {
         BUNDLE_STATE_CLOSED
-    } else if bundle
-        .nodes
-        .iter()
-        .any(|node| node.node_type == "feature.landed")
-    {
-        "landed"
+    } else if has_landed_node(bundle) {
+        // "feature.landed" is a ledger marker; if any recorded publication is still open we
+        // should not present the bundle as landed.
+        if has_open_publications(bundle) {
+            BUNDLE_STATE_OPEN
+        } else {
+            "landed"
+        }
     } else {
         BUNDLE_STATE_OPEN
     }
+}
+
+fn has_landed_node(bundle: &ChangeGroup) -> bool {
+    bundle
+        .nodes
+        .iter()
+        .any(|node| node.node_type == "feature.landed")
 }
 
 fn has_closed_node(bundle: &ChangeGroup) -> bool {
@@ -894,6 +903,17 @@ fn has_closed_node(bundle: &ChangeGroup) -> bool {
         .nodes
         .iter()
         .any(|node| node.node_type == "feature.closed")
+}
+
+fn has_open_publications(bundle: &ChangeGroup) -> bool {
+    bundle
+        .publications
+        .iter()
+        .any(|publication| !publication_state_is_final(&publication.state))
+}
+
+fn publication_state_is_final(state: &str) -> bool {
+    state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed")
 }
 
 fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {

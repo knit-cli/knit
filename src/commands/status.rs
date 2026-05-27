@@ -104,7 +104,8 @@ fn print_closed_summary(active: &crate::store::ActiveBundle, state: &str) {
 }
 
 fn print_publication_summary(active: &crate::store::ActiveBundle) {
-    if active.bundle.publications.is_empty() || has_landed_node(&active.bundle) {
+    let state = crate::commands::bundle::bundle_state(&active.bundle);
+    if active.bundle.publications.is_empty() || state == "landed" {
         return;
     }
     let tracked_count = active.bundle.repos.len();
@@ -133,11 +134,4 @@ fn print_publication_summary(active: &crate::store::ActiveBundle) {
 
 fn is_github_pr(publication: &PublicationEntry) -> bool {
     publication.provider == "github" && publication.kind == "pull_request"
-}
-
-fn has_landed_node(bundle: &crate::model::ChangeGroup) -> bool {
-    bundle
-        .nodes
-        .iter()
-        .any(|node| node.node_type == "feature.landed")
 }
