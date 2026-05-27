@@ -1,3 +1,4 @@
+use crate::checkout::checkout_dir;
 use crate::commands::agents::{
     print_worktree_agents_summary, upsert_managed_section, write_worktree_agents_md,
 };
@@ -11,10 +12,11 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+use std::process::Command;
 
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
-    start_bundle(title, None, &[], false, true, false, force, agents)
+    start_bundle(title, None, &[], false, true, false, force, agents, None)
 }
 
 pub fn start_bundle(
@@ -26,6 +28,7 @@ pub fn start_bundle(
     in_place: bool,
     force: bool,
     agents: bool,
+    enter: Option<&str>,
 ) -> Result<()> {
     if all_repos && !repo_ids.is_empty() {
         bail!("Use either --all-repos or --repo, not both.");
@@ -39,7 +42,7 @@ pub fn start_bundle(
     let worktree_dir = knit_dir.join("worktrees").join(&bundle_id);
     let bundle_path = stored_bundle_path(&root, &bundle_id);
     if bundle_path.exists() && !force {
-        if agents {
+        if agents && enter.is_none() {
             let bundle: ChangeGroup = read_json(&bundle_path)?;
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             let agents_path = write_agents_md(&root)?;
@@ -112,7 +115,76 @@ pub fn start_bundle(
     let worktree_agents = write_worktree_agents_md(&active)?;
     print_worktree_agents_summary(&worktree_agents);
 
+    if let Some(selector) = enter {
+        let path = enter_target_dir(&active, selector)?;
+        enter_shell(&active, &path)?;
+    }
+
     Ok(())
+}
+
+fn enter_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
+    if active.bundle.repos.is_empty() {
+        bail!("Cannot enter a checkout because the bundle has no tracked repos.");
+    }
+
+    if selector.trim().is_empty() {
+        if active.bundle.repos.len() == 1 {
+            return checkout_for_repo(active, 0);
+        }
+
+        return Ok(active.root.join(".knit/worktrees").join(&active.bundle.id));
+    }
+
+    let selectors = [selector.to_string()];
+    let indexes = crate::repo_selectors::resolve_repo_indexes(active, &selectors, false)?;
+    if indexes.len() != 1 {
+        bail!("Repo selector `{selector}` matched multiple repos; pass a more specific repo id.");
+    }
+    checkout_for_repo(active, indexes[0])
+}
+
+fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
+    let repo = &active.bundle.repos[index];
+    checkout_dir(active, repo).with_context(|| {
+        format!(
+            "{} has no materialized checkout. Run `knit worktree` first.",
+            repo.id
+        )
+    })
+}
+
+fn enter_shell(active: &ActiveBundle, path: &Path) -> Result<()> {
+    let shell = std::env::var_os("SHELL").unwrap_or_else(default_shell);
+    println!(
+        "{} {}",
+        out::heading("Entering:"),
+        out::path(path.display())
+    );
+    let status = Command::new(&shell)
+        .current_dir(path)
+        .env("KNIT_ROOT", &active.root)
+        .env("KNIT_BUNDLE", &active.bundle.id)
+        .status()
+        .with_context(|| {
+            format!(
+                "failed to start shell {} in {}",
+                PathBuf::from(&shell).display(),
+                path.display()
+            )
+        })?;
+    if !status.success() {
+        bail!("shell exited with {status}");
+    }
+    Ok(())
+}
+
+fn default_shell() -> std::ffi::OsString {
+    if cfg!(windows) {
+        std::ffi::OsString::from("cmd")
+    } else {
+        std::ffi::OsString::from("/bin/sh")
+    }
 }
 
 fn resolve_start_project(
@@ -224,6 +296,8 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
+Use `knit bundle start "feature title" --enter` to create the bundle and immediately start your shell in the created checkout. If the bundle tracks more than one repo, pass a repo selector such as `--enter backend`; without a selector Knit enters `.knit/worktrees/<bundle>`.
+
 For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
 ```sh
@@ -328,6 +402,7 @@ knit cherrypick --from feature-a --repo backend abc123
 
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle start "Feature title"` creates a bundle.
+- `knit bundle start "Feature title" --enter` creates a bundle and starts a shell in its generated checkout.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
 - `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.

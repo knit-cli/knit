@@ -489,6 +489,9 @@ pub enum BundleCommand {
         /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
         #[arg(long)]
         agents: bool,
+        /// Start a shell in the created checkout. Pass a repo selector when the bundle has several repos.
+        #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
+        enter: Option<String>,
     },
     /// Add repos or project repo ids to the current bundle.
     Add {

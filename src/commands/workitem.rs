@@ -234,6 +234,7 @@ pub fn start_work_item(id: &str, target: Option<&str>) -> Result<()> {
         false,
         false,
         true,
+        None,
     )?;
     let bundle_id = slugify(&title);
     let bundle_path = bundle_path(&root, &bundle_id);

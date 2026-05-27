@@ -125,6 +125,81 @@ fn project_default_repos_start_bundle_without_track() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn bundle_start_can_enter_created_worktree() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    let output = knit_with_env(
+        &workspace,
+        ["bundle", "start", "project feature", "--enter"],
+        &[("SHELL", "/bin/pwd")],
+    );
+    let checkout = workspace
+        .join(".knit/worktrees/project-feature/backend")
+        .canonicalize()
+        .unwrap();
+    assert!(output.contains("Entering:"));
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == checkout.to_str().unwrap()),
+        "{output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_start_enter_accepts_repo_selector() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    knit(&workspace, ["project", "init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    let output = knit_with_env(
+        &workspace,
+        ["bundle", "start", "project feature", "--enter", "frontend"],
+        &[("SHELL", "/bin/pwd")],
+    );
+    let checkout = workspace
+        .join(".knit/worktrees/project-feature/frontend")
+        .canonicalize()
+        .unwrap();
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == checkout.to_str().unwrap()),
+        "{output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn work_item_start_links_bundle_and_writes_prompt() {
     let root = unique_temp_dir();
