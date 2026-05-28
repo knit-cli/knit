@@ -14,10 +14,11 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;
@@ -145,6 +146,92 @@ struct OrphanWorktree {
     path: PathBuf,
 }
 
+struct PruneCache {
+    pr_by_url: Arc<Mutex<HashMap<String, github::PullRequest>>>,
+    pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<github::PullRequest>>>>,
+    pending_changes: Arc<Mutex<HashMap<String, bool>>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BranchKey {
+    repo_path: String,
+    head: String,
+    base: String,
+}
+
+impl PruneCache {
+    fn new() -> Self {
+        Self {
+            pr_by_url: Arc::new(Mutex::new(HashMap::new())),
+            pr_by_branch: Arc::new(Mutex::new(HashMap::new())),
+            pending_changes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn view_pr(&self, cwd: &Path, url: &str) -> Result<github::PullRequest> {
+        {
+            let cache = self.pr_by_url.lock().unwrap();
+            if let Some(pr) = cache.get(url) {
+                return Ok(pr.clone());
+            }
+        }
+        let pr = github::view_pr(cwd, url)?;
+        self.pr_by_url
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), pr.clone());
+        Ok(pr)
+    }
+
+    fn find_existing_pr(
+        &self,
+        cwd: &Path,
+        branch: &str,
+        base_branch: &str,
+    ) -> Result<Option<github::PullRequest>> {
+        let key = BranchKey {
+            repo_path: cwd.to_string_lossy().to_string(),
+            head: branch.to_string(),
+            base: base_branch.to_string(),
+        };
+        {
+            let cache = self.pr_by_branch.lock().unwrap();
+            if let Some(result) = cache.get(&key) {
+                return Ok(result.clone());
+            }
+        }
+        let result = github::find_existing_pr(cwd, branch, base_branch)?;
+        self.pr_by_branch
+            .lock()
+            .unwrap()
+            .insert(key, result.clone());
+        Ok(result)
+    }
+
+    fn checkout_has_pending_changes(
+        &self,
+        root: &Path,
+        repo: &crate::model::RepoEntry,
+    ) -> Result<bool> {
+        let Some(path) = checkout_path(root, repo) else {
+            return Ok(false);
+        };
+        let key = path.to_string_lossy().to_string();
+        {
+            let cache = self.pending_changes.lock().unwrap();
+            if let Some(&result) = cache.get(&key) {
+                return Ok(result);
+            }
+        }
+        let result = path_has_pending_changes(&path)?;
+        self.pending_changes
+            .lock()
+            .unwrap()
+            .insert(key, result);
+        Ok(result)
+    }
+}
+
 pub fn prune_merged_bundles(
     apply: bool,
     refresh: bool,
@@ -180,15 +267,50 @@ pub fn prune_merged_bundles(
 
     let mut entries = bundle_json_paths(&dir)?;
     entries.sort();
+    let cache = PruneCache::new();
     let mut candidates = Vec::new();
-    for path in entries {
-        let mut bundle: ChangeGroup = read_json(&path)?;
-        if let Some(reason) = dead_work_candidate(&root, &path, &mut bundle, refresh)? {
-            candidates.push(PruneCandidate {
-                id: bundle.id.clone(),
-                repo_count: bundle.repos.len(),
-                reason,
-            });
+    if refresh {
+        let bundles: Vec<_> = entries
+            .iter()
+            .map(|path| read_json::<ChangeGroup>(path).map(|bundle| (path.clone(), bundle)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let results = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (path, mut bundle) in bundles {
+                handles.push(scope.spawn(|| {
+                    let result =
+                        dead_work_candidate(&root, &path, &mut bundle, true, &cache);
+                    (path, bundle, result)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+
+        for (_path, bundle, result) in results {
+            if let Some(reason) = result? {
+                candidates.push(PruneCandidate {
+                    id: bundle.id.clone(),
+                    repo_count: bundle.repos.len(),
+                    reason,
+                });
+            }
+        }
+    } else {
+        for path in entries {
+            let mut bundle: ChangeGroup = read_json(&path)?;
+            if let Some(reason) =
+                dead_work_candidate(&root, &path, &mut bundle, false, &cache)?
+            {
+                candidates.push(PruneCandidate {
+                    id: bundle.id.clone(),
+                    repo_count: bundle.repos.len(),
+                    reason,
+                });
+            }
         }
     }
     let orphan_worktrees = if worktrees {
@@ -281,6 +403,7 @@ fn dead_work_candidate(
     path: &Path,
     bundle: &mut ChangeGroup,
     refresh: bool,
+    cache: &PruneCache,
 ) -> Result<Option<&'static str>> {
     let repos = bundle.repos.clone();
     let mut saw_publication = false;
@@ -293,21 +416,22 @@ fn dead_work_candidate(
 
         if refresh {
             if let Some(existing) = publication.as_ref() {
-                let pr =
-                    github::view_pr(Path::new(&repo.path), &existing.url).with_context(|| {
+                let pr = cache
+                    .view_pr(Path::new(&repo.path), &existing.url)
+                    .with_context(|| {
                         format!("{}: failed to refresh {}", bundle.id, existing.url)
                     })?;
                 github::upsert_publication(bundle, &repo, &pr);
                 publication = github::publication_for_repo(bundle, &repo.id).cloned();
             } else if let Some(branch) = branch {
-                if let Some(pr) =
-                    github::find_existing_pr(Path::new(&repo.path), branch, &repo.base_branch)
-                        .with_context(|| {
-                            format!(
-                                "{}: failed to check for an existing PR for {}",
-                                bundle.id, branch
-                            )
-                        })?
+                if let Some(pr) = cache
+                    .find_existing_pr(Path::new(&repo.path), branch, &repo.base_branch)
+                    .with_context(|| {
+                        format!(
+                            "{}: failed to check for an existing PR for {}",
+                            bundle.id, branch
+                        )
+                    })?
                 {
                     github::upsert_publication(bundle, &repo, &pr);
                     publication = github::publication_for_repo(bundle, &repo.id).cloned();
@@ -315,7 +439,7 @@ fn dead_work_candidate(
             }
         }
 
-        if checkout_has_pending_changes(root, &repo)? {
+        if cache.checkout_has_pending_changes(root, &repo)? {
             saw_pending_changes = true;
         }
 
@@ -358,7 +482,7 @@ fn publication_state_is_closed(state: &str) -> bool {
     state.eq_ignore_ascii_case("closed")
 }
 
-fn checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) -> Result<bool> {
+fn _checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) -> Result<bool> {
     let Some(path) = checkout_path(root, repo) else {
         return Ok(false);
     };
