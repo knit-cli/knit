@@ -391,23 +391,49 @@ pub fn run(cli: Cli) -> Result<()> {
             PublishCommand::Github { command } => match command {
                 GithubPublishCommand::Create {
                     repos,
+                    from_artifact,
+                    out,
+                    no_push,
                     bases,
                     all,
                     draft,
                     sync,
                     no_sync,
                     set_upstream,
-                } => commands::create_github_publications(
-                    &repos,
+                } => match from_artifact {
+                    Some(path) => commands::create_github_publications_from_artifact(
+                        &path,
+                        out.as_deref(),
+                        &repos,
+                        all,
+                        draft,
+                        &bases,
+                        sync || !no_sync,
+                        !no_push,
+                    ),
+                    None => commands::create_github_publications(
+                        &repos,
+                        all,
+                        draft,
+                        &bases,
+                        sync || !no_sync,
+                        set_upstream,
+                    ),
+                },
+                GithubPublishCommand::Sync {
+                    repos,
+                    from_artifact,
+                    out,
                     all,
-                    draft,
-                    &bases,
-                    sync || !no_sync,
-                    set_upstream,
-                ),
-                GithubPublishCommand::Sync { repos, all } => {
-                    commands::sync_github_publications(&repos, all)
-                }
+                } => match from_artifact {
+                    Some(path) => commands::sync_github_publications_from_artifact(
+                        &path,
+                        out.as_deref(),
+                        &repos,
+                        all,
+                    ),
+                    None => commands::sync_github_publications(&repos, all),
+                },
                 GithubPublishCommand::Status { repos, all } => {
                     commands::show_github_publication_status(&repos, all)
                 }
@@ -420,7 +446,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 out,
                 force,
             }) => commands::generate_land_plan(provider.as_deref(), out.as_deref(), force),
-            Some(LandCommand::Apply { plan }) => commands::apply_land_plan(plan.as_deref()),
+            Some(LandCommand::Apply {
+                plan,
+                from_artifact,
+                out,
+            }) => match from_artifact {
+                Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
+                None => commands::apply_land_plan(plan.as_deref()),
+            },
             Some(LandCommand::Resume { run }) => commands::resume_land_run(run.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
             Some(LandCommand::Update {

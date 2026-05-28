@@ -122,6 +122,39 @@ pub fn find_existing_pr(
     Ok(prs.into_iter().next())
 }
 
+pub fn find_existing_pr_for_repo(
+    cwd: &Path,
+    repo_full_name: &str,
+    branch: &str,
+    base_branch: &str,
+) -> Result<Option<PullRequest>> {
+    let output = gh_output(
+        cwd,
+        [
+            OsString::from("pr"),
+            OsString::from("list"),
+            OsString::from("--repo"),
+            OsString::from(repo_full_name),
+            OsString::from("--head"),
+            OsString::from(branch),
+            OsString::from("--base"),
+            OsString::from(base_branch),
+            OsString::from("--state"),
+            OsString::from("all"),
+            OsString::from("--json"),
+            OsString::from(
+                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
+            ),
+            OsString::from("--limit"),
+            OsString::from("1"),
+        ],
+        None,
+    )?;
+    let prs: Vec<PullRequest> =
+        serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
+    Ok(prs.into_iter().next())
+}
+
 pub fn create_pr(
     cwd: &Path,
     base_branch: &str,
@@ -133,6 +166,37 @@ pub fn create_pr(
     let mut args = vec![
         OsString::from("pr"),
         OsString::from("create"),
+        OsString::from("--base"),
+        OsString::from(base_branch),
+        OsString::from("--head"),
+        OsString::from(head_branch),
+        OsString::from("--title"),
+        OsString::from(title),
+        OsString::from("--body-file"),
+        OsString::from("-"),
+    ];
+    if draft {
+        args.push(OsString::from("--draft"));
+    }
+
+    let output = gh_output(cwd, args, Some(body))?;
+    parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
+}
+
+pub fn create_pr_for_repo(
+    cwd: &Path,
+    repo_full_name: &str,
+    base_branch: &str,
+    head_branch: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String> {
+    let mut args = vec![
+        OsString::from("pr"),
+        OsString::from("create"),
+        OsString::from("--repo"),
+        OsString::from(repo_full_name),
         OsString::from("--base"),
         OsString::from(base_branch),
         OsString::from("--head"),
@@ -167,6 +231,25 @@ pub fn view_pr(cwd: &Path, url: &str) -> Result<PullRequest> {
     serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
 }
 
+pub fn view_pr_for_repo(cwd: &Path, repo_full_name: &str, selector: &str) -> Result<PullRequest> {
+    let output = gh_output(
+        cwd,
+        [
+            OsString::from("pr"),
+            OsString::from("view"),
+            OsString::from(selector),
+            OsString::from("--repo"),
+            OsString::from(repo_full_name),
+            OsString::from("--json"),
+            OsString::from(
+                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
+            ),
+        ],
+        None,
+    )?;
+    serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
+}
+
 pub fn edit_pr_body(cwd: &Path, url: &str, body: &str) -> Result<()> {
     gh_output(
         cwd,
@@ -174,6 +257,28 @@ pub fn edit_pr_body(cwd: &Path, url: &str, body: &str) -> Result<()> {
             OsString::from("pr"),
             OsString::from("edit"),
             OsString::from(url),
+            OsString::from("--body-file"),
+            OsString::from("-"),
+        ],
+        Some(body),
+    )?;
+    Ok(())
+}
+
+pub fn edit_pr_body_for_repo(
+    cwd: &Path,
+    repo_full_name: &str,
+    selector: &str,
+    body: &str,
+) -> Result<()> {
+    gh_output(
+        cwd,
+        [
+            OsString::from("pr"),
+            OsString::from("edit"),
+            OsString::from(selector),
+            OsString::from("--repo"),
+            OsString::from(repo_full_name),
             OsString::from("--body-file"),
             OsString::from("-"),
         ],

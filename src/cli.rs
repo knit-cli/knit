@@ -917,6 +917,13 @@ pub enum LandCommand {
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
         #[arg(long)]
         plan: Option<PathBuf>,
+        /// Read a bundle JSON artifact from this path and land PRs without a local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Resume a failed or incomplete landing run.
     Resume {
@@ -955,6 +962,17 @@ pub enum GithubPublishCommand {
     Create {
         /// Optional repo ids or paths to limit PR creation.
         repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        /// When set, Knit will not require a local worktree checkout.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Skip pushing feature branches (GitHub-only). Feature branches must already exist on the remote.
+        #[arg(long)]
+        no_push: bool,
         /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
         #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
         bases: Vec<String>,
@@ -978,6 +996,13 @@ pub enum GithubPublishCommand {
     Sync {
         /// Optional repo ids or paths to limit PR sync.
         repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
         /// Sync every tracked repo instead of only repos with recorded bundle work or publications.
         #[arg(long)]
         all: bool,
