@@ -36,6 +36,102 @@ const DEFAULT_LAND_PROVIDER: &str = "github";
 const DEPLOY_MODE_COMMAND: &str = "command";
 const DEPLOY_MODE_PUSH: &str = "push";
 
+pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let mut bundle: crate::model::ChangeGroup = read_json(artifact_path)
+        .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
+    if bundle.repos.is_empty() {
+        bail!("Bundle artifact has no repos.");
+    }
+    if bundle.publications.is_empty() {
+        bail!("Bundle artifact has no GitHub PR publications. Run publish first.");
+    }
+
+    let started_at = now_iso();
+    let mut merged_repo_ids = Vec::new();
+    let mut publication_urls = Vec::new();
+
+    let repos = bundle.repos.clone();
+
+    for repo in &repos {
+        let Some(publication) = publication_for_repo(&bundle, &repo.id).cloned() else {
+            continue;
+        };
+
+        let pr = github::view_pr(&cwd, &publication.url)?;
+        if state_is_merged(&pr) {
+            github::upsert_publication(&mut bundle, repo, &pr);
+            merged_repo_ids.push(repo.id.clone());
+            publication_urls.push(publication.url.clone());
+            println!(
+                "{} {} {}",
+                out::ok("already merged"),
+                out::repo(&repo.id),
+                out::muted(&publication.url)
+            );
+            continue;
+        }
+
+        ensure_open_and_ready(&repo.id, &pr)?;
+
+        let summary = github::wait_for_checks(
+            &cwd,
+            &publication.url,
+            true,
+            1800,
+            10,
+        )?;
+        println!(
+            "{} {} {}",
+            out::ok("checks"),
+            out::repo(&repo.id),
+            out::muted(&summary.status)
+        );
+
+        github::merge_pr(
+            &cwd,
+            &publication.url,
+            DEFAULT_LANDING_MERGE_METHOD,
+            false,
+            pr.head_ref_oid.as_deref(),
+        )?;
+
+        let refreshed = github::view_pr(&cwd, &publication.url)?;
+        github::upsert_publication(&mut bundle, repo, &refreshed);
+        merged_repo_ids.push(repo.id.clone());
+        publication_urls.push(publication.url.clone());
+        println!(
+            "{} {} {}",
+            out::ok("merged"),
+            out::repo(&repo.id),
+            out::muted(&publication.url)
+        );
+    }
+
+    // Record a landed node in the artifact without writing land plan/run files.
+    let node = BundleNode::feature_landed(
+        node_id("land"),
+        started_at,
+        format!("land-{}", bundle.id),
+        format!("run-artifact-{}", bundle.id),
+        DEFAULT_LAND_PROVIDER.to_string(),
+        merged_repo_ids,
+        publication_urls,
+    );
+    bundle.nodes.push(node);
+    bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());
+    bundle.updated_at = now_iso();
+
+    match out_path {
+        Some(path) => write_json(path, &bundle),
+        None => {
+            let json = serde_json::to_string_pretty(&bundle).context("failed to encode bundle JSON")?;
+            println!("{json}");
+            Ok(())
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct LandPlan {
