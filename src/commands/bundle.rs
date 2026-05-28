@@ -438,7 +438,9 @@ fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
 fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
     let worktrees = git_worktrees_under(&orphan.path)?;
     for worktree in worktrees {
-        remove_git_worktree_from_self(&worktree, force)?;
+        if is_linked_worktree(&worktree) {
+            remove_git_worktree_from_self(&worktree, force)?;
+        }
     }
     if orphan.path.exists() {
         fs::remove_dir_all(&orphan.path)
@@ -451,6 +453,10 @@ fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
         out::path(orphan.path.display())
     );
     Ok(())
+}
+
+fn is_linked_worktree(path: &Path) -> bool {
+    path.join(".git").is_file()
 }
 
 fn git_worktrees_under(path: &Path) -> Result<Vec<PathBuf>> {
