@@ -1975,7 +1975,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     assert_eq!(steps[3]["id"].as_str(), Some("deploy-frontend"));
     assert_eq!(
         steps[3]["needs"].as_array().unwrap()[0].as_str(),
-        Some("deploy-backend")
+        Some("merge-frontend")
     );
 
     let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
