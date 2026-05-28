@@ -47,7 +47,8 @@ pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
 pub use init::{init_bundle, start_bundle};
 pub use land::{
-    apply_land_plan, generate_land_plan, land_default, resume_land_run, show_land_status,
+    apply_land_from_artifact, apply_land_plan, generate_land_plan, land_default, resume_land_run,
+    show_land_status,
     update_land_branches,
 };
 pub use log::{show_log, show_target};
@@ -59,7 +60,8 @@ pub use project::{
     set_project_run_command, show_project,
 };
 pub use publish::{
-    create_github_publications, show_github_publication_status, sync_github_publications,
+    create_github_publications, create_github_publications_from_artifact,
+    show_github_publication_status, sync_github_publications, sync_github_publications_from_artifact,
 };
 pub use pull::pull_repos;
 pub use push::push_repos;
