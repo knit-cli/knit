@@ -271,6 +271,13 @@ knit publish github create --base backend=stable --base frontend=main
 knit publish github status
 ```
 
+Publish from a bundle artifact JSON (no local worktrees; branches must already exist on GitHub):
+
+```sh
+knit publish github create --from-artifact bundle.json --out bundle.published.json --no-push
+knit publish github sync --from-artifact bundle.published.json --out bundle.published.json
+```
+
 When the PRs are approved and the user says to land, merge, release, ship, or continue after review, start landing through Knit:
 
 ```sh
@@ -282,6 +289,12 @@ Inspect or edit the plan, then execute it explicitly:
 ```sh
 knit land apply
 knit land status
+```
+
+Land from a bundle artifact JSON (merge-only, no local workspace):
+
+```sh
+knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 ```
 
 Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
