@@ -193,6 +193,8 @@ pub struct ProjectLandingPlan {
 pub struct ProjectLandingMergePlan {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repo_order: Vec<String>,
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub needs: std::collections::BTreeMap<String, Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_unlisted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
