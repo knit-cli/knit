@@ -145,6 +145,13 @@ struct StepOutcome {
     stdout: Option<String>,
     stderr: Option<String>,
     exit_code: Option<i32>,
+    publication_update: Option<PublicationUpdate>,
+}
+
+#[derive(Debug)]
+struct PublicationUpdate {
+    repo: RepoEntry,
+    pr: PullRequest,
 }
 
 pub fn generate_land_plan(
@@ -378,13 +385,24 @@ fn build_default_plan(active: &ActiveBundle, requested_provider: Option<&str>) -
     ensure_provider(&provider)?;
     let merge = landing.map(|landing| &landing.merge);
     let mut steps = Vec::new();
-    let mut previous: Option<String> = None;
+    let ordered_ids: BTreeSet<String> = merge
+        .map(|m| m.repo_order.iter().cloned().collect())
+        .unwrap_or_default();
+    let empty_needs = BTreeMap::new();
+    let merge_needs = merge.map(|m| &m.needs).unwrap_or(&empty_needs);
+    let mut previous_ordered: Option<String> = None;
     for repo in ordered_merge_repos(active, merge) {
         if publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
         let id = format!("merge-{}", repo.id);
-        let needs = previous.iter().cloned().collect::<Vec<_>>();
+        let needs = if let Some(explicit_needs) = merge_needs.get(&repo.id) {
+            explicit_needs.clone()
+        } else if ordered_ids.contains(&repo.id) {
+            previous_ordered.iter().cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         steps.push(LandStep {
             id: id.clone(),
             step_type: STEP_MERGE_PR.to_string(),
@@ -403,7 +421,9 @@ fn build_default_plan(active: &ActiveBundle, requested_provider: Option<&str>) -
             deployment_mode: None,
             checkout: None,
         });
-        previous = Some(id);
+        if ordered_ids.contains(&repo.id) {
+            previous_ordered = Some(id);
+        }
     }
     append_project_deployments(active, landing, &mut steps)?;
 
@@ -513,12 +533,11 @@ fn append_project_deployments(
         .filter(|step| step.step_type == STEP_MERGE_PR)
         .filter_map(|step| Some((step.repo_id.clone()?, step.id.clone())))
         .collect::<BTreeMap<_, _>>();
-    let last_merge = steps
+    let all_merge_ids = steps
         .iter()
-        .rev()
-        .find(|step| step.step_type == STEP_MERGE_PR)
-        .map(|step| step.id.clone());
-    let mut previous_deploy: Option<String> = None;
+        .filter(|step| step.step_type == STEP_MERGE_PR)
+        .map(|step| step.id.clone())
+        .collect::<Vec<_>>();
 
     for deployment in &landing.deployments {
         if let Some(repo_id) = &deployment.repo_id {
@@ -536,9 +555,8 @@ fn append_project_deployments(
         let needs = if deployment.needs.is_empty() {
             default_deployment_needs(
                 deployment.repo_id.as_deref(),
-                previous_deploy.as_deref(),
-                last_merge.as_deref(),
                 &merge_step_ids,
+                &all_merge_ids,
             )
         } else {
             deployment.needs.clone()
@@ -566,7 +584,6 @@ fn append_project_deployments(
             deployment_mode: Some(mode),
             checkout,
         });
-        previous_deploy = Some(deployment.id.clone());
     }
 
     Ok(())
@@ -574,21 +591,15 @@ fn append_project_deployments(
 
 fn default_deployment_needs(
     repo_id: Option<&str>,
-    previous_deploy: Option<&str>,
-    last_merge: Option<&str>,
     merge_step_ids: &BTreeMap<String, String>,
+    all_merge_ids: &[String],
 ) -> Vec<String> {
-    let mut needs = Vec::new();
-    if let Some(previous_deploy) = previous_deploy {
-        needs.push(previous_deploy.to_string());
-    } else if let Some(last_merge) = last_merge {
-        needs.push(last_merge.to_string());
-    } else if let Some(repo_id) = repo_id {
+    if let Some(repo_id) = repo_id {
         if let Some(merge_step) = merge_step_ids.get(repo_id) {
-            needs.push(merge_step.clone());
+            return vec![merge_step.clone()];
         }
     }
-    needs
+    all_merge_ids.to_vec()
 }
 
 struct LandUpdateTarget {
@@ -862,85 +873,163 @@ fn execute_run(
     run: &mut LandRun,
     run_path: &Path,
 ) -> Result<()> {
-    for step_id in order {
-        let step = plan
-            .steps
-            .iter()
-            .find(|step| &step.id == step_id)
-            .expect("validated plan order references a real step");
-        let run_index = run
-            .steps
-            .iter()
-            .position(|run_step| run_step.id == step.id)
-            .expect("run contains every plan step");
+    let waves = step_waves(&plan.steps, order)?;
 
-        if run.steps[run_index].status == STATUS_SUCCEEDED {
+    for wave in &waves {
+        let mut pending: Vec<(&LandStep, usize)> = Vec::new();
+        for step_id in wave {
+            let step = plan
+                .steps
+                .iter()
+                .find(|s| &s.id == step_id)
+                .expect("validated plan order references a real step");
+            let run_index = run
+                .steps
+                .iter()
+                .position(|run_step| run_step.id == step.id)
+                .expect("run contains every plan step");
+            if run.steps[run_index].status == STATUS_SUCCEEDED {
+                continue;
+            }
+            ensure_needs_succeeded(run, step)?;
+            run.steps[run_index].status = STATUS_RUNNING.to_string();
+            run.steps[run_index].started_at = Some(now_iso());
+            run.steps[run_index].finished_at = None;
+            run.steps[run_index].detail = None;
+            run.steps[run_index].stdout = None;
+            run.steps[run_index].stderr = None;
+            run.steps[run_index].exit_code = None;
+            pending.push((step, run_index));
+        }
+
+        if pending.is_empty() {
             continue;
         }
-        ensure_needs_succeeded(run, step)?;
-        run.steps[run_index].status = STATUS_RUNNING.to_string();
-        run.steps[run_index].started_at = Some(now_iso());
-        run.steps[run_index].finished_at = None;
-        run.steps[run_index].detail = None;
-        run.steps[run_index].stdout = None;
-        run.steps[run_index].stderr = None;
-        run.steps[run_index].exit_code = None;
+
         run.status = STATUS_RUNNING.to_string();
         run.updated_at = now_iso();
         write_json(run_path, run)?;
 
-        println!("{} {}", out::movement("running"), out::node(&step.id));
-        let outcome = match execute_step(active, plan, step) {
-            Ok(outcome) => outcome,
-            Err(error) => StepOutcome {
-                success: false,
-                detail: error.to_string(),
-                publication_url: step_publication(active, step).map(|publication| publication.url),
-                stdout: None,
-                stderr: None,
-                exit_code: None,
-            },
+        for (step, _) in &pending {
+            println!("{} {}", out::movement("running"), out::node(&step.id));
+        }
+
+        let active_shared: &ActiveBundle = active;
+        let results: Vec<(String, StepOutcome)> = if pending.len() == 1 {
+            let (step, _) = &pending[0];
+            let outcome = match execute_step(active_shared, plan, step) {
+                Ok(outcome) => outcome,
+                Err(error) => StepOutcome {
+                    success: false,
+                    detail: error.to_string(),
+                    publication_url: step_publication(active_shared, step)
+                        .map(|publication| publication.url),
+                    stdout: None,
+                    stderr: None,
+                    exit_code: None,
+                    publication_update: None,
+                },
+            };
+            vec![(step.id.clone(), outcome)]
+        } else {
+            let mut results = Vec::with_capacity(pending.len());
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = pending
+                    .iter()
+                    .map(|(step, _)| {
+                        let step_id = step.id.clone();
+                        scope.spawn(move || {
+                            let outcome = match execute_step(active_shared, plan, step) {
+                                Ok(outcome) => outcome,
+                                Err(error) => StepOutcome {
+                                    success: false,
+                                    detail: error.to_string(),
+                                    publication_url: step_publication(active_shared, step)
+                                        .map(|publication| publication.url),
+                                    stdout: None,
+                                    stderr: None,
+                                    exit_code: None,
+                                    publication_update: None,
+                                },
+                            };
+                            (step_id, outcome)
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    results.push(handle.join().expect("land step thread panicked"));
+                }
+            });
+            results
         };
 
-        let run_step = &mut run.steps[run_index];
-        run_step.status = if outcome.success {
-            STATUS_SUCCEEDED.to_string()
-        } else {
-            STATUS_FAILED.to_string()
-        };
-        run_step.finished_at = Some(now_iso());
-        run_step.detail = Some(outcome.detail.clone());
-        run_step.publication_url = outcome.publication_url;
-        run_step.stdout = outcome.stdout;
-        run_step.stderr = outcome.stderr;
-        run_step.exit_code = outcome.exit_code;
+        let mut bundle_dirty = false;
+        let mut any_failed = false;
+        for (step_id, outcome) in &results {
+            let run_index = run
+                .steps
+                .iter()
+                .position(|run_step| &run_step.id == step_id)
+                .expect("run contains every plan step");
+            let run_step = &mut run.steps[run_index];
+            run_step.status = if outcome.success {
+                STATUS_SUCCEEDED.to_string()
+            } else {
+                STATUS_FAILED.to_string()
+            };
+            run_step.finished_at = Some(now_iso());
+            run_step.detail = Some(outcome.detail.clone());
+            run_step.publication_url = outcome.publication_url.clone();
+            run_step.stdout = outcome.stdout.clone();
+            run_step.stderr = outcome.stderr.clone();
+            run_step.exit_code = outcome.exit_code;
+
+            if outcome.success {
+                println!(
+                    "{} {} {}",
+                    out::ok("succeeded"),
+                    out::node(step_id),
+                    out::muted(&outcome.detail)
+                );
+            } else {
+                any_failed = true;
+                println!(
+                    "{} {} {}",
+                    out::danger("failed"),
+                    out::node(step_id),
+                    outcome.detail
+                );
+            }
+
+            if let Some(update) = &outcome.publication_update {
+                github::upsert_publication(&mut active.bundle, &update.repo, &update.pr);
+                bundle_dirty = true;
+            }
+        }
+
         run.updated_at = now_iso();
-        run.status = if outcome.success {
-            STATUS_RUNNING.to_string()
-        } else {
+        run.status = if any_failed {
             STATUS_FAILED.to_string()
+        } else {
+            STATUS_RUNNING.to_string()
         };
         write_json(run_path, run)?;
-        save_active_bundle(active)?;
+        if bundle_dirty {
+            save_active_bundle(active)?;
+        }
 
-        if outcome.success {
-            println!(
-                "{} {} {}",
-                out::ok("succeeded"),
-                out::node(&step.id),
-                out::muted(&outcome.detail)
-            );
-        } else {
-            println!(
-                "{} {} {}",
-                out::danger("failed"),
-                out::node(&step.id),
-                outcome.detail
-            );
+        if any_failed {
+            let failed_ids: Vec<_> = results
+                .iter()
+                .filter(|(_, o)| !o.success)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            let label = if failed_ids.len() == 1 { "step" } else { "steps" };
             bail!(
-                "Land run {} stopped at step {}. Fix the issue and run `knit land resume`.",
+                "Land run {} stopped at {} {}. Fix the issue and run `knit land resume`.",
                 run.id,
-                step.id
+                label,
+                failed_ids.join(", ")
             );
         }
     }
@@ -954,8 +1043,40 @@ fn execute_run(
     Ok(())
 }
 
+fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec<String>>> {
+    let mut waves = Vec::new();
+    let mut satisfied = BTreeSet::new();
+    let mut remaining: BTreeSet<String> = order.iter().cloned().collect();
+
+    while !remaining.is_empty() {
+        let mut wave = Vec::new();
+        for step_id in order {
+            if !remaining.contains(step_id) {
+                continue;
+            }
+            let step = steps
+                .iter()
+                .find(|s| &s.id == step_id)
+                .expect("order references a real step");
+            if step.needs.iter().all(|need| satisfied.contains(need)) {
+                wave.push(step_id.clone());
+            }
+        }
+        if wave.is_empty() {
+            bail!("land plan contains a dependency cycle among remaining steps");
+        }
+        for id in &wave {
+            remaining.remove(id);
+            satisfied.insert(id.clone());
+        }
+        waves.push(wave);
+    }
+
+    Ok(waves)
+}
+
 fn execute_step(
-    active: &mut ActiveBundle,
+    active: &ActiveBundle,
     plan: &LandPlan,
     step: &LandStep,
 ) -> Result<StepOutcome> {
@@ -969,7 +1090,7 @@ fn execute_step(
 }
 
 fn execute_merge_pr(
-    active: &mut ActiveBundle,
+    active: &ActiveBundle,
     plan: &LandPlan,
     step: &LandStep,
 ) -> Result<StepOutcome> {
@@ -980,7 +1101,6 @@ fn execute_merge_pr(
         .clone();
     let pr = github::view_pr(&cwd, &publication.url)?;
     if state_is_merged(&pr) {
-        github::upsert_publication(&mut active.bundle, &repo, &pr);
         return Ok(StepOutcome {
             success: true,
             detail: "already merged".to_string(),
@@ -988,6 +1108,7 @@ fn execute_merge_pr(
             stdout: None,
             stderr: None,
             exit_code: None,
+            publication_update: Some(PublicationUpdate { repo, pr }),
         });
     }
     ensure_open_and_ready(repo_id, &pr)?;
@@ -1019,7 +1140,6 @@ fn execute_merge_pr(
         state: Some("MERGED".to_string()),
         ..pr.clone()
     });
-    github::upsert_publication(&mut active.bundle, &repo, &refreshed);
     detail.push(format!("merged with {method}"));
 
     if plan.provider != github::PROVIDER {
@@ -1033,6 +1153,10 @@ fn execute_merge_pr(
         stdout: None,
         stderr: None,
         exit_code: None,
+        publication_update: Some(PublicationUpdate {
+            repo,
+            pr: refreshed,
+        }),
     })
 }
 
@@ -1061,6 +1185,7 @@ fn execute_wait_checks(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
         stdout: None,
         stderr: None,
         exit_code: None,
+        publication_update: None,
     })
 }
 
@@ -1108,6 +1233,7 @@ fn execute_run_command(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
         stdout: non_empty(stdout),
         stderr: non_empty(stderr),
         exit_code,
+        publication_update: None,
     })
 }
 
@@ -1137,6 +1263,7 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
             stdout: None,
             stderr: None,
             exit_code: None,
+            publication_update: None,
         });
     }
 
@@ -1187,6 +1314,7 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
         stdout: non_empty(stdout),
         stderr: non_empty(stderr),
         exit_code,
+        publication_update: None,
     })
 }
 
@@ -2080,6 +2208,86 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn step_waves_groups_independent_steps() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &[]),
+            step("deploy", &["merge-a", "merge-b"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].len(), 2);
+        assert!(waves[0].contains(&"merge-a".to_string()));
+        assert!(waves[0].contains(&"merge-b".to_string()));
+        assert_eq!(waves[1], vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_respects_sequential_chain() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &["merge-a"]),
+            step("merge-c", &["merge-b"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["merge-a".to_string()]);
+        assert_eq!(waves[1], vec!["merge-b".to_string()]);
+        assert_eq!(waves[2], vec!["merge-c".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_mixed_parallel_and_sequential() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &["merge-a"]),
+            step("merge-c", &[]),
+            step("deploy", &["merge-b", "merge-c"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert!(waves[0].contains(&"merge-a".to_string()));
+        assert!(waves[0].contains(&"merge-c".to_string()));
+        assert_eq!(waves[1], vec!["merge-b".to_string()]);
+        assert_eq!(waves[2], vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn default_deployment_needs_uses_repo_merge_step() {
+        let mut merge_ids = BTreeMap::new();
+        merge_ids.insert("backend".to_string(), "merge-backend".to_string());
+        let all_merge = vec!["merge-backend".to_string(), "merge-frontend".to_string()];
+        let needs = default_deployment_needs(Some("backend"), &merge_ids, &all_merge);
+        assert_eq!(needs, vec!["merge-backend".to_string()]);
+    }
+
+    #[test]
+    fn default_deployment_needs_falls_back_to_all_merges() {
+        let merge_ids = BTreeMap::new();
+        let all_merge = vec!["merge-a".to_string(), "merge-b".to_string()];
+        let needs = default_deployment_needs(None, &merge_ids, &all_merge);
+        assert_eq!(needs, vec!["merge-a".to_string(), "merge-b".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_merge_depends_on_deploy() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("deploy-a", &["merge-a"]),
+            step("merge-b", &["deploy-a"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["merge-a".to_string()]);
+        assert_eq!(waves[1], vec!["deploy-a".to_string()]);
+        assert_eq!(waves[2], vec!["merge-b".to_string()]);
     }
 
     fn write_test_run(path: &Path, bundle_id: &str) {
