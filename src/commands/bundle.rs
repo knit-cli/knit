@@ -6,7 +6,7 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::providers::github;
+use crate::providers::{self, Forge, PrTarget, PullRequest};
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
     load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
@@ -147,8 +147,8 @@ struct OrphanWorktree {
 }
 
 struct PruneCache {
-    pr_by_url: Arc<Mutex<HashMap<String, github::PullRequest>>>,
-    pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<github::PullRequest>>>>,
+    pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
+    pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
     pending_changes: Arc<Mutex<HashMap<String, bool>>>,
 }
 
@@ -168,14 +168,14 @@ impl PruneCache {
         }
     }
 
-    fn view_pr(&self, cwd: &Path, url: &str) -> Result<github::PullRequest> {
+    fn view_pr(&self, forge: &dyn Forge, cwd: &Path, url: &str) -> Result<PullRequest> {
         {
             let cache = self.pr_by_url.lock().unwrap();
             if let Some(pr) = cache.get(url) {
                 return Ok(pr.clone());
             }
         }
-        let pr = github::view_pr(cwd, url)?;
+        let pr = forge.view(&PrTarget::checkout(cwd), url)?;
         self.pr_by_url
             .lock()
             .unwrap()
@@ -185,10 +185,11 @@ impl PruneCache {
 
     fn find_existing_pr(
         &self,
+        forge: &dyn Forge,
         cwd: &Path,
         branch: &str,
         base_branch: &str,
-    ) -> Result<Option<github::PullRequest>> {
+    ) -> Result<Option<PullRequest>> {
         let key = BranchKey {
             repo_path: cwd.to_string_lossy().to_string(),
             head: branch.to_string(),
@@ -200,7 +201,7 @@ impl PruneCache {
                 return Ok(result.clone());
             }
         }
-        let result = github::find_existing_pr(cwd, branch, base_branch)?;
+        let result = forge.find_existing(&PrTarget::checkout(cwd), branch, base_branch)?;
         self.pr_by_branch
             .lock()
             .unwrap()
@@ -412,29 +413,33 @@ fn dead_work_candidate(
     let mut saw_pending_changes = false;
     for repo in repos {
         let branch = repo.feature_branch.as_deref();
-        let mut publication = github::publication_for_repo(bundle, &repo.id).cloned();
+        let mut publication = providers::publication_for_repo(bundle, &repo.id).cloned();
 
+        // Skip review-state refresh for repos whose host is not recognized;
+        // prune still proceeds on the remaining signals.
         if refresh {
-            if let Some(existing) = publication.as_ref() {
-                let pr = cache
-                    .view_pr(Path::new(&repo.path), &existing.url)
-                    .with_context(|| {
-                        format!("{}: failed to refresh {}", bundle.id, existing.url)
-                    })?;
-                github::upsert_publication(bundle, &repo, &pr);
-                publication = github::publication_for_repo(bundle, &repo.id).cloned();
-            } else if let Some(branch) = branch {
-                if let Some(pr) = cache
-                    .find_existing_pr(Path::new(&repo.path), branch, &repo.base_branch)
-                    .with_context(|| {
-                        format!(
-                            "{}: failed to check for an existing PR for {}",
-                            bundle.id, branch
-                        )
-                    })?
-                {
-                    github::upsert_publication(bundle, &repo, &pr);
-                    publication = github::publication_for_repo(bundle, &repo.id).cloned();
+            if let Ok(forge) = providers::for_repo(&repo) {
+                if let Some(existing) = publication.as_ref() {
+                    let pr = cache
+                        .view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url)
+                        .with_context(|| {
+                            format!("{}: failed to refresh {}", bundle.id, existing.url)
+                        })?;
+                    providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                    publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                } else if let Some(branch) = branch {
+                    if let Some(pr) = cache
+                        .find_existing_pr(forge.as_ref(), Path::new(&repo.path), branch, &repo.base_branch)
+                        .with_context(|| {
+                            format!(
+                                "{}: failed to check for an existing review object for {}",
+                                bundle.id, branch
+                            )
+                        })?
+                    {
+                        providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                        publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                    }
                 }
             }
         }

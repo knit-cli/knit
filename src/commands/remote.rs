@@ -250,6 +250,51 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
     Ok(())
 }
 
+/// Push the resolved bundle artifact to the configured KnitHub remote alongside a
+/// git push, when enabled.
+///
+/// Resolution order for the remote: explicit `--remote`, then `sync_remote`, then a
+/// remote literally named `knithub`. With no remote configured this is a silent
+/// no-op. The `push_sync` config disables the implicit sync, but an explicit
+/// `--remote` still forces it. `--no-remote` always skips. A sync failure is
+/// reported as a warning and never fails the git push that already succeeded.
+pub fn maybe_sync_bundle_to_remote(remote_override: Option<&str>, no_remote: bool) -> Result<()> {
+    if no_remote {
+        return Ok(());
+    }
+    let Ok((_, config)) = workspace_config() else {
+        return Ok(());
+    };
+    if !config.push_sync && remote_override.is_none() {
+        return Ok(());
+    }
+    let Some(remote_name) = remote_override
+        .map(slugify)
+        .or_else(|| config.sync_remote.clone())
+        .or_else(|| {
+            config
+                .remotes
+                .contains_key("knithub")
+                .then(|| "knithub".to_string())
+        })
+    else {
+        return Ok(());
+    };
+    if resolve_remote(&config, &remote_name).is_err() {
+        // An explicitly requested remote that does not exist is an error; an
+        // implicit fallback that is missing is just skipped.
+        if remote_override.is_some() {
+            resolve_remote(&config, &remote_name)?;
+        }
+        return Ok(());
+    }
+
+    if let Err(error) = push_bundle_to_remote(&remote_name, None) {
+        println!("{} {error:#}", out::warn("KnitHub sync skipped:"));
+    }
+    Ok(())
+}
+
 pub fn clone_project_from_remote(
     project_identifier: &str,
     target: Option<&Path>,
@@ -308,6 +353,7 @@ pub fn clone_project_from_remote(
         active_project: Some(project.id.clone()),
         sync_remote: Some(remote_name.clone()),
         advice: true,
+        push_sync: true,
         remotes,
     };
     save_config(&target_root, &config)?;

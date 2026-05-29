@@ -109,29 +109,29 @@ fn print_publication_summary(active: &crate::store::ActiveBundle) {
         return;
     }
     let tracked_count = active.bundle.repos.len();
-    let github_prs = active
+    let review_count = active
         .bundle
         .publications
         .iter()
-        .filter(|publication| is_github_pr(publication))
+        .filter(|publication| is_review_publication(publication))
         .count();
-    if github_prs == 0 {
+    if review_count == 0 {
         return;
     }
 
     println!();
     println!(
-        "{} {}/{} GitHub PR(s) recorded, not landed",
+        "{} {}/{} review object(s) recorded, not landed",
         out::heading("Publications:"),
-        github_prs,
+        review_count,
         tracked_count
     );
     advice::print(
         &active.root,
-        "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection; do not use `gh pr merge`.",
+        "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection; do not merge the host review objects directly.",
     );
 }
 
-fn is_github_pr(publication: &PublicationEntry) -> bool {
-    publication.provider == "github" && publication.kind == "pull_request"
+fn is_review_publication(publication: &PublicationEntry) -> bool {
+    crate::providers::is_review_kind(&publication.kind)
 }

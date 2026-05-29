@@ -262,6 +262,12 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
+        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync for this push.
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Run a project command inside resolved bundle checkouts.
     Run {
@@ -891,7 +897,67 @@ pub enum SchemaCommand {
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
-    /// Publish to GitHub pull requests.
+    /// Push feature branches and create missing review objects (auto-detects each repo's host).
+    Create {
+        /// Optional repo ids or paths to limit creation.
+        repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Skip pushing feature branches. Branches must already exist on the remote.
+        #[arg(long)]
+        no_push: bool,
+        /// Override base branch. Use once for all repos or repeat as REPO=BRANCH.
+        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
+        bases: Vec<String>,
+        /// Create review objects for every tracked repo instead of only repos with recorded work.
+        #[arg(long)]
+        all: bool,
+        /// Create draft review objects.
+        #[arg(long)]
+        draft: bool,
+        /// Explicitly sync cross-links after creation. This is the default.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+        /// Skip the second phase that updates every review body with cross-links.
+        #[arg(long)]
+        no_sync: bool,
+        /// Set each feature branch's upstream to origin/<branch> while pushing.
+        #[arg(long)]
+        set_upstream: bool,
+        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync for this publish.
+        #[arg(long)]
+        no_remote: bool,
+    },
+    /// Refresh recorded review metadata and rewrite Knit cross-link blocks.
+    Sync {
+        /// Optional repo ids or paths to limit the sync.
+        repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Sync every tracked repo instead of only repos with recorded work or publications.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show recorded review objects for the resolved bundle.
+    Status {
+        /// Optional repo ids or paths to limit the status.
+        repos: Vec<String>,
+        /// Show every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Publish to GitHub explicitly. Alias kept for back-compat; prefer `knit publish create`.
     Github {
         #[command(subcommand)]
         command: GithubPublishCommand,
