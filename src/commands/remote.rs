@@ -389,16 +389,67 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result
     Ok(())
 }
 
+/// A bundle as it exists on the configured KnitHub sync remote, with its current
+/// artifact payload decoded into a `ChangeGroup` when one is present.
+pub struct RemoteBundleRecord {
+    pub remote_id: String,
+    pub slug: String,
+    pub lifecycle_state: String,
+    pub payload: Option<ChangeGroup>,
+}
+
+/// Resolve the name of the KnitHub sync remote, preferring an explicit `sync_remote`
+/// and otherwise falling back to a remote literally named `knithub`.
+fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
+    config
+        .sync_remote
+        .clone()
+        .or_else(|| config.remotes.contains_key("knithub").then(|| "knithub".to_string()))
+        .context("No KnitHub sync remote configured. Run `knit remote add knithub <url>` or use explicit prune flags instead of --all.")
+}
+
+/// List the bundle records the sync remote holds for `project_id`, decoding each
+/// bundle's current artifact payload when it is a supported Knit bundle.
+pub fn list_remote_bundles(config: &KnitConfig, project_id: &str) -> Result<Vec<RemoteBundleRecord>> {
+    let remote_name = resolve_sync_remote_name(config)?;
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let export = fetch_project_export(remote, &token, project_id)?;
+    Ok(export
+        .bundles
+        .into_iter()
+        .map(|bundle| {
+            let payload = bundle
+                .current_artifact
+                .as_ref()
+                .and_then(|artifact| decode_bundle_payload(&artifact.payload, &bundle.slug).ok());
+            RemoteBundleRecord {
+                remote_id: bundle.id,
+                slug: bundle.slug,
+                lifecycle_state: bundle.lifecycle_state,
+                payload,
+            }
+        })
+        .collect())
+}
+
+/// Delete a single bundle record from the sync remote by its remote id, returning the
+/// deleted bundle's slug.
+pub fn delete_remote_bundle_by_id(config: &KnitConfig, remote_id: &str) -> Result<String> {
+    let remote_name = resolve_sync_remote_name(config)?;
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let deleted: RemoteBundle =
+        request_json(remote, &token, "DELETE", &format!("/bundles/{remote_id}"), None)?;
+    Ok(deleted.slug)
+}
+
 pub fn delete_bundle_from_remote(
     _root: &Path,
     config: &KnitConfig,
     bundle: &ChangeGroup,
 ) -> Result<()> {
-    let remote_name = config
-        .sync_remote
-        .clone()
-        .or_else(|| config.remotes.contains_key("knithub").then(|| "knithub".to_string()))
-        .context("No KnitHub sync remote configured. Run `knit remote add knithub <url>` or use explicit prune flags instead of --all.")?;
+    let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
     let project_id = bundle
