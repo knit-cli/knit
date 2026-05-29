@@ -26,7 +26,21 @@ pub fn run_project_command(
         bail!("Use either a named command or a raw command after --, not both.");
     }
     if name.is_none() && raw_args.is_empty() {
-        bail!("Pass a project command name or a raw command after --.");
+        if crate::commands::runtime::try_handle(None, raw_args)? {
+            return Ok(());
+        }
+    }
+
+    if let Some(name) = name {
+        if raw_args.is_empty() && matches!(name, "up" | "down" | "status") {
+            if crate::commands::runtime::try_handle(Some(name), raw_args)? {
+                return Ok(());
+            }
+        }
+    }
+
+    if name.is_none() && raw_args.is_empty() {
+        bail!("Pass a project command name, `knit run up|down|status`, or a raw command after --.");
     }
 
     let active = load_active_bundle()?;
