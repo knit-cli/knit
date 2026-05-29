@@ -60,8 +60,8 @@ pub use project::{
     set_project_run_command, show_project,
 };
 pub use publish::{
-    create_github_publications, create_github_publications_from_artifact,
-    show_github_publication_status, sync_github_publications, sync_github_publications_from_artifact,
+    create_publications, create_publications_from_artifact, show_publication_status,
+    sync_publications, sync_publications_from_artifact,
 };
 pub use pull::pull_repos;
 pub use push::push_repos;

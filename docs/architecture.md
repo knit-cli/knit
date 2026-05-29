@@ -38,7 +38,10 @@ src/
     schema.rs
     git_passthrough.rs
   providers/
-    github.rs     provider-specific forge operations through gh
+    mod.rs        Forge trait, PrTarget, host detection, shared CLI runner + publication helpers
+    github.rs     GitHub forge adapter via the gh CLI
+    gitlab.rs     GitLab forge adapter via the glab CLI (merge requests)
+    forgejo.rs    Codeberg/Forgejo forge adapter via the tea CLI
   checkout.rs   checkout mode helpers and in-place branch guards
   advice.rs     sparse next-step advice helpers
   model.rs      project, config, context, bundle / ChangeGroup data structures
@@ -64,11 +67,11 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - Each file in `commands/` owns one user-facing command or tightly coupled command pair.
 - `commands/project.rs` owns reusable project repo templates under `.knit/projects/`.
 - `commands/bundle.rs` owns bundle inspection, listing, switching, and validation. It must not create a second review handoff object.
-- `commands/publish.rs` owns the user-facing publish workflow. Provider-specific calls live in `providers/`, starting with `providers/github.rs`.
+- `commands/publish.rs` owns the user-facing publish workflow. It resolves a `providers::Forge` per repo from the repo's remote and calls through the trait; it does not hard-code a host.
 - `commands/land.rs` owns landing plan/run orchestration. It reads publication metadata and project landing templates, writes `.knit/land-plans/` and `.knit/land-runs/`, manages deployment checkouts under `.knit/land-worktrees/`, and appends `feature.landed` only after every step succeeds.
 - `commands/merge.rs` owns local bundle/ref integration into target branches or other bundles. It writes `.knit/merge-runs/`, uses managed branch checkouts under `.knit/merge-worktrees/`, rolls back failed non-manual runs to their pre-run SHAs, and records target-bundle merges as `git.observed`.
 - `commands/doctor.rs` owns workspace validation and additive JSON migrations. `commands/schema.rs` prints bundled JSON Schemas for Knit artifacts.
-- `providers/` owns forge-specific subprocess behavior such as GitHub PR view/check/merge through `gh`. Provider modules should expose small operations; command modules decide workflow policy.
+- `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. Each adapter (`github.rs`/`gitlab.rs`/`forgejo.rs`) maps its CLI's JSON onto the canonical types. GitLab and Codeberg/Forgejo are detected from the remote host; every other remote defaults to GitHub. Provider modules expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
 - `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, folder context, then workspace fallback config.
