@@ -149,9 +149,9 @@ Rewind example:
 }
 ```
 
-Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each PR body. Future providers can use the same array with a different `provider` and `kind`, for example GitLab merge requests.
+Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each review body. The `provider` and `kind` identify the host adapter and review object: `github`/`pull_request`, `gitlab`/`merge_request`, or `forgejo`/`pull_request`. Knit records at most one review object per repo per bundle.
 
-The `baseBranch` field is the PR target recorded by the provider. `knit land` uses provider PR metadata, so a GitHub PR lands into the same base branch shown on GitHub.
+The `baseBranch` field is the review target recorded by the provider. `knit land` uses that metadata, so a review object lands into the same base branch shown on its host.
 
 ## Merge Runs
 

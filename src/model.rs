@@ -37,6 +37,10 @@ pub struct KnitConfig {
     pub sync_remote: Option<String>,
     #[serde(default = "default_advice")]
     pub advice: bool,
+    /// When true (default), git-pushing commands also push the bundle artifact to
+    /// the configured KnitHub remote. Set false to never sync on push.
+    #[serde(default = "default_push_sync")]
+    pub push_sync: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub remotes: BTreeMap<String, KnitRemote>,
 }
@@ -49,6 +53,7 @@ impl KnitConfig {
             active_project: None,
             sync_remote: None,
             advice: true,
+            push_sync: true,
             remotes: BTreeMap::new(),
         }
     }
@@ -60,12 +65,17 @@ impl KnitConfig {
             active_project: Some(active_project),
             sync_remote: None,
             advice: true,
+            push_sync: true,
             remotes: BTreeMap::new(),
         }
     }
 }
 
 fn default_advice() -> bool {
+    true
+}
+
+fn default_push_sync() -> bool {
     true
 }
 

@@ -7,7 +7,7 @@ use crate::model::{
     DEFAULT_LANDING_MERGE_METHOD, SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::providers::github::{self, publication_for_repo, PullRequest};
+use crate::providers::{self, publication_for_repo, CheckRun, Forge, PrTarget, PullRequest};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, load_config, project_path, read_json,
@@ -44,7 +44,7 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
         bail!("Bundle artifact has no repos.");
     }
     if bundle.publications.is_empty() {
-        bail!("Bundle artifact has no GitHub PR publications. Run publish first.");
+        bail!("Bundle artifact has no review publications. Run publish first.");
     }
 
     let started_at = now_iso();
@@ -57,10 +57,12 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
         let Some(publication) = publication_for_repo(&bundle, &repo.id).cloned() else {
             continue;
         };
+        let forge = providers::for_repo(repo)?;
+        let target = artifact_target(&cwd, forge.as_ref(), repo)?;
 
-        let pr = github::view_pr(&cwd, &publication.url)?;
+        let pr = forge.view(&target, &publication.url)?;
         if state_is_merged(&pr) {
-            github::upsert_publication(&mut bundle, repo, &pr);
+            providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
             merged_repo_ids.push(repo.id.clone());
             publication_urls.push(publication.url.clone());
             println!(
@@ -74,13 +76,7 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
 
         ensure_open_and_ready(&repo.id, &pr)?;
 
-        let summary = github::wait_for_checks(
-            &cwd,
-            &publication.url,
-            true,
-            1800,
-            10,
-        )?;
+        let summary = forge.wait_for_checks(&target, &publication.url, true, 1800, 10)?;
         println!(
             "{} {} {}",
             out::ok("checks"),
@@ -88,16 +84,16 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
             out::muted(&summary.status)
         );
 
-        github::merge_pr(
-            &cwd,
+        forge.merge(
+            &target,
             &publication.url,
             DEFAULT_LANDING_MERGE_METHOD,
             false,
             pr.head_ref_oid.as_deref(),
         )?;
 
-        let refreshed = github::view_pr(&cwd, &publication.url)?;
-        github::upsert_publication(&mut bundle, repo, &refreshed);
+        let refreshed = forge.view(&target, &publication.url)?;
+        providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &refreshed);
         merged_repo_ids.push(repo.id.clone());
         publication_urls.push(publication.url.clone());
         println!(
@@ -378,9 +374,9 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         out::heading("Land plan:"),
         out::path(plan_path.display())
     );
-    if plan.provider == "github" {
+    if providers::by_id(&plan.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -464,6 +460,9 @@ pub fn update_land_branches(
         push_update_targets(&targets, set_upstream)?;
         refresh_update_publications(&mut active, &targets)?;
         save_active_bundle(&active)?;
+        // Mirror the pushed feature branches into the KnitHub remote bundle
+        // (default on; see `knit config set push-sync`).
+        crate::commands::remote::maybe_sync_bundle_to_remote(None, false)?;
     }
 
     Ok(())
@@ -884,10 +883,11 @@ fn advanced_change(
 
 fn append_land_update_node(active: &mut ActiveBundle, changes: Vec<RepoChange>) -> Result<()> {
     let now = now_iso();
+    let provider = bundle_primary_provider(active);
     active.bundle.nodes.push(BundleNode::land_update(
         node_id("land_update"),
         now.clone(),
-        github::PROVIDER.to_string(),
+        provider,
         changes,
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
@@ -938,10 +938,13 @@ fn refresh_update_publications(
     targets: &[LandUpdateTarget],
 ) -> Result<()> {
     for target in targets {
-        let pr = github::view_pr(&target.cwd, &target.publication_url)
-            .with_context(|| format!("{}: failed to refresh PR metadata", target.repo_id))?;
         let repo = active.bundle.repos[target.repo_index].clone();
-        github::upsert_publication(&mut active.bundle, &repo, &pr);
+        let forge = providers::for_repo(&repo)?;
+        let pr_target = PrTarget::checkout(&target.cwd);
+        let pr = forge
+            .view(&pr_target, &target.publication_url)
+            .with_context(|| format!("{}: failed to refresh PR metadata", target.repo_id))?;
+        providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &pr);
     }
     Ok(())
 }
@@ -1098,7 +1101,13 @@ fn execute_run(
             }
 
             if let Some(update) = &outcome.publication_update {
-                github::upsert_publication(&mut active.bundle, &update.repo, &update.pr);
+                let forge = providers::for_repo(&update.repo)?;
+                providers::upsert_publication(
+                    &mut active.bundle,
+                    &update.repo,
+                    forge.as_ref(),
+                    &update.pr,
+                );
                 bundle_dirty = true;
             }
         }
@@ -1192,10 +1201,12 @@ fn execute_merge_pr(
 ) -> Result<StepOutcome> {
     let repo_id = required_repo_id(step)?;
     let (_, repo, cwd) = repo_context(active, repo_id)?;
+    let forge = providers::for_repo(&repo)?;
+    let target = PrTarget::checkout(&cwd);
     let publication = publication_for_repo(&active.bundle, repo_id)
-        .with_context(|| format!("{repo_id}: no GitHub PR publication recorded"))?
+        .with_context(|| format!("{repo_id}: no review publication recorded"))?
         .clone();
-    let pr = github::view_pr(&cwd, &publication.url)?;
+    let pr = forge.view(&target, &publication.url)?;
     if state_is_merged(&pr) {
         return Ok(StepOutcome {
             success: true,
@@ -1211,8 +1222,8 @@ fn execute_merge_pr(
 
     let mut detail = Vec::new();
     if step.wait_for_checks.unwrap_or(true) {
-        let summary = github::wait_for_checks(
-            &cwd,
+        let summary = forge.wait_for_checks(
+            &target,
             &publication.url,
             step.required_checks_only.unwrap_or(true),
             step.timeout_seconds.unwrap_or(1800),
@@ -1225,22 +1236,19 @@ fn execute_merge_pr(
         .method
         .as_deref()
         .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
-    github::merge_pr(
-        &cwd,
+    forge.merge(
+        &target,
         &publication.url,
         method,
         step.delete_branch.unwrap_or(false),
         pr.head_ref_oid.as_deref(),
     )?;
-    let refreshed = github::view_pr(&cwd, &publication.url).unwrap_or_else(|_| PullRequest {
+    let refreshed = forge.view(&target, &publication.url).unwrap_or_else(|_| PullRequest {
         state: Some("MERGED".to_string()),
         ..pr.clone()
     });
     detail.push(format!("merged with {method}"));
-
-    if plan.provider != github::PROVIDER {
-        bail!("unsupported land provider `{}`", plan.provider);
-    }
+    let _ = plan;
 
     Ok(StepOutcome {
         success: true,
@@ -1258,11 +1266,13 @@ fn execute_merge_pr(
 
 fn execute_wait_checks(active: &ActiveBundle, step: &LandStep) -> Result<StepOutcome> {
     let repo_id = required_repo_id(step)?;
-    let (_, _, cwd) = repo_context(active, repo_id)?;
+    let (_, repo, cwd) = repo_context(active, repo_id)?;
+    let forge = providers::for_repo(&repo)?;
+    let target = PrTarget::checkout(&cwd);
     let publication = publication_for_repo(&active.bundle, repo_id)
-        .with_context(|| format!("{repo_id}: no GitHub PR publication recorded"))?;
-    let summary = github::wait_for_checks(
-        &cwd,
+        .with_context(|| format!("{repo_id}: no review publication recorded"))?;
+    let summary = forge.wait_for_checks(
+        &target,
         &publication.url,
         step.required_only.unwrap_or(true),
         step.timeout_seconds.unwrap_or(1800),
@@ -1663,17 +1673,19 @@ fn preflight_publications(
         if !seen.insert(repo_id.to_string()) {
             continue;
         }
-        let (_, _, cwd) = repo_context(active, repo_id)?;
+        let (_, repo, cwd) = repo_context(active, repo_id)?;
+        let forge = providers::for_repo(&repo)?;
+        let target = PrTarget::checkout(&cwd);
         let publication = publication_for_repo(&active.bundle, repo_id)
-            .with_context(|| format!("{repo_id}: missing GitHub PR publication"))?;
-        let pr = github::view_pr(&cwd, &publication.url)?;
+            .with_context(|| format!("{repo_id}: missing review publication"))?;
+        let pr = forge.view(&target, &publication.url)?;
         if state_is_merged(&pr) && run.is_some() {
             continue;
         }
         ensure_open_and_ready(repo_id, &pr)?;
         if step.step_type == STEP_WAIT_CHECKS || step.wait_for_checks.unwrap_or(true) {
-            let runs = github::check_runs(
-                &cwd,
+            let runs = forge.check_runs(
+                &target,
                 &publication.url,
                 step.required_checks_only
                     .or(step.required_only)
@@ -1685,7 +1697,7 @@ fn preflight_publications(
     Ok(())
 }
 
-fn ensure_checks_ready(repo_id: &str, runs: &[github::CheckRun]) -> Result<()> {
+fn ensure_checks_ready(repo_id: &str, runs: &[CheckRun]) -> Result<()> {
     let failed = runs
         .iter()
         .filter(|run| {
@@ -1816,9 +1828,9 @@ fn print_plan(plan: &LandPlan, path: &Path) {
         out::heading("Plan file:"),
         out::path(path.display())
     );
-    if plan.provider == "github" {
+    if providers::by_id(&plan.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -1850,9 +1862,9 @@ fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {
         out::heading("Run file:"),
         out::path(path.display())
     );
-    if run.provider == "github" {
+    if providers::by_id(&run.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -1940,7 +1952,20 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
         );
         return;
     };
-    match github::view_pr(&cwd, publication_url) {
+    let forge = match providers::for_repo(repo) {
+        Ok(forge) => forge,
+        Err(error) => {
+            println!(
+                "  {} {} {}",
+                out::repo(repo_id),
+                out::danger("provider unavailable:"),
+                error
+            );
+            return;
+        }
+    };
+    let target = PrTarget::checkout(&cwd);
+    match forge.view(&target, publication_url) {
         Ok(pr) => {
             println!(
                 "  {} #{} {} {}",
@@ -1949,7 +1974,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
                 out::status(pr.state.as_deref().unwrap_or("UNKNOWN")),
                 pr.url
             );
-            match github::check_runs(&cwd, publication_url, true) {
+            match forge.check_runs(&target, publication_url, true) {
                 Ok(runs) => println!("    checks {}", check_status_label(&runs)),
                 Err(error) => println!("    {} {}", out::danger("checks unavailable:"), error),
             }
@@ -1963,7 +1988,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
     }
 }
 
-fn check_status_label(runs: &[github::CheckRun]) -> String {
+fn check_status_label(runs: &[CheckRun]) -> String {
     if runs.is_empty() {
         return out::ok("passed (no required checks)");
     }
@@ -2051,10 +2076,33 @@ fn required_repo_id(step: &LandStep) -> Result<&str> {
 }
 
 fn ensure_provider(provider: &str) -> Result<()> {
-    if provider != github::PROVIDER {
-        bail!("unsupported land provider `{provider}`. GitHub is the only provider implemented.");
+    if providers::by_id(provider).is_none() {
+        bail!("unsupported land provider `{provider}`. Supported: github, gitlab, forgejo.");
     }
     Ok(())
+}
+
+/// Build a forge target for artifact landing, scoping to the repo's full name
+/// when the remote is recognized so the CLI can target it without a checkout.
+fn artifact_target(cwd: &Path, forge: &dyn Forge, repo: &RepoEntry) -> Result<PrTarget> {
+    match repo
+        .remote
+        .as_deref()
+        .and_then(|remote| forge.repo_full_name(remote))
+    {
+        Some(full_name) => Ok(PrTarget::explicit(cwd, full_name)),
+        None => Ok(PrTarget::checkout(cwd)),
+    }
+}
+
+/// Best-effort provider label for a bundle, used on informational ledger nodes.
+fn bundle_primary_provider(active: &ActiveBundle) -> String {
+    active
+        .bundle
+        .repos
+        .iter()
+        .find_map(|repo| providers::for_repo(repo).ok().map(|forge| forge.id().to_string()))
+        .unwrap_or_else(|| DEFAULT_LAND_PROVIDER.to_string())
 }
 
 fn validate_merge_method(method: &str) -> Result<()> {
@@ -2254,7 +2302,7 @@ mod tests {
             id: "run".to_string(),
             plan_id: "plan".to_string(),
             bundle_id: "bundle".to_string(),
-            provider: github::PROVIDER.to_string(),
+            provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
             status: STATUS_RUNNING.to_string(),
             created_at: now_iso(),
@@ -2393,7 +2441,7 @@ mod tests {
             id: format!("run-{bundle_id}"),
             plan_id: "plan".to_string(),
             bundle_id: bundle_id.to_string(),
-            provider: github::PROVIDER.to_string(),
+            provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
             status: STATUS_SUCCEEDED.to_string(),
             created_at: now_iso(),
