@@ -55,7 +55,7 @@ struct RemoteArtifact {
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
-struct RemoteProjectExport {
+pub(crate) struct RemoteProjectExport {
     project: RemoteExportProject,
     knit_project: Option<KnitProject>,
     repositories: Vec<RemoteExportRepository>,
@@ -434,6 +434,65 @@ pub fn delete_bundle_from_remote(
     Ok(())
 }
 
+pub fn fetch_bundles_from_remote(
+    root: &Path,
+    config: &KnitConfig,
+    remote_name: Option<&str>,
+) -> Result<()> {
+    let remote_name = remote_name.map(slugify).or(config.sync_remote.clone()).with_context(|| {
+        "No remote configured for bundle fetch. Configure a remote with `knit remote add` or set sync_remote."
+    })?;
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+
+    let project_id = config
+        .active_project
+        .clone()
+        .context("Bundle fetch requires active_project. Set with `knit project init <name>`.")?;
+
+    let export = fetch_project_export(remote, &token, &project_id)?;
+
+    let Some(local_project) = load_project_if_present(root, &project_id)? else {
+        bail!("No local project `{project_id}` found. Cannot localize bundles.");
+    };
+
+    let bundles_dir = root.join(".knit/bundles");
+    fs::create_dir_all(&bundles_dir)
+        .with_context(|| format!("failed to create bundles directory {}", bundles_dir.display()))?;
+
+    let mut fetched_count = 0;
+    for remote_bundle in export.bundles {
+        if remote_bundle.lifecycle_state == "deleted" {
+            continue;
+        }
+        let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
+            continue;
+        };
+
+        let mut bundle = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)
+            .with_context(|| format!("failed to decode bundle `{}`", remote_bundle.slug))?;
+        bundle = localize_bundle(bundle, &local_project)
+            .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
+
+        let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
+        write_json(&bundle_path, &bundle)
+            .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
+        fetched_count += 1;
+    }
+
+    if fetched_count > 0 {
+        println!(
+            "{} {} bundle(s) from {}",
+            out::movement("fetched"),
+            out::ok(fetched_count),
+            out::repo(&remote_name)
+        );
+    } else {
+        println!("{} no bundles to fetch from {}", out::muted("already up-to-date"), out::repo(&remote_name));
+    }
+    Ok(())
+}
+
 fn resolve_remote_for_clone(
     remote_name: &str,
     url: Option<&str>,
@@ -466,7 +525,7 @@ fn resolve_remote_for_clone(
     Ok((remote, stored_token, resolved_token))
 }
 
-fn fetch_project_export(
+pub(crate) fn fetch_project_export(
     remote: &KnitRemote,
     token: &str,
     project_identifier: &str,
@@ -648,13 +707,13 @@ fn localized_export_bundles(
         .collect()
 }
 
-fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Result<ChangeGroup> {
+pub(crate) fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Result<ChangeGroup> {
     serde_json::from_value(payload.clone()).with_context(|| {
         format!("Remote bundle `{bundle_slug}` does not contain a supported Knit bundle payload.")
     })
 }
 
-fn localize_bundle(mut bundle: ChangeGroup, project: &KnitProject) -> Result<ChangeGroup> {
+pub(crate) fn localize_bundle(mut bundle: ChangeGroup, project: &KnitProject) -> Result<ChangeGroup> {
     bundle.project_id = Some(project.id.clone());
     for repo in &mut bundle.repos {
         let local = project
@@ -872,7 +931,7 @@ fn resolve_project_id(
     Ok(project_id)
 }
 
-fn resolve_remote<'a>(config: &'a crate::model::KnitConfig, name: &str) -> Result<&'a KnitRemote> {
+pub(crate) fn resolve_remote<'a>(config: &'a crate::model::KnitConfig, name: &str) -> Result<&'a KnitRemote> {
     let remote_name = slugify(name);
     config
         .remotes
@@ -880,7 +939,7 @@ fn resolve_remote<'a>(config: &'a crate::model::KnitConfig, name: &str) -> Resul
         .with_context(|| format!("No KnitHub remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first."))
 }
 
-fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
+pub(crate) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
         .context("No KnitHub token configured. Set KNITHUB_TOKEN, KNIT_REMOTE_<NAME>_TOKEN, or `knit remote token <name> <token>`.")
@@ -904,7 +963,7 @@ fn token_from_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-fn load_project_if_present(root: &Path, project_id: &str) -> Result<Option<KnitProject>> {
+pub(crate) fn load_project_if_present(root: &Path, project_id: &str) -> Result<Option<KnitProject>> {
     let path = project_path(root, project_id);
     if path.exists() {
         read_json(&path).map(Some)
