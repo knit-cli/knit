@@ -23,6 +23,7 @@ pub mod remote;
 pub mod remove;
 pub mod revert;
 pub mod run;
+pub mod runtime;
 pub mod schema;
 pub mod stage;
 pub mod status;

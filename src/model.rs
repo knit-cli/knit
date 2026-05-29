@@ -102,6 +102,8 @@ pub struct KnitProject {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands: BTreeMap<String, ProjectRunCommand>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<ProjectRuntime>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<ProjectLandingPlan>,
 }
 
@@ -116,6 +118,7 @@ impl KnitProject {
             org_id: None,
             repos: Vec::new(),
             commands: BTreeMap::new(),
+            runtime: None,
             landing: None,
         }
     }
@@ -185,6 +188,119 @@ pub struct ProjectRunCommand {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntime {
+    #[serde(default = "default_runtime_kind")]
+    pub kind: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack_repo: Option<String>,
+    #[serde(default = "default_compose_file")]
+    pub compose_file: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_compose_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree_dockerfile: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frontend_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gloss_web_ui_repo: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub database: Option<ProjectRuntimeDatabase>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ports: Option<ProjectRuntimePorts>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile_path: Option<String>,
+}
+
+fn default_runtime_kind() -> String {
+    "docker-compose".to_string()
+}
+
+fn default_compose_file() -> String {
+    "docker-compose.yml".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimeDatabase {
+    #[serde(default = "default_database_host")]
+    pub host: String,
+    #[serde(default = "default_database_port")]
+    pub port: u16,
+    #[serde(default = "default_database_name")]
+    pub name: String,
+}
+
+fn default_database_host() -> String {
+    "host.docker.internal".to_string()
+}
+
+fn default_database_port() -> u16 {
+    5436
+}
+
+fn default_database_name() -> String {
+    "knithub_dev".to_string()
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRuntimePorts {
+    #[serde(default = "default_backend_port_base")]
+    pub backend_base: u16,
+    #[serde(default = "default_frontend_port_base")]
+    pub frontend_base: u16,
+    #[serde(default = "default_port_step")]
+    pub step: u16,
+    #[serde(default = "default_backend_container_port")]
+    pub backend_container: u16,
+    #[serde(default = "default_frontend_container_port")]
+    pub frontend_container: u16,
+}
+
+fn default_backend_port_base() -> u16 {
+    4001
+}
+
+fn default_frontend_port_base() -> u16 {
+    5174
+}
+
+fn default_port_step() -> u16 {
+    10
+}
+
+fn default_backend_container_port() -> u16 {
+    4000
+}
+
+fn default_frontend_container_port() -> u16 {
+    5173
+}
+
+impl Default for ProjectRuntimeDatabase {
+    fn default() -> Self {
+        Self {
+            host: default_database_host(),
+            port: default_database_port(),
+            name: default_database_name(),
+        }
+    }
+}
+
+impl Default for ProjectRuntimePorts {
+    fn default() -> Self {
+        Self {
+            backend_base: default_backend_port_base(),
+            frontend_base: default_frontend_port_base(),
+            step: default_port_step(),
+            backend_container: default_backend_container_port(),
+            frontend_container: default_frontend_container_port(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
