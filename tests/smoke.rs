@@ -1709,7 +1709,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 
     let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(land_plan.contains("Lands into:"));
-    assert!(land_plan.contains("GitHub PR base branch"));
+    assert!(land_plan.contains("review object's base branch"));
     assert!(land_plan.contains("knit land apply"));
 
     fs::remove_dir_all(root).unwrap();
@@ -1834,14 +1834,17 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
 
     let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(apply.contains("Feature landed"));
+    // This plan sets no repoOrder, so merges share a wave and run in parallel;
+    // their relative order is unspecified, so compare as a set.
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
-    assert_eq!(
-        order.lines().collect::<Vec<_>>(),
-        vec!["backend", "frontend"]
-    );
+    let mut order_lines = order.lines().collect::<Vec<_>>();
+    order_lines.sort_unstable();
+    assert_eq!(order_lines, vec!["backend", "frontend"]);
     let methods = fs::read_to_string(fake_gh_dir.join("merge-methods.txt")).unwrap();
+    let mut method_lines = methods.lines().collect::<Vec<_>>();
+    method_lines.sort_unstable();
     assert_eq!(
-        methods.lines().collect::<Vec<_>>(),
+        method_lines,
         vec!["backend --merge", "frontend --merge"]
     );
 

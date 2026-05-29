@@ -17,7 +17,17 @@ pub fn set_config_value(key: &str, value: &str) -> Result<()> {
             );
             Ok(())
         }
-        _ => bail!("Unknown config key `{key}`. Currently supported: advice."),
+        "push-sync" | "push_sync" => {
+            config.push_sync = parse_bool(value)?;
+            save_config(&root, &config)?;
+            println!(
+                "{} push-sync={}",
+                out::heading("Config:"),
+                if config.push_sync { "true" } else { "false" }
+            );
+            Ok(())
+        }
+        _ => bail!("Unknown config key `{key}`. Currently supported: advice, push-sync."),
     }
 }
 

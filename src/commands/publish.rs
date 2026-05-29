@@ -4,11 +4,7 @@ use crate::git::{current_branch, git_output, git_output_optional, rev_parse};
 use crate::ids::short_sha;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
-use crate::providers::github::{
-    self, create_pr, create_pr_for_repo, edit_pr_body, edit_pr_body_for_repo, find_existing_pr,
-    find_existing_pr_for_repo, pr_number_from_url, publication_for_repo, view_pr, view_pr_for_repo,
-    PullRequest,
-};
+use crate::providers::{self, pr_number_from_url, publication_for_repo, PrTarget, PullRequest};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, save_active_bundle, ActiveBundle,
@@ -21,13 +17,15 @@ use std::path::Path;
 const KNIT_PR_BLOCK_BEGIN: &str = "<!-- BEGIN KNIT BUNDLE -->";
 const KNIT_PR_BLOCK_END: &str = "<!-- END KNIT BUNDLE -->";
 
-pub fn create_github_publications(
+pub fn create_publications(
     selectors: &[String],
     all: bool,
     draft: bool,
     bases: &[String],
     sync: bool,
     set_upstream: bool,
+    remote: Option<&str>,
+    no_remote: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
@@ -58,15 +56,19 @@ pub fn create_github_publications(
     }
 
     if sync {
-        failures.extend(sync_github_publications_for_indexes(&mut active, &indexes)?);
+        failures.extend(sync_publications_for_indexes(&mut active, &indexes)?);
     } else {
         println!(
             "{}",
             out::warn(
-                "Skipped PR body sync. Run `knit publish github sync` to add cross-links later."
+                "Skipped PR body sync. Run `knit publish sync` to add cross-links later."
             )
         );
     }
+
+    // Sync the bundle artifact to the configured KnitHub remote alongside the
+    // host review objects (default on; see `knit config set push-sync`).
+    crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
 
     if !failures.is_empty() {
         bail!(
@@ -78,7 +80,7 @@ pub fn create_github_publications(
     Ok(())
 }
 
-pub fn create_github_publications_from_artifact(
+pub fn create_publications_from_artifact(
     artifact_path: &Path,
     out_path: Option<&Path>,
     selectors: &[String],
@@ -120,12 +122,12 @@ pub fn create_github_publications_from_artifact(
     }
 
     if sync {
-        failures.extend(sync_github_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?);
+        failures.extend(sync_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?);
     } else {
         println!(
             "{}",
             out::warn(
-                "Skipped PR body sync. Run `knit publish github sync` to add cross-links later."
+                "Skipped PR body sync. Run `knit publish sync` to add cross-links later."
             )
         );
     }
@@ -141,14 +143,14 @@ pub fn create_github_publications_from_artifact(
     Ok(())
 }
 
-pub fn sync_github_publications(selectors: &[String], all: bool) -> Result<()> {
+pub fn sync_publications(selectors: &[String], all: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
-    let failures = sync_github_publications_for_indexes(&mut active, &indexes)?;
+    let failures = sync_publications_for_indexes(&mut active, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
     }
@@ -156,7 +158,7 @@ pub fn sync_github_publications(selectors: &[String], all: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn sync_github_publications_from_artifact(
+pub fn sync_publications_from_artifact(
     artifact_path: &Path,
     out_path: Option<&Path>,
     selectors: &[String],
@@ -169,7 +171,7 @@ pub fn sync_github_publications_from_artifact(
         bail!("Bundle artifact has no repos.");
     }
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
-    let failures = sync_github_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?;
+    let failures = sync_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
     }
@@ -177,7 +179,7 @@ pub fn sync_github_publications_from_artifact(
     Ok(())
 }
 
-pub fn show_github_publication_status(selectors: &[String], all: bool) -> Result<()> {
+pub fn show_publication_status(selectors: &[String], all: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
@@ -188,7 +190,7 @@ pub fn show_github_publication_status(selectors: &[String], all: bool) -> Result
     println!(
         "{}  {}  {}  {}",
         out::header_field("repo", 14),
-        out::header_field("pr", 10),
+        out::header_field("review", 10),
         out::header_field("state", 12),
         out::heading("url")
     );
@@ -222,22 +224,20 @@ fn print_landing_advice(active: &ActiveBundle) {
     if active.bundle.publications.is_empty() || has_landed_node(&active.bundle) {
         return;
     }
-    let github_prs = active
+    let review_count = active
         .bundle
         .publications
         .iter()
-        .filter(|publication| {
-            publication.provider == "github" && publication.kind == "pull_request"
-        })
+        .filter(|publication| providers::is_review_kind(&publication.kind))
         .count();
-    if github_prs == 0 {
+    if review_count == 0 {
         return;
     }
     println!();
     println!(
-        "{} {} GitHub PR(s) recorded, not landed",
+        "{} {} review object(s) recorded, not landed",
         out::heading("Landing:"),
-        github_prs
+        review_count
     );
     advice::print(
         &active.root,
@@ -293,10 +293,7 @@ fn publish_scope_repo_ids(bundle: &ChangeGroup) -> BTreeSet<String> {
         bundle
             .publications
             .iter()
-            .filter(|publication| {
-                publication.provider == github::PROVIDER
-                    && publication.kind == github::PULL_REQUEST_KIND
-            })
+            .filter(|publication| providers::is_review_kind(&publication.kind))
             .map(|publication| publication.repo_id.clone()),
     );
     repo_ids
@@ -370,6 +367,8 @@ fn create_or_reuse_pr(
     };
     ensure_feature_branch(repo, branch, &cwd)?;
     ensure_origin(repo, &cwd)?;
+    let forge = providers::for_repo(repo)?;
+    let target = PrTarget::checkout(&cwd);
 
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
@@ -386,7 +385,7 @@ fn create_or_reuse_pr(
     if let Some(existing) = publication_for_repo(&active.bundle, &repo.id) {
         if existing.base_branch != base_branch {
             bail!(
-                "{}: PR already recorded against {}. Knit records one PR per repo in a bundle; create a new bundle or publish before changing the base.",
+                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
                 repo.id,
                 out::branch(&existing.base_branch)
             );
@@ -400,9 +399,10 @@ fn create_or_reuse_pr(
         return Ok(());
     }
 
-    if let Some(existing) = find_existing_pr(&cwd, branch, base_branch)? {
-        github::upsert_publication(&mut active.bundle, repo, &existing);
-        let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
+    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
+        providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &existing);
+        let pr =
+            publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -414,8 +414,8 @@ fn create_or_reuse_pr(
 
     let title = format!("{} ({})", active.bundle.title, repo.id);
     let initial_body = initial_pr_body(&active.bundle, &repo.id);
-    let url = create_pr(&cwd, base_branch, branch, &title, &initial_body, draft)?;
-    let summary = view_pr(&cwd, &url).unwrap_or_else(|_| PullRequest {
+    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
+    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),
@@ -426,9 +426,9 @@ fn create_or_reuse_pr(
         is_draft: None,
         head_ref_oid: None,
     });
-    github::upsert_publication(&mut active.bundle, repo, &summary);
+    providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &summary);
 
-    let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
+    let pr = publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
     println!(
         "{}: {} #{} {}",
         out::repo(&repo.id),
@@ -456,13 +456,16 @@ fn create_or_reuse_pr_from_artifact(
         .remote
         .as_deref()
         .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
-    let repo_full_name =
-        github_repo_full_name(remote).with_context(|| format!("{}: invalid GitHub remote {remote}", repo.id))?;
+    let forge = providers::for_repo(repo)?;
+    let repo_full_name = forge
+        .repo_full_name(remote)
+        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
+    let target = PrTarget::explicit(cwd, repo_full_name);
 
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
         if existing.base_branch != base_branch {
             bail!(
-                "{}: PR already recorded against {}. Knit records one PR per repo in a bundle; create a new bundle or publish before changing the base.",
+                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
                 repo.id,
                 out::branch(&existing.base_branch)
             );
@@ -476,9 +479,9 @@ fn create_or_reuse_pr_from_artifact(
         return Ok(());
     }
 
-    if let Some(existing) = find_existing_pr_for_repo(cwd, &repo_full_name, branch, base_branch)? {
-        github::upsert_publication(bundle, repo, &existing);
-        let pr = publication_for_repo(bundle, &repo.id).expect("PR was just inserted");
+    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
+        providers::upsert_publication(bundle, repo, forge.as_ref(), &existing);
+        let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -490,8 +493,8 @@ fn create_or_reuse_pr_from_artifact(
 
     let title = format!("{} ({})", bundle.title, repo.id);
     let initial_body = initial_pr_body(bundle, &repo.id);
-    let url = create_pr_for_repo(cwd, &repo_full_name, base_branch, branch, &title, &initial_body, draft)?;
-    let summary = view_pr_for_repo(cwd, &repo_full_name, &url).unwrap_or_else(|_| PullRequest {
+    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
+    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),
@@ -502,9 +505,9 @@ fn create_or_reuse_pr_from_artifact(
         is_draft: None,
         head_ref_oid: None,
     });
-    github::upsert_publication(bundle, repo, &summary);
+    providers::upsert_publication(bundle, repo, forge.as_ref(), &summary);
 
-    let pr = publication_for_repo(bundle, &repo.id).expect("PR was just inserted");
+    let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
     println!(
         "{}: {} #{} {}",
         out::repo(&repo.id),
@@ -568,7 +571,7 @@ impl BaseOverrides {
     }
 }
 
-fn sync_github_publications_for_indexes(
+fn sync_publications_for_indexes(
     active: &mut ActiveBundle,
     indexes: &[usize],
 ) -> Result<Vec<String>> {
@@ -589,7 +592,7 @@ fn sync_github_publications_for_indexes(
     Ok(failures)
 }
 
-fn sync_github_publications_for_indexes_from_artifact(
+fn sync_publications_for_indexes_from_artifact(
     cwd: &Path,
     bundle: &mut ChangeGroup,
     indexes: &[usize],
@@ -618,23 +621,30 @@ fn sync_one_pr(active: &mut ActiveBundle, repo: &RepoEntry) -> Result<()> {
     let Some(cwd) = checkout_dir(active, repo) else {
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
+    let forge = providers::for_repo(repo)?;
+    let target = PrTarget::checkout(&cwd);
 
     let summary = if let Some(pr) = publication_for_repo(&active.bundle, &repo.id) {
-        view_pr(&cwd, &pr.url)?
-    } else if let Some(existing) = find_existing_pr(&cwd, branch, &repo.base_branch)? {
+        forge.view(&target, &pr.url)?
+    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
         existing
     } else {
-        println!("{}: {}", out::repo(&repo.id), out::muted("no PR recorded"));
+        println!(
+            "{}: {}",
+            out::repo(&repo.id),
+            out::muted("no review object recorded")
+        );
         return Ok(());
     };
 
-    github::upsert_publication(&mut active.bundle, repo, &summary);
+    providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &summary);
     let current_body = summary.body.unwrap_or_default();
     let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body != current_body {
-        let pr = publication_for_repo(&active.bundle, &repo.id).expect("PR was just inserted");
-        edit_pr_body(&cwd, &pr.url, &next_body)?;
+        let pr =
+            publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
+        forge.edit_body(&target, &pr.url, &next_body)?;
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -663,25 +673,32 @@ fn sync_one_pr_from_artifact(cwd: &Path, bundle: &mut ChangeGroup, repo: &RepoEn
         .remote
         .as_deref()
         .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
-    let repo_full_name =
-        github_repo_full_name(remote).with_context(|| format!("{}: invalid GitHub remote {remote}", repo.id))?;
+    let forge = providers::for_repo(repo)?;
+    let repo_full_name = forge
+        .repo_full_name(remote)
+        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
+    let target = PrTarget::explicit(cwd, repo_full_name);
 
     let summary = if let Some(pr) = publication_for_repo(bundle, &repo.id) {
-        view_pr_for_repo(cwd, &repo_full_name, &pr.url)?
-    } else if let Some(existing) = find_existing_pr_for_repo(cwd, &repo_full_name, branch, &repo.base_branch)? {
+        forge.view(&target, &pr.url)?
+    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
         existing
     } else {
-        println!("{}: {}", out::repo(&repo.id), out::muted("no PR recorded"));
+        println!(
+            "{}: {}",
+            out::repo(&repo.id),
+            out::muted("no review object recorded")
+        );
         return Ok(());
     };
 
-    github::upsert_publication(bundle, repo, &summary);
+    providers::upsert_publication(bundle, repo, forge.as_ref(), &summary);
     let current_body = summary.body.unwrap_or_default();
     let block = render_knit_pr_block(bundle, Some(&repo.id));
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body != current_body {
-        let pr = publication_for_repo(bundle, &repo.id).expect("PR was just inserted");
-        edit_pr_body_for_repo(cwd, &repo_full_name, &pr.url, &next_body)?;
+        let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
+        forge.edit_body(&target, &pr.url, &next_body)?;
         println!(
             "{}: {} {}",
             out::repo(&repo.id),
@@ -737,7 +754,7 @@ fn run_push(cwd: &Path, branch: &str, set_upstream: bool) -> Result<()> {
 
 fn initial_pr_body(bundle: &ChangeGroup, current_repo_id: &str) -> String {
     format!(
-        "Generated by Knit. Cross-links will be refreshed after all PRs are created.\n\n{}",
+        "Generated by Knit. Cross-links will be refreshed after all review objects are created.\n\n{}",
         render_knit_pr_block(bundle, Some(current_repo_id))
     )
 }
@@ -749,7 +766,7 @@ fn render_knit_pr_block(bundle: &ChangeGroup, current_repo_id: Option<&str>) -> 
         String::new(),
         format!("This PR is part of Knit bundle `{}`.", bundle.id),
         String::new(),
-        "See the other PRs in this bundle:".to_string(),
+        "See the other review objects in this bundle:".to_string(),
     ];
 
     let repo_ids = publish_scope_repo_ids(bundle);
@@ -820,23 +837,41 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
     }
 }
 
-fn github_repo_full_name(remote: &str) -> Option<String> {
-    let remote = remote.trim().trim_end_matches(".git");
-    let tail = remote.split("github.com").nth(1)?;
-    let tail = tail.trim_start_matches([':', '/']);
-    let (owner, name) = tail.split_once('/')?;
-    if owner.is_empty() || name.is_empty() {
-        return None;
-    }
-    Some(format!("{owner}/{name}"))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::model::{
         CommitGroup, CommitRef, PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION,
     };
+
+    fn pr_publication(repo_id: &str, number: u64, url: &str) -> PublicationEntry {
+        PublicationEntry {
+            repo_id: repo_id.to_string(),
+            provider: "github".to_string(),
+            kind: providers::PULL_REQUEST_KIND.to_string(),
+            number,
+            url: url.to_string(),
+            base_branch: "main".to_string(),
+            head_branch: "knit/venue-capacity".to_string(),
+            state: "OPEN".to_string(),
+            title: None,
+            updated_at: "2026-05-05T00:00:00.000Z".to_string(),
+        }
+    }
+
+    fn repo(id: &str) -> RepoEntry {
+        RepoEntry {
+            id: id.to_string(),
+            path: format!("/tmp/{id}"),
+            remote: None,
+            base_branch: "main".to_string(),
+            checkout_mode: "worktree".to_string(),
+            base_sha: None,
+            feature_branch: Some("knit/venue-capacity".to_string()),
+            worktree_path: None,
+            head_sha: None,
+        }
+    }
 
     #[test]
     fn managed_block_is_replaced_without_touching_user_body() {
@@ -860,41 +895,7 @@ mod tests {
             created_at: "2026-05-05T00:00:00.000Z".to_string(),
             updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             head_node_id: None,
-            repos: vec![
-                RepoEntry {
-                    id: "backend".to_string(),
-                    path: "/tmp/backend".to_string(),
-                    remote: None,
-                    base_branch: "main".to_string(),
-                    checkout_mode: "worktree".to_string(),
-                    base_sha: None,
-                    feature_branch: Some("knit/venue-capacity".to_string()),
-                    worktree_path: None,
-                    head_sha: None,
-                },
-                RepoEntry {
-                    id: "frontend".to_string(),
-                    path: "/tmp/frontend".to_string(),
-                    remote: None,
-                    base_branch: "main".to_string(),
-                    checkout_mode: "worktree".to_string(),
-                    base_sha: None,
-                    feature_branch: Some("knit/venue-capacity".to_string()),
-                    worktree_path: None,
-                    head_sha: None,
-                },
-                RepoEntry {
-                    id: "docs".to_string(),
-                    path: "/tmp/docs".to_string(),
-                    remote: None,
-                    base_branch: "main".to_string(),
-                    checkout_mode: "worktree".to_string(),
-                    base_sha: None,
-                    feature_branch: Some("knit/venue-capacity".to_string()),
-                    worktree_path: None,
-                    head_sha: None,
-                },
-            ],
+            repos: vec![repo("backend"), repo("frontend"), repo("docs")],
             commit_groups: vec![CommitGroup {
                 id: "kg_123".to_string(),
                 message: "change backend and frontend".to_string(),
@@ -911,18 +912,11 @@ mod tests {
                 ],
             }],
             nodes: Vec::new(),
-            publications: vec![PublicationEntry {
-                repo_id: "backend".to_string(),
-                provider: github::PROVIDER.to_string(),
-                kind: github::PULL_REQUEST_KIND.to_string(),
-                number: 123,
-                url: "https://github.com/acme/backend/pull/123".to_string(),
-                base_branch: "main".to_string(),
-                head_branch: "knit/venue-capacity".to_string(),
-                state: "OPEN".to_string(),
-                title: None,
-                updated_at: "2026-05-05T00:00:00.000Z".to_string(),
-            }],
+            publications: vec![pr_publication(
+                "backend",
+                123,
+                "https://github.com/acme/backend/pull/123",
+            )],
             work_item_ids: Vec::new(),
         };
 
@@ -932,18 +926,11 @@ mod tests {
         assert!(block.contains("`frontend`: pending"));
         assert!(!block.contains("`docs`: pending"));
 
-        bundle.publications.push(PublicationEntry {
-            repo_id: "frontend".to_string(),
-            provider: github::PROVIDER.to_string(),
-            kind: github::PULL_REQUEST_KIND.to_string(),
-            number: 456,
-            url: "https://github.com/acme/frontend/pull/456".to_string(),
-            base_branch: "main".to_string(),
-            head_branch: "knit/venue-capacity".to_string(),
-            state: "OPEN".to_string(),
-            title: None,
-            updated_at: "2026-05-05T00:00:00.000Z".to_string(),
-        });
+        bundle.publications.push(pr_publication(
+            "frontend",
+            456,
+            "https://github.com/acme/frontend/pull/456",
+        ));
         let synced = render_knit_pr_block(&bundle, Some("backend"));
         assert!(synced.contains("`frontend`: https://github.com/acme/frontend/pull/456"));
         assert!(!synced.contains("`docs`: pending"));
@@ -964,30 +951,7 @@ mod tests {
             created_at: "2026-05-05T00:00:00.000Z".to_string(),
             updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             head_node_id: None,
-            repos: vec![
-                RepoEntry {
-                    id: "backend".to_string(),
-                    path: "/tmp/backend".to_string(),
-                    remote: None,
-                    base_branch: "main".to_string(),
-                    checkout_mode: "worktree".to_string(),
-                    base_sha: None,
-                    feature_branch: Some("knit/venue-capacity".to_string()),
-                    worktree_path: None,
-                    head_sha: None,
-                },
-                RepoEntry {
-                    id: "docs".to_string(),
-                    path: "/tmp/docs".to_string(),
-                    remote: None,
-                    base_branch: "main".to_string(),
-                    checkout_mode: "worktree".to_string(),
-                    base_sha: None,
-                    feature_branch: Some("knit/venue-capacity".to_string()),
-                    worktree_path: None,
-                    head_sha: None,
-                },
-            ],
+            repos: vec![repo("backend"), repo("docs")],
             commit_groups: vec![CommitGroup {
                 id: "kg_123".to_string(),
                 message: "change backend".to_string(),

@@ -1,341 +1,198 @@
-use crate::model::{ChangeGroup, PublicationEntry, RepoEntry};
-use crate::time::now_iso;
+use super::{
+    cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
+    PULL_REQUEST_KIND,
+};
 use anyhow::{bail, Context, Result};
-use serde::Deserialize;
-use std::ffi::{OsStr, OsString};
-use std::io::Write;
-use std::path::Path;
-use std::process::{Command, Stdio};
-use std::thread;
-use std::time::{Duration, Instant};
+use std::ffi::OsString;
 
-pub const PROVIDER: &str = "github";
-pub const PULL_REQUEST_KIND: &str = "pull_request";
+const CLI: &str = "gh";
+const PR_JSON_FIELDS: &str =
+    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid";
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct PullRequest {
-    pub number: u64,
-    pub url: String,
-    #[serde(default)]
-    pub state: Option<String>,
-    #[serde(default)]
-    pub title: Option<String>,
-    #[serde(default)]
-    pub base_ref_name: Option<String>,
-    #[serde(default)]
-    pub head_ref_name: Option<String>,
-    #[serde(default)]
-    pub body: Option<String>,
-    #[serde(default)]
-    pub is_draft: Option<bool>,
-    #[serde(default)]
-    pub head_ref_oid: Option<String>,
-}
+/// GitHub forge adapter, backed by the `gh` CLI.
+pub struct GitHub;
 
-#[derive(Clone, Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CheckRun {
-    pub name: String,
-    #[serde(default)]
-    pub state: Option<String>,
-    #[serde(default)]
-    pub bucket: Option<String>,
-}
-
-pub struct CheckWaitSummary {
-    pub status: String,
-    pub runs: Vec<CheckRun>,
-}
-
-pub fn publication_for_repo<'a>(
-    bundle: &'a ChangeGroup,
-    repo_id: &str,
-) -> Option<&'a PublicationEntry> {
-    bundle.publications.iter().find(|publication| {
-        publication.provider == PROVIDER
-            && publication.kind == PULL_REQUEST_KIND
-            && publication.repo_id == repo_id
-    })
-}
-
-pub fn upsert_publication(bundle: &mut ChangeGroup, repo: &RepoEntry, pr: &PullRequest) {
-    let entry = PublicationEntry {
-        repo_id: repo.id.clone(),
-        provider: PROVIDER.to_string(),
-        kind: PULL_REQUEST_KIND.to_string(),
-        number: pr.number,
-        url: pr.url.clone(),
-        base_branch: pr
-            .base_ref_name
-            .clone()
-            .unwrap_or_else(|| repo.base_branch.clone()),
-        head_branch: pr
-            .head_ref_name
-            .clone()
-            .or_else(|| repo.feature_branch.clone())
-            .unwrap_or_default(),
-        state: pr.state.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
-        title: pr.title.clone(),
-        updated_at: now_iso(),
-    };
-
-    if let Some(existing) = bundle.publications.iter_mut().find(|publication| {
-        publication.provider == PROVIDER
-            && publication.kind == PULL_REQUEST_KIND
-            && publication.repo_id == repo.id
-    }) {
-        *existing = entry;
-    } else {
-        bundle.publications.push(entry);
+impl Forge for GitHub {
+    fn id(&self) -> &'static str {
+        "github"
     }
-    bundle.updated_at = now_iso();
-}
 
-pub fn find_existing_pr(
-    cwd: &Path,
-    branch: &str,
-    base_branch: &str,
-) -> Result<Option<PullRequest>> {
-    let output = gh_output(
-        cwd,
-        [
+    fn review_kind(&self) -> &'static str {
+        PULL_REQUEST_KIND
+    }
+
+    fn cli(&self) -> &'static str {
+        CLI
+    }
+
+    fn repo_full_name(&self, remote: &str) -> Option<String> {
+        full_name(remote)
+    }
+
+    fn find_existing(
+        &self,
+        target: &PrTarget,
+        head: &str,
+        base: &str,
+    ) -> Result<Option<PullRequest>> {
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("list"),
+                OsString::from("--head"),
+                OsString::from(head),
+                OsString::from("--base"),
+                OsString::from(base),
+                OsString::from("--state"),
+                OsString::from("all"),
+                OsString::from("--json"),
+                OsString::from(PR_JSON_FIELDS),
+                OsString::from("--limit"),
+                OsString::from("1"),
+            ],
+        );
+        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let prs: Vec<PullRequest> =
+            serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
+        Ok(prs.into_iter().next())
+    }
+
+    fn create(
+        &self,
+        target: &PrTarget,
+        base: &str,
+        head: &str,
+        title: &str,
+        body: &str,
+        draft: bool,
+    ) -> Result<String> {
+        let mut args = vec![
             OsString::from("pr"),
-            OsString::from("list"),
-            OsString::from("--head"),
-            OsString::from(branch),
+            OsString::from("create"),
             OsString::from("--base"),
-            OsString::from(base_branch),
-            OsString::from("--state"),
-            OsString::from("all"),
-            OsString::from("--json"),
-            OsString::from(
-                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
-            ),
-            OsString::from("--limit"),
-            OsString::from("1"),
-        ],
-        None,
-    )?;
-    let prs: Vec<PullRequest> =
-        serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
-    Ok(prs.into_iter().next())
-}
-
-pub fn find_existing_pr_for_repo(
-    cwd: &Path,
-    repo_full_name: &str,
-    branch: &str,
-    base_branch: &str,
-) -> Result<Option<PullRequest>> {
-    let output = gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("list"),
-            OsString::from("--repo"),
-            OsString::from(repo_full_name),
+            OsString::from(base),
             OsString::from("--head"),
-            OsString::from(branch),
-            OsString::from("--base"),
-            OsString::from(base_branch),
-            OsString::from("--state"),
-            OsString::from("all"),
-            OsString::from("--json"),
-            OsString::from(
-                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
-            ),
-            OsString::from("--limit"),
-            OsString::from("1"),
-        ],
-        None,
-    )?;
-    let prs: Vec<PullRequest> =
-        serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
-    Ok(prs.into_iter().next())
-}
-
-pub fn create_pr(
-    cwd: &Path,
-    base_branch: &str,
-    head_branch: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<String> {
-    let mut args = vec![
-        OsString::from("pr"),
-        OsString::from("create"),
-        OsString::from("--base"),
-        OsString::from(base_branch),
-        OsString::from("--head"),
-        OsString::from(head_branch),
-        OsString::from("--title"),
-        OsString::from(title),
-        OsString::from("--body-file"),
-        OsString::from("-"),
-    ];
-    if draft {
-        args.push(OsString::from("--draft"));
-    }
-
-    let output = gh_output(cwd, args, Some(body))?;
-    parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
-}
-
-pub fn create_pr_for_repo(
-    cwd: &Path,
-    repo_full_name: &str,
-    base_branch: &str,
-    head_branch: &str,
-    title: &str,
-    body: &str,
-    draft: bool,
-) -> Result<String> {
-    let mut args = vec![
-        OsString::from("pr"),
-        OsString::from("create"),
-        OsString::from("--repo"),
-        OsString::from(repo_full_name),
-        OsString::from("--base"),
-        OsString::from(base_branch),
-        OsString::from("--head"),
-        OsString::from(head_branch),
-        OsString::from("--title"),
-        OsString::from(title),
-        OsString::from("--body-file"),
-        OsString::from("-"),
-    ];
-    if draft {
-        args.push(OsString::from("--draft"));
-    }
-
-    let output = gh_output(cwd, args, Some(body))?;
-    parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
-}
-
-pub fn view_pr(cwd: &Path, url: &str) -> Result<PullRequest> {
-    let output = gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("view"),
-            OsString::from(url),
-            OsString::from("--json"),
-            OsString::from(
-                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
-            ),
-        ],
-        None,
-    )?;
-    serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
-}
-
-pub fn view_pr_for_repo(cwd: &Path, repo_full_name: &str, selector: &str) -> Result<PullRequest> {
-    let output = gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("view"),
-            OsString::from(selector),
-            OsString::from("--repo"),
-            OsString::from(repo_full_name),
-            OsString::from("--json"),
-            OsString::from(
-                "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid",
-            ),
-        ],
-        None,
-    )?;
-    serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
-}
-
-pub fn edit_pr_body(cwd: &Path, url: &str, body: &str) -> Result<()> {
-    gh_output(
-        cwd,
-        [
-            OsString::from("pr"),
-            OsString::from("edit"),
-            OsString::from(url),
+            OsString::from(head),
+            OsString::from("--title"),
+            OsString::from(title),
             OsString::from("--body-file"),
             OsString::from("-"),
-        ],
-        Some(body),
-    )?;
-    Ok(())
-}
+        ];
+        if draft {
+            args.push(OsString::from("--draft"));
+        }
+        let args = repo_scoped_args(target, "--repo", args);
+        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
+    }
 
-pub fn edit_pr_body_for_repo(
-    cwd: &Path,
-    repo_full_name: &str,
-    selector: &str,
-    body: &str,
-) -> Result<()> {
-    gh_output(
-        cwd,
-        [
+    fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("view"),
+                OsString::from(selector),
+                OsString::from("--json"),
+                OsString::from(PR_JSON_FIELDS),
+            ],
+        );
+        let output = cli_output(CLI, &target.cwd, args, None)?;
+        serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
+    }
+
+    fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("edit"),
+                OsString::from(selector),
+                OsString::from("--body-file"),
+                OsString::from("-"),
+            ],
+        );
+        cli_output(CLI, &target.cwd, args, Some(body))?;
+        Ok(())
+    }
+
+    fn merge(
+        &self,
+        target: &PrTarget,
+        selector: &str,
+        method: &str,
+        delete_branch: bool,
+        match_head: Option<&str>,
+    ) -> Result<()> {
+        let method_flag = match method {
+            "merge" => "--merge",
+            "rebase" => "--rebase",
+            "squash" => "--squash",
+            other => bail!("unknown GitHub merge method `{other}`"),
+        };
+        let mut args = vec![
             OsString::from("pr"),
-            OsString::from("edit"),
+            OsString::from("merge"),
             OsString::from(selector),
-            OsString::from("--repo"),
-            OsString::from(repo_full_name),
-            OsString::from("--body-file"),
-            OsString::from("-"),
-        ],
-        Some(body),
-    )?;
-    Ok(())
+            OsString::from(method_flag),
+        ];
+        if delete_branch {
+            args.push(OsString::from("--delete-branch"));
+        }
+        if let Some(sha) = match_head {
+            args.push(OsString::from("--match-head-commit"));
+            args.push(OsString::from(sha));
+        }
+        let args = repo_scoped_args(target, "--repo", args);
+        cli_output(CLI, &target.cwd, args, None)?;
+        Ok(())
+    }
+
+    fn check_runs(
+        &self,
+        target: &PrTarget,
+        selector: &str,
+        required_only: bool,
+    ) -> Result<Vec<CheckRun>> {
+        let mut args = vec![
+            OsString::from("pr"),
+            OsString::from("checks"),
+            OsString::from(selector),
+            OsString::from("--json"),
+            OsString::from("name,state,bucket"),
+        ];
+        if required_only {
+            args.push(OsString::from("--required"));
+        }
+        let args = repo_scoped_args(target, "--repo", args);
+
+        match cli_output(CLI, &target.cwd, args, None) {
+            Ok(output) if output.trim().is_empty() => Ok(Vec::new()),
+            Ok(output) => {
+                serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON")
+            }
+            Err(error) if is_no_checks_error(&error) => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
+    }
 }
 
-pub fn merge_pr(
-    cwd: &Path,
-    url: &str,
-    method: &str,
-    delete_branch: bool,
-    match_head_sha: Option<&str>,
-) -> Result<()> {
-    let method_flag = match method {
-        "merge" => "--merge",
-        "rebase" => "--rebase",
-        "squash" => "--squash",
-        other => bail!("unknown GitHub merge method `{other}`"),
-    };
-    let mut args = vec![
-        OsString::from("pr"),
-        OsString::from("merge"),
-        OsString::from(url),
-        OsString::from(method_flag),
-    ];
-    if delete_branch {
-        args.push(OsString::from("--delete-branch"));
+/// Parse `owner/name` from a GitHub remote URL.
+pub(crate) fn full_name(remote: &str) -> Option<String> {
+    let remote = remote.trim().trim_end_matches(".git");
+    let marker = "github.com";
+    let index = remote.find(marker)?;
+    let suffix = remote[index + marker.len()..].trim_start_matches([':', '/']);
+    let (owner, name) = suffix.split_once('/')?;
+    let name = name.split('/').next().unwrap_or(name);
+    if owner.is_empty() || name.is_empty() {
+        return None;
     }
-    if let Some(sha) = match_head_sha {
-        args.push(OsString::from("--match-head-commit"));
-        args.push(OsString::from(sha));
-    }
-
-    gh_output(cwd, args, None)?;
-    Ok(())
-}
-
-pub fn check_runs(cwd: &Path, url: &str, required_only: bool) -> Result<Vec<CheckRun>> {
-    let mut args = vec![
-        OsString::from("pr"),
-        OsString::from("checks"),
-        OsString::from(url),
-        OsString::from("--json"),
-        OsString::from("name,state,bucket"),
-    ];
-    if required_only {
-        args.push(OsString::from("--required"));
-    }
-
-    match gh_output(cwd, args, None) {
-        Ok(output) if output.trim().is_empty() => Ok(Vec::new()),
-        Ok(output) => serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON"),
-        Err(error) if is_no_checks_error(&error) => Ok(Vec::new()),
-        Err(error) => Err(error),
-    }
+    Some(format!("{owner}/{name}"))
 }
 
 fn is_no_checks_error(error: &anyhow::Error) -> bool {
@@ -349,151 +206,37 @@ fn is_no_checks_error(error: &anyhow::Error) -> bool {
         || message.contains("no required checks reported")
 }
 
-pub fn wait_for_checks(
-    cwd: &Path,
-    url: &str,
-    required_only: bool,
-    timeout_seconds: u64,
-    interval_seconds: u64,
-) -> Result<CheckWaitSummary> {
-    let started = Instant::now();
-    let timeout = Duration::from_secs(timeout_seconds);
-    let interval = Duration::from_secs(interval_seconds.max(1));
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-    loop {
-        let runs = check_runs(cwd, url, required_only)?;
-        let state = checks_state(&runs);
-        match state {
-            ChecksState::NoChecks => {
-                return Ok(CheckWaitSummary {
-                    status: "passed (no required checks)".to_string(),
-                    runs,
-                })
-            }
-            ChecksState::Passed => {
-                return Ok(CheckWaitSummary {
-                    status: "passed".to_string(),
-                    runs,
-                })
-            }
-            ChecksState::Failed(name) => bail!("check `{name}` failed for {url}"),
-            ChecksState::Pending => {
-                if started.elapsed() >= timeout {
-                    bail!("timed out waiting for checks on {url}");
-                }
-                thread::sleep(interval);
-            }
-        }
-    }
-}
-
-pub fn pr_number_from_url(url: &str) -> Option<u64> {
-    url.rsplit('/').next()?.parse().ok()
-}
-
-enum ChecksState {
-    NoChecks,
-    Passed,
-    Pending,
-    Failed(String),
-}
-
-fn checks_state(runs: &[CheckRun]) -> ChecksState {
-    if runs.is_empty() {
-        return ChecksState::NoChecks;
-    }
-    let mut has_pending = false;
-    for run in runs {
-        let bucket = run.bucket.as_deref().unwrap_or("");
-        let state = run.state.as_deref().unwrap_or("");
-        if matches!(bucket, "fail" | "cancel") || matches!(state, "FAILURE" | "CANCELLED") {
-            return ChecksState::Failed(run.name.clone());
-        }
-        if !matches!(bucket, "pass" | "skipping") && !matches!(state, "SUCCESS" | "SKIPPED") {
-            has_pending = true;
-        }
-    }
-    if has_pending {
-        ChecksState::Pending
-    } else {
-        ChecksState::Passed
-    }
-}
-
-fn gh_output<I, S>(cwd: &Path, args: I, stdin: Option<&str>) -> Result<String>
-where
-    I: IntoIterator<Item = S>,
-    S: AsRef<OsStr>,
-{
-    let args = args
-        .into_iter()
-        .map(|arg| arg.as_ref().to_os_string())
-        .collect::<Vec<_>>();
-    let mut child = Command::new("gh")
-        .args(&args)
-        .current_dir(cwd)
-        .stdin(if stdin.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .with_context(|| {
-            format!(
-                "failed to run `gh {}` in {}. Install and authenticate GitHub CLI to use Knit GitHub provider commands.",
-                display_args(&args),
-                cwd.display()
-            )
-        })?;
-
-    if let Some(input) = stdin {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .context("failed to open stdin for GitHub CLI")?;
-        child_stdin
-            .write_all(input.as_bytes())
-            .context("failed to write input to GitHub CLI")?;
+    #[test]
+    fn parses_full_name_from_remote_forms() {
+        assert_eq!(
+            full_name("https://github.com/acme/backend.git").as_deref(),
+            Some("acme/backend")
+        );
+        assert_eq!(
+            full_name("git@github.com:acme/backend.git").as_deref(),
+            Some("acme/backend")
+        );
+        assert_eq!(full_name("https://example.com/acme/backend").as_deref(), None);
     }
 
-    let output = child
-        .wait_with_output()
-        .with_context(|| format!("failed to wait for `gh {}`", display_args(&args)))?;
-
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string());
+    #[test]
+    fn parses_pr_view_json() {
+        let json = r#"{"number":7,"url":"https://github.com/acme/backend/pull/7","state":"OPEN","title":"t","baseRefName":"main","headRefName":"knit/x","isDraft":false,"headRefOid":"abc"}"#;
+        let pr: PullRequest = serde_json::from_str(json).unwrap();
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.base_ref_name.as_deref(), Some("main"));
+        assert_eq!(pr.head_ref_oid.as_deref(), Some("abc"));
     }
 
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = if stderr.trim().is_empty() {
-        stdout.trim()
-    } else {
-        stderr.trim()
-    };
-    bail!(
-        "gh {} failed in {}: {}",
-        display_args(&args),
-        cwd.display(),
-        detail
-    );
-}
-
-fn parse_pr_url(output: &str) -> Option<String> {
-    output
-        .split_whitespace()
-        .rev()
-        .find(|token| token.starts_with("https://") || token.starts_with("http://"))
-        .map(|token| token.trim_matches(|ch| ch == '"' || ch == '\'').to_string())
-}
-
-fn display_args(args: &[OsString]) -> String {
-    args.iter()
-        .map(|arg| arg.to_string_lossy())
-        .collect::<Vec<_>>()
-        .join(" ")
+    #[test]
+    fn pr_number_parsed_from_url() {
+        assert_eq!(
+            super::super::pr_number_from_url("https://github.com/acme/backend/pull/42"),
+            Some(42)
+        );
+    }
 }

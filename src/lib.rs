@@ -379,7 +379,9 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             all,
             set_upstream,
-        } => commands::push_repos(&repos, all, set_upstream),
+            remote,
+            no_remote,
+        } => commands::push_repos(&repos, all, set_upstream, remote.as_deref(), no_remote),
         Commands::Run {
             name,
             repos,
@@ -388,6 +390,55 @@ pub fn run(cli: Cli) -> Result<()> {
             args,
         } => commands::run_project_command(name.as_deref(), &repos, all, list, &args),
         Commands::Publish { target } => match target {
+            PublishCommand::Create {
+                repos,
+                from_artifact,
+                out,
+                no_push,
+                bases,
+                all,
+                draft,
+                sync,
+                no_sync,
+                set_upstream,
+                remote,
+                no_remote,
+            } => match from_artifact {
+                Some(path) => commands::create_publications_from_artifact(
+                    &path,
+                    out.as_deref(),
+                    &repos,
+                    all,
+                    draft,
+                    &bases,
+                    sync || !no_sync,
+                    !no_push,
+                ),
+                None => commands::create_publications(
+                    &repos,
+                    all,
+                    draft,
+                    &bases,
+                    sync || !no_sync,
+                    set_upstream,
+                    remote.as_deref(),
+                    no_remote,
+                ),
+            },
+            PublishCommand::Sync {
+                repos,
+                from_artifact,
+                out,
+                all,
+            } => match from_artifact {
+                Some(path) => {
+                    commands::sync_publications_from_artifact(&path, out.as_deref(), &repos, all)
+                }
+                None => commands::sync_publications(&repos, all),
+            },
+            PublishCommand::Status { repos, all } => {
+                commands::show_publication_status(&repos, all)
+            }
             PublishCommand::Github { command } => match command {
                 GithubPublishCommand::Create {
                     repos,
@@ -401,7 +452,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     no_sync,
                     set_upstream,
                 } => match from_artifact {
-                    Some(path) => commands::create_github_publications_from_artifact(
+                    Some(path) => commands::create_publications_from_artifact(
                         &path,
                         out.as_deref(),
                         &repos,
@@ -411,13 +462,15 @@ pub fn run(cli: Cli) -> Result<()> {
                         sync || !no_sync,
                         !no_push,
                     ),
-                    None => commands::create_github_publications(
+                    None => commands::create_publications(
                         &repos,
                         all,
                         draft,
                         &bases,
                         sync || !no_sync,
                         set_upstream,
+                        None,
+                        false,
                     ),
                 },
                 GithubPublishCommand::Sync {
@@ -426,16 +479,13 @@ pub fn run(cli: Cli) -> Result<()> {
                     out,
                     all,
                 } => match from_artifact {
-                    Some(path) => commands::sync_github_publications_from_artifact(
-                        &path,
-                        out.as_deref(),
-                        &repos,
-                        all,
-                    ),
-                    None => commands::sync_github_publications(&repos, all),
+                    Some(path) => {
+                        commands::sync_publications_from_artifact(&path, out.as_deref(), &repos, all)
+                    }
+                    None => commands::sync_publications(&repos, all),
                 },
                 GithubPublishCommand::Status { repos, all } => {
-                    commands::show_github_publication_status(&repos, all)
+                    commands::show_publication_status(&repos, all)
                 }
             },
         },
