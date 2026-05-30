@@ -157,6 +157,12 @@ pub enum Commands {
         /// Use only cached recorded PR states without querying GitHub.
         #[arg(long)]
         no_refresh: bool,
+        /// Treat bundles whose only uncommitted work is untracked files as dead work (the untracked files are discarded when worktrees are removed).
+        #[arg(long)]
+        untracked: bool,
+        /// Report every bundle's prune status, including ones that are kept.
+        #[arg(long)]
+        report: bool,
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
@@ -490,6 +496,12 @@ pub enum BundleCommand {
         /// Use only cached recorded PR states without querying GitHub.
         #[arg(long)]
         no_refresh: bool,
+        /// Treat bundles whose only uncommitted work is untracked files as dead work (the untracked files are discarded when worktrees are removed).
+        #[arg(long)]
+        untracked: bool,
+        /// Report every bundle's prune status, including ones that are kept.
+        #[arg(long)]
+        report: bool,
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
