@@ -579,6 +579,14 @@ pub fn run(cli: Cli) -> Result<()> {
             plan: _,
             apply,
         } => commands::revert_target(&target, apply),
+        Commands::Reset {
+            soft,
+            mixed: _,
+            hard,
+            commit,
+            repos,
+            all,
+        } => commands::reset_checkouts(soft, hard, commit.as_deref(), &repos, all),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { target } => commands::show_target(&target),
         Commands::Config { command } => match command {
