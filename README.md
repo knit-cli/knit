@@ -177,6 +177,7 @@ knit log [-<count>]
 knit log [-n [count]]
 knit revert <sha|node|HEAD|HEAD~N> [--plan]
 knit revert <sha|node|HEAD|HEAD~N> --apply
+knit reset [--soft|--mixed|--hard] [<commit>] [--repo <repo>] [--all]
 knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
@@ -535,6 +536,15 @@ knit git --repo backend diff --stat
 ```
 
 Repo selectors can be repo ids, original repo paths, or worktree paths. Quote `'*'` when you want Knit to receive the literal all-repos selector instead of your shell expanding it. If a git argument is ambiguous with a repo id, use `--repo`.
+
+`knit reset` runs `git reset` across tracked checkouts, mirroring git's own modes: `--soft` moves the branch pointer only, `--mixed` (the default) resets the index but keeps the working tree, and `--hard` resets the index and working tree. The optional `<commit>` defaults to `HEAD`. Scope is context-aware: when a bundle is resolved explicitly (`--bundle`), via `KNIT_BUNDLE`, a worktree cwd, or folder context, reset targets that bundle's checkouts; run from the workspace root it instead resets the active project's source repo checkouts, which is the fast way to discard changes a tool made directly on the source branches without a bundle. Like git, `--hard` does not remove untracked files; follow up with `knit git --all clean -fd` if you also need to drop new untracked files.
+
+```sh
+knit reset --hard --all          # discard tracked changes in every source repo (from workspace root)
+knit reset --hard --repo knit    # just one repo
+knit --bundle feature-a reset --hard --all
+knit reset --soft HEAD~1         # undo the last commit, keep the changes
+```
 
 Knit colors interactive terminal output for scanability. It disables color automatically when output is piped, when `NO_COLOR` is set, or when `TERM=dumb`. Use `KNIT_COLOR=always` or `KNIT_COLOR=never` to force a mode.
 
