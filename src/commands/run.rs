@@ -8,6 +8,8 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
+const RUNTIME_COMMANDS: [&str; 3] = ["up", "down", "status"];
+
 pub fn run_project_command(
     name: Option<&str>,
     explicit_repos: &[String],
@@ -25,8 +27,31 @@ pub fn run_project_command(
     if name.is_some() && !raw_args.is_empty() {
         bail!("Use either a named command or a raw command after --, not both.");
     }
+
+    if raw_args.is_empty() {
+        let runtime_command = name.unwrap_or("up");
+        if RUNTIME_COMMANDS.contains(&runtime_command) {
+            if crate::commands::runtime::try_handle(Some(runtime_command), raw_args)? {
+                return Ok(());
+            }
+
+            let active = load_active_bundle()?;
+            if project_has_runtime(&active)? {
+                bail!(
+                    "Bundle runtime is configured but could not run `{runtime_command}`. Use an updated knit CLI from `.knit/worktrees/<bundle>/knit` and run the command from a stack worktree checkout."
+                );
+            }
+
+            if name.is_some() {
+                bail!(
+                    "`knit run {runtime_command}` requires a `runtime` block in the Knit project. Pull it with `knit project pull --repo <stack-repo>` or add it to `.knit/projects/<project>.project.json`."
+                );
+            }
+        }
+    }
+
     if name.is_none() && raw_args.is_empty() {
-        bail!("Pass a project command name or a raw command after --.");
+        bail!("Pass a project command name, `knit run up|down|status`, or a raw command after --.");
     }
 
     let active = load_active_bundle()?;
@@ -69,10 +94,21 @@ pub fn run_project_command(
     run_invocation(&active, invocation)
 }
 
+fn project_has_runtime(active: &ActiveBundle) -> Result<bool> {
+    Ok(load_project_for_bundle(active)
+        .ok()
+        .and_then(|project| project.runtime)
+        .is_some())
+}
+
 fn list_commands() -> Result<()> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active)?;
     if project.commands.is_empty() {
+        if project.runtime.is_some() {
+            println!("{}", out::muted("Runtime commands: up, down, status"));
+            return Ok(());
+        }
         println!("{}", out::muted("No project commands."));
         return Ok(());
     }
@@ -88,6 +124,13 @@ fn list_commands() -> Result<()> {
             out::repo(name),
             out::muted(repo_label),
             command.command.join(" ")
+        );
+    }
+    if project.runtime.is_some() {
+        println!(
+            "{} {}",
+            out::repo("up|down|status"),
+            out::muted("bundle runtime (docker-compose)")
         );
     }
     Ok(())
