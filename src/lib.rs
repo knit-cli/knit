@@ -372,12 +372,21 @@ pub fn run(cli: Cli) -> Result<()> {
             rebase,
             force,
             feature,
+            main,
+            bundles,
             remote,
             no_remote,
-        } => {
-            commands::pull_repos(&repos, all, rebase, force, feature)?;
-            commands::pull_remote_state(remote.as_deref(), no_remote)
-        }
+        } => commands::pull(
+            &repos,
+            all,
+            rebase,
+            force,
+            feature,
+            main,
+            bundles,
+            remote.as_deref(),
+            no_remote,
+        ),
         Commands::Push {
             repos,
             all,
