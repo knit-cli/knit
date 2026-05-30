@@ -33,6 +33,44 @@
         }
       }
     },
+    "runtime": {
+      "type": "object",
+      "properties": {
+        "kind": { "type": "string" },
+        "stackRepo": { "type": "string" },
+        "composeFile": { "type": "string" },
+        "worktreeComposeFile": { "type": "string" },
+        "worktreeDockerfile": { "type": "string" },
+        "frontendRepo": { "type": "string" },
+        "glossWebUiRepo": { "type": "string" },
+        "profilePath": { "type": "string" },
+        "projectConfigFile": { "type": "string" },
+        "database": {
+          "type": "object",
+          "properties": {
+            "mode": { "enum": ["shared", "bundle"] },
+            "host": { "type": "string" },
+            "port": { "type": "integer" },
+            "name": { "type": "string" },
+            "nameTemplate": { "type": "string" },
+            "portBase": { "type": "integer" }
+          },
+          "additionalProperties": false
+        },
+        "ports": {
+          "type": "object",
+          "properties": {
+            "backendBase": { "type": "integer" },
+            "frontendBase": { "type": "integer" },
+            "step": { "type": "integer" },
+            "backendContainer": { "type": "integer" },
+            "frontendContainer": { "type": "integer" }
+          },
+          "additionalProperties": false
+        }
+      },
+      "additionalProperties": false
+    },
     "landing": {
       "type": "object",
       "properties": {

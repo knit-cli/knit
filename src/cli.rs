@@ -673,6 +673,17 @@ pub enum ProjectCommand {
         /// Project name. Defaults to the active project.
         name: Option<String>,
     },
+    /// Pull runtime/landing/commands from a repo-local knit.project.json.
+    Pull {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+        /// Repo id that contains knit.project.json, usually the stack repo.
+        #[arg(long)]
+        repo: String,
+        /// Refresh project AGENTS.md after pulling.
+        #[arg(long)]
+        agents: bool,
+    },
     /// Manage named commands that `knit run` can execute.
     Command {
         #[command(subcommand)]
