@@ -2810,6 +2810,80 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
 }
 
 #[test]
+fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    // Dead work whose only uncommitted content is an untracked file.
+    knit(&workspace, ["bundle", "start", "stray cleanup"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let stray_feature = workspace.join(".knit/worktrees/stray-cleanup/backend");
+    fs::write(stray_feature.join("PROOF.md"), "untracked proof\n").unwrap();
+
+    // Dead work with a tracked modification must stay protected even with --untracked.
+    knit(&workspace, ["bundle", "start", "dirty cleanup"]);
+    knit(&workspace, ["track", frontend.to_str().unwrap()]);
+    let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
+    append_line(&dirty_feature.join("app.txt"), "dirty local edit");
+
+    // Default prune surfaces the untracked-only bundle separately and does not
+    // treat it as a deletable candidate.
+    let preview = knit(&workspace, ["prune", "--no-refresh"]);
+    assert!(preview.contains("Blocked by untracked files"));
+    assert!(preview.contains("stray-cleanup"));
+    assert!(!preview.contains("Dead bundle candidates"));
+
+    // --report names every bundle and its status, including kept ones.
+    let report = knit(&workspace, ["prune", "--no-refresh", "--report"]);
+    assert!(report.contains("Bundle report:"));
+    assert!(report.contains("prunable with --untracked"));
+    assert!(report.contains("dirty-cleanup"));
+    assert!(report.contains("uncommitted tracked changes"));
+
+    // --untracked promotes the untracked-only bundle to a real candidate while
+    // still protecting the tracked-change bundle.
+    let untracked_preview = knit(&workspace, ["prune", "--no-refresh", "--untracked"]);
+    assert!(untracked_preview.contains("Dead bundle candidates"));
+    assert!(untracked_preview.contains("stray-cleanup"));
+    assert!(untracked_preview.contains("discards untracked files"));
+    assert!(!untracked_preview.contains("dirty-cleanup"));
+
+    let pruned = knit(
+        &workspace,
+        [
+            "prune",
+            "--no-refresh",
+            "--untracked",
+            "--apply",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(pruned.contains("stray-cleanup"));
+    assert!(!workspace
+        .join(".knit/bundles/stray-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/stray-cleanup.bundle.json")
+        .exists());
+    assert!(!stray_feature.exists());
+
+    // The tracked-change bundle and its worktree survive.
+    assert!(workspace
+        .join(".knit/bundles/dirty-cleanup.bundle.json")
+        .exists());
+    assert!(dirty_feature.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     let root = unique_temp_dir();
     let backend = root.join("backend");

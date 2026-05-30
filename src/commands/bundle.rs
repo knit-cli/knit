@@ -138,7 +138,7 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
 struct PruneCandidate {
     id: String,
     repo_count: usize,
-    reason: &'static str,
+    reason: String,
 }
 
 struct OrphanWorktree {
@@ -146,10 +146,83 @@ struct OrphanWorktree {
     path: PathBuf,
 }
 
+/// Uncommitted work found in a checkout, split by whether Git tracks it.
+#[derive(Clone, Copy, Default)]
+struct Pending {
+    tracked: bool,
+    untracked: bool,
+}
+
+impl Pending {
+    fn any(self) -> bool {
+        self.tracked || self.untracked
+    }
+
+    fn merge(&mut self, other: Pending) {
+        self.tracked |= other.tracked;
+        self.untracked |= other.untracked;
+    }
+}
+
+/// Everything prune learned about one bundle, so the same signals drive the
+/// prune decision, the `--untracked` relaxation, and the `--report` view.
+struct PruneAssessment {
+    id: String,
+    repo_count: usize,
+    saw_publication: bool,
+    saw_open_publication: bool,
+    saw_merged_publication: bool,
+    pending: Pending,
+}
+
+impl PruneAssessment {
+    /// Reason this bundle is dead work, or `None` if it should be kept.
+    /// With `untracked` set, checkouts whose only uncommitted work is
+    /// untracked files no longer hold the bundle back.
+    fn candidate_reason(&self, untracked: bool) -> Option<String> {
+        if self.saw_open_publication || self.pending.tracked {
+            return None;
+        }
+        if self.pending.untracked && !untracked {
+            return None;
+        }
+        let base = if self.saw_merged_publication {
+            "recorded PRs are merged"
+        } else if self.saw_publication {
+            "no open PRs and no pending changes"
+        } else {
+            "no recorded PRs and no pending changes"
+        };
+        if self.pending.untracked {
+            Some(format!("{base}; discards untracked files"))
+        } else {
+            Some(base.to_string())
+        }
+    }
+
+    /// True when the bundle would be dead work but for untracked files alone.
+    fn blocked_by_untracked_only(&self) -> bool {
+        !self.saw_open_publication && !self.pending.tracked && self.pending.untracked
+    }
+
+    /// The PR side of why the bundle is (or is not yet) dead work.
+    fn pr_basis(&self) -> &'static str {
+        if self.saw_open_publication {
+            "open PR(s)"
+        } else if self.saw_merged_publication {
+            "recorded PRs are merged"
+        } else if self.saw_publication {
+            "no open PRs"
+        } else {
+            "no recorded PRs"
+        }
+    }
+}
+
 struct PruneCache {
     pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
     pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
-    pending_changes: Arc<Mutex<HashMap<String, bool>>>,
+    pending_changes: Arc<Mutex<HashMap<String, Pending>>>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -213,9 +286,9 @@ impl PruneCache {
         &self,
         root: &Path,
         repo: &crate::model::RepoEntry,
-    ) -> Result<bool> {
+    ) -> Result<Pending> {
         let Some(path) = checkout_path(root, repo) else {
-            return Ok(false);
+            return Ok(Pending::default());
         };
         let key = path.to_string_lossy().to_string();
         {
@@ -224,7 +297,7 @@ impl PruneCache {
                 return Ok(result);
             }
         }
-        let result = path_has_pending_changes(&path)?;
+        let result = path_pending_changes(&path)?;
         self.pending_changes
             .lock()
             .unwrap()
@@ -236,6 +309,8 @@ impl PruneCache {
 pub fn prune_merged_bundles(
     apply: bool,
     refresh: bool,
+    untracked: bool,
+    report: bool,
     worktrees: bool,
     branches: bool,
     force_branches: bool,
@@ -269,58 +344,33 @@ pub fn prune_merged_bundles(
     let mut entries = bundle_json_paths(&dir)?;
     entries.sort();
     let cache = PruneCache::new();
+    let assessments = assess_bundles(&root, entries, refresh, &cache)?;
+
     let mut candidates = Vec::new();
-    if refresh {
-        let bundles: Vec<_> = entries
-            .iter()
-            .map(|path| read_json::<ChangeGroup>(path).map(|bundle| (path.clone(), bundle)))
-            .collect::<Result<Vec<_>, _>>()?;
-
-        let results = std::thread::scope(|scope| {
-            let mut handles = Vec::new();
-            for (path, mut bundle) in bundles {
-                handles.push(scope.spawn(|| {
-                    let result =
-                        dead_work_candidate(&root, &path, &mut bundle, true, &cache);
-                    (path, bundle, result)
-                }));
-            }
-            handles
-                .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-
-        for (_path, bundle, result) in results {
-            if let Some(reason) = result? {
-                candidates.push(PruneCandidate {
-                    id: bundle.id.clone(),
-                    repo_count: bundle.repos.len(),
-                    reason,
-                });
-            }
-        }
-    } else {
-        for path in entries {
-            let mut bundle: ChangeGroup = read_json(&path)?;
-            if let Some(reason) =
-                dead_work_candidate(&root, &path, &mut bundle, false, &cache)?
-            {
-                candidates.push(PruneCandidate {
-                    id: bundle.id.clone(),
-                    repo_count: bundle.repos.len(),
-                    reason,
-                });
-            }
+    let mut blocked_untracked = Vec::new();
+    for assessment in &assessments {
+        if let Some(reason) = assessment.candidate_reason(untracked) {
+            candidates.push(PruneCandidate {
+                id: assessment.id.clone(),
+                repo_count: assessment.repo_count,
+                reason,
+            });
+        } else if assessment.blocked_by_untracked_only() {
+            blocked_untracked.push(assessment);
         }
     }
+
     let orphan_worktrees = if worktrees {
         orphan_worktree_candidates(&root)?
     } else {
         Vec::new()
     };
 
-    if candidates.is_empty() && orphan_worktrees.is_empty() {
+    if report {
+        print_prune_report(&assessments, untracked);
+    }
+
+    if candidates.is_empty() && orphan_worktrees.is_empty() && blocked_untracked.is_empty() {
         println!(
             "{}",
             out::muted("No dead bundles or orphan worktrees to prune.")
@@ -335,7 +385,22 @@ pub fn prune_merged_bundles(
                 "  {} {} repo(s), {}",
                 out::node(&candidate.id),
                 candidate.repo_count,
-                out::muted(candidate.reason)
+                out::muted(&candidate.reason)
+            );
+        }
+    }
+
+    if !blocked_untracked.is_empty() {
+        println!(
+            "{}",
+            out::heading("Blocked by untracked files (use --untracked to prune):")
+        );
+        for assessment in &blocked_untracked {
+            println!(
+                "  {} {} repo(s), {}",
+                out::node(&assessment.id),
+                assessment.repo_count,
+                out::muted(format!("{}, only untracked files", assessment.pr_basis()))
             );
         }
     }
@@ -357,6 +422,7 @@ pub fn prune_merged_bundles(
             out::warn(format!(
                 "Run `{}` to delete these bundle artifacts.",
                 suggested_prune_apply_command(
+                    untracked,
                     worktrees,
                     branches,
                     force_branches,
@@ -399,18 +465,53 @@ pub fn prune_merged_bundles(
     Ok(())
 }
 
-fn dead_work_candidate(
+fn assess_bundles(
+    root: &Path,
+    entries: Vec<PathBuf>,
+    refresh: bool,
+    cache: &PruneCache,
+) -> Result<Vec<PruneAssessment>> {
+    if refresh {
+        let bundles: Vec<_> = entries
+            .iter()
+            .map(|path| read_json::<ChangeGroup>(path).map(|bundle| (path.clone(), bundle)))
+            .collect::<Result<Vec<_>, _>>()?;
+
+        let results = std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (path, mut bundle) in bundles {
+                handles.push(scope.spawn(move || {
+                    assess_bundle(root, &path, &mut bundle, true, cache)
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|h| h.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        results.into_iter().collect()
+    } else {
+        let mut assessments = Vec::new();
+        for path in entries {
+            let mut bundle: ChangeGroup = read_json(&path)?;
+            assessments.push(assess_bundle(root, &path, &mut bundle, false, cache)?);
+        }
+        Ok(assessments)
+    }
+}
+
+fn assess_bundle(
     root: &Path,
     path: &Path,
     bundle: &mut ChangeGroup,
     refresh: bool,
     cache: &PruneCache,
-) -> Result<Option<&'static str>> {
+) -> Result<PruneAssessment> {
     let repos = bundle.repos.clone();
     let mut saw_publication = false;
     let mut saw_merged_publication = false;
     let mut saw_open_publication = false;
-    let mut saw_pending_changes = false;
+    let mut pending = Pending::default();
     for repo in repos {
         let branch = repo.feature_branch.as_deref();
         let mut publication = providers::publication_for_repo(bundle, &repo.id).cloned();
@@ -444,9 +545,7 @@ fn dead_work_candidate(
             }
         }
 
-        if cache.checkout_has_pending_changes(root, &repo)? {
-            saw_pending_changes = true;
-        }
+        pending.merge(cache.checkout_has_pending_changes(root, &repo)?);
 
         let Some(publication) = publication else {
             continue;
@@ -467,16 +566,50 @@ fn dead_work_candidate(
         write_json(path, bundle)?;
     }
 
-    if saw_pending_changes || saw_open_publication {
-        return Ok(None);
+    Ok(PruneAssessment {
+        id: bundle.id.clone(),
+        repo_count: bundle.repos.len(),
+        saw_publication,
+        saw_open_publication,
+        saw_merged_publication,
+        pending,
+    })
+}
+
+fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
+    println!("{}", out::heading("Bundle report:"));
+    for assessment in assessments {
+        let status = if let Some(reason) = assessment.candidate_reason(untracked) {
+            format!("prunable — {reason}")
+        } else if assessment.blocked_by_untracked_only() {
+            "kept — only untracked files (prunable with --untracked)".to_string()
+        } else if assessment.saw_open_publication {
+            "kept — open PR(s)".to_string()
+        } else if assessment.pending.tracked {
+            "kept — uncommitted tracked changes".to_string()
+        } else {
+            "kept".to_string()
+        };
+
+        let mut detail = vec![
+            format!("{} repo(s)", assessment.repo_count),
+            assessment.pr_basis().to_string(),
+        ];
+        if assessment.pending.tracked {
+            detail.push("tracked changes".to_string());
+        }
+        if assessment.pending.untracked {
+            detail.push("untracked files".to_string());
+        }
+
+        println!(
+            "  {} {}",
+            out::node(&assessment.id),
+            out::muted(status)
+        );
+        println!("      {}", out::muted(detail.join(", ")));
     }
-    if saw_merged_publication {
-        return Ok(Some("recorded PRs are merged"));
-    }
-    if saw_publication {
-        return Ok(Some("no open PRs and no pending changes"));
-    }
-    Ok(Some("no recorded PRs and no pending changes"))
+    println!();
 }
 
 fn publication_state_is_merged(state: &str) -> bool {
@@ -491,7 +624,7 @@ fn _checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) ->
     let Some(path) = checkout_path(root, repo) else {
         return Ok(false);
     };
-    path_has_pending_changes(&path)
+    Ok(path_pending_changes(&path)?.any())
 }
 
 fn checkout_path(root: &Path, repo: &crate::model::RepoEntry) -> Option<PathBuf> {
@@ -512,23 +645,41 @@ fn resolve_path(root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn path_has_pending_changes(path: &Path) -> Result<bool> {
+fn path_pending_changes(path: &Path) -> Result<Pending> {
     if !path.exists() {
-        return Ok(false);
+        return Ok(Pending::default());
     }
     if crate::git::is_git_worktree(path) {
-        let status = git_output(path, ["status", "--short"])?;
-        return Ok(!status.trim().is_empty());
+        let status = git_output(path, ["status", "--porcelain"])?;
+        let mut pending = Pending::default();
+        for line in status.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("??") {
+                pending.untracked = true;
+            } else {
+                pending.tracked = true;
+            }
+        }
+        return Ok(pending);
     }
+    // Stray files outside a Git worktree can't be classified, so treat them
+    // as tracked changes: they block pruning even with --untracked.
     if path.is_file() {
-        return Ok(true);
+        return Ok(Pending {
+            tracked: true,
+            untracked: false,
+        });
     }
+    let mut pending = Pending::default();
     for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
-        if path_has_pending_changes(&entry?.path())? {
-            return Ok(true);
+        pending.merge(path_pending_changes(&entry?.path())?);
+        if pending.tracked && pending.untracked {
+            break;
         }
     }
-    Ok(false)
+    Ok(pending)
 }
 
 fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
@@ -549,7 +700,7 @@ fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
         if id.starts_with('.') || bundle_exists(root, &id) {
             continue;
         }
-        if path_has_pending_changes(&path)? {
+        if path_pending_changes(&path)?.any() {
             println!(
                 "{}: {} {}",
                 out::node(&id),
@@ -620,6 +771,7 @@ fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
 }
 
 fn suggested_prune_apply_command(
+    untracked: bool,
     worktrees: bool,
     branches: bool,
     force_branches: bool,
@@ -627,9 +779,17 @@ fn suggested_prune_apply_command(
     remote_bundles: bool,
 ) -> String {
     if worktrees && branches && force_branches && remote_branches && remote_bundles {
-        return "knit prune --apply --all".to_string();
+        let base = "knit prune --apply --all";
+        return if untracked {
+            format!("{base} --untracked")
+        } else {
+            base.to_string()
+        };
     }
     let mut command = vec!["knit", "prune", "--apply"];
+    if untracked {
+        command.push("--untracked");
+    }
     if worktrees {
         command.push("--worktrees");
     }
