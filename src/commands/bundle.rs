@@ -657,6 +657,27 @@ fn bundle_json_paths(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
         .collect())
 }
 
+/// Sorted ids of every open bundle in the workspace. Unreadable bundle files
+/// are skipped rather than aborting, so a single bad artifact does not block a
+/// workspace-wide pull.
+pub fn list_open_bundle_ids(root: &Path) -> Result<Vec<String>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for path in bundle_json_paths(&dir)? {
+        let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
+            continue;
+        };
+        if bundle_state(&bundle) == BUNDLE_STATE_OPEN {
+            ids.push(bundle.id);
+        }
+    }
+    ids.sort();
+    Ok(ids)
+}
+
 pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()> {
     if workspace && here {
         bail!("Use either --workspace or --here, not both.");

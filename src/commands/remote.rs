@@ -11,8 +11,8 @@ use crate::model::{
 };
 use crate::output as out;
 use crate::store::{
-    bundle_path, find_knit_root, load_active_bundle, load_active_bundle_for_update, load_config,
-    project_path, read_json, save_active_bundle, save_config, write_json, ActiveBundle,
+    bundle_path, find_knit_root, load_active_bundle, load_config, project_path, read_json,
+    save_active_bundle, save_config, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -379,59 +379,126 @@ pub fn clone_project_from_remote(
     Ok(())
 }
 
-pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result<()> {
-    if skip_remote {
-        return Ok(());
-    }
+/// The local project plus the remote project export, fetched once so many
+/// bundles can be localized and pulled without repeating the network round-trip.
+pub struct RemotePullContext {
+    project: KnitProject,
+    export: RemoteProjectExport,
+}
 
-    let mut active = load_active_bundle_for_update()?;
-    let config = load_config(&active.root)?;
-    let Some(remote_name) = remote_name.map(slugify).or(config.sync_remote.clone()) else {
-        return Ok(());
+/// Resolve the configured KnitHub remote and fetch the project export a single
+/// time. Returns `None` when the pull opts out (`--no-remote`) or no remote is
+/// configured, so callers can skip the artifact step without it being an error.
+/// Remote resolution matches push-sync: explicit override, then `sync_remote`,
+/// then a remote literally named `knithub`.
+pub fn prepare_remote_pull(
+    remote_override: Option<&str>,
+    skip_remote: bool,
+) -> Result<Option<RemotePullContext>> {
+    if skip_remote {
+        return Ok(None);
+    }
+    let (root, config) = workspace_config()?;
+    let Some(remote_name) = remote_override
+        .map(slugify)
+        .or_else(|| config.sync_remote.clone())
+        .or_else(|| {
+            config
+                .remotes
+                .contains_key("knithub")
+                .then(|| "knithub".to_string())
+        })
+    else {
+        return Ok(None);
     };
-    let remote = resolve_remote(&config, &remote_name)?;
+    let remote = match resolve_remote(&config, &remote_name) {
+        Ok(remote) => remote,
+        Err(error) => {
+            // An explicitly requested remote that is missing is an error; an
+            // implicit fallback that is missing is simply skipped.
+            if remote_override.is_some() {
+                return Err(error);
+            }
+            return Ok(None);
+        }
+    };
     let token = resolve_token(&remote_name, remote)?;
-    let project_id = active
-        .bundle
-        .project_id
+    let project_id = config
+        .active_project
         .clone()
-        .or(config.active_project.clone())
-        .context("No project selected for remote pull. Set activeProject or pass a bundle with projectId.")?;
-    let project = load_project_if_present(&active.root, &project_id)?
+        .context("No active project selected for remote pull. Run `knit project init <name>`.")?;
+    let project = load_project_if_present(&root, &project_id)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
     let export = fetch_project_export(remote, &token, &project_id)?;
-    let remote_bundle = export
+    Ok(Some(RemotePullContext { project, export }))
+}
+
+/// Outcome of pulling a single bundle's recorded state from the remote.
+pub enum RemoteBundleOutcome {
+    /// The artifact was applied; carries its hash.
+    Pulled(String),
+    /// Nothing to apply; carries a human-readable reason.
+    Skipped(String),
+}
+
+/// Pull one named bundle's recorded state from a prepared remote context:
+/// localize the remote artifact, fast-forward its feature checkouts, and save.
+/// Works for any bundle by id, not just the resolved one, so a workspace-wide
+/// pull can process every open bundle. Callers must serialize git work that
+/// touches shared source repos; this function only mutates the named bundle's
+/// own artifact and checkouts.
+pub fn pull_bundle_remote_state(
+    root: &Path,
+    context: &RemotePullContext,
+    bundle_id: &str,
+) -> Result<RemoteBundleOutcome> {
+    let path = bundle_path(root, bundle_id);
+    if !path.exists() {
+        return Ok(RemoteBundleOutcome::Skipped(
+            "no local bundle artifact".to_string(),
+        ));
+    }
+    let local: ChangeGroup = read_json(&path)?;
+    let Some(remote_bundle) = context
+        .export
         .bundles
         .iter()
-        .find(|bundle| bundle.slug == active.bundle.id)
-        .with_context(|| {
-            format!(
-                "Remote project `{project_id}` has no bundle `{}`.",
-                active.bundle.id
-            )
-        })?;
-    let artifact = remote_bundle.current_artifact.as_ref().with_context(|| {
-        format!(
-            "Remote bundle `{}` has no current artifact.",
-            active.bundle.id
-        )
-    })?;
+        .find(|bundle| bundle.slug == bundle_id)
+    else {
+        return Ok(RemoteBundleOutcome::Skipped("not present on remote".to_string()));
+    };
+    let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
+        return Ok(RemoteBundleOutcome::Skipped("no remote artifact".to_string()));
+    };
     let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
-    let localized = localize_bundle(remote_payload, &project)?;
-
+    let localized = localize_bundle(remote_payload, &context.project)?;
     prepare_feature_branches(&localized)?;
-    ensure_remote_bundle_fast_forward(&active.bundle, &localized)?;
-    active.bundle = localized;
+    ensure_remote_bundle_fast_forward(&local, &localized)?;
+    let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, localized);
     materialize_repos(&mut active, None)?;
     fast_forward_feature_checkouts(&mut active)?;
     save_active_bundle(&active)?;
+    Ok(RemoteBundleOutcome::Pulled(artifact.artifact_hash.clone()))
+}
 
-    println!(
-        "{} {} {}",
-        out::movement("pulled"),
-        out::repo(&remote_bundle.slug),
-        out::muted(&artifact.artifact_hash)
-    );
+pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result<()> {
+    let Some(context) = prepare_remote_pull(remote_name, skip_remote)? else {
+        return Ok(());
+    };
+    let active = load_active_bundle()?;
+    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id)? {
+        RemoteBundleOutcome::Pulled(hash) => println!(
+            "{} {} {}",
+            out::movement("pulled"),
+            out::repo(&active.bundle.id),
+            out::muted(&hash)
+        ),
+        RemoteBundleOutcome::Skipped(reason) => println!(
+            "{} {}",
+            out::warn("KnitHub pull skipped:"),
+            out::muted(reason)
+        ),
+    }
     Ok(())
 }
 
