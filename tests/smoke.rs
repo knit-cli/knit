@@ -2489,6 +2489,52 @@ fn bundle_delete_can_remove_generated_worktrees_and_force_delete_branches() {
 }
 
 #[test]
+fn delete_recovers_generated_worktree_when_recorded_path_was_lost() {
+    // A bundle synced back from a remote is localized, which clears the
+    // local-only worktreePath even though the generated checkout still exists
+    // and holds its feature branch. Cleanup must fall back to the conventional
+    // location so it removes the worktree and frees the branch for deletion.
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "throwaway"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let worktree = workspace.join(".knit/worktrees/throwaway/backend");
+    append_line(&worktree.join("app.txt"), "throwaway change");
+    knit(&workspace, ["commit", "--stage", "-m", "Throwaway change"]);
+
+    // Simulate the post-localize state: the recorded worktree path is gone.
+    let bundle_path = workspace.join(".knit/bundles/throwaway.bundle.json");
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    bundle["repos"][0]["worktreePath"] = Value::Null;
+    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    assert!(worktree.exists());
+    assert!(git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+
+    let deleted = knit(
+        &workspace,
+        [
+            "bundle",
+            "delete",
+            "throwaway",
+            "--force",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(deleted.contains("Deleted bundle"));
+    assert!(!worktree.exists());
+    assert!(!git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+    assert!(!bundle_path.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
