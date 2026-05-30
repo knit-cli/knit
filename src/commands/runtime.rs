@@ -1,6 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::model::{
     KnitProject, ProjectRuntime, ProjectRuntimeDatabase, ProjectRuntimePorts, RepoEntry,
+    DATABASE_MODE_BUNDLE, DATABASE_MODE_SHARED,
 };
 use crate::output as out;
 use crate::store::{load_active_bundle, project_path, read_json, write_json, ActiveBundle};
@@ -47,10 +48,21 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         .with_context(|| format!("{} has no checkout. Run `knit worktree` first.", stack_repo.id))?;
 
     let database = runtime.database.clone().unwrap_or_default();
-    ensure_database_reachable(&database)?;
+    let resolved_database = resolve_database(&database, &active.bundle.id)?;
+    if resolved_database.mode == DATABASE_MODE_SHARED {
+        ensure_shared_database_reachable(&database)?;
+    }
 
     let ports = allocate_ports(&active.root, &active.bundle.id, runtime.ports.clone())?;
-    let plan = build_plan(active, project, runtime, stack_repo, &stack_checkout, &ports)?;
+    let plan = build_plan(
+        active,
+        project,
+        runtime,
+        stack_repo,
+        &stack_checkout,
+        &ports,
+        &resolved_database,
+    )?;
     let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
     fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
 
@@ -62,7 +74,9 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         stack_repo: stack_repo.id.clone(),
         backend_port: ports.backend,
         frontend_port: ports.frontend,
-        database_port: database.port,
+        database_port: resolved_database.host_port.unwrap_or(database.port),
+        database_mode: resolved_database.mode.clone(),
+        database_name: resolved_database.name.clone(),
         compose_file: compose_path
             .strip_prefix(&active.root)
             .unwrap_or(&compose_path)
@@ -147,29 +161,70 @@ fn run_down(active: &ActiveBundle) -> Result<()> {
 fn run_status(active: &ActiveBundle) -> Result<()> {
     let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
     let state_path = run_dir.join("state.json");
+    let compose_path = run_dir.join("docker-compose.yml");
     if !state_path.exists() {
         bail!("No runtime state found for bundle `{}`. Run `knit run up` first.", active.bundle.id);
     }
 
-    let state: RuntimeRunState = read_json(&state_path)?;
+    let mut state: RuntimeRunState = read_json(&state_path)?;
+    if compose_path.exists() {
+        if let Some((backend, frontend)) = parse_compose_ports(&compose_path) {
+            state.backend_port = backend;
+            state.frontend_port = frontend;
+        }
+    }
+
+    let project_name = format!("knit-run-{}", active.bundle.id);
+    let backend_running = runtime_container_running(&format!("{project_name}-backend"));
+    let frontend_running = runtime_container_running(&format!("{project_name}-frontend"));
+    let db_running = runtime_container_running(&format!("{project_name}-db"));
+
     println!("{} {}", out::heading("Bundle:"), out::repo(&state.bundle_id));
-    println!("{} http://localhost:{}", out::heading("Backend:"), state.backend_port);
-    println!("{} http://localhost:{}", out::heading("Frontend:"), state.frontend_port);
     println!(
-        "{} localhost:{} ({})",
+        "{} {} (http://localhost:{})",
+        out::heading("Backend:"),
+        runtime_service_status(backend_running),
+        state.backend_port
+    );
+    println!(
+        "{} {} (http://localhost:{})",
+        out::heading("Frontend:"),
+        runtime_service_status(frontend_running),
+        state.frontend_port
+    );
+    println!(
+        "{} {} localhost:{} ({})",
         out::heading("Database:"),
+        database_status_label(&state, db_running),
         state.database_port,
-        state.database_port
+        state.database_name
     );
     if let Some(profile) = &state.profile_path {
-        println!(
-            "{} http://localhost:{}{}",
-            out::heading("Profile:"),
-            state.frontend_port,
-            profile
-        );
+        if frontend_running {
+            println!(
+                "{} http://localhost:{}{}",
+                out::heading("Profile:"),
+                state.frontend_port,
+                profile
+            );
+        } else {
+            println!(
+                "{} http://localhost:{}{} {}",
+                out::heading("Profile:"),
+                state.frontend_port,
+                profile,
+                out::muted("(frontend stopped)")
+            );
+        }
     }
     println!("{} {}", out::muted("Compose:"), state.compose_file);
+    if !backend_running && !frontend_running {
+        println!(
+            "{} {}",
+            out::heading("Next:"),
+            "Runtime is stopped. Run `knit run up` from a stack worktree checkout."
+        );
+    }
     Ok(())
 }
 
@@ -180,9 +235,9 @@ fn build_plan(
     _stack_repo: &RepoEntry,
     stack_checkout: &Path,
     ports: &AllocatedPorts,
+    resolved_database: &ResolvedDatabase,
 ) -> Result<RuntimePlan> {
     let workspace_root = &active.root;
-    let database = runtime.database.clone().unwrap_or_default();
     let frontend_repo_id = runtime
         .frontend_repo
         .clone()
@@ -229,7 +284,7 @@ fn build_plan(
             &frontend_rel,
             &gloss_rel,
             ports,
-            &database,
+            resolved_database,
             &profile_path,
         )
     } else {
@@ -243,7 +298,7 @@ fn build_plan(
             &frontend_rel,
             &gloss_rel,
             ports,
-            &database,
+            resolved_database,
             &profile_path,
         )
     };
@@ -259,17 +314,23 @@ fn generate_worktree_compose(
     frontend_src: &str,
     gloss_src: &str,
     ports: &AllocatedPorts,
-    database: &ProjectRuntimeDatabase,
+    database: &ResolvedDatabase,
     profile_path: &str,
 ) -> String {
     let workspace = workspace_root.display();
     let frontend_context = workspace_root.join(frontend_src).display().to_string();
     let gloss_context = workspace_root.join(gloss_src).display().to_string();
+    let db_service = bundle_database_service(project_name, database);
+    let backend_depends = if database.mode == DATABASE_MODE_BUNDLE {
+        "    depends_on:\n      db:\n        condition: service_healthy\n".to_string()
+    } else {
+        String::new()
+    };
     format!(
         r#"name: {project_name}
 
 services:
-  backend:
+{db_service}  backend:
     container_name: {project_name}-backend
     build:
       context: {workspace}
@@ -296,7 +357,7 @@ services:
     volumes:
       - {workspace}:{workspace}
       - ${{HOME}}/.config/gh:/root/.config/gh:ro
-
+{backend_depends}
   frontend:
     container_name: {project_name}-frontend
     build:
@@ -316,6 +377,7 @@ services:
         workspace = workspace,
         dockerfile = dockerfile,
         knithub_src = knithub_src,
+        db_service = db_service,
         db_host = database.host,
         db_port = database.port,
         db_name = database.name,
@@ -324,6 +386,7 @@ services:
         profile_path = profile_path,
         frontend_context = frontend_context,
         gloss_context = gloss_context,
+        backend_depends = backend_depends,
     )
 }
 
@@ -335,7 +398,7 @@ fn generate_main_compose(
     frontend_src: &str,
     gloss_src: &str,
     ports: &AllocatedPorts,
-    database: &ProjectRuntimeDatabase,
+    database: &ResolvedDatabase,
     profile_path: &str,
 ) -> String {
     generate_worktree_compose(
@@ -389,13 +452,20 @@ fn load_used_ports(root: &Path) -> Result<BTreeSet<u16>> {
 
     for entry in fs::read_dir(&runs_dir).context("failed to read runtime runs directory")? {
         let entry = entry?;
+        let bundle_id = entry.file_name().to_string_lossy().into_owned();
+        let project_name = format!("knit-run-{bundle_id}");
         let state_path = entry.path().join("state.json");
         if !state_path.exists() {
             continue;
         }
         let state: RuntimeRunState = read_json(&state_path)?;
-        used.insert(state.backend_port);
-        used.insert(state.frontend_port);
+        if runtime_container_running(&format!("{project_name}-backend"))
+            || runtime_container_running(&format!("{project_name}-frontend"))
+        {
+            used.insert(state.backend_port);
+            used.insert(state.frontend_port);
+            used.insert(state.database_port);
+        }
     }
 
     Ok(used)
@@ -405,15 +475,109 @@ fn port_available(port: u16) -> bool {
     TcpListener::bind(("0.0.0.0", port)).is_ok() && TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-fn ensure_database_reachable(database: &ProjectRuntimeDatabase) -> Result<()> {
+fn ensure_shared_database_reachable(database: &ProjectRuntimeDatabase) -> Result<()> {
     let addr = format!("127.0.0.1:{}", database.port);
     if TcpStream::connect(&addr).is_err() {
         bail!(
-            "Could not connect to the main dev database on localhost:{}. Start it first with `docker compose up -d db` from the main stack repo.",
+            "Could not connect to the shared dev database on localhost:{}. Start it first with `docker compose up -d db` from the main stack repo, or switch the project runtime database mode to `bundle`.",
             database.port
         );
     }
     Ok(())
+}
+
+fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Result<ResolvedDatabase> {
+    if database.mode == DATABASE_MODE_BUNDLE {
+        let template = database
+            .name_template
+            .as_deref()
+            .unwrap_or("knithub_{bundleId}");
+        let name = template.replace("{bundleId}", bundle_id);
+        let host_port = database.port_base.unwrap_or(5437);
+        Ok(ResolvedDatabase {
+            mode: DATABASE_MODE_BUNDLE.to_string(),
+            host: "db".to_string(),
+            port: 5432,
+            name,
+            host_port: Some(host_port),
+        })
+    } else {
+        Ok(ResolvedDatabase {
+            mode: DATABASE_MODE_SHARED.to_string(),
+            host: database.host.clone(),
+            port: database.port,
+            name: database.name.clone(),
+            host_port: Some(database.port),
+        })
+    }
+}
+
+fn bundle_database_service(project_name: &str, database: &ResolvedDatabase) -> String {
+    if database.mode != DATABASE_MODE_BUNDLE {
+        return String::new();
+    }
+
+    let host_port = database.host_port.unwrap_or(5437);
+    format!(
+        r#"  db:
+    container_name: {project_name}-db
+    image: postgres:17
+    environment:
+      POSTGRES_DB: {db_name}
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+    ports:
+      - "{host_port}:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d {db_name}"]
+      interval: 2s
+      timeout: 5s
+      retries: 20
+
+"#,
+        project_name = project_name,
+        db_name = database.name,
+        host_port = host_port,
+    )
+}
+
+fn runtime_container_running(name: &str) -> bool {
+    Command::new("docker")
+        .args(["inspect", "-f", "{{.State.Running}}", name])
+        .output()
+        .map(|output| String::from_utf8_lossy(&output.stdout).trim() == "true")
+        .unwrap_or(false)
+}
+
+fn runtime_service_status(running: bool) -> &'static str {
+    if running { "running" } else { "stopped" }
+}
+
+fn database_status_label(state: &RuntimeRunState, db_running: bool) -> &'static str {
+    if state.database_mode == DATABASE_MODE_BUNDLE {
+        runtime_service_status(db_running)
+    } else if TcpStream::connect(format!("127.0.0.1:{}", state.database_port)).is_ok() {
+        "reachable"
+    } else {
+        "unreachable"
+    }
+}
+
+fn parse_compose_ports(compose_path: &Path) -> Option<(u16, u16)> {
+    let text = fs::read_to_string(compose_path).ok()?;
+    let backend = parse_host_port(&text, "backend:")?;
+    let frontend = parse_host_port(&text, "frontend:")?;
+    Some((backend, frontend))
+}
+
+fn parse_host_port(text: &str, service_marker: &str) -> Option<u16> {
+    let start = text.find(service_marker)?;
+    let section = &text[start..];
+    let ports_idx = section.find("ports:")?;
+    let section = &section[ports_idx..];
+    let line = section.lines().find(|line| line.contains(":4000") || line.contains(":5173"))?;
+    let mapped = line.split('"').nth(1)?.split(':').next()?;
+    mapped.parse().ok()
 }
 
 fn resolve_stack_repo<'a>(active: &'a ActiveBundle, runtime: &ProjectRuntime) -> Result<&'a RepoEntry> {
@@ -479,9 +643,29 @@ struct RuntimeRunState {
     backend_port: u16,
     frontend_port: u16,
     database_port: u16,
+    #[serde(default = "default_database_mode_state")]
+    database_mode: String,
+    #[serde(default = "default_database_name_state")]
+    database_name: String,
     compose_file: String,
     profile_path: Option<String>,
     started_at: String,
+}
+
+fn default_database_mode_state() -> String {
+    DATABASE_MODE_SHARED.to_string()
+}
+
+fn default_database_name_state() -> String {
+    "knithub_dev".to_string()
+}
+
+struct ResolvedDatabase {
+    mode: String,
+    host: String,
+    port: u16,
+    name: String,
+    host_port: Option<u16>,
 }
 
 struct RuntimePlan {

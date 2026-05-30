@@ -2,7 +2,8 @@ use crate::commands::agents::write_project_agents_md;
 use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
 use crate::ids::slugify;
 use crate::model::{
-    KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, CHECKOUT_MODE_WORKTREE,
+    KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
+    CHECKOUT_MODE_WORKTREE,
 };
 use crate::output as out;
 use crate::store::{
@@ -318,6 +319,77 @@ pub fn remove_project_run_command(name: &str) -> Result<()> {
         out::heading("Removed project command:"),
         out::repo(command_name)
     );
+    Ok(())
+}
+
+pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let project_id = match name {
+        Some(name) => slugify(name),
+        None => active_project_id(&root)?,
+    };
+    let path = project_path(&root, &project_id);
+    if !path.exists() {
+        bail!(
+            "Project `{}` does not exist locally. Run `knit project init {project_id}` first.",
+            out::repo(&project_id)
+        );
+    }
+
+    let mut project: KnitProject = read_json(&path)?;
+    let repo_entry = project
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("repo `{repo_id}` is not listed in project `{}`", project.id))?;
+    let repo_root = Path::new(&repo_entry.path);
+    let config_path = repo_root.join(PROJECT_CONFIG_FILE);
+    if !config_path.exists() {
+        bail!(
+            "No `{}` found in {}. Commit the project runtime config to the stack repo first.",
+            PROJECT_CONFIG_FILE,
+            out::path(repo_root.display())
+        );
+    }
+
+    let incoming: KnitProject = read_json(&config_path)?;
+    if incoming.id != project.id {
+        bail!(
+            "Project id mismatch: workspace has `{}` but `{}` declares `{}`.",
+            project.id,
+            out::path(config_path.display()),
+            incoming.id
+        );
+    }
+
+    if incoming.runtime.is_some() {
+        project.runtime = incoming.runtime;
+    }
+    if incoming.landing.is_some() {
+        project.landing = incoming.landing;
+    }
+    for (command_name, command) in incoming.commands {
+        project.commands.entry(command_name).or_insert(command);
+    }
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+
+    println!(
+        "{} {}",
+        out::heading("Pulled project config:"),
+        out::path(config_path.display())
+    );
+    println!("{} {}", out::heading("Updated:"), out::path(path.display()));
+
+    if agents {
+        let agents_path = write_project_agents_md(&root, &project)?;
+        println!(
+            "{} {}",
+            out::heading("Project AGENTS.md:"),
+            out::path(agents_path.display())
+        );
+    }
     Ok(())
 }
 

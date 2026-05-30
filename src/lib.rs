@@ -48,6 +48,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::push_project_to_remote(name.as_deref(), &remote)
             }
             ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
+            ProjectCommand::Pull { name, repo, agents } => {
+                commands::pull_project_config(name.as_deref(), &repo, agents)
+            }
             ProjectCommand::Command { command } => match command {
                 ProjectRunCommandCli::Set {
                     name,
