@@ -353,6 +353,8 @@ knit prune --apply --untracked --worktrees
 
 Remote bundle cleanup uses the configured KnitHub sync remote, requires a token with `bundle:delete`, and marks matching remote bundle records deleted. Use explicit flags instead of `--all` when you want local/Git branch cleanup but want to preserve KnitHub bundle history.
 
+With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit prune --apply` could delete a local artifact while leaving its KnitHub record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
+
 So the common cleanup distinction is:
 
 ```sh

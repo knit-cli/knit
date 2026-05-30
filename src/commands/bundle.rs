@@ -146,6 +146,20 @@ struct OrphanWorktree {
     path: PathBuf,
 }
 
+/// A bundle that exists on the KnitHub sync remote but has no local artifact and
+/// whose recorded pull requests are all merged or closed, so prune can never reach
+/// it through the local `.knit/bundles/` scan.
+struct RemoteOrphan {
+    remote_id: String,
+    slug: String,
+    reason: &'static str,
+}
+
+/// Surface a non-fatal prune problem on stderr without aborting the whole run.
+fn print_prune_warning(message: impl std::fmt::Display) {
+    eprintln!("{}", out::warn(message));
+}
+
 /// Uncommitted work found in a checkout, split by whether Git tracks it.
 #[derive(Clone, Copy, Default)]
 struct Pending {
@@ -344,7 +358,7 @@ pub fn prune_merged_bundles(
     let mut entries = bundle_json_paths(&dir)?;
     entries.sort();
     let cache = PruneCache::new();
-    let assessments = assess_bundles(&root, entries, refresh, &cache)?;
+    let (assessments, local_ids) = assess_bundles(&root, entries, refresh, &cache);
 
     let mut candidates = Vec::new();
     let mut blocked_untracked = Vec::new();
@@ -365,15 +379,24 @@ pub fn prune_merged_bundles(
     } else {
         Vec::new()
     };
+    let remote_orphans = if remote_bundles {
+        remote_orphan_candidates(config.as_ref(), &local_ids, &root, refresh)
+    } else {
+        Vec::new()
+    };
 
     if report {
         print_prune_report(&assessments, untracked);
     }
 
-    if candidates.is_empty() && orphan_worktrees.is_empty() && blocked_untracked.is_empty() {
+    if candidates.is_empty()
+        && orphan_worktrees.is_empty()
+        && blocked_untracked.is_empty()
+        && remote_orphans.is_empty()
+    {
         println!(
             "{}",
-            out::muted("No dead bundles or orphan worktrees to prune.")
+            out::muted("No dead bundles, orphan worktrees, or remote orphan records to prune.")
         );
         return Ok(());
     }
@@ -411,6 +434,17 @@ pub fn prune_merged_bundles(
                 "  {} {}",
                 out::node(&orphan.id),
                 out::path(orphan.path.display())
+            );
+        }
+    }
+    if !remote_orphans.is_empty() {
+        println!("{}", out::heading("Remote orphan bundle candidates:"));
+        for orphan in &remote_orphans {
+            println!(
+                "  {} {} ({})",
+                out::node(&orphan.slug),
+                out::muted("KnitHub record with no local bundle"),
+                out::muted(orphan.reason)
             );
         }
     }
@@ -453,6 +487,26 @@ pub fn prune_merged_bundles(
         remove_orphan_worktree(&orphan, force_branches)?;
         removed_orphans += 1;
     }
+    let mut removed_remote = 0usize;
+    if let Some(config) = config.as_ref() {
+        for orphan in remote_orphans {
+            match crate::commands::remote::delete_remote_bundle_by_id(config, &orphan.remote_id) {
+                Ok(slug) => {
+                    println!(
+                        "{}: {} {}",
+                        out::node(&orphan.slug),
+                        out::movement("deleted remote bundle"),
+                        out::muted(slug)
+                    );
+                    removed_remote += 1;
+                }
+                Err(err) => print_prune_warning(format!(
+                    "{}: failed to delete remote bundle record: {err:#}",
+                    orphan.slug
+                )),
+            }
+        }
+    }
 
     println!("{} {} bundle(s)", out::heading("Pruned:"), pruned);
     if removed_orphans > 0 {
@@ -462,42 +516,74 @@ pub fn prune_merged_bundles(
             removed_orphans
         );
     }
+    if removed_remote > 0 {
+        println!(
+            "{} {} remote orphan record(s)",
+            out::heading("Removed:"),
+            removed_remote
+        );
+    }
     Ok(())
 }
 
+/// Assess every bundle, returning the assessments plus the set of ids that exist
+/// locally. Best-effort: an unreadable bundle file is skipped with a warning, and
+/// a bundle that fails its scan is skipped rather than aborting the whole prune.
 fn assess_bundles(
     root: &Path,
     entries: Vec<PathBuf>,
     refresh: bool,
     cache: &PruneCache,
-) -> Result<Vec<PruneAssessment>> {
-    if refresh {
-        let bundles: Vec<_> = entries
-            .iter()
-            .map(|path| read_json::<ChangeGroup>(path).map(|bundle| (path.clone(), bundle)))
-            .collect::<Result<Vec<_>, _>>()?;
+) -> (Vec<PruneAssessment>, BTreeSet<String>) {
+    let mut local_ids = BTreeSet::new();
+    let mut bundles = Vec::new();
+    for path in entries {
+        match read_json::<ChangeGroup>(&path) {
+            Ok(bundle) => {
+                local_ids.insert(bundle.id.clone());
+                bundles.push((path, bundle));
+            }
+            Err(err) => print_prune_warning(format!(
+                "skipped unreadable bundle {}: {err:#}",
+                path.display()
+            )),
+        }
+    }
 
-        let results = std::thread::scope(|scope| {
+    let results: Vec<(String, Result<PruneAssessment>)> = if refresh {
+        std::thread::scope(|scope| {
             let mut handles = Vec::new();
             for (path, mut bundle) in bundles {
                 handles.push(scope.spawn(move || {
-                    assess_bundle(root, &path, &mut bundle, true, cache)
+                    let id = bundle.id.clone();
+                    (id, assess_bundle(root, &path, &mut bundle, true, cache))
                 }));
             }
             handles
                 .into_iter()
-                .map(|h| h.join().unwrap())
-                .collect::<Vec<_>>()
-        });
-        results.into_iter().collect()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        })
     } else {
-        let mut assessments = Vec::new();
-        for path in entries {
-            let mut bundle: ChangeGroup = read_json(&path)?;
-            assessments.push(assess_bundle(root, &path, &mut bundle, false, cache)?);
+        bundles
+            .into_iter()
+            .map(|(path, mut bundle)| {
+                let id = bundle.id.clone();
+                (id, assess_bundle(root, &path, &mut bundle, false, cache))
+            })
+            .collect()
+    };
+
+    let mut assessments = Vec::new();
+    for (id, result) in results {
+        match result {
+            Ok(assessment) => assessments.push(assessment),
+            Err(err) => {
+                print_prune_warning(format!("{id}: skipped during prune scan: {err:#}"))
+            }
         }
-        Ok(assessments)
     }
+    (assessments, local_ids)
 }
 
 fn assess_bundle(
@@ -518,34 +604,53 @@ fn assess_bundle(
 
         // Skip review-state refresh for repos whose host is not recognized;
         // prune still proceeds on the remaining signals.
+        // A failed lookup or checkout probe must not abort the whole prune: warn
+        // and fall back to the last recorded state, keeping the bundle when the
+        // checkout is unverifiable.
         if refresh {
             if let Ok(forge) = providers::for_repo(&repo) {
                 if let Some(existing) = publication.as_ref() {
-                    let pr = cache
-                        .view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url)
-                        .with_context(|| {
-                            format!("{}: failed to refresh {}", bundle.id, existing.url)
-                        })?;
-                    providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
-                    publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                    match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
+                        Ok(pr) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Err(err) => print_prune_warning(format!(
+                            "{}/{}: could not refresh {} ({err:#}); using last recorded state",
+                            bundle.id, repo.id, existing.url
+                        )),
+                    }
                 } else if let Some(branch) = branch {
-                    if let Some(pr) = cache
-                        .find_existing_pr(forge.as_ref(), Path::new(&repo.path), branch, &repo.base_branch)
-                        .with_context(|| {
-                            format!(
-                                "{}: failed to check for an existing review object for {}",
-                                bundle.id, branch
-                            )
-                        })?
-                    {
-                        providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
-                        publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                    match cache.find_existing_pr(
+                        forge.as_ref(),
+                        Path::new(&repo.path),
+                        branch,
+                        &repo.base_branch,
+                    ) {
+                        Ok(Some(pr)) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Ok(None) => {}
+                        Err(err) => print_prune_warning(format!(
+                            "{}/{}: could not check for an open review object on {branch} ({err:#}); using last recorded state",
+                            bundle.id, repo.id
+                        )),
                     }
                 }
             }
         }
 
-        pending.merge(cache.checkout_has_pending_changes(root, &repo)?);
+        match cache.checkout_has_pending_changes(root, &repo) {
+            Ok(found) => pending.merge(found),
+            Err(err) => {
+                print_prune_warning(format!(
+                    "{}/{}: could not inspect checkout for pending changes ({err:#}); keeping the bundle to be safe",
+                    bundle.id, repo.id
+                ));
+                pending.tracked = true;
+            }
+        }
 
         let Some(publication) = publication else {
             continue;
@@ -574,6 +679,99 @@ fn assess_bundle(
         saw_merged_publication,
         pending,
     })
+}
+
+/// Find KnitHub remote bundle records that have no local artifact and whose recorded
+/// PRs are all merged or closed. These can never be reached by the local `.knit/bundles/`
+/// scan once their local artifact is gone, so prune would otherwise leave them forever.
+fn remote_orphan_candidates(
+    config: Option<&crate::model::KnitConfig>,
+    local_ids: &BTreeSet<String>,
+    root: &Path,
+    refresh: bool,
+) -> Vec<RemoteOrphan> {
+    let Some(config) = config else {
+        return Vec::new();
+    };
+    let Some(project_id) = config.active_project.clone() else {
+        print_prune_warning(
+            "no active project configured; skipping KnitHub remote orphan detection",
+        );
+        return Vec::new();
+    };
+    let records = match crate::commands::remote::list_remote_bundles(config, &project_id) {
+        Ok(records) => records,
+        Err(err) => {
+            print_prune_warning(format!(
+                "could not list KnitHub remote bundles ({err:#}); skipping remote orphan detection"
+            ));
+            return Vec::new();
+        }
+    };
+    let mut orphans = Vec::new();
+    for record in records {
+        if record.lifecycle_state == "deleted" || local_ids.contains(&record.slug) {
+            continue;
+        }
+        let Some(payload) = record.payload.as_ref() else {
+            continue;
+        };
+        if let Some(reason) = remote_payload_dead_reason(root, payload, refresh) {
+            orphans.push(RemoteOrphan {
+                remote_id: record.remote_id,
+                slug: record.slug,
+                reason,
+            });
+        }
+    }
+    orphans
+}
+
+/// Classify an orphaned remote bundle's pull requests. The remote's stored artifact can be
+/// stale (it was pushed before the PR merged), so with `refresh` on we re-check each PR's
+/// live state from its host by URL, falling back to the last synced state only when the
+/// lookup fails. A bundle is dead only when it has publications and none are still open; one
+/// with no recorded PRs is left alone in case it is unpublished work in progress.
+fn remote_payload_dead_reason(
+    root: &Path,
+    payload: &ChangeGroup,
+    refresh: bool,
+) -> Option<&'static str> {
+    let mut saw_publication = false;
+    let mut saw_merged = false;
+    for publication in &payload.publications {
+        saw_publication = true;
+        let state = if refresh {
+            match providers::by_id(&publication.provider) {
+                Some(forge) => match forge.view(&PrTarget::checkout(root), &publication.url) {
+                    Ok(pr) => pr.state.unwrap_or_else(|| publication.state.clone()),
+                    Err(err) => {
+                        print_prune_warning(format!(
+                            "{}: could not refresh remote review object {} ({err:#}); using last synced state",
+                            payload.id, publication.url
+                        ));
+                        publication.state.clone()
+                    }
+                },
+                None => publication.state.clone(),
+            }
+        } else {
+            publication.state.clone()
+        };
+        if publication_state_is_merged(&state) {
+            saw_merged = true;
+        } else if !publication_state_is_closed(&state) {
+            return None;
+        }
+    }
+    if !saw_publication {
+        return None;
+    }
+    if saw_merged {
+        Some("remote PRs are merged")
+    } else {
+        Some("remote PRs are closed")
+    }
 }
 
 fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
@@ -1488,5 +1686,71 @@ fn validate_commit_ref(
         errors.push(format!(
             "{owner_kind} `{owner_id}` commit sha must not be empty"
         ));
+    }
+}
+
+#[cfg(test)]
+mod prune_tests {
+    use super::*;
+    use crate::model::PublicationEntry;
+
+    fn bundle_with_publication_states(states: &[&str]) -> ChangeGroup {
+        let mut bundle = ChangeGroup::new(
+            "feature".to_string(),
+            "feature".to_string(),
+            "2026-05-05T00:00:00.000Z".to_string(),
+        );
+        bundle.publications = states
+            .iter()
+            .enumerate()
+            .map(|(index, state)| PublicationEntry {
+                repo_id: format!("repo{index}"),
+                provider: "github".to_string(),
+                kind: providers::PULL_REQUEST_KIND.to_string(),
+                number: index as u64 + 1,
+                url: format!("https://github.com/acme/repo{index}/pull/{}", index + 1),
+                base_branch: "main".to_string(),
+                head_branch: format!("knit/feature-{index}"),
+                state: (*state).to_string(),
+                title: None,
+                updated_at: "2026-05-05T00:00:00.000Z".to_string(),
+            })
+            .collect();
+        bundle
+    }
+
+    // refresh=false keeps these pure (no host lookups), exercising the classification of
+    // an orphan remote bundle from its recorded publication states.
+    fn dead_reason(states: &[&str]) -> Option<&'static str> {
+        remote_payload_dead_reason(
+            Path::new("/nonexistent"),
+            &bundle_with_publication_states(states),
+            false,
+        )
+    }
+
+    #[test]
+    fn all_merged_publications_are_dead() {
+        assert_eq!(dead_reason(&["MERGED", "merged"]), Some("remote PRs are merged"));
+    }
+
+    #[test]
+    fn all_closed_publications_are_dead() {
+        assert_eq!(dead_reason(&["CLOSED"]), Some("remote PRs are closed"));
+    }
+
+    #[test]
+    fn merged_and_closed_without_open_is_dead() {
+        assert_eq!(dead_reason(&["MERGED", "CLOSED"]), Some("remote PRs are merged"));
+    }
+
+    #[test]
+    fn any_open_publication_keeps_the_bundle() {
+        assert_eq!(dead_reason(&["MERGED", "OPEN"]), None);
+    }
+
+    #[test]
+    fn no_publications_is_not_an_orphan() {
+        assert_eq!(dead_reason(&[]), None);
     }
 }
