@@ -136,10 +136,18 @@ fn cleanable_worktree_path(
     bundle_id: &str,
     repo: &crate::model::RepoEntry,
 ) -> Option<PathBuf> {
-    let recorded = repo.worktree_path.as_deref()?;
-    let path = resolve_path(root, recorded);
     let clean_root = root.join(".knit/worktrees").join(bundle_id);
-    path.starts_with(clean_root).then_some(path)
+    if let Some(recorded) = repo.worktree_path.as_deref() {
+        let path = resolve_path(root, recorded);
+        return path.starts_with(&clean_root).then_some(path);
+    }
+    // The recorded worktree path can be lost while the checkout survives — for
+    // example when a bundle is synced back from a remote and localized, which
+    // clears the local-only `worktreePath`. Fall back to the conventional
+    // location so cleanup still removes the generated worktree (and frees its
+    // branch) instead of leaving it to block later branch deletion.
+    let conventional = clean_root.join(&repo.id);
+    crate::git::is_git_worktree(&conventional).then_some(conventional)
 }
 
 fn resolve_path(root: &Path, path: &str) -> PathBuf {
