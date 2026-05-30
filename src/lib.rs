@@ -373,7 +373,12 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
         Commands::Status => commands::show_status(),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
-        Commands::Fetch { repos, all } => commands::fetch_repos(&repos, all),
+        Commands::Fetch {
+            repos,
+            mode,
+            remote,
+            no_remote,
+        } => commands::fetch_repos(&repos, mode, remote.as_deref(), no_remote),
         Commands::Pull {
             repos,
             all,

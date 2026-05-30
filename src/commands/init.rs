@@ -262,6 +262,12 @@ Push the bundle's feature branches after committing:
 knit --bundle feature-a push --set-upstream
 ```
 
+Push the bundle to a KnitHub remote so it appears in the hosted dashboard:
+
+```sh
+knit --bundle feature-a push --remote knithub
+```
+
 Publish PRs against their intended GitHub base branch:
 
 ```sh
@@ -356,6 +362,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
+- `knit push --remote knithub` pushes the resolved bundle to the configured KnitHub remote so it is visible in the hosted dashboard.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit checkpoint "note"` records non-Git progress in the bundle ledger.
 - `knit close --reason "merged"` marks the bundle closed without deleting branches or worktrees.

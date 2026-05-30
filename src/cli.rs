@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -11,6 +11,16 @@ pub struct Cli {
     pub bundle: Option<String>,
     #[command(subcommand)]
     pub command: Commands,
+}
+
+#[derive(ValueEnum, Clone, Debug)]
+pub enum FetchMode {
+    /// Fetch both git repos and knit bundles (default).
+    All,
+    /// Fetch git repos only.
+    Git,
+    /// Fetch knit bundles only.
+    Knit,
 }
 
 #[derive(Subcommand)]
@@ -227,13 +237,19 @@ pub enum Commands {
         /// Optional repo ids or paths to limit the diff.
         repos: Vec<String>,
     },
-    /// Fetch tracked repos without merging.
+    /// Fetch tracked repos and/or bundles.
     Fetch {
-        /// Optional repo ids or paths to limit the fetch.
+        /// Optional repo ids or paths to limit the git fetch.
         repos: Vec<String>,
-        /// Fetch every tracked repo. This is the default when no repos are passed.
-        #[arg(long)]
-        all: bool,
+        /// Fetch mode: --all (default), --git only, --knit only.
+        #[arg(long, default_value = "all", value_name = "MODE")]
+        mode: FetchMode,
+        /// Named KnitHub remote for knit fetch. Uses `knithub` or sync_remote if not specified.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// (Deprecated, use --git) Skip KnitHub remote sync.
+        #[arg(long, hide = true)]
+        no_remote: bool,
     },
     /// Pull tracked repos. With no flags: inside a bundle pulls that bundle's
     /// checkouts; at the workspace base pulls every project main repo and open
