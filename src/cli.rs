@@ -229,9 +229,11 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
-    /// Pull tracked repos.
+    /// Pull tracked repos. With no flags: inside a bundle pulls that bundle's
+    /// checkouts; at the workspace base pulls every project main repo and open
+    /// bundle, reporting each.
     Pull {
-        /// Optional repo ids or paths to limit the pull.
+        /// Optional repo ids or paths to limit a single-bundle pull.
         repos: Vec<String>,
         /// Pull every tracked repo. This is the default when no repos are passed.
         #[arg(long)]
@@ -245,6 +247,12 @@ pub enum Commands {
         /// Pull the tracked feature checkouts instead of original/base repo paths.
         #[arg(long)]
         feature: bool,
+        /// Update the active project's repos (their source checkouts, current branch, fast-forward only).
+        #[arg(long)]
+        main: bool,
+        /// Update every open bundle's checkouts from its KnitHub artifact. Combine with --main.
+        #[arg(long)]
+        bundles: bool,
         /// Also pull the current bundle artifact from a KnitHub remote. With no value, uses `knithub`.
         #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "knithub")]
         remote: Option<String>,

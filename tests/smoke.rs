@@ -1531,6 +1531,94 @@ fn pull_updates_original_base_checkout_and_bundle_base_sha() {
 }
 
 #[test]
+fn pull_main_fast_forwards_project_repos_and_reports() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, backend_collab) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collab) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["project", "init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    // Advance backend's origin main; leave frontend with a local dirty edit.
+    append_line(&backend_collab.join("app.txt"), "remote main update");
+    git(&backend_collab, ["add", "app.txt"]);
+    git(&backend_collab, ["commit", "-m", "Remote main update"]);
+    git(&backend_collab, ["push", "origin", "main"]);
+    let backend_sha = git(&backend_collab, ["rev-parse", "HEAD"]);
+    append_line(&frontend.join("app.txt"), "local uncommitted edit");
+
+    let report = knit(&workspace, ["pull", "--main"]);
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("backend"));
+    assert!(report.contains(&backend_sha[..7]));
+    assert!(report.contains("frontend"));
+    assert!(report.contains("skipped"));
+
+    // Backend's source checkout fast-forwarded; the dirty repo was left alone.
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), backend_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["project", "init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Two open bundles: the old workspace-fallback guard refused a bare pull at
+    // the root. The new aggregate pull reports instead.
+    knit(&workspace, ["bundle", "start", "feature one"]);
+    knit(&workspace, ["bundle", "start", "feature two"]);
+
+    let report = knit(&workspace, ["pull"]);
+    assert!(!report.contains("Refusing"));
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("Pulled:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_bundles_without_remote_reports_each_bundle_skipped() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "start", "feature one"]);
+    knit(&workspace, ["bundle", "start", "feature two"]);
+
+    let report = knit(&workspace, ["pull", "--bundles"]);
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("no KnitHub remote configured"));
+    // --bundles alone does not touch project main repos.
+    assert!(!report.contains("Main repos:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");

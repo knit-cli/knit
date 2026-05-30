@@ -145,7 +145,7 @@ knit clean [--plans] [--worktrees] [--closed] [--merge-worktrees] [--all] [--for
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
-knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
+knit pull [--main] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
@@ -394,16 +394,28 @@ knit fetch backend
 knit fetch --all
 ```
 
-`knit pull` updates tracked repos from their remotes. By default it runs in the original repo path on the recorded base branch and uses `git pull --ff-only`, then updates the repo's recorded `baseSha` in the bundle. It refuses to run when an affected checkout has uncommitted changes unless `--force` is passed. Use `--rebase` for `git pull --rebase`.
+`knit pull` is context-aware. With no target flags:
+
+- **At the workspace base** (the shared workspace fallback, e.g. several open bundles and no specific one resolved) it updates *everything*: every active-project repo's source checkout plus every open bundle, and prints a per-target report instead of refusing.
+- **For a specific resolved bundle** (inside a worktree, `--bundle <id>`, `KNIT_BUNDLE`, or a single-bundle workspace) it pulls that bundle's tracked repos and then its KnitHub artifact, as before.
+
+Target flags drive the aggregate, best-effort report directly and may be combined:
+
+- `--main` updates each active-project repo's *source checkout* on its current branch with `git pull --ff-only`.
+- `--bundles` updates every open bundle's feature checkouts from its KnitHub artifact.
+
+Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and never abort on the first problem: a dirty tree or non-fast-forward is reported (`skipped`/`failed`) while the rest proceed.
 
 ```sh
-knit pull
-knit pull backend
-knit pull --all
+knit pull                 # at the base: project main repos + every open bundle, reported
+knit pull --main          # update all project repos' current branch (fast-forward only)
+knit pull --bundles       # fast-forward every open bundle's checkouts from KnitHub
+knit pull --main --bundles
+knit pull backend         # single-bundle: pull a specific tracked repo's base checkout
 knit pull --rebase frontend
 ```
 
-Use `knit pull --feature` when you intentionally want to pull the tracked Knit feature checkout instead of the original/base checkout. Feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
+Single-bundle pulls still default to the original repo path on the recorded base branch with `git pull --ff-only`, updating the recorded `baseSha`, and refuse on uncommitted changes unless `--force` (use `--rebase` for `git pull --rebase`). Use `knit pull --feature` to pull the tracked Knit feature checkout instead; feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
 
 `knit push` pushes tracked feature branches to `origin`. It does not create PRs, update GitHub metadata, or change bundle state. By default it pushes the current feature branch to `origin/<branch>` without setting upstream; use `--set-upstream` when you want git's upstream tracking configured:
 
