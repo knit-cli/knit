@@ -7,7 +7,7 @@ use crate::model::{
     DEFAULT_LANDING_MERGE_METHOD, SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::providers::github::{self, publication_for_repo, PullRequest};
+use crate::providers::{self, publication_for_repo, CheckRun, Forge, PrTarget, PullRequest};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, load_config, project_path, read_json,
@@ -35,6 +35,99 @@ const STATUS_FAILED: &str = "failed";
 const DEFAULT_LAND_PROVIDER: &str = "github";
 const DEPLOY_MODE_COMMAND: &str = "command";
 const DEPLOY_MODE_PUSH: &str = "push";
+
+pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let mut bundle: crate::model::ChangeGroup = read_json(artifact_path)
+        .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
+    if bundle.repos.is_empty() {
+        bail!("Bundle artifact has no repos.");
+    }
+    if bundle.publications.is_empty() {
+        bail!("Bundle artifact has no review publications. Run publish first.");
+    }
+
+    let started_at = now_iso();
+    let mut merged_repo_ids = Vec::new();
+    let mut publication_urls = Vec::new();
+
+    let repos = bundle.repos.clone();
+
+    for repo in &repos {
+        let Some(publication) = publication_for_repo(&bundle, &repo.id).cloned() else {
+            continue;
+        };
+        let forge = providers::for_repo(repo)?;
+        let target = artifact_target(&cwd, forge.as_ref(), repo)?;
+
+        let pr = forge.view(&target, &publication.url)?;
+        if state_is_merged(&pr) {
+            providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
+            merged_repo_ids.push(repo.id.clone());
+            publication_urls.push(publication.url.clone());
+            println!(
+                "{} {} {}",
+                out::ok("already merged"),
+                out::repo(&repo.id),
+                out::muted(&publication.url)
+            );
+            continue;
+        }
+
+        ensure_open_and_ready(&repo.id, &pr)?;
+
+        let summary = forge.wait_for_checks(&target, &publication.url, true, 1800, 10)?;
+        println!(
+            "{} {} {}",
+            out::ok("checks"),
+            out::repo(&repo.id),
+            out::muted(&summary.status)
+        );
+
+        forge.merge(
+            &target,
+            &publication.url,
+            DEFAULT_LANDING_MERGE_METHOD,
+            false,
+            pr.head_ref_oid.as_deref(),
+        )
+        .with_context(|| format!("{}: merging {}", repo.id, publication.url))?;
+
+        let refreshed = forge.view(&target, &publication.url)?;
+        providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &refreshed);
+        merged_repo_ids.push(repo.id.clone());
+        publication_urls.push(publication.url.clone());
+        println!(
+            "{} {} {}",
+            out::ok("merged"),
+            out::repo(&repo.id),
+            out::muted(&publication.url)
+        );
+    }
+
+    // Record a landed node in the artifact without writing land plan/run files.
+    let node = BundleNode::feature_landed(
+        node_id("land"),
+        started_at,
+        format!("land-{}", bundle.id),
+        format!("run-artifact-{}", bundle.id),
+        DEFAULT_LAND_PROVIDER.to_string(),
+        merged_repo_ids,
+        publication_urls,
+    );
+    bundle.nodes.push(node);
+    bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());
+    bundle.updated_at = now_iso();
+
+    match out_path {
+        Some(path) => write_json(path, &bundle),
+        None => {
+            let json = serde_json::to_string_pretty(&bundle).context("failed to encode bundle JSON")?;
+            println!("{json}");
+            Ok(())
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -145,6 +238,13 @@ struct StepOutcome {
     stdout: Option<String>,
     stderr: Option<String>,
     exit_code: Option<i32>,
+    publication_update: Option<PublicationUpdate>,
+}
+
+#[derive(Debug)]
+struct PublicationUpdate {
+    repo: RepoEntry,
+    pr: PullRequest,
 }
 
 pub fn generate_land_plan(
@@ -275,9 +375,9 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         out::heading("Land plan:"),
         out::path(plan_path.display())
     );
-    if plan.provider == "github" {
+    if providers::by_id(&plan.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -361,6 +461,9 @@ pub fn update_land_branches(
         push_update_targets(&targets, set_upstream)?;
         refresh_update_publications(&mut active, &targets)?;
         save_active_bundle(&active)?;
+        // Mirror the pushed feature branches into the KnitHub remote bundle
+        // (default on; see `knit config set push-sync`).
+        crate::commands::remote::maybe_sync_bundle_to_remote(None, false)?;
     }
 
     Ok(())
@@ -378,13 +481,24 @@ fn build_default_plan(active: &ActiveBundle, requested_provider: Option<&str>) -
     ensure_provider(&provider)?;
     let merge = landing.map(|landing| &landing.merge);
     let mut steps = Vec::new();
-    let mut previous: Option<String> = None;
+    let ordered_ids: BTreeSet<String> = merge
+        .map(|m| m.repo_order.iter().cloned().collect())
+        .unwrap_or_default();
+    let empty_needs = BTreeMap::new();
+    let merge_needs = merge.map(|m| &m.needs).unwrap_or(&empty_needs);
+    let mut previous_ordered: Option<String> = None;
     for repo in ordered_merge_repos(active, merge) {
         if publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
         let id = format!("merge-{}", repo.id);
-        let needs = previous.iter().cloned().collect::<Vec<_>>();
+        let needs = if let Some(explicit_needs) = merge_needs.get(&repo.id) {
+            explicit_needs.clone()
+        } else if ordered_ids.contains(&repo.id) {
+            previous_ordered.iter().cloned().collect::<Vec<_>>()
+        } else {
+            Vec::new()
+        };
         steps.push(LandStep {
             id: id.clone(),
             step_type: STEP_MERGE_PR.to_string(),
@@ -403,7 +517,9 @@ fn build_default_plan(active: &ActiveBundle, requested_provider: Option<&str>) -
             deployment_mode: None,
             checkout: None,
         });
-        previous = Some(id);
+        if ordered_ids.contains(&repo.id) {
+            previous_ordered = Some(id);
+        }
     }
     append_project_deployments(active, landing, &mut steps)?;
 
@@ -513,12 +629,11 @@ fn append_project_deployments(
         .filter(|step| step.step_type == STEP_MERGE_PR)
         .filter_map(|step| Some((step.repo_id.clone()?, step.id.clone())))
         .collect::<BTreeMap<_, _>>();
-    let last_merge = steps
+    let all_merge_ids = steps
         .iter()
-        .rev()
-        .find(|step| step.step_type == STEP_MERGE_PR)
-        .map(|step| step.id.clone());
-    let mut previous_deploy: Option<String> = None;
+        .filter(|step| step.step_type == STEP_MERGE_PR)
+        .map(|step| step.id.clone())
+        .collect::<Vec<_>>();
 
     for deployment in &landing.deployments {
         if let Some(repo_id) = &deployment.repo_id {
@@ -536,9 +651,8 @@ fn append_project_deployments(
         let needs = if deployment.needs.is_empty() {
             default_deployment_needs(
                 deployment.repo_id.as_deref(),
-                previous_deploy.as_deref(),
-                last_merge.as_deref(),
                 &merge_step_ids,
+                &all_merge_ids,
             )
         } else {
             deployment.needs.clone()
@@ -566,7 +680,6 @@ fn append_project_deployments(
             deployment_mode: Some(mode),
             checkout,
         });
-        previous_deploy = Some(deployment.id.clone());
     }
 
     Ok(())
@@ -574,21 +687,15 @@ fn append_project_deployments(
 
 fn default_deployment_needs(
     repo_id: Option<&str>,
-    previous_deploy: Option<&str>,
-    last_merge: Option<&str>,
     merge_step_ids: &BTreeMap<String, String>,
+    all_merge_ids: &[String],
 ) -> Vec<String> {
-    let mut needs = Vec::new();
-    if let Some(previous_deploy) = previous_deploy {
-        needs.push(previous_deploy.to_string());
-    } else if let Some(last_merge) = last_merge {
-        needs.push(last_merge.to_string());
-    } else if let Some(repo_id) = repo_id {
+    if let Some(repo_id) = repo_id {
         if let Some(merge_step) = merge_step_ids.get(repo_id) {
-            needs.push(merge_step.clone());
+            return vec![merge_step.clone()];
         }
     }
-    needs
+    all_merge_ids.to_vec()
 }
 
 struct LandUpdateTarget {
@@ -777,10 +884,11 @@ fn advanced_change(
 
 fn append_land_update_node(active: &mut ActiveBundle, changes: Vec<RepoChange>) -> Result<()> {
     let now = now_iso();
+    let provider = bundle_primary_provider(active);
     active.bundle.nodes.push(BundleNode::land_update(
         node_id("land_update"),
         now.clone(),
-        github::PROVIDER.to_string(),
+        provider,
         changes,
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
@@ -831,10 +939,13 @@ fn refresh_update_publications(
     targets: &[LandUpdateTarget],
 ) -> Result<()> {
     for target in targets {
-        let pr = github::view_pr(&target.cwd, &target.publication_url)
-            .with_context(|| format!("{}: failed to refresh PR metadata", target.repo_id))?;
         let repo = active.bundle.repos[target.repo_index].clone();
-        github::upsert_publication(&mut active.bundle, &repo, &pr);
+        let forge = providers::for_repo(&repo)?;
+        let pr_target = PrTarget::checkout(&target.cwd);
+        let pr = forge
+            .view(&pr_target, &target.publication_url)
+            .with_context(|| format!("{}: failed to refresh PR metadata", target.repo_id))?;
+        providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &pr);
     }
     Ok(())
 }
@@ -862,85 +973,169 @@ fn execute_run(
     run: &mut LandRun,
     run_path: &Path,
 ) -> Result<()> {
-    for step_id in order {
-        let step = plan
-            .steps
-            .iter()
-            .find(|step| &step.id == step_id)
-            .expect("validated plan order references a real step");
-        let run_index = run
-            .steps
-            .iter()
-            .position(|run_step| run_step.id == step.id)
-            .expect("run contains every plan step");
+    let waves = step_waves(&plan.steps, order)?;
 
-        if run.steps[run_index].status == STATUS_SUCCEEDED {
+    for wave in &waves {
+        let mut pending: Vec<(&LandStep, usize)> = Vec::new();
+        for step_id in wave {
+            let step = plan
+                .steps
+                .iter()
+                .find(|s| &s.id == step_id)
+                .expect("validated plan order references a real step");
+            let run_index = run
+                .steps
+                .iter()
+                .position(|run_step| run_step.id == step.id)
+                .expect("run contains every plan step");
+            if run.steps[run_index].status == STATUS_SUCCEEDED {
+                continue;
+            }
+            ensure_needs_succeeded(run, step)?;
+            run.steps[run_index].status = STATUS_RUNNING.to_string();
+            run.steps[run_index].started_at = Some(now_iso());
+            run.steps[run_index].finished_at = None;
+            run.steps[run_index].detail = None;
+            run.steps[run_index].stdout = None;
+            run.steps[run_index].stderr = None;
+            run.steps[run_index].exit_code = None;
+            pending.push((step, run_index));
+        }
+
+        if pending.is_empty() {
             continue;
         }
-        ensure_needs_succeeded(run, step)?;
-        run.steps[run_index].status = STATUS_RUNNING.to_string();
-        run.steps[run_index].started_at = Some(now_iso());
-        run.steps[run_index].finished_at = None;
-        run.steps[run_index].detail = None;
-        run.steps[run_index].stdout = None;
-        run.steps[run_index].stderr = None;
-        run.steps[run_index].exit_code = None;
+
         run.status = STATUS_RUNNING.to_string();
         run.updated_at = now_iso();
         write_json(run_path, run)?;
 
-        println!("{} {}", out::movement("running"), out::node(&step.id));
-        let outcome = match execute_step(active, plan, step) {
-            Ok(outcome) => outcome,
-            Err(error) => StepOutcome {
-                success: false,
-                detail: error.to_string(),
-                publication_url: step_publication(active, step).map(|publication| publication.url),
-                stdout: None,
-                stderr: None,
-                exit_code: None,
-            },
+        for (step, _) in &pending {
+            println!("{} {}", out::movement("running"), out::node(&step.id));
+        }
+
+        let active_shared: &ActiveBundle = active;
+        let results: Vec<(String, StepOutcome)> = if pending.len() == 1 {
+            let (step, _) = &pending[0];
+            let outcome = match execute_step(active_shared, plan, step) {
+                Ok(outcome) => outcome,
+                Err(error) => StepOutcome {
+                    success: false,
+                    detail: error.to_string(),
+                    publication_url: step_publication(active_shared, step)
+                        .map(|publication| publication.url),
+                    stdout: None,
+                    stderr: None,
+                    exit_code: None,
+                    publication_update: None,
+                },
+            };
+            vec![(step.id.clone(), outcome)]
+        } else {
+            let mut results = Vec::with_capacity(pending.len());
+            std::thread::scope(|scope| {
+                let handles: Vec<_> = pending
+                    .iter()
+                    .map(|(step, _)| {
+                        let step_id = step.id.clone();
+                        scope.spawn(move || {
+                            let outcome = match execute_step(active_shared, plan, step) {
+                                Ok(outcome) => outcome,
+                                Err(error) => StepOutcome {
+                                    success: false,
+                                    detail: error.to_string(),
+                                    publication_url: step_publication(active_shared, step)
+                                        .map(|publication| publication.url),
+                                    stdout: None,
+                                    stderr: None,
+                                    exit_code: None,
+                                    publication_update: None,
+                                },
+                            };
+                            (step_id, outcome)
+                        })
+                    })
+                    .collect();
+                for handle in handles {
+                    results.push(handle.join().expect("land step thread panicked"));
+                }
+            });
+            results
         };
 
-        let run_step = &mut run.steps[run_index];
-        run_step.status = if outcome.success {
-            STATUS_SUCCEEDED.to_string()
-        } else {
-            STATUS_FAILED.to_string()
-        };
-        run_step.finished_at = Some(now_iso());
-        run_step.detail = Some(outcome.detail.clone());
-        run_step.publication_url = outcome.publication_url;
-        run_step.stdout = outcome.stdout;
-        run_step.stderr = outcome.stderr;
-        run_step.exit_code = outcome.exit_code;
+        let mut bundle_dirty = false;
+        let mut any_failed = false;
+        for (step_id, outcome) in &results {
+            let run_index = run
+                .steps
+                .iter()
+                .position(|run_step| &run_step.id == step_id)
+                .expect("run contains every plan step");
+            let run_step = &mut run.steps[run_index];
+            run_step.status = if outcome.success {
+                STATUS_SUCCEEDED.to_string()
+            } else {
+                STATUS_FAILED.to_string()
+            };
+            run_step.finished_at = Some(now_iso());
+            run_step.detail = Some(outcome.detail.clone());
+            run_step.publication_url = outcome.publication_url.clone();
+            run_step.stdout = outcome.stdout.clone();
+            run_step.stderr = outcome.stderr.clone();
+            run_step.exit_code = outcome.exit_code;
+
+            if outcome.success {
+                println!(
+                    "{} {} {}",
+                    out::ok("succeeded"),
+                    out::node(step_id),
+                    out::muted(&outcome.detail)
+                );
+            } else {
+                any_failed = true;
+                println!(
+                    "{} {} {}",
+                    out::danger("failed"),
+                    out::node(step_id),
+                    outcome.detail
+                );
+            }
+
+            if let Some(update) = &outcome.publication_update {
+                let forge = providers::for_repo(&update.repo)?;
+                providers::upsert_publication(
+                    &mut active.bundle,
+                    &update.repo,
+                    forge.as_ref(),
+                    &update.pr,
+                );
+                bundle_dirty = true;
+            }
+        }
+
         run.updated_at = now_iso();
-        run.status = if outcome.success {
-            STATUS_RUNNING.to_string()
-        } else {
+        run.status = if any_failed {
             STATUS_FAILED.to_string()
+        } else {
+            STATUS_RUNNING.to_string()
         };
         write_json(run_path, run)?;
-        save_active_bundle(active)?;
+        if bundle_dirty {
+            save_active_bundle(active)?;
+        }
 
-        if outcome.success {
-            println!(
-                "{} {} {}",
-                out::ok("succeeded"),
-                out::node(&step.id),
-                out::muted(&outcome.detail)
-            );
-        } else {
-            println!(
-                "{} {} {}",
-                out::danger("failed"),
-                out::node(&step.id),
-                outcome.detail
-            );
+        if any_failed {
+            let failed_ids: Vec<_> = results
+                .iter()
+                .filter(|(_, o)| !o.success)
+                .map(|(id, _)| id.as_str())
+                .collect();
+            let label = if failed_ids.len() == 1 { "step" } else { "steps" };
             bail!(
-                "Land run {} stopped at step {}. Fix the issue and run `knit land resume`.",
+                "Land run {} stopped at {} {}. Fix the issue and run `knit land resume`.",
                 run.id,
-                step.id
+                label,
+                failed_ids.join(", ")
             );
         }
     }
@@ -954,8 +1149,40 @@ fn execute_run(
     Ok(())
 }
 
+fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec<String>>> {
+    let mut waves = Vec::new();
+    let mut satisfied = BTreeSet::new();
+    let mut remaining: BTreeSet<String> = order.iter().cloned().collect();
+
+    while !remaining.is_empty() {
+        let mut wave = Vec::new();
+        for step_id in order {
+            if !remaining.contains(step_id) {
+                continue;
+            }
+            let step = steps
+                .iter()
+                .find(|s| &s.id == step_id)
+                .expect("order references a real step");
+            if step.needs.iter().all(|need| satisfied.contains(need)) {
+                wave.push(step_id.clone());
+            }
+        }
+        if wave.is_empty() {
+            bail!("land plan contains a dependency cycle among remaining steps");
+        }
+        for id in &wave {
+            remaining.remove(id);
+            satisfied.insert(id.clone());
+        }
+        waves.push(wave);
+    }
+
+    Ok(waves)
+}
+
 fn execute_step(
-    active: &mut ActiveBundle,
+    active: &ActiveBundle,
     plan: &LandPlan,
     step: &LandStep,
 ) -> Result<StepOutcome> {
@@ -969,18 +1196,19 @@ fn execute_step(
 }
 
 fn execute_merge_pr(
-    active: &mut ActiveBundle,
+    active: &ActiveBundle,
     plan: &LandPlan,
     step: &LandStep,
 ) -> Result<StepOutcome> {
     let repo_id = required_repo_id(step)?;
     let (_, repo, cwd) = repo_context(active, repo_id)?;
+    let forge = providers::for_repo(&repo)?;
+    let target = PrTarget::checkout(&cwd);
     let publication = publication_for_repo(&active.bundle, repo_id)
-        .with_context(|| format!("{repo_id}: no GitHub PR publication recorded"))?
+        .with_context(|| format!("{repo_id}: no review publication recorded"))?
         .clone();
-    let pr = github::view_pr(&cwd, &publication.url)?;
+    let pr = forge.view(&target, &publication.url)?;
     if state_is_merged(&pr) {
-        github::upsert_publication(&mut active.bundle, &repo, &pr);
         return Ok(StepOutcome {
             success: true,
             detail: "already merged".to_string(),
@@ -988,14 +1216,15 @@ fn execute_merge_pr(
             stdout: None,
             stderr: None,
             exit_code: None,
+            publication_update: Some(PublicationUpdate { repo, pr }),
         });
     }
     ensure_open_and_ready(repo_id, &pr)?;
 
     let mut detail = Vec::new();
     if step.wait_for_checks.unwrap_or(true) {
-        let summary = github::wait_for_checks(
-            &cwd,
+        let summary = forge.wait_for_checks(
+            &target,
             &publication.url,
             step.required_checks_only.unwrap_or(true),
             step.timeout_seconds.unwrap_or(1800),
@@ -1008,23 +1237,19 @@ fn execute_merge_pr(
         .method
         .as_deref()
         .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
-    github::merge_pr(
-        &cwd,
+    forge.merge(
+        &target,
         &publication.url,
         method,
         step.delete_branch.unwrap_or(false),
         pr.head_ref_oid.as_deref(),
     )?;
-    let refreshed = github::view_pr(&cwd, &publication.url).unwrap_or_else(|_| PullRequest {
+    let refreshed = forge.view(&target, &publication.url).unwrap_or_else(|_| PullRequest {
         state: Some("MERGED".to_string()),
         ..pr.clone()
     });
-    github::upsert_publication(&mut active.bundle, &repo, &refreshed);
     detail.push(format!("merged with {method}"));
-
-    if plan.provider != github::PROVIDER {
-        bail!("unsupported land provider `{}`", plan.provider);
-    }
+    let _ = plan;
 
     Ok(StepOutcome {
         success: true,
@@ -1033,16 +1258,22 @@ fn execute_merge_pr(
         stdout: None,
         stderr: None,
         exit_code: None,
+        publication_update: Some(PublicationUpdate {
+            repo,
+            pr: refreshed,
+        }),
     })
 }
 
 fn execute_wait_checks(active: &ActiveBundle, step: &LandStep) -> Result<StepOutcome> {
     let repo_id = required_repo_id(step)?;
-    let (_, _, cwd) = repo_context(active, repo_id)?;
+    let (_, repo, cwd) = repo_context(active, repo_id)?;
+    let forge = providers::for_repo(&repo)?;
+    let target = PrTarget::checkout(&cwd);
     let publication = publication_for_repo(&active.bundle, repo_id)
-        .with_context(|| format!("{repo_id}: no GitHub PR publication recorded"))?;
-    let summary = github::wait_for_checks(
-        &cwd,
+        .with_context(|| format!("{repo_id}: no review publication recorded"))?;
+    let summary = forge.wait_for_checks(
+        &target,
         &publication.url,
         step.required_only.unwrap_or(true),
         step.timeout_seconds.unwrap_or(1800),
@@ -1061,6 +1292,7 @@ fn execute_wait_checks(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
         stdout: None,
         stderr: None,
         exit_code: None,
+        publication_update: None,
     })
 }
 
@@ -1108,6 +1340,7 @@ fn execute_run_command(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
         stdout: non_empty(stdout),
         stderr: non_empty(stderr),
         exit_code,
+        publication_update: None,
     })
 }
 
@@ -1137,6 +1370,7 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
             stdout: None,
             stderr: None,
             exit_code: None,
+            publication_update: None,
         });
     }
 
@@ -1187,6 +1421,7 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
         stdout: non_empty(stdout),
         stderr: non_empty(stderr),
         exit_code,
+        publication_update: None,
     })
 }
 
@@ -1439,17 +1674,19 @@ fn preflight_publications(
         if !seen.insert(repo_id.to_string()) {
             continue;
         }
-        let (_, _, cwd) = repo_context(active, repo_id)?;
+        let (_, repo, cwd) = repo_context(active, repo_id)?;
+        let forge = providers::for_repo(&repo)?;
+        let target = PrTarget::checkout(&cwd);
         let publication = publication_for_repo(&active.bundle, repo_id)
-            .with_context(|| format!("{repo_id}: missing GitHub PR publication"))?;
-        let pr = github::view_pr(&cwd, &publication.url)?;
+            .with_context(|| format!("{repo_id}: missing review publication"))?;
+        let pr = forge.view(&target, &publication.url)?;
         if state_is_merged(&pr) && run.is_some() {
             continue;
         }
         ensure_open_and_ready(repo_id, &pr)?;
         if step.step_type == STEP_WAIT_CHECKS || step.wait_for_checks.unwrap_or(true) {
-            let runs = github::check_runs(
-                &cwd,
+            let runs = forge.check_runs(
+                &target,
                 &publication.url,
                 step.required_checks_only
                     .or(step.required_only)
@@ -1461,7 +1698,7 @@ fn preflight_publications(
     Ok(())
 }
 
-fn ensure_checks_ready(repo_id: &str, runs: &[github::CheckRun]) -> Result<()> {
+fn ensure_checks_ready(repo_id: &str, runs: &[CheckRun]) -> Result<()> {
     let failed = runs
         .iter()
         .filter(|run| {
@@ -1592,9 +1829,9 @@ fn print_plan(plan: &LandPlan, path: &Path) {
         out::heading("Plan file:"),
         out::path(path.display())
     );
-    if plan.provider == "github" {
+    if providers::by_id(&plan.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -1626,9 +1863,9 @@ fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {
         out::heading("Run file:"),
         out::path(path.display())
     );
-    if run.provider == "github" {
+    if providers::by_id(&run.provider).is_some() {
         println!(
-            "{} each recorded GitHub PR base branch",
+            "{} each recorded review object's base branch",
             out::heading("Lands into:")
         );
     }
@@ -1716,7 +1953,20 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
         );
         return;
     };
-    match github::view_pr(&cwd, publication_url) {
+    let forge = match providers::for_repo(repo) {
+        Ok(forge) => forge,
+        Err(error) => {
+            println!(
+                "  {} {} {}",
+                out::repo(repo_id),
+                out::danger("provider unavailable:"),
+                error
+            );
+            return;
+        }
+    };
+    let target = PrTarget::checkout(&cwd);
+    match forge.view(&target, publication_url) {
         Ok(pr) => {
             println!(
                 "  {} #{} {} {}",
@@ -1725,7 +1975,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
                 out::status(pr.state.as_deref().unwrap_or("UNKNOWN")),
                 pr.url
             );
-            match github::check_runs(&cwd, publication_url, true) {
+            match forge.check_runs(&target, publication_url, true) {
                 Ok(runs) => println!("    checks {}", check_status_label(&runs)),
                 Err(error) => println!("    {} {}", out::danger("checks unavailable:"), error),
             }
@@ -1739,7 +1989,7 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
     }
 }
 
-fn check_status_label(runs: &[github::CheckRun]) -> String {
+fn check_status_label(runs: &[CheckRun]) -> String {
     if runs.is_empty() {
         return out::ok("passed (no required checks)");
     }
@@ -1827,10 +2077,33 @@ fn required_repo_id(step: &LandStep) -> Result<&str> {
 }
 
 fn ensure_provider(provider: &str) -> Result<()> {
-    if provider != github::PROVIDER {
-        bail!("unsupported land provider `{provider}`. GitHub is the only provider implemented.");
+    if providers::by_id(provider).is_none() {
+        bail!("unsupported land provider `{provider}`. Supported: github, gitlab, forgejo.");
     }
     Ok(())
+}
+
+/// Build a forge target for artifact landing, scoping to the repo's full name
+/// when the remote is recognized so the CLI can target it without a checkout.
+fn artifact_target(cwd: &Path, forge: &dyn Forge, repo: &RepoEntry) -> Result<PrTarget> {
+    match repo
+        .remote
+        .as_deref()
+        .and_then(|remote| forge.repo_full_name(remote))
+    {
+        Some(full_name) => Ok(PrTarget::explicit(cwd, full_name)),
+        None => Ok(PrTarget::checkout(cwd)),
+    }
+}
+
+/// Best-effort provider label for a bundle, used on informational ledger nodes.
+fn bundle_primary_provider(active: &ActiveBundle) -> String {
+    active
+        .bundle
+        .repos
+        .iter()
+        .find_map(|repo| providers::for_repo(repo).ok().map(|forge| forge.id().to_string()))
+        .unwrap_or_else(|| DEFAULT_LAND_PROVIDER.to_string())
 }
 
 fn validate_merge_method(method: &str) -> Result<()> {
@@ -2030,7 +2303,7 @@ mod tests {
             id: "run".to_string(),
             plan_id: "plan".to_string(),
             bundle_id: "bundle".to_string(),
-            provider: github::PROVIDER.to_string(),
+            provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
             status: STATUS_RUNNING.to_string(),
             created_at: now_iso(),
@@ -2082,6 +2355,86 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn step_waves_groups_independent_steps() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &[]),
+            step("deploy", &["merge-a", "merge-b"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 2);
+        assert_eq!(waves[0].len(), 2);
+        assert!(waves[0].contains(&"merge-a".to_string()));
+        assert!(waves[0].contains(&"merge-b".to_string()));
+        assert_eq!(waves[1], vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_respects_sequential_chain() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &["merge-a"]),
+            step("merge-c", &["merge-b"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["merge-a".to_string()]);
+        assert_eq!(waves[1], vec!["merge-b".to_string()]);
+        assert_eq!(waves[2], vec!["merge-c".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_mixed_parallel_and_sequential() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("merge-b", &["merge-a"]),
+            step("merge-c", &[]),
+            step("deploy", &["merge-b", "merge-c"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert!(waves[0].contains(&"merge-a".to_string()));
+        assert!(waves[0].contains(&"merge-c".to_string()));
+        assert_eq!(waves[1], vec!["merge-b".to_string()]);
+        assert_eq!(waves[2], vec!["deploy".to_string()]);
+    }
+
+    #[test]
+    fn default_deployment_needs_uses_repo_merge_step() {
+        let mut merge_ids = BTreeMap::new();
+        merge_ids.insert("backend".to_string(), "merge-backend".to_string());
+        let all_merge = vec!["merge-backend".to_string(), "merge-frontend".to_string()];
+        let needs = default_deployment_needs(Some("backend"), &merge_ids, &all_merge);
+        assert_eq!(needs, vec!["merge-backend".to_string()]);
+    }
+
+    #[test]
+    fn default_deployment_needs_falls_back_to_all_merges() {
+        let merge_ids = BTreeMap::new();
+        let all_merge = vec!["merge-a".to_string(), "merge-b".to_string()];
+        let needs = default_deployment_needs(None, &merge_ids, &all_merge);
+        assert_eq!(needs, vec!["merge-a".to_string(), "merge-b".to_string()]);
+    }
+
+    #[test]
+    fn step_waves_merge_depends_on_deploy() {
+        let steps = vec![
+            step("merge-a", &[]),
+            step("deploy-a", &["merge-a"]),
+            step("merge-b", &["deploy-a"]),
+        ];
+        let order = ordered_step_ids(&steps).unwrap();
+        let waves = step_waves(&steps, &order).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["merge-a".to_string()]);
+        assert_eq!(waves[1], vec!["deploy-a".to_string()]);
+        assert_eq!(waves[2], vec!["merge-b".to_string()]);
+    }
+
     fn write_test_run(path: &Path, bundle_id: &str) {
         let run = LandRun {
             schema_version: SCHEMA_VERSION.to_string(),
@@ -2089,7 +2442,7 @@ mod tests {
             id: format!("run-{bundle_id}"),
             plan_id: "plan".to_string(),
             bundle_id: bundle_id.to_string(),
-            provider: github::PROVIDER.to_string(),
+            provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
             status: STATUS_SUCCEEDED.to_string(),
             created_at: now_iso(),

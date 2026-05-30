@@ -23,6 +23,7 @@ pub mod remote;
 pub mod remove;
 pub mod revert;
 pub mod run;
+pub mod runtime;
 pub mod schema;
 pub mod stage;
 pub mod status;
@@ -47,7 +48,8 @@ pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
 pub use init::{init_bundle, start_bundle};
 pub use land::{
-    apply_land_plan, generate_land_plan, land_default, resume_land_run, show_land_status,
+    apply_land_from_artifact, apply_land_plan, generate_land_plan, land_default, resume_land_run,
+    show_land_status,
     update_land_branches,
 };
 pub use log::{show_log, show_target};
@@ -55,13 +57,15 @@ pub use merge::{create_compat_bundle, merge_command};
 pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects,
-    refresh_project_agents, remove_project, remove_project_run_command, set_project_org,
+    refresh_project_agents, remove_project, remove_project_run_command, pull_project_config,
+    set_project_org,
     set_project_run_command, show_project,
 };
 pub use publish::{
-    create_github_publications, show_github_publication_status, sync_github_publications,
+    create_publications, create_publications_from_artifact, show_publication_status,
+    sync_publications, sync_publications_from_artifact,
 };
-pub use pull::pull_repos;
+pub use pull::{pull, pull_repos};
 pub use push::push_repos;
 pub use remote::{
     add_remote, clone_project_from_remote, list_remotes, pull_remote_state, push_bundle_to_remote,

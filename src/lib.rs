@@ -48,6 +48,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::push_project_to_remote(name.as_deref(), &remote)
             }
             ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
+            ProjectCommand::Pull { name, repo, agents } => {
+                commands::pull_project_config(name.as_deref(), &repo, agents)
+            }
             ProjectCommand::Command { command } => match command {
                 ProjectRunCommandCli::Set {
                     name,
@@ -232,6 +235,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 force,
                 refresh,
                 no_refresh,
+                untracked,
+                report,
                 all,
                 worktrees,
                 branches,
@@ -248,6 +253,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::prune_merged_bundles(
                     apply || force,
                     refresh,
+                    untracked,
+                    report,
                     worktrees,
                     branches,
                     force_branches,
@@ -323,6 +330,8 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             refresh,
             no_refresh,
+            untracked,
+            report,
             all,
             worktrees,
             branches,
@@ -339,6 +348,8 @@ pub fn run(cli: Cli) -> Result<()> {
             commands::prune_merged_bundles(
                 apply || force,
                 refresh,
+                untracked,
+                report,
                 worktrees,
                 branches,
                 force_branches,
@@ -369,17 +380,28 @@ pub fn run(cli: Cli) -> Result<()> {
             rebase,
             force,
             feature,
+            main,
+            bundles,
             remote,
             no_remote,
-        } => {
-            commands::pull_repos(&repos, all, rebase, force, feature)?;
-            commands::pull_remote_state(remote.as_deref(), no_remote)
-        }
+        } => commands::pull(
+            &repos,
+            all,
+            rebase,
+            force,
+            feature,
+            main,
+            bundles,
+            remote.as_deref(),
+            no_remote,
+        ),
         Commands::Push {
             repos,
             all,
             set_upstream,
-        } => commands::push_repos(&repos, all, set_upstream),
+            remote,
+            no_remote,
+        } => commands::push_repos(&repos, all, set_upstream, remote.as_deref(), no_remote),
         Commands::Run {
             name,
             repos,
@@ -388,28 +410,102 @@ pub fn run(cli: Cli) -> Result<()> {
             args,
         } => commands::run_project_command(name.as_deref(), &repos, all, list, &args),
         Commands::Publish { target } => match target {
-            PublishCommand::Github { command } => match command {
-                GithubPublishCommand::Create {
-                    repos,
-                    bases,
+            PublishCommand::Create {
+                repos,
+                from_artifact,
+                out,
+                no_push,
+                bases,
+                all,
+                draft,
+                sync,
+                no_sync,
+                set_upstream,
+                remote,
+                no_remote,
+            } => match from_artifact {
+                Some(path) => commands::create_publications_from_artifact(
+                    &path,
+                    out.as_deref(),
+                    &repos,
                     all,
                     draft,
-                    sync,
-                    no_sync,
-                    set_upstream,
-                } => commands::create_github_publications(
+                    &bases,
+                    sync || !no_sync,
+                    !no_push,
+                ),
+                None => commands::create_publications(
                     &repos,
                     all,
                     draft,
                     &bases,
                     sync || !no_sync,
                     set_upstream,
+                    remote.as_deref(),
+                    no_remote,
                 ),
-                GithubPublishCommand::Sync { repos, all } => {
-                    commands::sync_github_publications(&repos, all)
+            },
+            PublishCommand::Sync {
+                repos,
+                from_artifact,
+                out,
+                all,
+            } => match from_artifact {
+                Some(path) => {
+                    commands::sync_publications_from_artifact(&path, out.as_deref(), &repos, all)
                 }
+                None => commands::sync_publications(&repos, all),
+            },
+            PublishCommand::Status { repos, all } => {
+                commands::show_publication_status(&repos, all)
+            }
+            PublishCommand::Github { command } => match command {
+                GithubPublishCommand::Create {
+                    repos,
+                    from_artifact,
+                    out,
+                    no_push,
+                    bases,
+                    all,
+                    draft,
+                    sync,
+                    no_sync,
+                    set_upstream,
+                } => match from_artifact {
+                    Some(path) => commands::create_publications_from_artifact(
+                        &path,
+                        out.as_deref(),
+                        &repos,
+                        all,
+                        draft,
+                        &bases,
+                        sync || !no_sync,
+                        !no_push,
+                    ),
+                    None => commands::create_publications(
+                        &repos,
+                        all,
+                        draft,
+                        &bases,
+                        sync || !no_sync,
+                        set_upstream,
+                        None,
+                        false,
+                    ),
+                },
+                GithubPublishCommand::Sync {
+                    repos,
+                    from_artifact,
+                    out,
+                    all,
+                } => match from_artifact {
+                    Some(path) => {
+                        commands::sync_publications_from_artifact(&path, out.as_deref(), &repos, all)
+                    }
+                    None => commands::sync_publications(&repos, all),
+                },
                 GithubPublishCommand::Status { repos, all } => {
-                    commands::show_github_publication_status(&repos, all)
+                    commands::show_publication_status(&repos, all)
                 }
             },
         },
@@ -420,7 +516,14 @@ pub fn run(cli: Cli) -> Result<()> {
                 out,
                 force,
             }) => commands::generate_land_plan(provider.as_deref(), out.as_deref(), force),
-            Some(LandCommand::Apply { plan }) => commands::apply_land_plan(plan.as_deref()),
+            Some(LandCommand::Apply {
+                plan,
+                from_artifact,
+                out,
+            }) => match from_artifact {
+                Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
+                None => commands::apply_land_plan(plan.as_deref()),
+            },
             Some(LandCommand::Resume { run }) => commands::resume_land_run(run.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
             Some(LandCommand::Update {

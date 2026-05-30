@@ -1,16 +1,27 @@
 use crate::checkout::checkout_dir;
+use crate::commands::bundle::list_open_bundle_ids;
+use crate::commands::project::load_project_by_id;
+use crate::commands::remote::{
+    prepare_remote_pull, pull_bundle_remote_state, pull_remote_state, RemoteBundleOutcome,
+    RemotePullContext,
+};
 use crate::git::{current_branch, git_output, rev_parse};
 use crate::ids::short_sha;
-use crate::model::RepoEntry;
+use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::status::status_label;
-use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
+use crate::store::{
+    bundle_path, find_knit_root, load_active_bundle, load_active_bundle_for_update, load_config,
+    read_json, save_active_bundle, ActiveBundle, BundleResolutionSource,
+};
 use crate::time::now_iso;
 use crate::tracking::{sync_note, sync_observed_changes_for_repo_ids};
 use anyhow::{bail, Context, Result};
+use std::collections::HashMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub fn pull_repos(
     selectors: &[String],
@@ -204,5 +215,327 @@ fn print_pull_summary(target: &PullTarget, before: &str, after: &str) {
             out::sha(short_sha(before)),
             out::sha(short_sha(after))
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Context-aware pull orchestrator
+// ---------------------------------------------------------------------------
+
+/// Entry point for `knit pull`. Decides what to update from context and flags:
+/// - `--main` / `--bundles` (or both) run the aggregate, best-effort report.
+/// - With no target flags: inside a resolved bundle, pull that bundle's feature
+///   worktrees plus its KnitHub artifact; at the workspace base (the shared
+///   fallback) pull everything (project main repos + every open bundle).
+#[allow(clippy::too_many_arguments)]
+pub fn pull(
+    selectors: &[String],
+    all: bool,
+    rebase: bool,
+    force: bool,
+    feature: bool,
+    main: bool,
+    bundles: bool,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
+    if main || bundles {
+        return aggregate_pull(main, bundles, rebase, force, remote, no_remote);
+    }
+
+    // A bare `knit pull` (no repo/flag target) at the workspace base means
+    // "update everything": the project's main repos plus every open bundle.
+    // Explicit selectors, `--all`, or `--feature` keep the single-bundle meaning.
+    if selectors.is_empty() && !all && !feature {
+        let active = load_active_bundle()?;
+        if active.resolution_source == BundleResolutionSource::Config {
+            return aggregate_pull(true, true, rebase, force, remote, no_remote);
+        }
+    }
+
+    // A specific bundle is in context: pull its repos (and its KnitHub artifact).
+    pull_repos(selectors, all, rebase, force, feature)?;
+    pull_remote_state(remote, no_remote)
+}
+
+/// Result of pulling one unit (a project repo's source checkout, or a bundle).
+enum Outcome {
+    Advanced { before: String, after: String },
+    Unchanged(String),
+    Synced(String),
+    Skipped(String),
+    Failed(String),
+}
+
+/// Serializes git work that touches the same source repo while letting distinct
+/// repos run concurrently. A `--main` repo and any bundle that includes the same
+/// repo share one lock; unrelated repos never block each other.
+#[derive(Default)]
+struct RepoGate {
+    locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
+}
+
+impl RepoGate {
+    fn mutex_for(&self, path: &Path) -> Arc<Mutex<()>> {
+        self.locks
+            .lock()
+            .unwrap()
+            .entry(path.to_path_buf())
+            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .clone()
+    }
+
+    /// Run `op` while holding the lock for every given repo path. Paths are
+    /// acquired in a globally consistent (sorted) order, so concurrent callers
+    /// holding overlapping sets cannot deadlock.
+    fn lock_all<R>(&self, paths: &[PathBuf], op: impl FnOnce() -> R) -> R {
+        let mut ordered: Vec<PathBuf> = paths.to_vec();
+        ordered.sort();
+        ordered.dedup();
+        let arcs: Vec<Arc<Mutex<()>>> = ordered.iter().map(|path| self.mutex_for(path)).collect();
+        let _guards: Vec<_> = arcs.iter().map(|arc| arc.lock().unwrap()).collect();
+        op()
+    }
+}
+
+/// Update project main repos and/or every open bundle, in parallel, reporting
+/// each target's outcome instead of aborting on the first problem.
+fn aggregate_pull(
+    main: bool,
+    bundles: bool,
+    rebase: bool,
+    force: bool,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+
+    let main_repos: Vec<(String, PathBuf)> = match (main, config.active_project.clone()) {
+        (true, Some(project_id)) => load_project_by_id(&root, &project_id)?
+            .repos
+            .iter()
+            .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
+            .collect(),
+        // No active project: `--main` has nothing to update, but the run should
+        // still report (and process any bundles) rather than erroring out.
+        _ => Vec::new(),
+    };
+
+    let bundle_ids = if bundles {
+        list_open_bundle_ids(&root)?
+    } else {
+        Vec::new()
+    };
+    let remote_context = if bundles {
+        prepare_remote_pull(remote, no_remote)?
+    } else {
+        None
+    };
+    let bundle_repo_paths: HashMap<String, Vec<PathBuf>> = bundle_ids
+        .iter()
+        .map(|id| (id.clone(), read_bundle_repo_paths(&root, id)))
+        .collect();
+
+    let gate = RepoGate::default();
+    let mut main_results: Vec<(String, Outcome)> = Vec::new();
+    let mut bundle_results: Vec<(String, Outcome)> = Vec::new();
+
+    std::thread::scope(|scope| {
+        let main_handles: Vec<_> = main_repos
+            .iter()
+            .map(|(id, path)| {
+                let gate = &gate;
+                scope.spawn(move || {
+                    let outcome =
+                        gate.lock_all(std::slice::from_ref(path), || pull_path(path, rebase, force));
+                    (id.clone(), outcome)
+                })
+            })
+            .collect();
+
+        let bundle_handles: Vec<_> = bundle_ids
+            .iter()
+            .map(|id| {
+                let gate = &gate;
+                let context = remote_context.as_ref();
+                let root = root.as_path();
+                let paths = bundle_repo_paths.get(id).cloned().unwrap_or_default();
+                scope.spawn(move || {
+                    let outcome = gate.lock_all(&paths, || pull_one_bundle(root, context, id));
+                    (id.clone(), outcome)
+                })
+            })
+            .collect();
+
+        main_results = main_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        bundle_results = bundle_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+    });
+
+    report(&main_results, &bundle_results);
+    Ok(())
+}
+
+/// Best-effort `git pull` of one checkout on its current branch. Never bails:
+/// a dirty tree, a non-fast-forward, or a git error becomes a reported outcome.
+fn pull_path(cwd: &Path, rebase: bool, force: bool) -> Outcome {
+    if !cwd.exists() {
+        return Outcome::Failed("source path does not exist".to_string());
+    }
+    if !force {
+        match git_output(cwd, ["status", "--short"]) {
+            Ok(status) if !status.trim().is_empty() => {
+                return Outcome::Skipped("uncommitted changes".to_string())
+            }
+            Ok(_) => {}
+            Err(error) => return Outcome::Failed(condense(&error)),
+        }
+    }
+    let before = match rev_parse(cwd, "HEAD") {
+        Ok(sha) => sha,
+        Err(error) => return Outcome::Failed(condense(&error)),
+    };
+    let mut args = vec![OsString::from("pull")];
+    args.push(OsString::from(if rebase { "--rebase" } else { "--ff-only" }));
+    if let Err(error) = git_output(cwd, args) {
+        return Outcome::Failed(condense(&error));
+    }
+    let after = match rev_parse(cwd, "HEAD") {
+        Ok(sha) => sha,
+        Err(error) => return Outcome::Failed(condense(&error)),
+    };
+    if before == after {
+        Outcome::Unchanged(after)
+    } else {
+        Outcome::Advanced { before, after }
+    }
+}
+
+fn pull_one_bundle(root: &Path, context: Option<&RemotePullContext>, bundle_id: &str) -> Outcome {
+    let Some(context) = context else {
+        return Outcome::Skipped("no KnitHub remote configured".to_string());
+    };
+    match pull_bundle_remote_state(root, context, bundle_id) {
+        Ok(RemoteBundleOutcome::Pulled(hash)) => Outcome::Synced(hash),
+        Ok(RemoteBundleOutcome::Skipped(reason)) => Outcome::Skipped(reason),
+        Err(error) => Outcome::Failed(condense(&error)),
+    }
+}
+
+fn read_bundle_repo_paths(root: &Path, bundle_id: &str) -> Vec<PathBuf> {
+    let path = bundle_path(root, bundle_id);
+    match read_json::<ChangeGroup>(&path) {
+        Ok(bundle) => bundle
+            .repos
+            .iter()
+            .map(|repo| PathBuf::from(&repo.path))
+            .collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+/// Collapse a multi-line git/anyhow error into a single reportable line,
+/// dropping git's advice ("hint:") noise.
+fn condense(error: &anyhow::Error) -> String {
+    format!("{error:#}")
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with("hint:"))
+        .collect::<Vec<_>>()
+        .join("; ")
+}
+
+fn report(main_results: &[(String, Outcome)], bundle_results: &[(String, Outcome)]) {
+    let mut totals = Totals::default();
+    if !main_results.is_empty() {
+        println!("{}", out::heading("Main repos:"));
+        for (id, outcome) in main_results {
+            print_outcome(id, outcome);
+            totals.add(outcome);
+        }
+    }
+    if !bundle_results.is_empty() {
+        println!("{}", out::heading("Bundles:"));
+        for (id, outcome) in bundle_results {
+            print_outcome(id, outcome);
+            totals.add(outcome);
+        }
+    }
+    if main_results.is_empty() && bundle_results.is_empty() {
+        println!("{}", out::muted("Nothing to pull."));
+        return;
+    }
+    println!(
+        "{} {} advanced, {} unchanged, {} synced, {} skipped, {} failed",
+        out::heading("Pulled:"),
+        totals.advanced,
+        totals.unchanged,
+        totals.synced,
+        totals.skipped,
+        totals.failed
+    );
+}
+
+#[derive(Default)]
+struct Totals {
+    advanced: usize,
+    unchanged: usize,
+    synced: usize,
+    skipped: usize,
+    failed: usize,
+}
+
+impl Totals {
+    fn add(&mut self, outcome: &Outcome) {
+        match outcome {
+            Outcome::Advanced { .. } => self.advanced += 1,
+            Outcome::Unchanged(_) => self.unchanged += 1,
+            Outcome::Synced(_) => self.synced += 1,
+            Outcome::Skipped(_) => self.skipped += 1,
+            Outcome::Failed(_) => self.failed += 1,
+        }
+    }
+}
+
+fn print_outcome(id: &str, outcome: &Outcome) {
+    match outcome {
+        Outcome::Advanced { before, after } => println!(
+            "  {} {} {} -> {}",
+            out::repo(id),
+            out::movement("advanced"),
+            out::sha(short_sha(before)),
+            out::sha(short_sha(after))
+        ),
+        Outcome::Unchanged(sha) => println!(
+            "  {} {} {}",
+            out::repo(id),
+            out::muted("unchanged"),
+            out::sha(short_sha(sha))
+        ),
+        Outcome::Synced(hash) => println!(
+            "  {} {} {}",
+            out::repo(id),
+            out::movement("pulled"),
+            out::muted(hash)
+        ),
+        Outcome::Skipped(reason) => println!(
+            "  {} {} ({})",
+            out::repo(id),
+            out::muted("skipped"),
+            out::muted(reason)
+        ),
+        Outcome::Failed(reason) => println!(
+            "  {} {} ({})",
+            out::repo(id),
+            out::danger("failed"),
+            out::muted(reason)
+        ),
     }
 }
