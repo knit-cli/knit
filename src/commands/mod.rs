@@ -57,7 +57,8 @@ pub use merge::{create_compat_bundle, merge_command};
 pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects,
-    refresh_project_agents, remove_project, remove_project_run_command, set_project_org,
+    refresh_project_agents, remove_project, remove_project_run_command, pull_project_config,
+    set_project_org,
     set_project_run_command, show_project,
 };
 pub use publish::{

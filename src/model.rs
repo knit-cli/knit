@@ -197,6 +197,8 @@ pub struct ProjectRuntime {
     pub kind: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_repo: Option<String>,
+    #[serde(default = "default_project_config_file")]
+    pub project_config_file: String,
     #[serde(default = "default_compose_file")]
     pub compose_file: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -223,15 +225,33 @@ fn default_compose_file() -> String {
     "docker-compose.yml".to_string()
 }
 
+fn default_project_config_file() -> String {
+    "knit.project.json".to_string()
+}
+
+pub const PROJECT_CONFIG_FILE: &str = "knit.project.json";
+pub const DATABASE_MODE_SHARED: &str = "shared";
+pub const DATABASE_MODE_BUNDLE: &str = "bundle";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntimeDatabase {
+    #[serde(default = "default_database_mode")]
+    pub mode: String,
     #[serde(default = "default_database_host")]
     pub host: String,
     #[serde(default = "default_database_port")]
     pub port: u16,
     #[serde(default = "default_database_name")]
     pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name_template: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port_base: Option<u16>,
+}
+
+fn default_database_mode() -> String {
+    DATABASE_MODE_SHARED.to_string()
 }
 
 fn default_database_host() -> String {
@@ -284,9 +304,12 @@ fn default_frontend_container_port() -> u16 {
 impl Default for ProjectRuntimeDatabase {
     fn default() -> Self {
         Self {
+            mode: default_database_mode(),
             host: default_database_host(),
             port: default_database_port(),
             name: default_database_name(),
+            name_template: None,
+            port_base: None,
         }
     }
 }

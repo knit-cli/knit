@@ -3,6 +3,7 @@ use crate::git::git_output;
 use crate::model::{KnitProject, RepoEntry, DEFAULT_LANDING_MERGE_METHOD};
 use crate::output as out;
 use crate::store::ActiveBundle;
+use crate::store::read_json;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -192,6 +193,7 @@ fn worktree_agents_section(active: &ActiveBundle, repo: &RepoEntry, checkout: &P
         .map(|(repo_id, path)| format!("- `{repo_id}`: `{path}`"))
         .collect::<Vec<_>>()
         .join("\n");
+    let runtime_section = worktree_runtime_section(active);
 
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
@@ -211,7 +213,7 @@ knit add
 knit commit --stage -m "Describe the feature change"
 knit push --set-upstream
 ```
-
+{runtime_section}
 Sibling worktrees for this bundle:
 
 {repo_worktrees}
@@ -222,11 +224,120 @@ Do not edit the original source checkout for feature work unless the bundle was 
         bundle = active.bundle.id,
         repo = repo.id,
         checkout = checkout_display,
+        runtime_section = runtime_section,
         repo_worktrees = if repo_worktrees.is_empty() {
             "(none)".to_string()
         } else {
             repo_worktrees
         }
+    )
+}
+
+fn worktree_runtime_section(active: &ActiveBundle) -> String {
+    let Some(project) = load_bundle_project(active) else {
+        return String::new();
+    };
+    let Some(runtime) = &project.runtime else {
+        return String::new();
+    };
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    if active.bundle.repos.iter().all(|repo| repo.id != stack_repo) {
+        return String::new();
+    }
+
+    format!(
+        r#"
+When the project defines a bundle runtime, start the bundle stack from a stack worktree checkout such as `{stack_repo}`:
+
+```sh
+knit run up
+knit run status
+knit run down
+```
+
+`knit run up` generates `.knit/runtime-runs/{bundle}/docker-compose.yml`, picks free host ports, and starts the bundle stack. Use `knit run status` for the live URLs; do not guess ports from an older run.
+
+"#
+        ,
+        stack_repo = stack_repo,
+        bundle = active.bundle.id,
+    )
+}
+
+fn load_bundle_project(active: &ActiveBundle) -> Option<KnitProject> {
+    let project_id = active.bundle.project_id.as_deref()?;
+    let path = active.root.join(".knit/projects").join(format!("{project_id}.project.json"));
+    read_json(&path).ok()
+}
+
+fn project_runtime_agents_section(project: &KnitProject) -> String {
+    let Some(runtime) = &project.runtime else {
+        return String::new();
+    };
+
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    let frontend_repo = runtime.frontend_repo.as_deref().unwrap_or("knithub-frontend");
+    let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
+    let config_file = &runtime.project_config_file;
+    let database = runtime.database.clone().unwrap_or_default();
+    let database_mode = database.mode.as_str();
+    let database_detail = if database_mode == crate::model::DATABASE_MODE_BUNDLE {
+        format!(
+            "mode `{database_mode}` with database `{name}` on host port `{port}` (started by the bundle runtime compose file)",
+            name = database
+                .name_template
+                .as_deref()
+                .unwrap_or("knithub_{bundleId}"),
+            port = database.port_base.unwrap_or(5437),
+        )
+    } else {
+        format!(
+            "mode `{database_mode}` using `{name}` on localhost:`{port}` (must already be running before `knit run up`)",
+            name = database.name,
+            port = database.port,
+        )
+    };
+    let ports = runtime.ports.clone().unwrap_or_default();
+
+    format!(
+        r#"
+### Bundle runtime
+
+This project defines a native Knit bundle runtime. The committed source of truth lives in `{config_file}` inside `{stack_repo}`; sync it into the workspace with:
+
+```sh
+knit project pull --repo {stack_repo}
+knit project agents
+```
+
+From a bundle worktree that includes `{stack_repo}` and `{frontend_repo}`:
+
+```sh
+knit run up
+knit run status
+knit run down
+```
+
+Runtime behavior:
+
+- Generates `.knit/runtime-runs/<bundle>/docker-compose.yml` and `state.json`
+- Builds the stack from bundle worktrees, not the source checkout on `main`
+- Allocates host ports starting at backend `{backend_base}`, frontend `{frontend_base}` (step `{step}`)
+- Database: {database_detail}
+- Opens `{profile_path}` on the allocated frontend port after `knit run status`
+
+Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode starts a dedicated Postgres container per runtime with its own empty database.
+
+"#
+        ,
+        config_file = config_file,
+        stack_repo = stack_repo,
+        frontend_repo = frontend_repo,
+        profile_path = profile_path,
+        backend_base = ports.backend_base,
+        frontend_base = ports.frontend_base,
+        step = ports.step,
+        database_detail = database_detail,
     )
 }
 
@@ -260,6 +371,7 @@ fn project_agents_section(project: &KnitProject) -> String {
         )
     };
     let landing_section = project_landing_agents_section(project);
+    let runtime_section = project_runtime_agents_section(project);
 
     format!(
         r#"{begin}
@@ -289,7 +401,7 @@ For narrower or unusual work, inspect the project first and then choose repo ids
 knit project show {project_id}
 knit bundle start "feature title" --project {project_id} --repo <repo-id>
 ```
-{landing_section}
+{runtime_section}{landing_section}
 {end}
 "#,
         begin = begin,
@@ -297,6 +409,7 @@ knit bundle start "feature title" --project {project_id} --repo <repo-id>
         project_id = project.id,
         default_repos = default_repos,
         observed_section = observed_section,
+        runtime_section = runtime_section,
         landing_section = landing_section
     )
 }
