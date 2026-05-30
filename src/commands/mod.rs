@@ -21,6 +21,7 @@ pub mod pull;
 pub mod push;
 pub mod remote;
 pub mod remove;
+pub mod reset;
 pub mod revert;
 pub mod run;
 pub mod runtime;
@@ -72,6 +73,7 @@ pub use remote::{
     push_bundle_to_remote, push_project_to_remote, remove_remote, set_remote_token, show_remote,
 };
 pub use remove::remove_repos;
+pub use reset::reset_checkouts;
 pub use revert::revert_target;
 pub use run::run_project_command;
 pub use schema::print_schema;

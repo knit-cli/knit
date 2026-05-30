@@ -696,6 +696,64 @@ fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
 }
 
 #[test]
+fn reset_hard_restores_tracked_changes_in_project_source_repos() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["project", "init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Dirty the canonical source checkout the way an external tool would.
+    fs::write(backend.join("app.txt"), "tampered\n").unwrap();
+    fs::write(backend.join("untracked.txt"), "new\n").unwrap();
+
+    let output = knit(&workspace, ["reset", "--hard", "--all"]);
+    assert!(output.contains("resetting source checkouts for project demo"));
+
+    // Tracked change is discarded; the untracked file survives, mirroring `git reset --hard`.
+    assert_eq!(
+        fs::read_to_string(backend.join("app.txt")).unwrap(),
+        "backend\n"
+    );
+    assert!(backend.join("untracked.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn reset_hard_resets_bundle_worktree_when_resolved_from_worktree() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "feature"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+
+    let checkout = workspace.join(".knit/worktrees/feature/backend");
+    fs::write(checkout.join("app.txt"), "tampered\n").unwrap();
+
+    // Resolved from the worktree cwd, reset targets the bundle checkout, not project sources.
+    let output = knit(&checkout, ["reset", "--hard"]);
+    assert!(!output.contains("resetting source checkouts"));
+    assert_eq!(
+        fs::read_to_string(checkout.join("app.txt")).unwrap(),
+        "backend\n"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn run_executes_named_project_commands_in_bundle_worktrees() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
