@@ -9,7 +9,13 @@ use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::Path;
 
-pub fn push_repos(selectors: &[String], all: bool, set_upstream: bool) -> Result<()> {
+pub fn push_repos(
+    selectors: &[String],
+    all: bool,
+    set_upstream: bool,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
@@ -29,6 +35,10 @@ pub fn push_repos(selectors: &[String], all: bool, set_upstream: bool) -> Result
     if !failures.is_empty() {
         bail!("push failed:\n{}", failures.join("\n"));
     }
+
+    // After git branches are pushed, also sync the bundle artifact to the
+    // configured KnitHub remote (default on; see `knit config set push-sync`).
+    crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
 
     Ok(())
 }

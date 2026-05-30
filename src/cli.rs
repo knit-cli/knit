@@ -157,6 +157,12 @@ pub enum Commands {
         /// Use only cached recorded PR states without querying GitHub.
         #[arg(long)]
         no_refresh: bool,
+        /// Treat bundles whose only uncommitted work is untracked files as dead work (the untracked files are discarded when worktrees are removed).
+        #[arg(long)]
+        untracked: bool,
+        /// Report every bundle's prune status, including ones that are kept.
+        #[arg(long)]
+        report: bool,
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
@@ -229,9 +235,11 @@ pub enum Commands {
         #[arg(long)]
         all: bool,
     },
-    /// Pull tracked repos.
+    /// Pull tracked repos. With no flags: inside a bundle pulls that bundle's
+    /// checkouts; at the workspace base pulls every project main repo and open
+    /// bundle, reporting each.
     Pull {
-        /// Optional repo ids or paths to limit the pull.
+        /// Optional repo ids or paths to limit a single-bundle pull.
         repos: Vec<String>,
         /// Pull every tracked repo. This is the default when no repos are passed.
         #[arg(long)]
@@ -245,6 +253,12 @@ pub enum Commands {
         /// Pull the tracked feature checkouts instead of original/base repo paths.
         #[arg(long)]
         feature: bool,
+        /// Update the active project's repos (their source checkouts, current branch, fast-forward only).
+        #[arg(long)]
+        main: bool,
+        /// Update every open bundle's checkouts from its KnitHub artifact. Combine with --main.
+        #[arg(long)]
+        bundles: bool,
         /// Also pull the current bundle artifact from a KnitHub remote. With no value, uses `knithub`.
         #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "knithub")]
         remote: Option<String>,
@@ -262,6 +276,12 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
+        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync for this push.
+        #[arg(long)]
+        no_remote: bool,
     },
     /// Run a project command inside resolved bundle checkouts.
     Run {
@@ -484,6 +504,12 @@ pub enum BundleCommand {
         /// Use only cached recorded PR states without querying GitHub.
         #[arg(long)]
         no_refresh: bool,
+        /// Treat bundles whose only uncommitted work is untracked files as dead work (the untracked files are discarded when worktrees are removed).
+        #[arg(long)]
+        untracked: bool,
+        /// Report every bundle's prune status, including ones that are kept.
+        #[arg(long)]
+        report: bool,
         /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
         #[arg(long)]
         all: bool,
@@ -666,6 +692,17 @@ pub enum ProjectCommand {
     Agents {
         /// Project name. Defaults to the active project.
         name: Option<String>,
+    },
+    /// Pull runtime/landing/commands from a repo-local knit.project.json.
+    Pull {
+        /// Project name. Defaults to the active project.
+        name: Option<String>,
+        /// Repo id that contains knit.project.json, usually the stack repo.
+        #[arg(long)]
+        repo: String,
+        /// Refresh project AGENTS.md after pulling.
+        #[arg(long)]
+        agents: bool,
     },
     /// Manage named commands that `knit run` can execute.
     Command {
@@ -891,7 +928,67 @@ pub enum SchemaCommand {
 
 #[derive(Subcommand)]
 pub enum PublishCommand {
-    /// Publish to GitHub pull requests.
+    /// Push feature branches and create missing review objects (auto-detects each repo's host).
+    Create {
+        /// Optional repo ids or paths to limit creation.
+        repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Skip pushing feature branches. Branches must already exist on the remote.
+        #[arg(long)]
+        no_push: bool,
+        /// Override base branch. Use once for all repos or repeat as REPO=BRANCH.
+        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
+        bases: Vec<String>,
+        /// Create review objects for every tracked repo instead of only repos with recorded work.
+        #[arg(long)]
+        all: bool,
+        /// Create draft review objects.
+        #[arg(long)]
+        draft: bool,
+        /// Explicitly sync cross-links after creation. This is the default.
+        #[arg(long, conflicts_with = "no_sync")]
+        sync: bool,
+        /// Skip the second phase that updates every review body with cross-links.
+        #[arg(long)]
+        no_sync: bool,
+        /// Set each feature branch's upstream to origin/<branch> while pushing.
+        #[arg(long)]
+        set_upstream: bool,
+        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync for this publish.
+        #[arg(long)]
+        no_remote: bool,
+    },
+    /// Refresh recorded review metadata and rewrite Knit cross-link blocks.
+    Sync {
+        /// Optional repo ids or paths to limit the sync.
+        repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Sync every tracked repo instead of only repos with recorded work or publications.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show recorded review objects for the resolved bundle.
+    Status {
+        /// Optional repo ids or paths to limit the status.
+        repos: Vec<String>,
+        /// Show every tracked repo. This is the default when no repos are passed.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Publish to GitHub explicitly. Alias kept for back-compat; prefer `knit publish create`.
     Github {
         #[command(subcommand)]
         command: GithubPublishCommand,
@@ -917,6 +1014,13 @@ pub enum LandCommand {
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
         #[arg(long)]
         plan: Option<PathBuf>,
+        /// Read a bundle JSON artifact from this path and land PRs without a local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
     },
     /// Resume a failed or incomplete landing run.
     Resume {
@@ -955,6 +1059,17 @@ pub enum GithubPublishCommand {
     Create {
         /// Optional repo ids or paths to limit PR creation.
         repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        /// When set, Knit will not require a local worktree checkout.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
+        /// Skip pushing feature branches (GitHub-only). Feature branches must already exist on the remote.
+        #[arg(long)]
+        no_push: bool,
         /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
         #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
         bases: Vec<String>,
@@ -978,6 +1093,13 @@ pub enum GithubPublishCommand {
     Sync {
         /// Optional repo ids or paths to limit PR sync.
         repos: Vec<String>,
+        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        /// Write the updated bundle JSON artifact to this path.
+        /// When omitted, the updated artifact is printed to stdout.
+        #[arg(long)]
+        out: Option<PathBuf>,
         /// Sync every tracked repo instead of only repos with recorded bundle work or publications.
         #[arg(long)]
         all: bool,

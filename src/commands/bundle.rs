@@ -6,7 +6,7 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::providers::github;
+use crate::providers::{self, Forge, PrTarget, PullRequest};
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
     load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
@@ -14,10 +14,11 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;
@@ -137,7 +138,7 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
 struct PruneCandidate {
     id: String,
     repo_count: usize,
-    reason: &'static str,
+    reason: String,
 }
 
 struct OrphanWorktree {
@@ -159,9 +160,171 @@ fn print_prune_warning(message: impl std::fmt::Display) {
     eprintln!("{}", out::warn(message));
 }
 
+/// Uncommitted work found in a checkout, split by whether Git tracks it.
+#[derive(Clone, Copy, Default)]
+struct Pending {
+    tracked: bool,
+    untracked: bool,
+}
+
+impl Pending {
+    fn any(self) -> bool {
+        self.tracked || self.untracked
+    }
+
+    fn merge(&mut self, other: Pending) {
+        self.tracked |= other.tracked;
+        self.untracked |= other.untracked;
+    }
+}
+
+/// Everything prune learned about one bundle, so the same signals drive the
+/// prune decision, the `--untracked` relaxation, and the `--report` view.
+struct PruneAssessment {
+    id: String,
+    repo_count: usize,
+    saw_publication: bool,
+    saw_open_publication: bool,
+    saw_merged_publication: bool,
+    pending: Pending,
+}
+
+impl PruneAssessment {
+    /// Reason this bundle is dead work, or `None` if it should be kept.
+    /// With `untracked` set, checkouts whose only uncommitted work is
+    /// untracked files no longer hold the bundle back.
+    fn candidate_reason(&self, untracked: bool) -> Option<String> {
+        if self.saw_open_publication || self.pending.tracked {
+            return None;
+        }
+        if self.pending.untracked && !untracked {
+            return None;
+        }
+        let base = if self.saw_merged_publication {
+            "recorded PRs are merged"
+        } else if self.saw_publication {
+            "no open PRs and no pending changes"
+        } else {
+            "no recorded PRs and no pending changes"
+        };
+        if self.pending.untracked {
+            Some(format!("{base}; discards untracked files"))
+        } else {
+            Some(base.to_string())
+        }
+    }
+
+    /// True when the bundle would be dead work but for untracked files alone.
+    fn blocked_by_untracked_only(&self) -> bool {
+        !self.saw_open_publication && !self.pending.tracked && self.pending.untracked
+    }
+
+    /// The PR side of why the bundle is (or is not yet) dead work.
+    fn pr_basis(&self) -> &'static str {
+        if self.saw_open_publication {
+            "open PR(s)"
+        } else if self.saw_merged_publication {
+            "recorded PRs are merged"
+        } else if self.saw_publication {
+            "no open PRs"
+        } else {
+            "no recorded PRs"
+        }
+    }
+}
+
+struct PruneCache {
+    pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
+    pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
+    pending_changes: Arc<Mutex<HashMap<String, Pending>>>,
+}
+
+#[derive(Clone, Debug, Hash, PartialEq, Eq)]
+struct BranchKey {
+    repo_path: String,
+    head: String,
+    base: String,
+}
+
+impl PruneCache {
+    fn new() -> Self {
+        Self {
+            pr_by_url: Arc::new(Mutex::new(HashMap::new())),
+            pr_by_branch: Arc::new(Mutex::new(HashMap::new())),
+            pending_changes: Arc::new(Mutex::new(HashMap::new())),
+        }
+    }
+
+    fn view_pr(&self, forge: &dyn Forge, cwd: &Path, url: &str) -> Result<PullRequest> {
+        {
+            let cache = self.pr_by_url.lock().unwrap();
+            if let Some(pr) = cache.get(url) {
+                return Ok(pr.clone());
+            }
+        }
+        let pr = forge.view(&PrTarget::checkout(cwd), url)?;
+        self.pr_by_url
+            .lock()
+            .unwrap()
+            .insert(url.to_string(), pr.clone());
+        Ok(pr)
+    }
+
+    fn find_existing_pr(
+        &self,
+        forge: &dyn Forge,
+        cwd: &Path,
+        branch: &str,
+        base_branch: &str,
+    ) -> Result<Option<PullRequest>> {
+        let key = BranchKey {
+            repo_path: cwd.to_string_lossy().to_string(),
+            head: branch.to_string(),
+            base: base_branch.to_string(),
+        };
+        {
+            let cache = self.pr_by_branch.lock().unwrap();
+            if let Some(result) = cache.get(&key) {
+                return Ok(result.clone());
+            }
+        }
+        let result = forge.find_existing(&PrTarget::checkout(cwd), branch, base_branch)?;
+        self.pr_by_branch
+            .lock()
+            .unwrap()
+            .insert(key, result.clone());
+        Ok(result)
+    }
+
+    fn checkout_has_pending_changes(
+        &self,
+        root: &Path,
+        repo: &crate::model::RepoEntry,
+    ) -> Result<Pending> {
+        let Some(path) = checkout_path(root, repo) else {
+            return Ok(Pending::default());
+        };
+        let key = path.to_string_lossy().to_string();
+        {
+            let cache = self.pending_changes.lock().unwrap();
+            if let Some(&result) = cache.get(&key) {
+                return Ok(result);
+            }
+        }
+        let result = path_pending_changes(&path)?;
+        self.pending_changes
+            .lock()
+            .unwrap()
+            .insert(key, result);
+        Ok(result)
+    }
+}
+
 pub fn prune_merged_bundles(
     apply: bool,
     refresh: bool,
+    untracked: bool,
+    report: bool,
     worktrees: bool,
     branches: bool,
     force_branches: bool,
@@ -194,33 +357,23 @@ pub fn prune_merged_bundles(
 
     let mut entries = bundle_json_paths(&dir)?;
     entries.sort();
+    let cache = PruneCache::new();
+    let (assessments, local_ids) = assess_bundles(&root, entries, refresh, &cache);
+
     let mut candidates = Vec::new();
-    let mut local_ids = BTreeSet::new();
-    for path in entries {
-        let mut bundle: ChangeGroup = match read_json(&path) {
-            Ok(bundle) => bundle,
-            Err(err) => {
-                print_prune_warning(format!(
-                    "skipped unreadable bundle {}: {err:#}",
-                    path.display()
-                ));
-                continue;
-            }
-        };
-        local_ids.insert(bundle.id.clone());
-        match dead_work_candidate(&root, &path, &mut bundle, refresh) {
-            Ok(Some(reason)) => candidates.push(PruneCandidate {
-                id: bundle.id.clone(),
-                repo_count: bundle.repos.len(),
+    let mut blocked_untracked = Vec::new();
+    for assessment in &assessments {
+        if let Some(reason) = assessment.candidate_reason(untracked) {
+            candidates.push(PruneCandidate {
+                id: assessment.id.clone(),
+                repo_count: assessment.repo_count,
                 reason,
-            }),
-            Ok(None) => {}
-            Err(err) => print_prune_warning(format!(
-                "{}: skipped during prune scan: {err:#}",
-                bundle.id
-            )),
+            });
+        } else if assessment.blocked_by_untracked_only() {
+            blocked_untracked.push(assessment);
         }
     }
+
     let orphan_worktrees = if worktrees {
         orphan_worktree_candidates(&root)?
     } else {
@@ -232,7 +385,15 @@ pub fn prune_merged_bundles(
         Vec::new()
     };
 
-    if candidates.is_empty() && orphan_worktrees.is_empty() && remote_orphans.is_empty() {
+    if report {
+        print_prune_report(&assessments, untracked);
+    }
+
+    if candidates.is_empty()
+        && orphan_worktrees.is_empty()
+        && blocked_untracked.is_empty()
+        && remote_orphans.is_empty()
+    {
         println!(
             "{}",
             out::muted("No dead bundles, orphan worktrees, or remote orphan records to prune.")
@@ -247,7 +408,22 @@ pub fn prune_merged_bundles(
                 "  {} {} repo(s), {}",
                 out::node(&candidate.id),
                 candidate.repo_count,
-                out::muted(candidate.reason)
+                out::muted(&candidate.reason)
+            );
+        }
+    }
+
+    if !blocked_untracked.is_empty() {
+        println!(
+            "{}",
+            out::heading("Blocked by untracked files (use --untracked to prune):")
+        );
+        for assessment in &blocked_untracked {
+            println!(
+                "  {} {} repo(s), {}",
+                out::node(&assessment.id),
+                assessment.repo_count,
+                out::muted(format!("{}, only untracked files", assessment.pr_basis()))
             );
         }
     }
@@ -280,6 +456,7 @@ pub fn prune_merged_bundles(
             out::warn(format!(
                 "Run `{}` to delete these bundle artifacts.",
                 suggested_prune_apply_command(
+                    untracked,
                     worktrees,
                     branches,
                     force_branches,
@@ -349,57 +526,129 @@ pub fn prune_merged_bundles(
     Ok(())
 }
 
-fn dead_work_candidate(
+/// Assess every bundle, returning the assessments plus the set of ids that exist
+/// locally. Best-effort: an unreadable bundle file is skipped with a warning, and
+/// a bundle that fails its scan is skipped rather than aborting the whole prune.
+fn assess_bundles(
+    root: &Path,
+    entries: Vec<PathBuf>,
+    refresh: bool,
+    cache: &PruneCache,
+) -> (Vec<PruneAssessment>, BTreeSet<String>) {
+    let mut local_ids = BTreeSet::new();
+    let mut bundles = Vec::new();
+    for path in entries {
+        match read_json::<ChangeGroup>(&path) {
+            Ok(bundle) => {
+                local_ids.insert(bundle.id.clone());
+                bundles.push((path, bundle));
+            }
+            Err(err) => print_prune_warning(format!(
+                "skipped unreadable bundle {}: {err:#}",
+                path.display()
+            )),
+        }
+    }
+
+    let results: Vec<(String, Result<PruneAssessment>)> = if refresh {
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (path, mut bundle) in bundles {
+                handles.push(scope.spawn(move || {
+                    let id = bundle.id.clone();
+                    (id, assess_bundle(root, &path, &mut bundle, true, cache))
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        })
+    } else {
+        bundles
+            .into_iter()
+            .map(|(path, mut bundle)| {
+                let id = bundle.id.clone();
+                (id, assess_bundle(root, &path, &mut bundle, false, cache))
+            })
+            .collect()
+    };
+
+    let mut assessments = Vec::new();
+    for (id, result) in results {
+        match result {
+            Ok(assessment) => assessments.push(assessment),
+            Err(err) => {
+                print_prune_warning(format!("{id}: skipped during prune scan: {err:#}"))
+            }
+        }
+    }
+    (assessments, local_ids)
+}
+
+fn assess_bundle(
     root: &Path,
     path: &Path,
     bundle: &mut ChangeGroup,
     refresh: bool,
-) -> Result<Option<&'static str>> {
+    cache: &PruneCache,
+) -> Result<PruneAssessment> {
     let repos = bundle.repos.clone();
     let mut saw_publication = false;
     let mut saw_merged_publication = false;
     let mut saw_open_publication = false;
-    let mut saw_pending_changes = false;
+    let mut pending = Pending::default();
     for repo in repos {
         let branch = repo.feature_branch.as_deref();
-        let mut publication = github::publication_for_repo(bundle, &repo.id).cloned();
+        let mut publication = providers::publication_for_repo(bundle, &repo.id).cloned();
 
+        // Skip review-state refresh for repos whose host is not recognized;
+        // prune still proceeds on the remaining signals.
+        // A failed lookup or checkout probe must not abort the whole prune: warn
+        // and fall back to the last recorded state, keeping the bundle when the
+        // checkout is unverifiable.
         if refresh {
-            if let Some(existing) = publication.as_ref() {
-                match github::view_pr(Path::new(&repo.path), &existing.url) {
-                    Ok(pr) => {
-                        github::upsert_publication(bundle, &repo, &pr);
-                        publication = github::publication_for_repo(bundle, &repo.id).cloned();
+            if let Ok(forge) = providers::for_repo(&repo) {
+                if let Some(existing) = publication.as_ref() {
+                    match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
+                        Ok(pr) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Err(err) => print_prune_warning(format!(
+                            "{}/{}: could not refresh {} ({err:#}); using last recorded state",
+                            bundle.id, repo.id, existing.url
+                        )),
                     }
-                    Err(err) => print_prune_warning(format!(
-                        "{}/{}: could not refresh {} ({err:#}); using last recorded state",
-                        bundle.id, repo.id, existing.url
-                    )),
-                }
-            } else if let Some(branch) = branch {
-                match github::find_existing_pr(Path::new(&repo.path), branch, &repo.base_branch) {
-                    Ok(Some(pr)) => {
-                        github::upsert_publication(bundle, &repo, &pr);
-                        publication = github::publication_for_repo(bundle, &repo.id).cloned();
+                } else if let Some(branch) = branch {
+                    match cache.find_existing_pr(
+                        forge.as_ref(),
+                        Path::new(&repo.path),
+                        branch,
+                        &repo.base_branch,
+                    ) {
+                        Ok(Some(pr)) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Ok(None) => {}
+                        Err(err) => print_prune_warning(format!(
+                            "{}/{}: could not check for an open review object on {branch} ({err:#}); using last recorded state",
+                            bundle.id, repo.id
+                        )),
                     }
-                    Ok(None) => {}
-                    Err(err) => print_prune_warning(format!(
-                        "{}/{}: could not check for an open PR on {branch} ({err:#}); using last recorded state",
-                        bundle.id, repo.id
-                    )),
                 }
             }
         }
 
-        match checkout_has_pending_changes(root, &repo) {
-            Ok(true) => saw_pending_changes = true,
-            Ok(false) => {}
+        match cache.checkout_has_pending_changes(root, &repo) {
+            Ok(found) => pending.merge(found),
             Err(err) => {
                 print_prune_warning(format!(
                     "{}/{}: could not inspect checkout for pending changes ({err:#}); keeping the bundle to be safe",
                     bundle.id, repo.id
                 ));
-                saw_pending_changes = true;
+                pending.tracked = true;
             }
         }
 
@@ -422,16 +671,14 @@ fn dead_work_candidate(
         write_json(path, bundle)?;
     }
 
-    if saw_pending_changes || saw_open_publication {
-        return Ok(None);
-    }
-    if saw_merged_publication {
-        return Ok(Some("recorded PRs are merged"));
-    }
-    if saw_publication {
-        return Ok(Some("no open PRs and no pending changes"));
-    }
-    Ok(Some("no recorded PRs and no pending changes"))
+    Ok(PruneAssessment {
+        id: bundle.id.clone(),
+        repo_count: bundle.repos.len(),
+        saw_publication,
+        saw_open_publication,
+        saw_merged_publication,
+        pending,
+    })
 }
 
 /// Find KnitHub remote bundle records that have no local artifact and whose recorded
@@ -482,8 +729,8 @@ fn remote_orphan_candidates(
 
 /// Classify an orphaned remote bundle's pull requests. The remote's stored artifact can be
 /// stale (it was pushed before the PR merged), so with `refresh` on we re-check each PR's
-/// live state from GitHub by URL, falling back to the last synced state only when the lookup
-/// fails. A bundle is dead only when it has publications and none of them are still open; one
+/// live state from its host by URL, falling back to the last synced state only when the
+/// lookup fails. A bundle is dead only when it has publications and none are still open; one
 /// with no recorded PRs is left alone in case it is unpublished work in progress.
 fn remote_payload_dead_reason(
     root: &Path,
@@ -495,15 +742,18 @@ fn remote_payload_dead_reason(
     for publication in &payload.publications {
         saw_publication = true;
         let state = if refresh {
-            match github::view_pr(root, &publication.url) {
-                Ok(pr) => pr.state.unwrap_or_else(|| publication.state.clone()),
-                Err(err) => {
-                    print_prune_warning(format!(
-                        "{}: could not refresh remote PR {} ({err:#}); using last synced state",
-                        payload.id, publication.url
-                    ));
-                    publication.state.clone()
-                }
+            match providers::by_id(&publication.provider) {
+                Some(forge) => match forge.view(&PrTarget::checkout(root), &publication.url) {
+                    Ok(pr) => pr.state.unwrap_or_else(|| publication.state.clone()),
+                    Err(err) => {
+                        print_prune_warning(format!(
+                            "{}: could not refresh remote review object {} ({err:#}); using last synced state",
+                            payload.id, publication.url
+                        ));
+                        publication.state.clone()
+                    }
+                },
+                None => publication.state.clone(),
             }
         } else {
             publication.state.clone()
@@ -524,6 +774,42 @@ fn remote_payload_dead_reason(
     }
 }
 
+fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
+    println!("{}", out::heading("Bundle report:"));
+    for assessment in assessments {
+        let status = if let Some(reason) = assessment.candidate_reason(untracked) {
+            format!("prunable — {reason}")
+        } else if assessment.blocked_by_untracked_only() {
+            "kept — only untracked files (prunable with --untracked)".to_string()
+        } else if assessment.saw_open_publication {
+            "kept — open PR(s)".to_string()
+        } else if assessment.pending.tracked {
+            "kept — uncommitted tracked changes".to_string()
+        } else {
+            "kept".to_string()
+        };
+
+        let mut detail = vec![
+            format!("{} repo(s)", assessment.repo_count),
+            assessment.pr_basis().to_string(),
+        ];
+        if assessment.pending.tracked {
+            detail.push("tracked changes".to_string());
+        }
+        if assessment.pending.untracked {
+            detail.push("untracked files".to_string());
+        }
+
+        println!(
+            "  {} {}",
+            out::node(&assessment.id),
+            out::muted(status)
+        );
+        println!("      {}", out::muted(detail.join(", ")));
+    }
+    println!();
+}
+
 fn publication_state_is_merged(state: &str) -> bool {
     state.eq_ignore_ascii_case("merged")
 }
@@ -532,11 +818,11 @@ fn publication_state_is_closed(state: &str) -> bool {
     state.eq_ignore_ascii_case("closed")
 }
 
-fn checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) -> Result<bool> {
+fn _checkout_has_pending_changes(root: &Path, repo: &crate::model::RepoEntry) -> Result<bool> {
     let Some(path) = checkout_path(root, repo) else {
         return Ok(false);
     };
-    path_has_pending_changes(&path)
+    Ok(path_pending_changes(&path)?.any())
 }
 
 fn checkout_path(root: &Path, repo: &crate::model::RepoEntry) -> Option<PathBuf> {
@@ -557,23 +843,41 @@ fn resolve_path(root: &Path, path: &str) -> PathBuf {
     }
 }
 
-fn path_has_pending_changes(path: &Path) -> Result<bool> {
+fn path_pending_changes(path: &Path) -> Result<Pending> {
     if !path.exists() {
-        return Ok(false);
+        return Ok(Pending::default());
     }
     if crate::git::is_git_worktree(path) {
-        let status = git_output(path, ["status", "--short"])?;
-        return Ok(!status.trim().is_empty());
+        let status = git_output(path, ["status", "--porcelain"])?;
+        let mut pending = Pending::default();
+        for line in status.lines() {
+            if line.trim().is_empty() {
+                continue;
+            }
+            if line.starts_with("??") {
+                pending.untracked = true;
+            } else {
+                pending.tracked = true;
+            }
+        }
+        return Ok(pending);
     }
+    // Stray files outside a Git worktree can't be classified, so treat them
+    // as tracked changes: they block pruning even with --untracked.
     if path.is_file() {
-        return Ok(true);
+        return Ok(Pending {
+            tracked: true,
+            untracked: false,
+        });
     }
+    let mut pending = Pending::default();
     for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
-        if path_has_pending_changes(&entry?.path())? {
-            return Ok(true);
+        pending.merge(path_pending_changes(&entry?.path())?);
+        if pending.tracked && pending.untracked {
+            break;
         }
     }
-    Ok(false)
+    Ok(pending)
 }
 
 fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
@@ -594,7 +898,7 @@ fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
         if id.starts_with('.') || bundle_exists(root, &id) {
             continue;
         }
-        if path_has_pending_changes(&path)? {
+        if path_pending_changes(&path)?.any() {
             println!(
                 "{}: {} {}",
                 out::node(&id),
@@ -612,7 +916,9 @@ fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
 fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
     let worktrees = git_worktrees_under(&orphan.path)?;
     for worktree in worktrees {
-        remove_git_worktree_from_self(&worktree, force)?;
+        if is_linked_worktree(&worktree) {
+            remove_git_worktree_from_self(&worktree, force)?;
+        }
     }
     if orphan.path.exists() {
         fs::remove_dir_all(&orphan.path)
@@ -625,6 +931,10 @@ fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
         out::path(orphan.path.display())
     );
     Ok(())
+}
+
+fn is_linked_worktree(path: &Path) -> bool {
+    path.join(".git").is_file()
 }
 
 fn git_worktrees_under(path: &Path) -> Result<Vec<PathBuf>> {
@@ -659,6 +969,7 @@ fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
 }
 
 fn suggested_prune_apply_command(
+    untracked: bool,
     worktrees: bool,
     branches: bool,
     force_branches: bool,
@@ -666,9 +977,17 @@ fn suggested_prune_apply_command(
     remote_bundles: bool,
 ) -> String {
     if worktrees && branches && force_branches && remote_branches && remote_bundles {
-        return "knit prune --apply --all".to_string();
+        let base = "knit prune --apply --all";
+        return if untracked {
+            format!("{base} --untracked")
+        } else {
+            base.to_string()
+        };
     }
     let mut command = vec!["knit", "prune", "--apply"];
+    if untracked {
+        command.push("--untracked");
+    }
     if worktrees {
         command.push("--worktrees");
     }
@@ -694,6 +1013,27 @@ fn bundle_json_paths(dir: &std::path::Path) -> Result<Vec<std::path::PathBuf>> {
         .map(|entry| entry.path())
         .filter(|path| path.extension() == Some(OsStr::new("json")))
         .collect())
+}
+
+/// Sorted ids of every open bundle in the workspace. Unreadable bundle files
+/// are skipped rather than aborting, so a single bad artifact does not block a
+/// workspace-wide pull.
+pub fn list_open_bundle_ids(root: &Path) -> Result<Vec<String>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut ids = Vec::new();
+    for path in bundle_json_paths(&dir)? {
+        let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
+            continue;
+        };
+        if bundle_state(&bundle) == BUNDLE_STATE_OPEN {
+            ids.push(bundle.id);
+        }
+    }
+    ids.sort();
+    Ok(ids)
 }
 
 pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()> {
@@ -1365,8 +1705,8 @@ mod prune_tests {
             .enumerate()
             .map(|(index, state)| PublicationEntry {
                 repo_id: format!("repo{index}"),
-                provider: github::PROVIDER.to_string(),
-                kind: github::PULL_REQUEST_KIND.to_string(),
+                provider: "github".to_string(),
+                kind: providers::PULL_REQUEST_KIND.to_string(),
                 number: index as u64 + 1,
                 url: format!("https://github.com/acme/repo{index}/pull/{}", index + 1),
                 base_branch: "main".to_string(),
@@ -1379,10 +1719,14 @@ mod prune_tests {
         bundle
     }
 
-    // refresh=false keeps these pure (no GitHub lookups), exercising the classification of
+    // refresh=false keeps these pure (no host lookups), exercising the classification of
     // an orphan remote bundle from its recorded publication states.
     fn dead_reason(states: &[&str]) -> Option<&'static str> {
-        remote_payload_dead_reason(Path::new("/nonexistent"), &bundle_with_publication_states(states), false)
+        remote_payload_dead_reason(
+            Path::new("/nonexistent"),
+            &bundle_with_publication_states(states),
+            false,
+        )
     }
 
     #[test]

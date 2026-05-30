@@ -145,16 +145,17 @@ knit clean [--plans] [--worktrees] [--closed] [--merge-worktrees] [--all] [--for
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
-knit pull [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
-knit push [--all] [--set-upstream] [repo-id-or-path...]
+knit pull [--main] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
+knit push [--all] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run --list
-knit publish github create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [repo-id-or-path...]
-knit publish github sync [repo-id-or-path...]
-knit publish github status [repo-id-or-path...]
+knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
+knit publish sync [repo-id-or-path...]
+knit publish status [repo-id-or-path...]
+knit publish github <create|sync|status> ...   # back-compat alias
 knit land
-knit land plan [--provider github] [--out <path>] [--force]
+knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>]
 knit land resume [--run <path>]
@@ -166,6 +167,7 @@ knit merge push [--run <id-or-path>] [--repo <repo-id>]... [--set-upstream]
 knit merge --continue
 knit merge --abort
 knit config set advice true|false
+knit config set push-sync true|false
 knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
@@ -339,7 +341,19 @@ knit prune --apply --worktrees --branches
 knit prune --apply --all
 ```
 
+A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not delete it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — combine with `--worktrees` (or `--all`) on `--apply` so the untracked files are discarded with the generated checkout. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
+
+`--report` prints every scanned bundle and why it is prunable or kept (open PRs, merged PRs, tracked changes, or untracked-only files), not just the deletable candidates:
+
+```sh
+knit prune --report
+knit prune --untracked
+knit prune --apply --untracked --worktrees
+```
+
 Remote bundle cleanup uses the configured KnitHub sync remote, requires a token with `bundle:delete`, and marks matching remote bundle records deleted. Use explicit flags instead of `--all` when you want local/Git branch cleanup but want to preserve KnitHub bundle history.
+
+With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit prune --apply` could delete a local artifact while leaving its KnitHub record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
 
 So the common cleanup distinction is:
 
@@ -392,16 +406,28 @@ knit fetch backend
 knit fetch --all
 ```
 
-`knit pull` updates tracked repos from their remotes. By default it runs in the original repo path on the recorded base branch and uses `git pull --ff-only`, then updates the repo's recorded `baseSha` in the bundle. It refuses to run when an affected checkout has uncommitted changes unless `--force` is passed. Use `--rebase` for `git pull --rebase`.
+`knit pull` is context-aware. With no target flags:
+
+- **At the workspace base** (the shared workspace fallback, e.g. several open bundles and no specific one resolved) it updates *everything*: every active-project repo's source checkout plus every open bundle, and prints a per-target report instead of refusing.
+- **For a specific resolved bundle** (inside a worktree, `--bundle <id>`, `KNIT_BUNDLE`, or a single-bundle workspace) it pulls that bundle's tracked repos and then its KnitHub artifact, as before.
+
+Target flags drive the aggregate, best-effort report directly and may be combined:
+
+- `--main` updates each active-project repo's *source checkout* on its current branch with `git pull --ff-only`.
+- `--bundles` updates every open bundle's feature checkouts from its KnitHub artifact.
+
+Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and never abort on the first problem: a dirty tree or non-fast-forward is reported (`skipped`/`failed`) while the rest proceed.
 
 ```sh
-knit pull
-knit pull backend
-knit pull --all
+knit pull                 # at the base: project main repos + every open bundle, reported
+knit pull --main          # update all project repos' current branch (fast-forward only)
+knit pull --bundles       # fast-forward every open bundle's checkouts from KnitHub
+knit pull --main --bundles
+knit pull backend         # single-bundle: pull a specific tracked repo's base checkout
 knit pull --rebase frontend
 ```
 
-Use `knit pull --feature` when you intentionally want to pull the tracked Knit feature checkout instead of the original/base checkout. Feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
+Single-bundle pulls still default to the original repo path on the recorded base branch with `git pull --ff-only`, updating the recorded `baseSha`, and refuse on uncommitted changes unless `--force` (use `--rebase` for `git pull --rebase`). Use `knit pull --feature` to pull the tracked Knit feature checkout instead; feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
 
 `knit push` pushes tracked feature branches to `origin`. It does not create PRs, update GitHub metadata, or change bundle state. By default it pushes the current feature branch to `origin/<branch>` without setting upstream; use `--set-upstream` when you want git's upstream tracking configured:
 
@@ -412,34 +438,39 @@ knit push --all
 knit push --set-upstream frontend
 ```
 
-`knit publish` publishes tracked feature branches to a code hosting provider. GitHub is the only provider implemented right now, and it uses the GitHub CLI (`gh`), so you need `gh` installed and authenticated for the repos you are publishing:
+`knit publish` publishes tracked feature branches to a code host. Knit is host-independent: it detects each repo's host from its git remote and drives that host's CLI. GitLab (`glab`, merge requests) and Codeberg/Forgejo (`tea`, pull requests) are detected from their remote hosts; every other remote defaults to GitHub (`gh`, pull requests). Install and authenticate the matching CLI for the repos you are publishing.
 
 ```sh
-knit publish github create
-knit publish github create --draft
-knit publish github create backend
-knit publish github create --base release
-knit publish github create --base backend=stable --base frontend=main
-knit publish github create --no-sync
-knit publish github sync
-knit publish github status
+knit publish create
+knit publish create --draft
+knit publish create backend
+knit publish create --base release
+knit publish create --base backend=stable --base frontend=main
+knit publish create --no-sync
+knit publish create --no-remote
+knit publish sync
+knit publish status
 ```
 
-`knit publish github create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing GitHub PRs or reuses an existing PR for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected PR body with the complete cross-repo PR list. The PR base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after PRs were created, run `knit publish github sync` after fixing auth or network issues.
+`knit publish github …` is kept as a back-compat alias for `knit publish create/sync/status`.
+
+`knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
+
+When a KnitHub sync remote is configured, `knit publish create` and `knit push` also push the bundle artifact to that remote so the host and KnitHub stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force a specific remote with `--remote <name>`.
 
 Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
 
 When PRs are approved and the user says to land, merge, release, ship, or continue after review, keep the workflow on the Knit bundle:
 
 ```sh
-knit publish github status
+knit publish status
 knit land
 knit land apply
 ```
 
-Do not use `gh pr merge` for Knit-owned bundles, and do not use `knit merge --into main` as a substitute for PR landing unless you explicitly want direct branch integration instead of PR landing.
+Do not merge the host review objects directly (for example `gh pr merge`) for Knit-owned bundles, and do not use `knit merge --into main` as a substitute for PR landing unless you explicitly want direct branch integration instead of PR landing.
 
-`knit land` coordinates landing the recorded cross-repo PR set. It is provider-neutral at the command boundary, but GitHub is the only provider implemented today:
+`knit land` coordinates landing the recorded cross-repo review set. It resolves each repo's host adapter from its remote (GitHub, GitLab, or Codeberg/Forgejo):
 
 ```sh
 knit land plan
@@ -557,10 +588,10 @@ Sparse advice is enabled by default for new workspaces. It prints a `Next:` line
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
-- `knit push` only pushes feature branches to `origin`; use `knit publish github create` for GitHub PR publishing.
-- `knit publish` currently supports only GitHub through the `gh` CLI. GitLab/Bitbucket/Forgejo support would need provider adapters.
-- `knit publish github create` is not perfectly transactional. Branch pushes, PR creation, and PR body updates happen sequentially. If phase two fails after PRs are created, run `knit publish github sync`.
-- `knit land` currently supports only GitHub PR publications through the `gh` CLI. A GitHub PR merge lands into that PR's base branch. Remote PR merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
+- `knit push` pushes feature branches to `origin` and, when a KnitHub sync remote is configured and `push-sync` is enabled, the bundle artifact to that remote; use `knit publish create` to publish review objects.
+- `knit publish` detects the host from each repo's remote: GitLab uses `glab`, Codeberg/Forgejo uses `tea`, and every other remote defaults to GitHub's `gh`. The matching CLI must be installed and authenticated. Bitbucket and other hosts would need new adapters. The GitLab and Forgejo adapters target current `glab`/`tea` JSON; their field mapping may need tuning across CLI versions, and `tea` does not surface commit-status checks, so landing treats Forgejo PRs as having no required checks.
+- `knit publish create` is not perfectly transactional. Branch pushes, review creation, and body updates happen sequentially. If phase two fails after review objects are created, run `knit publish sync`.
+- `knit land` resolves the host adapter per repo from its remote. A merge lands into the recorded base branch. Remote merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.
 - `knit land plan` never executes local commands. `run` steps execute only during `apply` or `resume`.
 - `knit clean --worktrees` removes generated worktree directories only. It leaves source repos and feature branches in place. `knit bundle delete --worktrees --branches --force-branches` is the explicit local discard path for a bundle's generated worktrees and local feature branches.
 - `knit commit` only looks for staged changes inside tracked checkouts.
@@ -587,6 +618,6 @@ See [docs/architecture.md](docs/architecture.md) for the module boundaries and t
 
 - Standalone JSON Schema for `ChangeGroup`
 - Safer partial-failure recovery for multi-repo commits
-- Provider adapters for non-GitHub publishing and landing
+- More host adapters (e.g. Bitbucket) and richer GitLab/Forgejo check integration
 - Better detection of existing registered worktrees
 - Optional bundle export/import flows for handoff to Gloss

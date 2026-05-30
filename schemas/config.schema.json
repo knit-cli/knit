@@ -9,6 +9,7 @@
     "activeProject": { "type": "string" },
     "syncRemote": { "type": "string" },
     "advice": { "type": "boolean" },
+    "pushSync": { "type": "boolean" },
     "remotes": {
       "type": "object",
       "additionalProperties": {

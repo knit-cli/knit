@@ -1531,6 +1531,94 @@ fn pull_updates_original_base_checkout_and_bundle_base_sha() {
 }
 
 #[test]
+fn pull_main_fast_forwards_project_repos_and_reports() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, backend_collab) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collab) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["project", "init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    // Advance backend's origin main; leave frontend with a local dirty edit.
+    append_line(&backend_collab.join("app.txt"), "remote main update");
+    git(&backend_collab, ["add", "app.txt"]);
+    git(&backend_collab, ["commit", "-m", "Remote main update"]);
+    git(&backend_collab, ["push", "origin", "main"]);
+    let backend_sha = git(&backend_collab, ["rev-parse", "HEAD"]);
+    append_line(&frontend.join("app.txt"), "local uncommitted edit");
+
+    let report = knit(&workspace, ["pull", "--main"]);
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("backend"));
+    assert!(report.contains(&backend_sha[..7]));
+    assert!(report.contains("frontend"));
+    assert!(report.contains("skipped"));
+
+    // Backend's source checkout fast-forwarded; the dirty repo was left alone.
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), backend_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["project", "init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Two open bundles: the old workspace-fallback guard refused a bare pull at
+    // the root. The new aggregate pull reports instead.
+    knit(&workspace, ["bundle", "start", "feature one"]);
+    knit(&workspace, ["bundle", "start", "feature two"]);
+
+    let report = knit(&workspace, ["pull"]);
+    assert!(!report.contains("Refusing"));
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("Pulled:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_bundles_without_remote_reports_each_bundle_skipped() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "start", "feature one"]);
+    knit(&workspace, ["bundle", "start", "feature two"]);
+
+    let report = knit(&workspace, ["pull", "--bundles"]);
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("no KnitHub remote configured"));
+    // --bundles alone does not touch project main repos.
+    assert!(!report.contains("Main repos:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
@@ -1709,7 +1797,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 
     let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(land_plan.contains("Lands into:"));
-    assert!(land_plan.contains("GitHub PR base branch"));
+    assert!(land_plan.contains("review object's base branch"));
     assert!(land_plan.contains("knit land apply"));
 
     fs::remove_dir_all(root).unwrap();
@@ -1834,14 +1922,17 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
 
     let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(apply.contains("Feature landed"));
+    // This plan sets no repoOrder, so merges share a wave and run in parallel;
+    // their relative order is unspecified, so compare as a set.
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
-    assert_eq!(
-        order.lines().collect::<Vec<_>>(),
-        vec!["backend", "frontend"]
-    );
+    let mut order_lines = order.lines().collect::<Vec<_>>();
+    order_lines.sort_unstable();
+    assert_eq!(order_lines, vec!["backend", "frontend"]);
     let methods = fs::read_to_string(fake_gh_dir.join("merge-methods.txt")).unwrap();
+    let mut method_lines = methods.lines().collect::<Vec<_>>();
+    method_lines.sort_unstable();
     assert_eq!(
-        methods.lines().collect::<Vec<_>>(),
+        method_lines,
         vec!["backend --merge", "frontend --merge"]
     );
 
@@ -1975,7 +2066,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     assert_eq!(steps[3]["id"].as_str(), Some("deploy-frontend"));
     assert_eq!(
         steps[3]["needs"].as_array().unwrap()[0].as_str(),
-        Some("deploy-backend")
+        Some("merge-frontend")
     );
 
     let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
@@ -2486,6 +2577,52 @@ fn bundle_delete_can_remove_generated_worktrees_and_force_delete_branches() {
 }
 
 #[test]
+fn delete_recovers_generated_worktree_when_recorded_path_was_lost() {
+    // A bundle synced back from a remote is localized, which clears the
+    // local-only worktreePath even though the generated checkout still exists
+    // and holds its feature branch. Cleanup must fall back to the conventional
+    // location so it removes the worktree and frees the branch for deletion.
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "start", "throwaway"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let worktree = workspace.join(".knit/worktrees/throwaway/backend");
+    append_line(&worktree.join("app.txt"), "throwaway change");
+    knit(&workspace, ["commit", "--stage", "-m", "Throwaway change"]);
+
+    // Simulate the post-localize state: the recorded worktree path is gone.
+    let bundle_path = workspace.join(".knit/bundles/throwaway.bundle.json");
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    bundle["repos"][0]["worktreePath"] = Value::Null;
+    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    assert!(worktree.exists());
+    assert!(git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+
+    let deleted = knit(
+        &workspace,
+        [
+            "bundle",
+            "delete",
+            "throwaway",
+            "--force",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(deleted.contains("Deleted bundle"));
+    assert!(!worktree.exists());
+    assert!(!git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
+    assert!(!bundle_path.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -2664,6 +2801,80 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     assert!(workspace
         .join(".knit/deleted/bundles/abandoned-cleanup.bundle.json")
         .exists());
+    assert!(workspace
+        .join(".knit/bundles/dirty-cleanup.bundle.json")
+        .exists());
+    assert!(dirty_feature.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    // Dead work whose only uncommitted content is an untracked file.
+    knit(&workspace, ["bundle", "start", "stray cleanup"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let stray_feature = workspace.join(".knit/worktrees/stray-cleanup/backend");
+    fs::write(stray_feature.join("PROOF.md"), "untracked proof\n").unwrap();
+
+    // Dead work with a tracked modification must stay protected even with --untracked.
+    knit(&workspace, ["bundle", "start", "dirty cleanup"]);
+    knit(&workspace, ["track", frontend.to_str().unwrap()]);
+    let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
+    append_line(&dirty_feature.join("app.txt"), "dirty local edit");
+
+    // Default prune surfaces the untracked-only bundle separately and does not
+    // treat it as a deletable candidate.
+    let preview = knit(&workspace, ["prune", "--no-refresh"]);
+    assert!(preview.contains("Blocked by untracked files"));
+    assert!(preview.contains("stray-cleanup"));
+    assert!(!preview.contains("Dead bundle candidates"));
+
+    // --report names every bundle and its status, including kept ones.
+    let report = knit(&workspace, ["prune", "--no-refresh", "--report"]);
+    assert!(report.contains("Bundle report:"));
+    assert!(report.contains("prunable with --untracked"));
+    assert!(report.contains("dirty-cleanup"));
+    assert!(report.contains("uncommitted tracked changes"));
+
+    // --untracked promotes the untracked-only bundle to a real candidate while
+    // still protecting the tracked-change bundle.
+    let untracked_preview = knit(&workspace, ["prune", "--no-refresh", "--untracked"]);
+    assert!(untracked_preview.contains("Dead bundle candidates"));
+    assert!(untracked_preview.contains("stray-cleanup"));
+    assert!(untracked_preview.contains("discards untracked files"));
+    assert!(!untracked_preview.contains("dirty-cleanup"));
+
+    let pruned = knit(
+        &workspace,
+        [
+            "prune",
+            "--no-refresh",
+            "--untracked",
+            "--apply",
+            "--worktrees",
+            "--branches",
+            "--force-branches",
+        ],
+    );
+    assert!(pruned.contains("stray-cleanup"));
+    assert!(!workspace
+        .join(".knit/bundles/stray-cleanup.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/stray-cleanup.bundle.json")
+        .exists());
+    assert!(!stray_feature.exists());
+
+    // The tracked-change bundle and its worktree survive.
     assert!(workspace
         .join(".knit/bundles/dirty-cleanup.bundle.json")
         .exists());
