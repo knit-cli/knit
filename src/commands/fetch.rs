@@ -1,3 +1,4 @@
+use crate::cli::FetchMode;
 use crate::git::{git_output, git_output_optional};
 use crate::ids::short_sha;
 use crate::output as out;
@@ -6,26 +7,60 @@ use crate::store::load_active_bundle;
 use anyhow::{bail, Context, Result};
 use std::path::{Path, PathBuf};
 
-pub fn fetch_repos(selectors: &[String], all: bool) -> Result<()> {
-    let active = load_active_bundle()?;
-    if active.bundle.repos.is_empty() {
-        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
-    }
+pub fn fetch_repos(
+    selectors: &[String],
+    mode: FetchMode,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
+    let fetch_git = matches!(mode, FetchMode::All | FetchMode::Git) && !no_remote;
+    let fetch_knit = matches!(mode, FetchMode::All | FetchMode::Knit) && !no_remote;
 
-    let indexes = resolve_repo_indexes(&active, selectors, all)?;
-    let mut failures = Vec::new();
+    let mut git_failures = Vec::new();
+    let mut knit_result = Ok(());
 
-    for index in indexes {
-        let repo = &active.bundle.repos[index];
-        if let Err(error) = fetch_repo(repo) {
-            println!("{}: {}", out::repo(&repo.id), out::danger("fetch failed"));
-            failures.push(format!("{}: {error:#}", repo.id));
+    if fetch_git {
+        let active = load_active_bundle()?;
+        if active.bundle.repos.is_empty() {
+            bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
+        }
+
+        let indexes = resolve_repo_indexes(&active, selectors, false)?;
+        for index in indexes {
+            let repo = &active.bundle.repos[index];
+            if let Err(error) = fetch_repo(repo) {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo.id),
+                    out::danger("fetch failed")
+                );
+                git_failures.push(format!("{}: {error:#}", repo.id));
+            }
         }
     }
 
-    if !failures.is_empty() {
-        bail!("fetch failed:\n{}", failures.join("\n"));
+    if fetch_knit {
+        let active = load_active_bundle()?;
+        knit_result = crate::commands::fetch_bundles_from_remote(
+            &active.root,
+            &crate::store::load_config(&active.root)?,
+            remote,
+        );
+        if let Err(ref error) = knit_result {
+            println!(
+                "{}: {}",
+                out::muted("bundle fetch"),
+                out::danger(error.to_string())
+            );
+        }
     }
+
+    if !git_failures.is_empty() {
+        bail!("fetch failed:\n{}", git_failures.join("\n"));
+    }
+
+    // Don't fail entire fetch if knit fetch fails (git succeeded)
+    let _ = knit_result;
 
     Ok(())
 }
@@ -38,7 +73,9 @@ fn fetch_repo(repo: &crate::model::RepoEntry) -> Result<()> {
 
     let remote = "origin";
     git_output_optional(&cwd, ["remote", "get-url", remote])?
-        .with_context(|| format!("no `{remote}` remote configured in {}", cwd.display()))?;
+        .with_context(|| {
+            format!("no `{remote}` remote configured in {}", cwd.display())
+        })?;
 
     let remote_ref = format!("{remote}/{}", repo.base_branch);
     let before = ref_sha(&cwd, &remote_ref)?;
@@ -50,13 +87,15 @@ fn fetch_repo(repo: &crate::model::RepoEntry) -> Result<()> {
 }
 
 fn ref_sha(cwd: &Path, reference: &str) -> Result<Option<String>> {
-    git_output_optional(
-        cwd,
-        ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-    )
+    git_output_optional(cwd, ["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
 }
 
-fn print_fetch_summary(repo_id: &str, remote_ref: &str, before: Option<&str>, after: Option<&str>) {
+fn print_fetch_summary(
+    repo_id: &str,
+    remote_ref: &str,
+    before: Option<&str>,
+    after: Option<&str>,
+) {
     match (before, after) {
         (Some(before), Some(after)) if before != after => {
             println!(
