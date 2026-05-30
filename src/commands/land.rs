@@ -90,7 +90,8 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
             DEFAULT_LANDING_MERGE_METHOD,
             false,
             pr.head_ref_oid.as_deref(),
-        )?;
+        )
+        .with_context(|| format!("{}: merging {}", repo.id, publication.url))?;
 
         let refreshed = forge.view(&target, &publication.url)?;
         providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &refreshed);
