@@ -405,6 +405,26 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
     },
+    /// Run git reset across tracked checkouts (resolved bundle, or project source repos from the workspace root).
+    Reset {
+        /// Do not touch the index or working tree (git reset --soft).
+        #[arg(long, conflicts_with_all = ["mixed", "hard"])]
+        soft: bool,
+        /// Reset the index but keep the working tree. This is the default (git reset --mixed).
+        #[arg(long, conflicts_with_all = ["soft", "hard"])]
+        mixed: bool,
+        /// Reset the index and working tree, discarding tracked changes (git reset --hard).
+        #[arg(long, conflicts_with_all = ["soft", "mixed"])]
+        hard: bool,
+        /// Commit-ish to reset to. Defaults to HEAD.
+        commit: Option<String>,
+        /// Target repo id or path. Repeat for multiple repos.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Run against every tracked repo.
+        #[arg(long)]
+        all: bool,
+    },
     /// Run a git command in tracked checkouts.
     Git {
         /// Target repo id or path. Repeat for multiple repos.
