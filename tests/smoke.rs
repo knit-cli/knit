@@ -127,7 +127,7 @@ fn project_default_repos_start_bundle_without_track() {
 
 #[cfg(unix)]
 #[test]
-fn bundle_start_enter_opens_project_worktree_root() {
+fn bundle_start_cd_opens_project_worktree_root() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let frontend = root.join("frontend");
@@ -148,7 +148,7 @@ fn bundle_start_enter_opens_project_worktree_root() {
 
     let output = knit_with_env(
         &workspace,
-        ["bundle", "start", "project feature", "--enter"],
+        ["bundle", "start", "project feature", "--cd"],
         &[("SHELL", "/bin/pwd")],
     );
     let checkout = workspace
@@ -157,7 +157,7 @@ fn bundle_start_enter_opens_project_worktree_root() {
         .unwrap();
     assert!(checkout.join("backend").exists());
     assert!(checkout.join("frontend").exists());
-    assert!(output.contains("Entering:"));
+    assert!(output.contains("cd:"));
     assert!(
         output
             .lines()
@@ -170,7 +170,7 @@ fn bundle_start_enter_opens_project_worktree_root() {
 
 #[cfg(unix)]
 #[test]
-fn bundle_start_enter_accepts_repo_selector() {
+fn bundle_start_cd_accepts_repo_selector() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let frontend = root.join("frontend");
@@ -191,7 +191,7 @@ fn bundle_start_enter_accepts_repo_selector() {
 
     let output = knit_with_env(
         &workspace,
-        ["bundle", "start", "project feature", "--enter", "frontend"],
+        ["bundle", "start", "project feature", "--cd", "frontend"],
         &[("SHELL", "/bin/pwd")],
     );
     let checkout = workspace
