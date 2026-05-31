@@ -127,17 +127,23 @@ fn project_default_repos_start_bundle_without_track() {
 
 #[cfg(unix)]
 #[test]
-fn bundle_start_can_enter_created_worktree() {
+fn bundle_start_enter_opens_project_worktree_root() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
+    let frontend = root.join("frontend");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
     init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
     knit(&workspace, ["project", "init", "arbient"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
     );
 
     let output = knit_with_env(
@@ -149,6 +155,8 @@ fn bundle_start_can_enter_created_worktree() {
         .join(".knit/worktrees/project-feature")
         .canonicalize()
         .unwrap();
+    assert!(checkout.join("backend").exists());
+    assert!(checkout.join("frontend").exists());
     assert!(output.contains("Entering:"));
     assert!(
         output
