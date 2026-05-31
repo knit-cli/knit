@@ -90,6 +90,7 @@ pub fn split_bundle(
         false,
         force,
         false,
+        None,
     )?;
     set_bundle_override(Some(bundle_id));
     cherrypick_from_bundle(source_bundle_id, targets, &repo_ids, false)

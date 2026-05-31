@@ -205,6 +205,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 in_place,
                 force,
                 agents,
+                cd,
             }) => commands::start_bundle(
                 &title,
                 project.as_deref(),
@@ -214,6 +215,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 in_place,
                 force,
                 agents,
+                cd.as_deref(),
             ),
             Some(BundleCommand::Add {
                 repos,
