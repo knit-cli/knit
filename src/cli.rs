@@ -1060,12 +1060,30 @@ pub enum LandCommand {
         /// When omitted, the updated artifact is printed to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// Also push the landed bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync after landing.
+        #[arg(long, conflicts_with = "remote")]
+        no_remote: bool,
     },
     /// Resume a failed or incomplete landing run.
     Resume {
         /// Run file to resume. Defaults to the latest run.
         #[arg(long)]
         run: Option<PathBuf>,
+        /// Also push the landed bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
+        /// Skip the KnitHub bundle sync after landing.
+        #[arg(long, conflicts_with = "remote")]
+        no_remote: bool,
+    },
+    /// Push the current landed bundle artifact to a KnitHub remote.
+    Sync {
+        /// Named KnitHub remote. Defaults to sync_remote or `knithub`.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Option<String>,
     },
     /// Show the latest landing run or default plan status.
     Status {

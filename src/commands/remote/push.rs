@@ -210,6 +210,64 @@ pub fn maybe_sync_bundle_to_remote(remote_override: Option<&str>, no_remote: boo
     Ok(())
 }
 
+/// Push the resolved bundle artifact to KnitHub when push-sync is enabled.
+///
+/// Unlike `maybe_sync_bundle_to_remote`, sync failures are returned to the
+/// caller. This is used after landing so a stale remote lifecycle state is
+/// visible instead of being hidden behind a best-effort warning.
+pub fn sync_bundle_to_remote_if_enabled(
+    remote_override: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
+    if no_remote {
+        return Ok(());
+    }
+    let Ok((_, config)) = workspace_config() else {
+        return Ok(());
+    };
+    if !config.push_sync && remote_override.is_none() {
+        return Ok(());
+    }
+    let Some(remote_name) = remote_override
+        .map(slugify)
+        .or_else(|| config.sync_remote.clone())
+        .or_else(|| {
+            config
+                .remotes
+                .contains_key("knithub")
+                .then(|| "knithub".to_string())
+        })
+    else {
+        return Ok(());
+    };
+    if resolve_remote(&config, &remote_name).is_err() {
+        if remote_override.is_some() {
+            resolve_remote(&config, &remote_name)?;
+        }
+        return Ok(());
+    }
+
+    push_bundle_to_remote(&remote_name, None)
+}
+
+/// Push the resolved bundle artifact to KnitHub, failing if no remote is
+/// configured or if the sync cannot complete.
+pub fn sync_bundle_to_remote(remote_override: Option<&str>) -> Result<()> {
+    let (_, config) = workspace_config()?;
+    let remote_name = remote_override
+        .map(slugify)
+        .or_else(|| config.sync_remote.clone())
+        .or_else(|| {
+            config
+                .remotes
+                .contains_key("knithub")
+                .then(|| "knithub".to_string())
+        })
+        .context("No KnitHub remote configured. Run `knit remote add knithub <url>` first.")?;
+    resolve_remote(&config, &remote_name)?;
+    push_bundle_to_remote(&remote_name, None)
+}
+
 fn upsert_project(
     remote: &KnitRemote,
     token: &str,
