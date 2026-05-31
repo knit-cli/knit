@@ -318,7 +318,11 @@ pub fn land_default() -> Result<()> {
     generate_land_plan(None, None, false)
 }
 
-pub fn apply_land_plan(plan_path: Option<&Path>) -> Result<()> {
+pub fn apply_land_plan(
+    plan_path: Option<&Path>,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_plan_path(&active, plan_path)?;
     if !path.exists() {
@@ -339,10 +343,16 @@ pub fn apply_land_plan(plan_path: Option<&Path>) -> Result<()> {
     }
     let mut run = execute::new_run(&active, &plan, &path);
     write_json(&run_path, &run)?;
-    execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)
+    execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
+    crate::commands::remote::sync_bundle_to_remote_if_enabled(remote, no_remote)?;
+    Ok(())
 }
 
-pub fn resume_land_run(run_path: Option<&Path>) -> Result<()> {
+pub fn resume_land_run(
+    run_path: Option<&Path>,
+    remote: Option<&str>,
+    no_remote: bool,
+) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
@@ -363,7 +373,21 @@ pub fn resume_land_run(run_path: Option<&Path>) -> Result<()> {
     run.status = STATUS_RUNNING.to_string();
     run.updated_at = now_iso();
     write_json(&path, &run)?;
-    execute::execute_run(&mut active, &plan, &order, &mut run, &path)
+    execute::execute_run(&mut active, &plan, &order, &mut run, &path)?;
+    crate::commands::remote::sync_bundle_to_remote_if_enabled(remote, no_remote)?;
+    Ok(())
+}
+
+pub fn sync_landed_bundle(remote: Option<&str>) -> Result<()> {
+    let active = load_active_bundle()?;
+    if crate::commands::bundle::bundle_state(&active.bundle) != "landed" {
+        bail!(
+            "Bundle {} is not landed yet. Run `knit land apply` first.",
+            active.bundle.id
+        );
+    }
+    drop(active);
+    crate::commands::remote::sync_bundle_to_remote(remote)
 }
 
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {

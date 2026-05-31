@@ -2061,7 +2061,12 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert!(existing_plan.contains("Land plan"));
     assert!(!fake_gh_dir.join("merge-order.txt").exists());
 
-    let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     assert!(apply.contains("Feature landed"));
     // This plan sets no repoOrder, so merges share a wave and run in parallel;
     // their relative order is unspecified, so compare as a set.
@@ -2086,6 +2091,8 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert!(workspace.join(".knit/land-runs").exists());
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
     assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
+    let sync_error = knit_fails(&workspace, ["land", "sync"]);
+    assert!(sync_error.contains("No KnitHub remote configured"));
 
     let mut stale_bundle = read_bundle(&workspace);
     stale_bundle["publications"] = json!([]);

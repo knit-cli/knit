@@ -361,6 +361,7 @@ Inspect or edit the plan, then execute it explicitly:
 ```sh
 knit land apply
 knit land status
+knit land sync
 ```
 
 Land from a bundle artifact JSON (merge-only, no local workspace):
@@ -369,7 +370,7 @@ Land from a bundle artifact JSON (merge-only, no local workspace):
 knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 ```
 
-Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
+Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. When push-sync is enabled, a successful land also syncs the updated bundle artifact to the configured KnitHub remote; use `knit land sync` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
 Use `knit merge` for local integration into staging branches or compatibility bundles:
 
@@ -422,6 +423,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it.
+- `knit land sync` pushes the current landed bundle artifact to the configured KnitHub remote.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
