@@ -525,11 +525,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 plan,
                 from_artifact,
                 out,
+                remote,
+                no_remote,
             }) => match from_artifact {
                 Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
-                None => commands::apply_land_plan(plan.as_deref()),
+                None => commands::apply_land_plan(plan.as_deref(), remote.as_deref(), no_remote),
             },
-            Some(LandCommand::Resume { run }) => commands::resume_land_run(run.as_deref()),
+            Some(LandCommand::Resume {
+                run,
+                remote,
+                no_remote,
+            }) => commands::resume_land_run(run.as_deref(), remote.as_deref(), no_remote),
+            Some(LandCommand::Sync { remote }) => commands::sync_landed_bundle(remote.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
             Some(LandCommand::Update {
                 repos,
