@@ -1,0 +1,366 @@
+//! KnitHub HTTP client: request transport over `curl`, remote/token/config
+//! resolution, project-export fetching, and localizing remote bundles onto the
+//! local project's repos.
+
+use super::{HttpResponse, RemoteProjectExport};
+use crate::checkout::is_in_place;
+use crate::git::{branch_exists, current_branch, git_output, is_ancestor, ref_exists, rev_parse};
+use crate::ids::slugify;
+use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, RepoEntry};
+use crate::store::{find_knit_root, load_config, project_path, read_json, ActiveBundle};
+use crate::time::now_iso;
+use anyhow::{bail, Context, Result};
+use serde::de::DeserializeOwned;
+use serde::Deserialize;
+use serde_json::Value;
+use std::ffi::OsString;
+use std::io::Write;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ApiEnvelope<T> {
+    data: T,
+}
+
+pub(super) fn workspace_config() -> Result<(PathBuf, KnitConfig)> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+    Ok((root, config))
+}
+
+pub(super) fn resolve_project_id(
+    root: &Path,
+    config: &KnitConfig,
+    name: Option<&str>,
+) -> Result<String> {
+    let project_id = name
+        .map(slugify)
+        .or_else(|| config.active_project.clone())
+        .context("No project selected. Pass a project name or run `knit project init <name>`.")?;
+    if !project_path(root, &project_id).exists() {
+        bail!("No local Knit project named `{project_id}`.");
+    }
+    Ok(project_id)
+}
+
+pub(super) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
+    let remote_name = slugify(name);
+    config
+        .remotes
+        .get(&remote_name)
+        .with_context(|| format!("No KnitHub remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first."))
+}
+
+pub(super) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
+    token_from_env(&slugify(name))
+        .or_else(|| remote.token.clone())
+        .context("No KnitHub token configured. Set KNITHUB_TOKEN, KNIT_REMOTE_<NAME>_TOKEN, or `knit remote token <name> <token>`.")
+}
+
+pub(super) fn token_from_env(name: &str) -> Option<String> {
+    let env_name = format!(
+        "KNIT_REMOTE_{}_TOKEN",
+        name.chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
+    std::env::var(env_name)
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("KNITHUB_TOKEN").ok())
+        .filter(|value| !value.trim().is_empty())
+}
+
+/// Resolve the name of the KnitHub sync remote, preferring an explicit `sync_remote`
+/// and otherwise falling back to a remote literally named `knithub`.
+pub(super) fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
+    config
+        .sync_remote
+        .clone()
+        .or_else(|| config.remotes.contains_key("knithub").then(|| "knithub".to_string()))
+        .context("No KnitHub sync remote configured. Run `knit remote add knithub <url>` or use explicit prune flags instead of --all.")
+}
+
+pub(super) fn load_project_if_present(root: &Path, project_id: &str) -> Result<Option<KnitProject>> {
+    let path = project_path(root, project_id);
+    if path.exists() {
+        read_json(&path).map(Some)
+    } else {
+        Ok(None)
+    }
+}
+
+pub(super) fn fetch_project_export(
+    remote: &KnitRemote,
+    token: &str,
+    project_identifier: &str,
+) -> Result<RemoteProjectExport> {
+    request_json(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{}/export", slugify(project_identifier)),
+        None,
+    )
+}
+
+pub(super) fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Result<ChangeGroup> {
+    serde_json::from_value(payload.clone()).with_context(|| {
+        format!("Remote bundle `{bundle_slug}` does not contain a supported Knit bundle payload.")
+    })
+}
+
+pub(super) fn localize_bundle(mut bundle: ChangeGroup, project: &KnitProject) -> Result<ChangeGroup> {
+    bundle.project_id = Some(project.id.clone());
+    for repo in &mut bundle.repos {
+        let local = project
+            .repos
+            .iter()
+            .find(|project_repo| project_repo.id == repo.id)
+            .or_else(|| {
+                project.repos.iter().find(|project_repo| {
+                    project_repo.remote.is_some()
+                        && project_repo.remote.as_deref() == repo.remote.as_deref()
+                })
+            })
+            .with_context(|| {
+                format!(
+                    "{}: remote bundle references a repo that is not in local project `{}`.",
+                    repo.id, project.id
+                )
+            })?;
+        repo.path = local.path.clone();
+        repo.remote = local.remote.clone().or_else(|| repo.remote.clone());
+        repo.base_branch = local.base_branch.clone();
+        repo.checkout_mode = local.checkout_mode.clone();
+        repo.worktree_path = None;
+    }
+    Ok(bundle)
+}
+
+pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
+    for repo in &bundle.repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            continue;
+        };
+        let repo_path = PathBuf::from(&repo.path);
+        if git_output(&repo_path, ["remote", "get-url", "origin"]).is_err() {
+            continue;
+        }
+
+        git_output(&repo_path, ["fetch", "origin", branch])
+            .with_context(|| format!("{}: failed to fetch origin/{branch}", repo.id))?;
+        let remote_ref = format!("origin/{branch}");
+        if !ref_exists(&repo_path, &remote_ref) {
+            bail!("{}: fetched branch {remote_ref} was not found.", repo.id);
+        }
+        if !branch_exists(&repo_path, branch) {
+            git_output(
+                &repo_path,
+                [
+                    OsString::from("branch"),
+                    OsString::from("--track"),
+                    OsString::from(branch),
+                    OsString::from(&remote_ref),
+                ],
+            )
+            .with_context(|| format!("{}: failed to create local branch {branch}", repo.id))?;
+        } else {
+            let _ = git_output(
+                &repo_path,
+                [
+                    OsString::from("branch"),
+                    OsString::from("--set-upstream-to"),
+                    OsString::from(&remote_ref),
+                    OsString::from(branch),
+                ],
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn ensure_remote_bundle_fast_forward(
+    local: &ChangeGroup,
+    remote: &ChangeGroup,
+) -> Result<()> {
+    for remote_repo in &remote.repos {
+        let Some(remote_head) = remote_repo.head_sha.as_deref() else {
+            continue;
+        };
+        let Some(local_repo) = local.repos.iter().find(|repo| repo.id == remote_repo.id) else {
+            continue;
+        };
+        let Some(local_head) = local_repo.head_sha.as_deref() else {
+            continue;
+        };
+        if local_head == remote_head {
+            continue;
+        }
+        let repo_path = PathBuf::from(&remote_repo.path);
+        if !is_ancestor(&repo_path, local_head, remote_head) {
+            bail!(
+                "{}: remote bundle head {} is not a fast-forward from local head {}. Push or reconcile local work before remote pull.",
+                remote_repo.id,
+                &remote_head[..remote_head.len().min(12)],
+                &local_head[..local_head.len().min(12)]
+            );
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Result<()> {
+    let root = active.root.clone();
+    for repo in &mut active.bundle.repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            continue;
+        };
+        let Some(checkout) = remote_checkout_dir(&root, repo) else {
+            continue;
+        };
+        let actual = current_branch(&checkout)?.unwrap_or_else(|| "(detached HEAD)".to_string());
+        if actual != branch {
+            bail!(
+                "{}: expected feature checkout branch `{branch}`, found `{actual}` in {}.",
+                repo.id,
+                checkout.display()
+            );
+        }
+        let remote_ref = format!("origin/{branch}");
+        if ref_exists(&checkout, &remote_ref) {
+            git_output(&checkout, ["merge", "--ff-only", &remote_ref])
+                .with_context(|| format!("{}: failed to fast-forward {branch}", repo.id))?;
+        }
+        repo.head_sha = Some(
+            rev_parse(&checkout, "HEAD")
+                .with_context(|| format!("{}: failed to read feature checkout HEAD", repo.id))?,
+        );
+    }
+    active.bundle.updated_at = now_iso();
+    Ok(())
+}
+
+fn remote_checkout_dir(root: &Path, repo: &RepoEntry) -> Option<PathBuf> {
+    if let Some(path) = &repo.worktree_path {
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        return path.exists().then_some(path);
+    }
+    if is_in_place(repo) {
+        let path = PathBuf::from(&repo.path);
+        return path.exists().then_some(path);
+    }
+    None
+}
+
+pub(super) fn request_json<T: DeserializeOwned>(
+    remote: &KnitRemote,
+    token: &str,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+) -> Result<T> {
+    decode_response(request(remote, token, method, path, payload)?)
+}
+
+pub(super) fn decode_response<T: DeserializeOwned>(response: HttpResponse) -> Result<T> {
+    if !(200..300).contains(&response.status) {
+        bail!(
+            "KnitHub remote returned HTTP {}: {}",
+            response.status,
+            response.body.trim()
+        );
+    }
+    let envelope: ApiEnvelope<T> =
+        serde_json::from_str(&response.body).context("failed to parse KnitHub response")?;
+    Ok(envelope.data)
+}
+
+pub(super) fn request(
+    remote: &KnitRemote,
+    token: &str,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+) -> Result<HttpResponse> {
+    let url = format!("{}{}", api_base_url(&remote.url), path);
+    let body = match payload {
+        Some(value) => serde_json::to_string(value).context("failed to serialize request body")?,
+        None => String::new(),
+    };
+    let mut command = Command::new("curl");
+    command
+        .arg("-sS")
+        .arg("-X")
+        .arg(method)
+        .arg("-H")
+        .arg("content-type: application/json")
+        .arg("-H")
+        .arg(format!("authorization: Bearer {token}"));
+    if payload.is_some() {
+        command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
+    }
+    let mut child = command
+        .arg("--write-out")
+        .arg("\nKNIT_HTTP_STATUS:%{http_code}")
+        .arg(&url)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to start curl; install curl or use an environment that provides it")?;
+
+    if payload.is_some() {
+        child
+            .stdin
+            .as_mut()
+            .context("failed to open curl stdin")?
+            .write_all(body.as_bytes())
+            .context("failed to write request body to curl")?;
+    }
+
+    let output = child.wait_with_output().context("failed to run curl")?;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (body, status) = stdout
+        .rsplit_once("\nKNIT_HTTP_STATUS:")
+        .context("curl did not return an HTTP status")?;
+    if !output.status.success() && status.trim().is_empty() {
+        bail!("curl failed: {}", stderr.trim());
+    }
+    let status = status
+        .trim()
+        .parse::<u16>()
+        .context("failed to parse HTTP status from curl")?;
+    if status == 000 {
+        bail!("curl failed: {}", stderr.trim());
+    }
+    Ok(HttpResponse {
+        status,
+        body: body.to_string(),
+    })
+}
+
+pub(super) fn normalize_base_url(url: &str) -> String {
+    url.trim().trim_end_matches('/').to_string()
+}
+
+fn api_base_url(url: &str) -> String {
+    let url = normalize_base_url(url);
+    if url.ends_with("/api/v1") {
+        url
+    } else {
+        format!("{url}/api/v1")
+    }
+}
