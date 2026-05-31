@@ -233,6 +233,7 @@ pub fn create_compat_bundle(
             in_place,
             force,
             false,
+            None,
         );
     }
 
