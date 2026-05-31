@@ -249,7 +249,7 @@ knit bundle add docs
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
 
-Use `knit bundle start "<title>" --enter` to create the bundle and immediately start your shell in `.knit/worktrees/<bundle>`. Pass a repo selector such as `--enter backend` when you want to enter a specific repo checkout instead.
+Use `knit bundle start "<title>" --project <project> --enter` to create the bundle with the project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--repo` only when you want to limit which repos are included; pass an `--enter` value such as `--enter backend` only when you want to enter a specific repo checkout instead.
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
