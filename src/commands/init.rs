@@ -28,7 +28,7 @@ pub fn start_bundle(
     in_place: bool,
     force: bool,
     agents: bool,
-    enter: Option<&str>,
+    cd: Option<&str>,
 ) -> Result<()> {
     if all_repos && !repo_ids.is_empty() {
         bail!("Use either --all-repos or --repo, not both.");
@@ -42,7 +42,7 @@ pub fn start_bundle(
     let worktree_dir = knit_dir.join("worktrees").join(&bundle_id);
     let bundle_path = stored_bundle_path(&root, &bundle_id);
     if bundle_path.exists() && !force {
-        if agents && enter.is_none() {
+        if agents && cd.is_none() {
             let bundle: ChangeGroup = read_json(&bundle_path)?;
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             let agents_path = write_agents_md(&root)?;
@@ -115,17 +115,17 @@ pub fn start_bundle(
     let worktree_agents = write_worktree_agents_md(&active)?;
     print_worktree_agents_summary(&worktree_agents);
 
-    if let Some(selector) = enter {
-        let path = enter_target_dir(&active, selector)?;
-        enter_shell(&active, &path)?;
+    if let Some(selector) = cd {
+        let path = cd_target_dir(&active, selector)?;
+        start_shell_in(&active, &path)?;
     }
 
     Ok(())
 }
 
-fn enter_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
+fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
     if active.bundle.repos.is_empty() {
-        bail!("Cannot enter a checkout because the bundle has no tracked repos.");
+        bail!("Cannot cd into a checkout because the bundle has no tracked repos.");
     }
 
     if selector.trim().is_empty() {
@@ -150,13 +150,9 @@ fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
     })
 }
 
-fn enter_shell(active: &ActiveBundle, path: &Path) -> Result<()> {
+fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(default_shell);
-    println!(
-        "{} {}",
-        out::heading("Entering:"),
-        out::path(path.display())
-    );
+    println!("{} {}", out::heading("cd:"), out::path(path.display()));
     let status = Command::new(&shell)
         .current_dir(path)
         .env("KNIT_ROOT", &active.root)
@@ -292,7 +288,7 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
-Use `knit bundle start "feature title" --project <project> --enter` to create the bundle with the project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--repo` only when you want to limit which repos are included; pass an `--enter` value such as `--enter backend` only when you want to enter a specific repo checkout instead.
+Use `knit bundle start "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
@@ -398,7 +394,7 @@ knit cherrypick --from feature-a --repo backend abc123
 
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle start "Feature title"` creates a bundle.
-- `knit bundle start "Feature title" --enter` creates a bundle and starts a shell in its generated checkout.
+- `knit bundle start "Feature title" --cd` creates a bundle and starts a shell in `.knit/worktrees/<bundle>`.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
 - `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.

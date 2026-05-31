@@ -116,7 +116,7 @@ knit project list
 knit project show [name]
 knit project remove <name> --force
 knit bundle
-knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents] [--enter [<repo>]]
+knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove [<repo-id>...] [--repo <repo-id>]...
 knit bundle list [--all] [--archived] [--deleted]
@@ -249,7 +249,7 @@ knit bundle add docs
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
 
-Use `knit bundle start "<title>" --project <project> --enter` to create the bundle with the project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--repo` only when you want to limit which repos are included; pass an `--enter` value such as `--enter backend` only when you want to enter a specific repo checkout instead.
+Use `knit bundle start "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
