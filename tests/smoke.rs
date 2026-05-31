@@ -146,7 +146,7 @@ fn bundle_start_can_enter_created_worktree() {
         &[("SHELL", "/bin/pwd")],
     );
     let checkout = workspace
-        .join(".knit/worktrees/project-feature/backend")
+        .join(".knit/worktrees/project-feature")
         .canonicalize()
         .unwrap();
     assert!(output.contains("Entering:"));

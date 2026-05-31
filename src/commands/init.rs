@@ -129,10 +129,6 @@ fn enter_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
     }
 
     if selector.trim().is_empty() {
-        if active.bundle.repos.len() == 1 {
-            return checkout_for_repo(active, 0);
-        }
-
         return Ok(active.root.join(".knit/worktrees").join(&active.bundle.id));
     }
 
@@ -296,7 +292,7 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
-Use `knit bundle start "feature title" --enter` to create the bundle and immediately start your shell in the created checkout. If the bundle tracks more than one repo, pass a repo selector such as `--enter backend`; without a selector Knit enters `.knit/worktrees/<bundle>`.
+Use `knit bundle start "feature title" --enter` to create the bundle and immediately start your shell in `.knit/worktrees/<bundle>`. Pass a repo selector such as `--enter backend` when you want to enter a specific repo checkout instead.
 
 For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
