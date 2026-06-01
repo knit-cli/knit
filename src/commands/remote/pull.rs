@@ -4,16 +4,58 @@
 use super::client::{
     decode_bundle_payload, ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts,
     fetch_project_export, localize_bundle, load_project_if_present, prepare_feature_branches,
-    request_json, resolve_remote, resolve_sync_remote_name, resolve_token, workspace_config,
+    request_json, resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
+    workspace_config,
 };
-use super::{RemoteBundle, RemoteProjectExport};
+use super::{RemoteBundle, RemoteProjectExport, RemoteViews};
 use crate::commands::worktree::materialize_repos;
-use crate::model::{ChangeGroup, KnitConfig, KnitProject};
+use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitProjectViews, KnitRemote};
 use crate::output as out;
 use crate::store::{bundle_path, load_active_bundle, read_json, save_active_bundle, ActiveBundle};
+use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::fs;
 use std::path::Path;
+
+/// Pull the current user's saved views for a project from the KnitHub remote,
+/// replacing the local views artifact.
+pub fn pull_views_from_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
+    let (root, config) = workspace_config()?;
+    let project_id = resolve_project_id(&root, &config, name)?;
+    let remote = resolve_remote(&config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    let count = pull_views_into(&root, remote, &token, &project_id)?;
+    println!(
+        "{} {} {}",
+        out::movement("pulled views"),
+        out::repo(&project_id),
+        out::muted(format!("{count} view(s)"))
+    );
+    Ok(())
+}
+
+/// Fetch a project's saved views from the remote and write the local artifact at
+/// `root`, returning the number of views written. Reused by `knit clone`.
+pub(super) fn pull_views_into(
+    root: &Path,
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+) -> Result<usize> {
+    let remote_views: RemoteViews = request_json(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project_id}/view"),
+        None,
+    )?;
+    let mut views = KnitProjectViews::new(project_id.to_string(), now_iso());
+    views.default_view = remote_views.default_view;
+    views.views = remote_views.views;
+    views.updated_at = now_iso();
+    crate::store::save_views(root, &views)?;
+    Ok(views.views.len())
+}
 
 /// The local project plus the remote project export, fetched once so many
 /// bundles can be localized and pulled without repeating the network round-trip.

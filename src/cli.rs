@@ -41,6 +41,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Manage your saved per-project views (named bundle shapes).
+    View {
+        #[command(subcommand)]
+        command: ViewCommand,
+    },
     /// Manage org-level repo universes.
     Org {
         #[command(subcommand)]
@@ -477,6 +482,15 @@ pub enum BundleCommand {
         /// Include every project repo, including observed repos.
         #[arg(long)]
         all_repos: bool,
+        /// Apply a saved view (named bundle shape). Conflicts with --repo/--all-repos.
+        #[arg(long, value_name = "NAME")]
+        view: Option<String>,
+        /// Add a project repo on top of the resolved set. Repeatable.
+        #[arg(long = "include", value_name = "REPO")]
+        include: Vec<String>,
+        /// Drop a repo from the resolved set. Repeatable.
+        #[arg(long = "exclude", value_name = "REPO")]
+        exclude: Vec<String>,
         /// Only update the bundle; do not create branches or worktrees.
         #[arg(long)]
         no_worktree: bool,
@@ -515,6 +529,47 @@ pub enum BundleCommand {
         /// Repo ids to remove from the current bundle.
         #[arg(short = 'r', long = "repo", value_name = "REPO")]
         repos: Vec<String>,
+    },
+    /// Add project repos to the current bundle and materialize their worktrees.
+    Include {
+        /// Project repo ids to include.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Use each original repo checkout directly instead of a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+    },
+    /// Remove repos from the current bundle, tearing down their worktrees.
+    Exclude {
+        /// Repo ids to exclude from the current bundle.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Keep the generated worktree on disk (tracking removal only).
+        #[arg(long, conflicts_with = "delete_branch")]
+        keep_worktree: bool,
+        /// Also delete the local feature branch after removing the worktree.
+        #[arg(long)]
+        delete_branch: bool,
+        /// Discard uncommitted or unpushed work when tearing down.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Reshape the current bundle to match a saved view.
+    ApplyView {
+        /// Saved view name to apply.
+        name: String,
+        /// Keep generated worktrees for repos the view drops (tracking removal only).
+        #[arg(long, conflicts_with = "delete_branch")]
+        keep_worktree: bool,
+        /// Also delete local feature branches for repos the view drops.
+        #[arg(long)]
+        delete_branch: bool,
+        /// Discard uncommitted or unpushed work when tearing down dropped repos.
+        #[arg(long)]
+        force: bool,
     },
     /// List bundles in the workspace.
     List {
@@ -906,6 +961,120 @@ pub enum ProjectRunCommandCli {
     Remove {
         /// Command name.
         name: String,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ViewCommand {
+    /// List your saved views for a project (`*` marks the default).
+    List {
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Print a view, or with --repos the repos it resolves to.
+    Show {
+        /// View name. Omit to print the whole views document.
+        name: Option<String>,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Print the resolved repo set instead of the raw view.
+        #[arg(long)]
+        repos: bool,
+    },
+    /// Create or replace a saved view.
+    Save {
+        /// View name.
+        name: String,
+        /// Repo id to add on top of the project default. Repeatable.
+        #[arg(long = "include", value_name = "REPO")]
+        include: Vec<String>,
+        /// Repo id to drop from the project default. Repeatable.
+        #[arg(long = "exclude", value_name = "REPO")]
+        exclude: Vec<String>,
+        /// Derive include/exclude from the current bundle's repos.
+        #[arg(long)]
+        from_bundle: bool,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Add repos to a view's include list.
+    Include {
+        /// View name.
+        name: String,
+        /// Repo ids to add.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Add repos to a view's exclude list.
+    Exclude {
+        /// View name.
+        name: String,
+        /// Repo ids to exclude.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Drop repos from both a view's include and exclude lists.
+    Unset {
+        /// View name.
+        name: String,
+        /// Repo ids to remove from the view.
+        #[arg(required = true)]
+        repos: Vec<String>,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Set or clear the default view applied by bare `knit bundle start`.
+    Default {
+        /// View name to make the default.
+        name: Option<String>,
+        /// Clear the default view.
+        #[arg(long, conflicts_with = "name")]
+        clear: bool,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Delete a saved view.
+    Rm {
+        /// View name.
+        name: String,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Open the views file in $EDITOR.
+    Edit {
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Push your views to a KnitHub remote.
+    Push {
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+    },
+    /// Pull your views from a KnitHub remote.
+    Pull {
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
     },
 }
 

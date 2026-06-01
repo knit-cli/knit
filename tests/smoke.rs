@@ -125,6 +125,136 @@ fn project_default_repos_start_bundle_without_track() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn setup_three_repo_project(workspace: &Path, root: &Path) {
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let docs = root.join("docs");
+    fs::create_dir_all(workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    init_repo(&docs, "docs");
+    knit(workspace, ["project", "init", "arbient"]);
+    knit(
+        workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(
+        workspace,
+        ["project", "add", "docs", docs.to_str().unwrap(), "--observe"],
+    );
+}
+
+fn bundle_repo_ids(workspace: &Path, bundle_id: &str) -> Vec<String> {
+    let path = workspace
+        .join(".knit/bundles")
+        .join(format!("{bundle_id}.bundle.json"));
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    bundle["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn views_apply_default_and_named_shapes_on_bundle_start() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+    knit(
+        &workspace,
+        [
+            "view", "save", "frontend", "--include", "docs", "--exclude", "backend",
+        ],
+    );
+    knit(&workspace, ["view", "default", "backend"]);
+
+    let list = knit(&workspace, ["view", "list"]);
+    assert!(list.contains("backend"), "{list}");
+    assert!(list.contains("frontend"), "{list}");
+
+    // Default view (backend) drops frontend; docs is observed, so backend only.
+    knit(&workspace, ["bundle", "start", "default feature"]);
+    assert_eq!(bundle_repo_ids(&workspace, "default-feature"), vec!["backend"]);
+
+    // Named view "frontend" => {frontend, docs}; ad-hoc --include adds backend.
+    knit(
+        &workspace,
+        [
+            "bundle", "start", "named feature", "--view", "frontend", "--include", "backend",
+        ],
+    );
+    let ids = bundle_repo_ids(&workspace, "named-feature");
+    assert_eq!(ids, vec!["backend", "frontend", "docs"], "{ids:?}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn view_flag_conflicts_with_repo_selection() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+
+    let error = knit_fails(
+        &workspace,
+        ["bundle", "start", "x", "--view", "backend", "--repo", "backend"],
+    );
+    assert!(error.contains("not together with --repo"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_include_and_exclude_manage_worktrees() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["bundle", "start", "live feature"]);
+    let worktrees = workspace.join(".knit/worktrees/live-feature");
+    assert!(worktrees.join("backend").exists());
+    assert!(worktrees.join("frontend").exists());
+    assert!(!worktrees.join("docs").exists());
+
+    // Include the observed repo: its worktree is materialized.
+    knit(&workspace, ["bundle", "include", "docs"]);
+    assert!(worktrees.join("docs").exists());
+    assert!(bundle_repo_ids(&workspace, "live-feature").contains(&"docs".to_string()));
+
+    // Exclude (default): worktree removed, feature branch kept.
+    knit(&workspace, ["bundle", "exclude", "frontend"]);
+    assert!(!worktrees.join("frontend").exists());
+    assert!(!bundle_repo_ids(&workspace, "live-feature").contains(&"frontend".to_string()));
+    assert!(
+        git(&root.join("frontend"), ["branch", "--list", "knit/live-feature"])
+            .contains("knit/live-feature"),
+        "feature branch should be preserved by default"
+    );
+
+    // Exclude with --delete-branch: worktree removed and branch deleted.
+    knit(
+        &workspace,
+        ["bundle", "exclude", "docs", "--delete-branch"],
+    );
+    assert!(!worktrees.join("docs").exists());
+    assert!(
+        !git(&root.join("docs"), ["branch", "--list", "knit/live-feature"])
+            .contains("knit/live-feature"),
+        "feature branch should be deleted with --delete-branch"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn bundle_start_cd_opens_project_worktree_root() {
