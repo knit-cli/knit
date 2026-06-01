@@ -24,12 +24,14 @@ pub mod remove;
 pub mod reset;
 pub mod revert;
 pub mod run;
+pub mod shape;
 pub mod runtime;
 pub mod schema;
 pub mod stage;
 pub mod status;
 pub mod sync;
 pub mod track;
+pub mod view;
 pub mod workitem;
 pub mod worktree;
 
@@ -70,17 +72,23 @@ pub use pull::{pull, pull_repos};
 pub use push::push_repos;
 pub use remote::{
     add_remote, clone_project_from_remote, fetch_bundles_from_remote, list_remotes, pull_remote_state,
-    push_bundle_to_remote, push_project_to_remote, remove_remote, set_remote_token, show_remote,
+    pull_views_from_remote, push_bundle_to_remote, push_project_to_remote, push_views_to_remote,
+    remove_remote, set_remote_token, show_remote,
 };
 pub use remove::remove_repos;
 pub use reset::reset_checkouts;
 pub use revert::revert_target;
 pub use run::run_project_command;
 pub use schema::print_schema;
+pub use shape::{bundle_apply_view, bundle_exclude, bundle_include};
 pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;
 pub use track::{track_repo_selectors, track_repos};
+pub use view::{
+    edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
+    view_include, view_unset,
+};
 pub use workitem::{
     add_work_item, approve_work_item, export_work_items, list_work_items, show_work_item,
     start_work_item, update_work_item,
