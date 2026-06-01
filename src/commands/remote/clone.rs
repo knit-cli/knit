@@ -88,6 +88,14 @@ pub fn clone_project_from_remote(
     };
     crate::store::save_config(&target_root, &config)?;
 
+    // Best-effort: restore the cloning user's saved views for the project.
+    match super::pull::pull_views_into(&target_root, &remote, &token, &project.id) {
+        Ok(count) if count > 0 => {
+            println!("{} {count} view(s)", out::heading("Views:"))
+        }
+        _ => {}
+    }
+
     if materialize {
         if let Some(bundle_id) = selected_bundle_id.as_deref() {
             materialize_imported_bundle(&target_root, bundle_id)?;

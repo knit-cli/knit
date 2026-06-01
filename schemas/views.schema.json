@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit project views",
+  "type": "object",
+  "required": ["schemaVersion", "kind", "projectId", "createdAt", "updatedAt"],
+  "properties": {
+    "schemaVersion": { "const": "0.1" },
+    "kind": { "const": "KnitProjectViews" },
+    "projectId": { "type": "string" },
+    "createdAt": { "type": "string" },
+    "updatedAt": { "type": "string" },
+    "defaultView": { "type": "string" },
+    "views": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "include": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "exclude": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        },
+        "additionalProperties": false
+      }
+    }
+  },
+  "additionalProperties": false
+}

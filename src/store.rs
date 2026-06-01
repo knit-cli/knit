@@ -130,6 +130,32 @@ pub fn org_path(root: &Path, org_id: &str) -> PathBuf {
     root.join(".knit/orgs").join(format!("{org_id}.org.json"))
 }
 
+pub fn views_path(root: &Path, project_id: &str) -> PathBuf {
+    root.join(".knit/views")
+        .join(format!("{project_id}.views.json"))
+}
+
+/// Load the current user's views artifact for a project, returning an empty
+/// document when none exists yet.
+pub fn load_views(root: &Path, project_id: &str) -> Result<crate::model::KnitProjectViews> {
+    let path = views_path(root, project_id);
+    if path.exists() {
+        read_json(&path)
+    } else {
+        Ok(crate::model::KnitProjectViews::new(
+            project_id.to_string(),
+            crate::time::now_iso(),
+        ))
+    }
+}
+
+pub fn save_views(root: &Path, views: &crate::model::KnitProjectViews) -> Result<()> {
+    let dir = root.join(".knit/views");
+    fs::create_dir_all(&dir)
+        .with_context(|| format!("failed to create {}", dir.display()))?;
+    write_json(&views_path(root, &views.project_id), views)
+}
+
 pub fn work_item_path(root: &Path, work_item_id: &str) -> PathBuf {
     root.join(".knit/work-items")
         .join(format!("{work_item_id}.work-item.json"))
