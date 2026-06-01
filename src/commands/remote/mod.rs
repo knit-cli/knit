@@ -15,17 +15,27 @@ pub use clone::clone_project_from_remote;
 pub use pull::{
     delete_bundle_from_remote, delete_remote_bundle_by_id, fetch_bundles_from_remote,
     list_remote_bundles, prepare_remote_pull, pull_bundle_remote_state, pull_remote_state,
-    RemoteBundleOutcome, RemoteBundleRecord, RemotePullContext,
+    pull_views_from_remote, RemoteBundleOutcome, RemoteBundleRecord, RemotePullContext,
 };
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_bundle_to_remote,
-    push_project_to_remote, remove_remote, set_remote_token, show_remote, sync_bundle_to_remote,
-    sync_bundle_to_remote_if_enabled,
+    push_project_to_remote, push_views_to_remote, remove_remote, set_remote_token, show_remote,
+    sync_bundle_to_remote, sync_bundle_to_remote_if_enabled,
 };
 
-use crate::model::KnitProject;
+use crate::model::{KnitProject, ProjectView};
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteViews {
+    #[serde(default)]
+    default_view: Option<String>,
+    #[serde(default)]
+    views: BTreeMap<String, ProjectView>,
+}
 
 // Shared HTTP/response DTOs. Kept in the module root so the sibling submodules
 // (descendants) can read their fields without a wider `pub`.

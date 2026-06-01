@@ -115,10 +115,24 @@ knit project command remove <name>
 knit project list
 knit project show [name]
 knit project remove <name> --force
+knit view list [--project <name>]
+knit view show [name] [--project <name>] [--repos]
+knit view save <name> [--include <repo>]... [--exclude <repo>]... [--from-bundle] [--project <name>]
+knit view include <name> <repo>... [--project <name>]
+knit view exclude <name> <repo>... [--project <name>]
+knit view unset <name> <repo>... [--project <name>]
+knit view default [name] [--clear] [--project <name>]
+knit view rm <name> [--project <name>]
+knit view edit [--project <name>]
+knit view push [--project <name>] [--remote <name>]
+knit view pull [--project <name>] [--remote <name>]
 knit bundle
-knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
+knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove [<repo-id>...] [--repo <repo-id>]...
+knit bundle include <repo>... [--in-place] [--no-worktree]
+knit bundle exclude <repo>... [--keep-worktree|--delete-branch] [--force]
+knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
 knit bundle list [--all] [--archived] [--deleted]
 knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
@@ -210,6 +224,31 @@ knit run api-test
 ```sh
 knit run --repo backend -- docker compose ps
 ```
+
+### Views
+
+A project's repo list is shared by everyone, with `--observe` marking repos kept out of default bundle starts. A **view** is per-user config layered on top of that shared project: a named "bundle shape" expressed as include/exclude deltas over the project's default repo set. Views are stored per user at `.knit/views/<project-id>.views.json` and never touch the shared project artifact, so a junior member can work against two repos while a staff member keeps several shapes for the same project.
+
+```sh
+knit view save backend --exclude frontend,docs
+knit view save frontend --include design-system --exclude backend
+knit view default backend            # bare `knit bundle start` now uses this shape
+knit view list                       # `*` marks the default
+knit view show frontend --repos      # print the repos this view resolves to
+```
+
+`knit bundle start "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle start "x" --view backend --include docs` and `knit bundle start "y" --all-repos --exclude sej` both work.
+
+A live bundle can be reshaped at any time, with the worktree consequences:
+
+```sh
+knit bundle include docs             # materialize the repo's branch + worktree
+knit bundle exclude frontend         # tear down its worktree, keep the branch
+knit bundle exclude frontend --delete-branch   # also delete the local feature branch
+knit bundle apply-view backend       # reshape the bundle to match a saved view
+```
+
+`knit bundle exclude` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry (the old `knit bundle remove` behavior). Views sync to KnitHub as the user's own config with `knit view push` / `knit view pull`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 

@@ -13,6 +13,7 @@ use crate::output as out;
 use crate::store::{load_active_bundle, load_config, save_config};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use std::path::Path;
 
 pub fn add_remote(name: &str, url: &str, token: Option<&str>) -> Result<()> {
     let (root, mut config) = workspace_config()?;
@@ -127,6 +128,59 @@ pub fn push_project_to_remote(name: Option<&str>, remote_name: &str) -> Result<(
         out::repo(&pushed.slug),
         out::muted(&pushed.id),
         out::muted(format!("{repo_count} repo(s)"))
+    );
+
+    // Best-effort: also upload the user's saved views for this project. A server
+    // without the views endpoint must not fail the project push.
+    if let Err(error) = upload_views(remote, &token, &root, &pushed.slug) {
+        println!("{} {error:#}", out::warn("views not synced:"));
+    }
+    Ok(())
+}
+
+/// Upload the local saved views for a project to the remote, if any exist.
+fn upload_views(remote: &KnitRemote, token: &str, root: &Path, project_slug: &str) -> Result<()> {
+    let views = crate::store::load_views(root, project_slug)?;
+    if views.views.is_empty() && views.default_view.is_none() {
+        return Ok(());
+    }
+    let payload = json!({
+        "defaultView": views.default_view,
+        "views": views.views,
+    });
+    request_json::<Value>(
+        remote,
+        token,
+        "PUT",
+        &format!("/projects/{project_slug}/view"),
+        Some(&payload),
+    )?;
+    Ok(())
+}
+
+/// Push the current user's saved views for a project to the KnitHub remote.
+pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
+    let (root, config) = workspace_config()?;
+    let project_id = resolve_project_id(&root, &config, name)?;
+    let remote = resolve_remote(&config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    let views = crate::store::load_views(&root, &project_id)?;
+    let payload = json!({
+        "defaultView": views.default_view,
+        "views": views.views,
+    });
+    request_json::<Value>(
+        remote,
+        &token,
+        "PUT",
+        &format!("/projects/{project_id}/view"),
+        Some(&payload),
+    )?;
+    println!(
+        "{} {} {}",
+        out::movement("pushed views"),
+        out::repo(&project_id),
+        out::muted(format!("{} view(s)", views.views.len()))
     );
     Ok(())
 }
