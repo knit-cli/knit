@@ -6,12 +6,20 @@ use super::client::{
     fetch_project_export, localize_bundle, load_project_if_present, prepare_feature_branches,
     request_json, resolve_remote, resolve_sync_remote_name, resolve_token, workspace_config,
 };
-use super::{RemoteBundle, RemoteProjectExport};
+use super::clone::{
+    clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
+};
+use super::{RemoteBundle, RemoteExportRepository, RemoteProjectExport};
 use crate::commands::worktree::materialize_repos;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject};
 use crate::output as out;
-use crate::store::{bundle_path, load_active_bundle, read_json, save_active_bundle, ActiveBundle};
+use crate::store::{
+    bundle_path, load_active_bundle, project_path, read_json, save_active_bundle, write_json,
+    ActiveBundle,
+};
+use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
@@ -80,10 +88,103 @@ pub fn prepare_remote_pull(
         .active_project
         .clone()
         .context("No active project selected for remote pull. Run `knit project init <name>`.")?;
-    let project = load_project_if_present(&root, &project_id)?
+    let mut project = load_project_if_present(&root, &project_id)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
     let export = fetch_project_export(remote, &token, &project_id)?;
+    reconcile_project_repositories(&root, &mut project, &export)?;
     Ok(Some(RemotePullContext { project, export }))
+}
+
+/// Reconcile the local project's tracked repositories with the remote export so
+/// that repositories added or removed on KnitHub flow into an existing
+/// workspace, not just a fresh `knit clone`. Removals drop the project repo
+/// entry (the checkout on disk is left in place); additions clone the repo into
+/// the workspace and record it. A degenerate export with no repositories is
+/// ignored so a transient/empty response never wipes the local repo list.
+fn reconcile_project_repositories(
+    root: &Path,
+    project: &mut KnitProject,
+    export: &RemoteProjectExport,
+) -> Result<()> {
+    if export.repositories.is_empty() {
+        return Ok(());
+    }
+
+    let export_ids: BTreeSet<String> = export
+        .repositories
+        .iter()
+        .map(export_repo_local_id)
+        .collect();
+
+    let mut removed = Vec::new();
+    project.repos.retain(|repo| {
+        let keep = export_ids.contains(&repo.id);
+        if !keep {
+            removed.push(repo.id.clone());
+        }
+        keep
+    });
+
+    let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
+    let to_add: Vec<&RemoteExportRepository> = export
+        .repositories
+        .iter()
+        .filter(|repository| !existing.contains(&export_repo_local_id(repository)))
+        .collect();
+
+    let mut added = Vec::new();
+    let mut failed = Vec::new();
+    for repository in to_add {
+        let local_id = export_repo_local_id(repository);
+        match clone_export_repositories(root, std::slice::from_ref(repository)) {
+            Ok(paths) => {
+                if let Some(repo_path) = paths.get(&local_id) {
+                    project
+                        .repos
+                        .push(project_repo_entry_from_export(repository, repo_path));
+                    added.push(local_id);
+                }
+            }
+            Err(error) => failed.push((local_id, format!("{error:#}"))),
+        }
+    }
+
+    if added.is_empty() && removed.is_empty() && failed.is_empty() {
+        return Ok(());
+    }
+
+    if !added.is_empty() || !removed.is_empty() {
+        project.repos.sort_by(|a, b| a.id.cmp(&b.id));
+        project.updated_at = now_iso();
+        write_json(&project_path(root, &project.id), project)?;
+    }
+
+    for id in &added {
+        println!(
+            "{} {} {}",
+            out::heading("Project repo:"),
+            out::movement("added"),
+            out::repo(id)
+        );
+    }
+    for id in &removed {
+        println!(
+            "{} {} {}",
+            out::heading("Project repo:"),
+            out::movement("removed"),
+            out::repo(id)
+        );
+    }
+    for (id, reason) in &failed {
+        println!(
+            "{} {}: {}",
+            out::warn("Project repo add failed:"),
+            out::repo(id),
+            out::muted(reason)
+        );
+    }
+
+    Ok(())
 }
 
 /// Pull one named bundle's recorded state from a prepared remote context:
