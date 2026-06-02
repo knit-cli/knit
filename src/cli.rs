@@ -1195,6 +1195,9 @@ pub enum PublishCommand {
         /// Show every tracked repo. This is the default when no repos are passed.
         #[arg(long)]
         all: bool,
+        /// Fetch live mergeability, checks, and review state from the host.
+        #[arg(long)]
+        live: bool,
     },
     /// Publish to GitHub explicitly. Alias kept for back-compat; prefer `knit publish create`.
     Github {
@@ -1260,6 +1263,8 @@ pub enum LandCommand {
         #[arg(long)]
         run: Option<PathBuf>,
     },
+    /// Preflight each recorded PR's live landing readiness before applying.
+    Check,
     /// Merge current PR base branches into feature branches and record the integration.
     Update {
         /// Optional repo ids or paths to limit the update.
@@ -1337,5 +1342,8 @@ pub enum GithubPublishCommand {
         /// Show every tracked repo. This is the default when no repos are passed.
         #[arg(long)]
         all: bool,
+        /// Fetch live mergeability, checks, and review state from the host.
+        #[arg(long)]
+        live: bool,
     },
 }
