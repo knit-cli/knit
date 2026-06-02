@@ -131,6 +131,54 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
     Ok(())
 }
 
+/// Tear down a single repo's generated worktree, clearing its recorded
+/// `worktreePath`. `git worktree remove` refuses to remove a dirty checkout
+/// unless `force` is set, which is the guard against discarding uncommitted work.
+pub(crate) fn remove_repo_worktree(
+    root: &Path,
+    bundle_id: &str,
+    repo: &mut crate::model::RepoEntry,
+    force: bool,
+) -> Result<()> {
+    if is_in_place(repo) {
+        println!(
+            "{}: {}",
+            out::repo(&repo.id),
+            out::muted("in-place checkout preserved")
+        );
+        return Ok(());
+    }
+    let Some(path) = cleanable_worktree_path(root, bundle_id, repo) else {
+        return Ok(());
+    };
+    if !path.exists() {
+        repo.worktree_path = None;
+        return Ok(());
+    }
+    let repo_root = PathBuf::from(&repo.path);
+    if !repo_root.exists() {
+        bail!(
+            "{}: original repo path is missing, cannot run git worktree remove",
+            repo.id
+        );
+    }
+    remove_git_worktree(&repo_root, &path, force).with_context(|| {
+        format!(
+            "{}: failed to remove worktree (pass --force to discard uncommitted work)",
+            repo.id
+        )
+    })?;
+    println!(
+        "{}: {} {}",
+        out::repo(&repo.id),
+        out::movement("removed"),
+        out::path(path.display())
+    );
+    repo.worktree_path = None;
+    remove_empty_dirs(root.join(".knit/worktrees").join(bundle_id));
+    Ok(())
+}
+
 fn cleanable_worktree_path(
     root: &Path,
     bundle_id: &str,

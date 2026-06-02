@@ -115,10 +115,24 @@ knit project command remove <name>
 knit project list
 knit project show [name]
 knit project remove <name> --force
+knit view list [--project <name>]
+knit view show [name] [--project <name>] [--repos]
+knit view save <name> [--include <repo>]... [--exclude <repo>]... [--from-bundle] [--project <name>]
+knit view include <name> <repo>... [--project <name>]
+knit view exclude <name> <repo>... [--project <name>]
+knit view unset <name> <repo>... [--project <name>]
+knit view default [name] [--clear] [--project <name>]
+knit view rm <name> [--project <name>]
+knit view edit [--project <name>]
+knit view push [--project <name>] [--remote <name>]
+knit view pull [--project <name>] [--remote <name>]
 knit bundle
-knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
+knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove [<repo-id>...] [--repo <repo-id>]...
+knit bundle include <repo>... [--in-place] [--no-worktree]
+knit bundle exclude <repo>... [--keep-worktree|--delete-branch] [--force]
+knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
 knit bundle list [--all] [--archived] [--deleted]
 knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
@@ -152,10 +166,11 @@ knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run --list
 knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
 knit publish sync [repo-id-or-path...]
-knit publish status [repo-id-or-path...]
+knit publish status [--live] [repo-id-or-path...]
 knit publish github <create|sync|status> ...   # back-compat alias
 knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
+knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>] [--remote <remote>] [--no-remote]
 knit land resume [--run <path>] [--remote <remote>] [--no-remote]
@@ -210,6 +225,31 @@ knit run api-test
 ```sh
 knit run --repo backend -- docker compose ps
 ```
+
+### Views
+
+A project's repo list is shared by everyone, with `--observe` marking repos kept out of default bundle starts. A **view** is per-user config layered on top of that shared project: a named "bundle shape" expressed as include/exclude deltas over the project's default repo set. Views are stored per user at `.knit/views/<project-id>.views.json` and never touch the shared project artifact, so a junior member can work against two repos while a staff member keeps several shapes for the same project.
+
+```sh
+knit view save backend --exclude frontend,docs
+knit view save frontend --include design-system --exclude backend
+knit view default backend            # bare `knit bundle start` now uses this shape
+knit view list                       # `*` marks the default
+knit view show frontend --repos      # print the repos this view resolves to
+```
+
+`knit bundle start "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle start "x" --view backend --include docs` and `knit bundle start "y" --all-repos --exclude sej` both work.
+
+A live bundle can be reshaped at any time, with the worktree consequences:
+
+```sh
+knit bundle include docs             # materialize the repo's branch + worktree
+knit bundle exclude frontend         # tear down its worktree, keep the branch
+knit bundle exclude frontend --delete-branch   # also delete the local feature branch
+knit bundle apply-view backend       # reshape the bundle to match a saved view
+```
+
+`knit bundle exclude` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry (the old `knit bundle remove` behavior). Views sync to KnitHub as the user's own config with `knit view push` / `knit view pull`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 
@@ -478,11 +518,14 @@ Do not merge the host review objects directly (for example `gh pr merge`) for Kn
 
 ```sh
 knit land plan
+knit land check
 knit land update --push
 knit land apply
 knit land status
 knit land resume
 ```
+
+`knit land check` is a read-only preflight: it fetches each recorded PR once and prints a readiness table (state, mergeable, checks, review decision, and a verdict) so you can see whether `knit land apply` will succeed and why not. A `conflict` verdict points you at `knit land update`; an already-merged PR shows `already landed`. `knit publish status --live` shows the same live columns alongside the recorded review objects. Both are non-mutating.
 
 `knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. Without a project landing template, the default plan is linear in bundle repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `merge`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `squash` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
 
@@ -490,7 +533,7 @@ Bare `knit land` is safe: it creates or shows the default plan and stops. It nev
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to the configured KnitHub remote when push-sync is enabled. Use `--remote <name>` to force a remote, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to the configured KnitHub remote when push-sync is enabled. Use `--remote <name>` to force a remote, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
 
 `knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
 

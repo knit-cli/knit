@@ -3,11 +3,11 @@ use crate::commands::agents::{
     print_worktree_agents_summary, upsert_managed_section, write_worktree_agents_md,
 };
 use crate::ids::slugify;
-use crate::model::{ChangeGroup, KnitConfig};
+use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
 use crate::output as out;
 use crate::store::{
-    bundle_path as stored_bundle_path, find_knit_root, load_config, read_json, save_active_bundle,
-    save_config, write_json, ActiveBundle,
+    bundle_path as stored_bundle_path, find_knit_root, load_config, load_views, read_json,
+    save_active_bundle, save_config, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -16,14 +16,20 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
-    start_bundle(title, None, &[], false, true, false, force, agents, None)
+    start_bundle(
+        title, None, &[], false, None, &[], &[], true, false, force, agents, None,
+    )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn start_bundle(
     title: &str,
     project: Option<&str>,
     repo_ids: &[String],
     all_repos: bool,
+    view: Option<&str>,
+    include: &[String],
+    exclude: &[String],
     materialize: bool,
     in_place: bool,
     force: bool,
@@ -32,6 +38,9 @@ pub fn start_bundle(
 ) -> Result<()> {
     if all_repos && !repo_ids.is_empty() {
         bail!("Use either --all-repos or --repo, not both.");
+    }
+    if view.is_some() && (all_repos || !repo_ids.is_empty()) {
+        bail!("Use --view for default selection, not together with --repo or --all-repos.");
     }
 
     let cwd = std::env::current_dir().context("failed to read current directory")?;
@@ -82,7 +91,8 @@ pub fn start_bundle(
     save_config(&root, &config)?;
 
     if let Some(project_id) = &project_id {
-        let selected = select_project_repos(&root, project_id, repo_ids, all_repos)?;
+        let selected =
+            select_project_repos(&root, project_id, repo_ids, all_repos, view, include, exclude)?;
         if !selected.is_empty() {
             let mut active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             crate::commands::track::track_project_repos(
@@ -204,32 +214,119 @@ fn select_project_repos(
     project_id: &str,
     repo_ids: &[String],
     all_repos: bool,
-) -> Result<Vec<crate::model::ProjectRepoEntry>> {
+    view_name: Option<&str>,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<ProjectRepoEntry>> {
     let project = crate::commands::project::load_project_by_id(root, project_id)?;
-    if all_repos {
-        return Ok(project.repos);
+    let view = resolve_active_view(root, project_id, view_name)?;
+    resolve_view_repos(
+        &project,
+        repo_ids,
+        all_repos,
+        view.as_ref(),
+        include,
+        exclude,
+    )
+}
+
+/// Resolve which named view to apply: an explicit `--view` name (which must
+/// exist), otherwise the user's saved default view, otherwise none.
+pub(crate) fn resolve_active_view(
+    root: &Path,
+    project_id: &str,
+    view_name: Option<&str>,
+) -> Result<Option<ProjectView>> {
+    let views = load_views(root, project_id)?;
+    match view_name {
+        Some(name) => {
+            let name = slugify(name);
+            let view = views.views.get(&name).cloned().with_context(|| {
+                format!(
+                    "Project {} has no saved view named {}. Create it with `knit view save {name}`.",
+                    out::repo(project_id),
+                    out::repo(&name)
+                )
+            })?;
+            Ok(Some(view))
+        }
+        // A dangling default is ignored rather than blocking `bundle start`.
+        None => Ok(views
+            .default_view
+            .as_ref()
+            .and_then(|name| views.views.get(name).cloned())),
     }
-    if repo_ids.is_empty() {
-        return Ok(project
-            .repos
-            .into_iter()
-            .filter(|repo| repo.include_by_default)
-            .collect());
+}
+
+/// Resolve a project's repo set for a bundle, applying (in order): the explicit
+/// `--repo`/`--all-repos` set or the `includeByDefault` set plus the active
+/// view's include/exclude deltas, then ad-hoc `include`/`exclude` overrides.
+/// Results preserve project order and are de-duplicated.
+pub(crate) fn resolve_view_repos(
+    project: &KnitProject,
+    repo_ids: &[String],
+    all_repos: bool,
+    view: Option<&ProjectView>,
+    include: &[String],
+    exclude: &[String],
+) -> Result<Vec<ProjectRepoEntry>> {
+    use std::collections::BTreeSet;
+    let mut selected: BTreeSet<String> = BTreeSet::new();
+
+    if !repo_ids.is_empty() {
+        for repo_id in repo_ids {
+            selected.insert(project_repo(project, repo_id)?.id.clone());
+        }
+    } else if all_repos {
+        for repo in &project.repos {
+            selected.insert(repo.id.clone());
+        }
+    } else {
+        for repo in &project.repos {
+            if repo.include_by_default {
+                selected.insert(repo.id.clone());
+            }
+        }
+        if let Some(view) = view {
+            for repo_id in &view.include {
+                selected.insert(project_repo(project, repo_id)?.id.clone());
+            }
+            for repo_id in &view.exclude {
+                selected.remove(&project_repo(project, repo_id)?.id);
+            }
+        }
     }
 
-    let mut selected = Vec::new();
-    for repo_id in repo_ids {
-        let repo_id = slugify(repo_id);
-        let Some(repo) = project.repos.iter().find(|repo| repo.id == repo_id) else {
-            bail!(
-                "Project {} has no repo named {}.",
-                out::repo(project_id),
-                out::repo(&repo_id)
-            );
-        };
-        selected.push(repo.clone());
+    // Ad-hoc flags apply on top in every mode, so `--all-repos --exclude sej`
+    // and `--view backend --include gloss` both work.
+    for repo_id in include {
+        selected.insert(project_repo(project, repo_id)?.id.clone());
     }
-    Ok(selected)
+    for repo_id in exclude {
+        selected.remove(&project_repo(project, repo_id)?.id);
+    }
+
+    Ok(project
+        .repos
+        .iter()
+        .filter(|repo| selected.contains(&repo.id))
+        .cloned()
+        .collect())
+}
+
+fn project_repo<'a>(project: &'a KnitProject, repo_id: &str) -> Result<&'a ProjectRepoEntry> {
+    let repo_id = slugify(repo_id);
+    project
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| {
+            format!(
+                "Project {} has no repo named {}.",
+                out::repo(&project.id),
+                out::repo(&repo_id)
+            )
+        })
 }
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
@@ -289,6 +386,18 @@ knit bundle start "feature b" --repo backend
 ```
 
 Use `knit bundle start "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+
+Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
+
+```sh
+knit view save backend --exclude frontend,docs
+knit view default backend
+knit bundle start "feature title"              # uses the default view
+knit bundle start "feature title" --view frontend --include docs
+knit bundle include docs                       # materialize a repo into the live bundle
+knit bundle exclude frontend                   # tear down its worktree, keep the branch
+knit bundle apply-view backend                 # reshape the live bundle to a saved view
+```
 
 For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
@@ -359,10 +468,13 @@ knit land
 Inspect or edit the plan, then execute it explicitly:
 
 ```sh
+knit land check
 knit land apply
 knit land status
 knit land sync
 ```
+
+`knit land check` is a read-only preflight: it shows each recorded PR's live state, mergeability, checks, review decision, and a landing verdict, so you can tell whether `knit land apply` will succeed before running it. When it reports a `conflict`, run `knit land update` to merge the base in and resolve, then land again. `knit publish status --live` shows the same live columns.
 
 Land from a bundle artifact JSON (merge-only, no local workspace):
 
@@ -398,6 +510,11 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle start "Feature title" --cd` creates a bundle and starts a shell in `.knit/worktrees/<bundle>`.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
 - `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
+- `knit bundle include <repo>...` adds project repos to the current bundle and materializes their worktrees.
+- `knit bundle exclude <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
+- `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
+- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for `knit bundle start`.
+- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit view push`/`knit view pull` sync them to KnitHub.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
 - `knit bundle split <bundle> <selector>...` creates a fresh bundle and cherry-picks selected source commits into it.
 - `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
@@ -423,6 +540,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it.
+- `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
 - `knit land sync` pushes the current landed bundle artifact to the configured KnitHub remote.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.

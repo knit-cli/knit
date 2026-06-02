@@ -179,7 +179,7 @@ pub fn sync_publications_from_artifact(
     Ok(())
 }
 
-pub fn show_publication_status(selectors: &[String], all: bool) -> Result<()> {
+pub fn show_publication_status(selectors: &[String], all: bool, live: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
@@ -187,6 +187,38 @@ pub fn show_publication_status(selectors: &[String], all: bool) -> Result<()> {
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
     println!("Bundle: {}\n", out::heading(&active.bundle.id));
+
+    if live {
+        // Fetch live state from the host and report landing-readiness columns.
+        println!(
+            "{}  {}  {}  {}  {}  {}  {}",
+            out::header_field("repo", 16),
+            out::header_field("pr", 6),
+            out::header_field("state", 8),
+            out::header_field("mergeable", 10),
+            out::header_field("checks", 9),
+            out::header_field("review", 9),
+            out::heading("verdict")
+        );
+        for index in indexes {
+            let repo = &active.bundle.repos[index];
+            match publication_for_repo(&active.bundle, &repo.id) {
+                Some(pr) => {
+                    let readiness =
+                        crate::commands::land::assess_landing_readiness(&active, repo, &pr.url);
+                    crate::commands::land::print_readiness_row(&readiness);
+                }
+                None => println!(
+                    "{}  {}",
+                    out::repo_field(&repo.id, 16),
+                    out::muted("(no PR)")
+                ),
+            }
+        }
+        print_landing_advice(&active);
+        return Ok(());
+    }
+
     println!(
         "{}  {}  {}  {}",
         out::header_field("repo", 14),
@@ -425,6 +457,9 @@ fn create_or_reuse_pr(
         body: None,
         is_draft: None,
         head_ref_oid: None,
+        mergeable: None,
+        merge_state_status: None,
+        review_decision: None,
     });
     providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &summary);
 
@@ -504,6 +539,9 @@ fn create_or_reuse_pr_from_artifact(
         body: None,
         is_draft: None,
         head_ref_oid: None,
+        mergeable: None,
+        merge_state_status: None,
+        review_decision: None,
     });
     providers::upsert_publication(bundle, repo, forge.as_ref(), &summary);
 

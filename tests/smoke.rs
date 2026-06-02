@@ -125,6 +125,136 @@ fn project_default_repos_start_bundle_without_track() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn setup_three_repo_project(workspace: &Path, root: &Path) {
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let docs = root.join("docs");
+    fs::create_dir_all(workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    init_repo(&docs, "docs");
+    knit(workspace, ["project", "init", "arbient"]);
+    knit(
+        workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(
+        workspace,
+        ["project", "add", "docs", docs.to_str().unwrap(), "--observe"],
+    );
+}
+
+fn bundle_repo_ids(workspace: &Path, bundle_id: &str) -> Vec<String> {
+    let path = workspace
+        .join(".knit/bundles")
+        .join(format!("{bundle_id}.bundle.json"));
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap();
+    bundle["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn views_apply_default_and_named_shapes_on_bundle_start() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+    knit(
+        &workspace,
+        [
+            "view", "save", "frontend", "--include", "docs", "--exclude", "backend",
+        ],
+    );
+    knit(&workspace, ["view", "default", "backend"]);
+
+    let list = knit(&workspace, ["view", "list"]);
+    assert!(list.contains("backend"), "{list}");
+    assert!(list.contains("frontend"), "{list}");
+
+    // Default view (backend) drops frontend; docs is observed, so backend only.
+    knit(&workspace, ["bundle", "start", "default feature"]);
+    assert_eq!(bundle_repo_ids(&workspace, "default-feature"), vec!["backend"]);
+
+    // Named view "frontend" => {frontend, docs}; ad-hoc --include adds backend.
+    knit(
+        &workspace,
+        [
+            "bundle", "start", "named feature", "--view", "frontend", "--include", "backend",
+        ],
+    );
+    let ids = bundle_repo_ids(&workspace, "named-feature");
+    assert_eq!(ids, vec!["backend", "frontend", "docs"], "{ids:?}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn view_flag_conflicts_with_repo_selection() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+
+    let error = knit_fails(
+        &workspace,
+        ["bundle", "start", "x", "--view", "backend", "--repo", "backend"],
+    );
+    assert!(error.contains("not together with --repo"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_include_and_exclude_manage_worktrees() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["bundle", "start", "live feature"]);
+    let worktrees = workspace.join(".knit/worktrees/live-feature");
+    assert!(worktrees.join("backend").exists());
+    assert!(worktrees.join("frontend").exists());
+    assert!(!worktrees.join("docs").exists());
+
+    // Include the observed repo: its worktree is materialized.
+    knit(&workspace, ["bundle", "include", "docs"]);
+    assert!(worktrees.join("docs").exists());
+    assert!(bundle_repo_ids(&workspace, "live-feature").contains(&"docs".to_string()));
+
+    // Exclude (default): worktree removed, feature branch kept.
+    knit(&workspace, ["bundle", "exclude", "frontend"]);
+    assert!(!worktrees.join("frontend").exists());
+    assert!(!bundle_repo_ids(&workspace, "live-feature").contains(&"frontend".to_string()));
+    assert!(
+        git(&root.join("frontend"), ["branch", "--list", "knit/live-feature"])
+            .contains("knit/live-feature"),
+        "feature branch should be preserved by default"
+    );
+
+    // Exclude with --delete-branch: worktree removed and branch deleted.
+    knit(
+        &workspace,
+        ["bundle", "exclude", "docs", "--delete-branch"],
+    );
+    assert!(!worktrees.join("docs").exists());
+    assert!(
+        !git(&root.join("docs"), ["branch", "--list", "knit/live-feature"])
+            .contains("knit/live-feature"),
+        "feature branch should be deleted with --delete-branch"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[cfg(unix)]
 #[test]
 fn bundle_start_cd_opens_project_worktree_root() {
@@ -2109,6 +2239,116 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Create a two-repo bundle and publish its PRs through the fake `gh`, returning
+/// the workspace plus the fake-gh paths so tests can toggle PR state via markers.
+fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        ["track", backend.to_str().unwrap(), frontend.to_str().unwrap()],
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend land",
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "frontend land",
+    );
+    knit(&workspace, ["commit", "--stage", "-m", "Landing change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+#[test]
+fn land_apply_skips_already_merged_pr() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    // backend is already merged with no prior run recorded; a fresh land apply
+    // must treat it as a satisfied step, not bail with "expected OPEN".
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("Feature landed"), "{apply}");
+    // Only frontend should be merged; backend was skipped as already merged.
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["frontend"], "{order}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_check_reports_pr_readiness() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    // Both PRs open, clean, no required checks -> ready.
+    let check = knit_with_fake_gh(&workspace, ["land", "check"], &fake_bin, &fake_gh_dir);
+    assert!(check.contains("Readiness:"), "{check}");
+    assert!(check.contains("backend"), "{check}");
+    assert!(check.contains("frontend"), "{check}");
+    assert!(check.contains("ready"), "{check}");
+
+    // backend merged, frontend conflicting -> distinct verdicts + update hint.
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("conflict-frontend"), "").unwrap();
+    let check2 = knit_with_fake_gh(&workspace, ["land", "check"], &fake_bin, &fake_gh_dir);
+    assert!(check2.contains("already landed"), "{check2}");
+    assert!(check2.contains("conflict"), "{check2}");
+    assert!(check2.contains("knit land update"), "{check2}");
+
+    // `publish status --live` surfaces the same readiness columns.
+    let live = knit_with_fake_gh(
+        &workspace,
+        ["publish", "status", "--live"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(live.contains("verdict"), "{live}");
+    assert!(live.contains("conflict"), "{live}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_conflict_points_to_land_update() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    fs::write(fake_gh_dir.join("conflict-backend"), "").unwrap();
+    let error = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(error.contains("merge conflicts"), "{error}");
+    assert!(error.contains("knit land update"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     let root = unique_temp_dir();
@@ -3566,7 +3806,14 @@ case "$sub" in
     if [ "${GH_FAKE_DRAFT:-0}" = "1" ]; then
       draft="true"
     fi
-    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo"
+    mergeable="MERGEABLE"
+    mergestate="CLEAN"
+    if [ -f "$GH_FAKE_DIR/conflict-$pr_repo" ]; then
+      mergeable="CONFLICTING"
+      mergestate="DIRTY"
+    fi
+    review="${GH_FAKE_REVIEW:-}"
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
     ;;
   edit)
     url="$1"

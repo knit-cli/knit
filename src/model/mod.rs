@@ -3,6 +3,7 @@
 //!
 //! - [`config`] workspace config + folder context map
 //! - [`project`] reusable project templates (repos, runtime, landing)
+//! - [`view`] per-user named views (bundle shapes) over a project
 //! - [`org`] org-level repo universe
 //! - [`workitem`] actionable work items
 //! - [`bundle`] the bundle (`ChangeGroup`) and its contents
@@ -11,12 +12,14 @@ mod bundle;
 mod config;
 mod org;
 mod project;
+mod view;
 mod workitem;
 
 pub use bundle::*;
 pub use config::*;
 pub use org::*;
 pub use project::*;
+pub use view::*;
 pub use workitem::*;
 
 pub const SCHEMA_VERSION: &str = "0.1";
