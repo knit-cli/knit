@@ -172,7 +172,7 @@ fn prepare_clone_target(target: &Path) -> Result<()> {
     Ok(())
 }
 
-fn clone_export_repositories(
+pub(super) fn clone_export_repositories(
     target_root: &Path,
     repositories: &[RemoteExportRepository],
 ) -> Result<BTreeMap<String, PathBuf>> {
@@ -265,24 +265,35 @@ fn local_project_from_export(
         let repo_path = repo_paths
             .get(&local_id)
             .with_context(|| format!("{local_id}: repository was not cloned"))?;
-        project.repos.push(ProjectRepoEntry {
-            id: local_id,
-            path: repo_path.to_string_lossy().to_string(),
-            remote: repository.remote_url.clone(),
-            base_branch: repository
-                .default_branch
-                .clone()
-                .filter(|branch| !branch.trim().is_empty())
-                .unwrap_or_else(|| "main".to_string()),
-            checkout_mode: metadata_string(&repository.metadata, "checkoutMode")
-                .unwrap_or_else(|| CHECKOUT_MODE_WORKTREE.to_string()),
-            include_by_default: metadata_bool(&repository.metadata, "includeByDefault")
-                .unwrap_or(true),
-        });
+        project
+            .repos
+            .push(project_repo_entry_from_export(repository, repo_path));
     }
 
     project.updated_at = now_iso();
     Ok(project)
+}
+
+/// Build a local project repo entry from an exported repository and its cloned
+/// path. Shared with incremental remote pull so both code paths record repos the
+/// same way.
+pub(super) fn project_repo_entry_from_export(
+    repository: &RemoteExportRepository,
+    repo_path: &Path,
+) -> ProjectRepoEntry {
+    ProjectRepoEntry {
+        id: export_repo_local_id(repository),
+        path: repo_path.to_string_lossy().to_string(),
+        remote: repository.remote_url.clone(),
+        base_branch: repository
+            .default_branch
+            .clone()
+            .filter(|branch| !branch.trim().is_empty())
+            .unwrap_or_else(|| "main".to_string()),
+        checkout_mode: metadata_string(&repository.metadata, "checkoutMode")
+            .unwrap_or_else(|| CHECKOUT_MODE_WORKTREE.to_string()),
+        include_by_default: metadata_bool(&repository.metadata, "includeByDefault").unwrap_or(true),
+    }
 }
 
 fn localized_export_bundles(
@@ -334,7 +345,7 @@ fn materialize_imported_bundle(root: &Path, bundle_id: &str) -> Result<()> {
     crate::store::save_active_bundle(&active)
 }
 
-fn export_repo_local_id(repository: &RemoteExportRepository) -> String {
+pub(super) fn export_repo_local_id(repository: &RemoteExportRepository) -> String {
     repository
         .local_id
         .clone()
