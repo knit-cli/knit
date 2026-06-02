@@ -359,10 +359,13 @@ knit land
 Inspect or edit the plan, then execute it explicitly:
 
 ```sh
+knit land check
 knit land apply
 knit land status
 knit land sync
 ```
+
+`knit land check` is a read-only preflight: it shows each recorded PR's live state, mergeability, checks, review decision, and a landing verdict, so you can tell whether `knit land apply` will succeed before running it. When it reports a `conflict`, run `knit land update` to merge the base in and resolve, then land again. `knit publish status --live` shows the same live columns.
 
 Land from a bundle artifact JSON (merge-only, no local workspace):
 
@@ -423,6 +426,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it.
+- `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
 - `knit land sync` pushes the current landed bundle artifact to the configured KnitHub remote.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
