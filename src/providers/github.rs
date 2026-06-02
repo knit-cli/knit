@@ -7,7 +7,7 @@ use std::ffi::OsString;
 
 const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
-    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid";
+    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision";
 
 /// GitHub forge adapter, backed by the `gh` CLI.
 pub struct GitHub;
