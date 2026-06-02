@@ -240,6 +240,9 @@ fn into_pull_request(mr: GlabMr) -> PullRequest {
         body: mr.description,
         is_draft: Some(draft),
         head_ref_oid: mr.sha,
+        mergeable: None,
+        merge_state_status: None,
+        review_decision: None,
     }
 }
 
