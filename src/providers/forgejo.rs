@@ -198,6 +198,9 @@ fn into_pull_request(pr: TeaPr) -> PullRequest {
         body: None,
         is_draft: Some(false),
         head_ref_oid: None,
+        mergeable: None,
+        merge_state_status: None,
+        review_decision: None,
     }
 }
 

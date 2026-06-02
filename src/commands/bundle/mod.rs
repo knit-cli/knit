@@ -330,6 +330,62 @@ pub fn delete_bundle(
     Ok(())
 }
 
+/// Delete one repo's local feature branch in its original checkout. Uses
+/// `git branch -d` (fails on unmerged/unpushed work) unless `force` selects `-D`.
+pub(crate) fn delete_repo_feature_branch(
+    repo: &crate::model::RepoEntry,
+    force: bool,
+) -> Result<()> {
+    let Some(branch) = repo.feature_branch.as_deref() else {
+        println!(
+            "{}: {}",
+            out::repo(&repo.id),
+            out::muted("no feature branch recorded")
+        );
+        return Ok(());
+    };
+    let repo_root = PathBuf::from(&repo.path);
+    if !repo_root.exists() {
+        bail!(
+            "{}: original repo path is missing, cannot delete {}",
+            repo.id,
+            branch
+        );
+    }
+    if is_in_place(repo) && current_branch(&repo_root)?.as_deref() == Some(branch) {
+        bail!(
+            "{}: {} is checked out in the source repo; switch branches before deleting it",
+            repo.id,
+            branch
+        );
+    }
+    if !branch_exists(&repo_root, branch) {
+        println!(
+            "{}: {} {}",
+            out::repo(&repo.id),
+            out::muted("branch already missing"),
+            out::branch(branch)
+        );
+        return Ok(());
+    }
+    let delete_flag = if force { "-D" } else { "-d" };
+    git_output(
+        &repo_root,
+        [
+            OsString::from("branch"),
+            OsString::from(delete_flag),
+            OsString::from(branch),
+        ],
+    )?;
+    println!(
+        "{}: {} {}",
+        out::repo(&repo.id),
+        out::movement("removed"),
+        out::branch(branch)
+    );
+    Ok(())
+}
+
 fn delete_local_feature_branches(bundle: &ChangeGroup, force: bool) -> Result<()> {
     let mut failures = Vec::new();
     for repo in &bundle.repos {

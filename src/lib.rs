@@ -19,7 +19,7 @@ use anyhow::{bail, Result};
 
 pub use cli::{
     BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, OrgCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand, ViewCommand,
     WorkItemCommand,
 };
 
@@ -66,6 +66,49 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
+        },
+        Commands::View { command } => match command {
+            ViewCommand::List { project } => commands::list_views(project.as_deref()),
+            ViewCommand::Show {
+                name,
+                project,
+                repos,
+            } => commands::show_view(name.as_deref(), project.as_deref(), repos),
+            ViewCommand::Save {
+                name,
+                include,
+                exclude,
+                from_bundle,
+                project,
+            } => commands::save_view(&name, &include, &exclude, from_bundle, project.as_deref()),
+            ViewCommand::Include {
+                name,
+                repos,
+                project,
+            } => commands::view_include(&name, &repos, project.as_deref()),
+            ViewCommand::Exclude {
+                name,
+                repos,
+                project,
+            } => commands::view_exclude(&name, &repos, project.as_deref()),
+            ViewCommand::Unset {
+                name,
+                repos,
+                project,
+            } => commands::view_unset(&name, &repos, project.as_deref()),
+            ViewCommand::Default {
+                name,
+                clear,
+                project,
+            } => commands::set_default_view(name.as_deref(), clear, project.as_deref()),
+            ViewCommand::Rm { name, project } => commands::remove_view(&name, project.as_deref()),
+            ViewCommand::Edit { project } => commands::edit_views(project.as_deref()),
+            ViewCommand::Push { project, remote } => {
+                commands::push_views_to_remote(project.as_deref(), &remote)
+            }
+            ViewCommand::Pull { project, remote } => {
+                commands::pull_views_from_remote(project.as_deref(), &remote)
+            }
         },
         Commands::Org { command } => match command {
             OrgCommand::Init { name } => commands::init_org(&name),
@@ -201,6 +244,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 project,
                 repos,
                 all_repos,
+                view,
+                include,
+                exclude,
                 no_worktree,
                 in_place,
                 force,
@@ -211,6 +257,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 project.as_deref(),
                 &repos,
                 all_repos,
+                view.as_deref(),
+                &include,
+                &exclude,
                 !no_worktree,
                 in_place,
                 force,
@@ -227,6 +276,23 @@ pub fn run(cli: Cli) -> Result<()> {
                 let repo_ids = remove_repo_ids(repo_ids, repos)?;
                 commands::remove_repos(&repo_ids)
             }
+            Some(BundleCommand::Include {
+                repos,
+                in_place,
+                no_worktree,
+            }) => commands::bundle_include(&repos, !no_worktree, in_place),
+            Some(BundleCommand::Exclude {
+                repos,
+                keep_worktree,
+                delete_branch,
+                force,
+            }) => commands::bundle_exclude(&repos, keep_worktree, delete_branch, force),
+            Some(BundleCommand::ApplyView {
+                name,
+                keep_worktree,
+                delete_branch,
+                force,
+            }) => commands::bundle_apply_view(&name, keep_worktree, delete_branch, force),
             Some(BundleCommand::List {
                 all,
                 archived,
@@ -463,8 +529,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
                 None => commands::sync_publications(&repos, all),
             },
-            PublishCommand::Status { repos, all } => {
-                commands::show_publication_status(&repos, all)
+            PublishCommand::Status { repos, all, live } => {
+                commands::show_publication_status(&repos, all, live)
             }
             PublishCommand::Github { command } => match command {
                 GithubPublishCommand::Create {
@@ -511,8 +577,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     None => commands::sync_publications(&repos, all),
                 },
-                GithubPublishCommand::Status { repos, all } => {
-                    commands::show_publication_status(&repos, all)
+                GithubPublishCommand::Status { repos, all, live } => {
+                    commands::show_publication_status(&repos, all, live)
                 }
             },
         },
@@ -540,6 +606,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }) => commands::resume_land_run(run.as_deref(), remote.as_deref(), no_remote),
             Some(LandCommand::Sync { remote }) => commands::sync_landed_bundle(remote.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
+            Some(LandCommand::Check) => commands::check_landing(),
             Some(LandCommand::Update {
                 repos,
                 all,
