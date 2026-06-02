@@ -152,10 +152,11 @@ knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run --list
 knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
 knit publish sync [repo-id-or-path...]
-knit publish status [repo-id-or-path...]
+knit publish status [--live] [repo-id-or-path...]
 knit publish github <create|sync|status> ...   # back-compat alias
 knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
+knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>] [--remote <remote>] [--no-remote]
 knit land resume [--run <path>] [--remote <remote>] [--no-remote]
@@ -478,11 +479,14 @@ Do not merge the host review objects directly (for example `gh pr merge`) for Kn
 
 ```sh
 knit land plan
+knit land check
 knit land update --push
 knit land apply
 knit land status
 knit land resume
 ```
+
+`knit land check` is a read-only preflight: it fetches each recorded PR once and prints a readiness table (state, mergeable, checks, review decision, and a verdict) so you can see whether `knit land apply` will succeed and why not. A `conflict` verdict points you at `knit land update`; an already-merged PR shows `already landed`. `knit publish status --live` shows the same live columns alongside the recorded review objects. Both are non-mutating.
 
 `knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. Without a project landing template, the default plan is linear in bundle repo order, merges each recorded GitHub PR into that PR's GitHub base branch with `merge`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `squash` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
 
@@ -490,7 +494,7 @@ Bare `knit land` is safe: it creates or shows the default plan and stops. It nev
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to the configured KnitHub remote when push-sync is enabled. Use `--remote <name>` to force a remote, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to the configured KnitHub remote when push-sync is enabled. Use `--remote <name>` to force a remote, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
 
 `knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
 

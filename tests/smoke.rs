@@ -2109,6 +2109,116 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Create a two-repo bundle and publish its PRs through the fake `gh`, returning
+/// the workspace plus the fake-gh paths so tests can toggle PR state via markers.
+fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        ["track", backend.to_str().unwrap(), frontend.to_str().unwrap()],
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "backend land",
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
+        "frontend land",
+    );
+    knit(&workspace, ["commit", "--stage", "-m", "Landing change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "github", "create", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+#[test]
+fn land_apply_skips_already_merged_pr() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    // backend is already merged with no prior run recorded; a fresh land apply
+    // must treat it as a satisfied step, not bail with "expected OPEN".
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("Feature landed"), "{apply}");
+    // Only frontend should be merged; backend was skipped as already merged.
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["frontend"], "{order}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_check_reports_pr_readiness() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    // Both PRs open, clean, no required checks -> ready.
+    let check = knit_with_fake_gh(&workspace, ["land", "check"], &fake_bin, &fake_gh_dir);
+    assert!(check.contains("Readiness:"), "{check}");
+    assert!(check.contains("backend"), "{check}");
+    assert!(check.contains("frontend"), "{check}");
+    assert!(check.contains("ready"), "{check}");
+
+    // backend merged, frontend conflicting -> distinct verdicts + update hint.
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("conflict-frontend"), "").unwrap();
+    let check2 = knit_with_fake_gh(&workspace, ["land", "check"], &fake_bin, &fake_gh_dir);
+    assert!(check2.contains("already landed"), "{check2}");
+    assert!(check2.contains("conflict"), "{check2}");
+    assert!(check2.contains("knit land update"), "{check2}");
+
+    // `publish status --live` surfaces the same readiness columns.
+    let live = knit_with_fake_gh(
+        &workspace,
+        ["publish", "status", "--live"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(live.contains("verdict"), "{live}");
+    assert!(live.contains("conflict"), "{live}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_conflict_points_to_land_update() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    fs::write(fake_gh_dir.join("conflict-backend"), "").unwrap();
+    let error = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(error.contains("merge conflicts"), "{error}");
+    assert!(error.contains("knit land update"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     let root = unique_temp_dir();
@@ -3566,7 +3676,14 @@ case "$sub" in
     if [ "${GH_FAKE_DRAFT:-0}" = "1" ]; then
       draft="true"
     fi
-    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo"
+    mergeable="MERGEABLE"
+    mergestate="CLEAN"
+    if [ -f "$GH_FAKE_DIR/conflict-$pr_repo" ]; then
+      mergeable="CONFLICTING"
+      mergestate="DIRTY"
+    fi
+    review="${GH_FAKE_REVIEW:-}"
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
     ;;
   edit)
     url="$1"

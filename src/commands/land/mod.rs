@@ -5,16 +5,21 @@
 //! lifting lives in focused submodules:
 //!
 //! - [`plan`] builds the default plan from the bundle and project landing template
+//! - [`check`] live landing-readiness preflight (`knit land check`)
 //! - [`validate`] validates a plan and preflights its PRs
 //! - [`execute`] schedules and runs the plan, recording progress
 //! - [`update`] implements `knit land update` (merge base into feature branches)
 //! - [`display`] renders plans, run status, and PR/check state
 
+mod check;
 mod display;
 mod execute;
 mod plan;
 mod update;
 mod validate;
+
+pub use check::check_landing;
+pub(crate) use check::{assess_landing_readiness, print_readiness_row};
 
 use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
@@ -517,7 +522,15 @@ fn ensure_open_and_ready(repo_id: &str, pr: &PullRequest) -> Result<()> {
         bail!("{repo_id}: PR #{} is a draft.", pr.number);
     }
     match pr.state.as_deref().unwrap_or("UNKNOWN") {
-        "OPEN" => Ok(()),
+        "OPEN" => {
+            if pr.is_conflicting() {
+                bail!(
+                    "{repo_id}: PR #{} has merge conflicts with its base branch. Run `knit land update` to merge the base in and resolve them, then land again.",
+                    pr.number
+                );
+            }
+            Ok(())
+        }
         state => bail!("{repo_id}: PR #{} is {state}, expected OPEN.", pr.number),
     }
 }

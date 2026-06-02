@@ -139,7 +139,9 @@ pub(super) fn preflight_publications(
         let publication = publication_for_repo(&active.bundle, repo_id)
             .with_context(|| format!("{repo_id}: missing review publication"))?;
         let pr = forge.view(&target, &publication.url)?;
-        if state_is_merged(&pr) && run.is_some() {
+        // An already-merged PR is a satisfied step regardless of whether a prior
+        // run exists; the executor and the from-artifact path both skip it.
+        if state_is_merged(&pr) {
             continue;
         }
         ensure_open_and_ready(repo_id, &pr)?;

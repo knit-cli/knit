@@ -463,8 +463,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
                 None => commands::sync_publications(&repos, all),
             },
-            PublishCommand::Status { repos, all } => {
-                commands::show_publication_status(&repos, all)
+            PublishCommand::Status { repos, all, live } => {
+                commands::show_publication_status(&repos, all, live)
             }
             PublishCommand::Github { command } => match command {
                 GithubPublishCommand::Create {
@@ -511,8 +511,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     }
                     None => commands::sync_publications(&repos, all),
                 },
-                GithubPublishCommand::Status { repos, all } => {
-                    commands::show_publication_status(&repos, all)
+                GithubPublishCommand::Status { repos, all, live } => {
+                    commands::show_publication_status(&repos, all, live)
                 }
             },
         },
@@ -540,6 +540,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }) => commands::resume_land_run(run.as_deref(), remote.as_deref(), no_remote),
             Some(LandCommand::Sync { remote }) => commands::sync_landed_bundle(remote.as_deref()),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
+            Some(LandCommand::Check) => commands::check_landing(),
             Some(LandCommand::Update {
                 repos,
                 all,

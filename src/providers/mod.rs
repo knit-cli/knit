@@ -40,6 +40,23 @@ pub struct PullRequest {
     pub is_draft: Option<bool>,
     #[serde(default)]
     pub head_ref_oid: Option<String>,
+    /// Mergeability as reported by the host: `MERGEABLE`, `CONFLICTING`, `UNKNOWN`.
+    #[serde(default)]
+    pub mergeable: Option<String>,
+    /// Finer merge-state hint (`CLEAN`, `DIRTY`, `BLOCKED`, `BEHIND`, ...). GitHub only.
+    #[serde(default)]
+    pub merge_state_status: Option<String>,
+    /// Review decision: `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty.
+    #[serde(default)]
+    pub review_decision: Option<String>,
+}
+
+impl PullRequest {
+    /// True when the host reports the PR conflicts with its base branch.
+    pub fn is_conflicting(&self) -> bool {
+        self.mergeable.as_deref() == Some("CONFLICTING")
+            || self.merge_state_status.as_deref() == Some("DIRTY")
+    }
 }
 
 /// A single status/check result for a review object.
