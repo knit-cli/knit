@@ -137,6 +137,18 @@ pub trait Forge {
         delete_branch: bool,
         match_head: Option<&str>,
     ) -> Result<()>;
+    fn revert_pull_request(
+        &self,
+        _target: &PrTarget,
+        _selector: &str,
+        _title: &str,
+        _body: &str,
+    ) -> Result<String> {
+        bail!(
+            "{} does not support provider-native PR revert in Knit yet.",
+            self.id()
+        );
+    }
     fn check_runs(
         &self,
         target: &PrTarget,
@@ -338,7 +350,12 @@ fn checks_state(runs: &[CheckRun]) -> ChecksState {
 
 /// Run a forge CLI and capture stdout, returning a helpful error when the tool
 /// is missing or exits non-zero.
-pub(crate) fn cli_output<I, S>(bin: &str, cwd: &Path, args: I, stdin: Option<&str>) -> Result<String>
+pub(crate) fn cli_output<I, S>(
+    bin: &str,
+    cwd: &Path,
+    args: I,
+    stdin: Option<&str>,
+) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,

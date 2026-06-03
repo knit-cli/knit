@@ -229,6 +229,19 @@ fn print_node(node: &BundleNode) {
                 }
             }
         }
+        "pr.revert" => {
+            println!(
+                "{}  {}  {}",
+                out::node(&node.id),
+                out::movement("pr revert"),
+                node.provider.as_deref().unwrap_or("provider")
+            );
+            if let Some(repo_ids) = &node.repo_ids {
+                for repo_id in repo_ids {
+                    println!("  {}", out::repo(repo_id));
+                }
+            }
+        }
         "repo.removed" => {
             println!("{}  {}", out::node(&node.id), out::danger("removed repos"));
             if let Some(repo_ids) = &node.repo_ids {
@@ -267,7 +280,10 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
             }
             Ok(())
         }
-        "feature.landed" => {
+        "feature.landed" | "pr.revert" => {
+            if let Some(target_node_id) = &node.target_node_id {
+                println!("{} {}", out::heading("Reverts:"), out::node(target_node_id));
+            }
             if let Some(plan_id) = &node.plan_id {
                 println!("{} {}", out::heading("Plan:"), out::node(plan_id));
             }

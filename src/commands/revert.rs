@@ -3,6 +3,7 @@ use crate::git::{git_output, rev_parse};
 use crate::ids::{revert_group_id, revert_plan_id, short_sha};
 use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
 use crate::output as out;
+use crate::providers::{self, pr_number_from_url, publication_for_repo, PrTarget, PullRequest};
 use crate::selectors::resolve_log_node;
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
@@ -11,7 +12,7 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
@@ -19,6 +20,7 @@ use std::path::PathBuf;
 const REVERT_PLAN_KIND: &str = "KnitRevertPlan";
 const OP_REVERT: &str = "revert";
 const OP_CHERRY_PICK: &str = "cherryPick";
+const OP_PR_REVERT: &str = "prRevert";
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -27,6 +29,8 @@ struct RevertPlan {
     kind: String,
     id: String,
     bundle_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    provider: Option<String>,
     target_ref: String,
     target_node_id: String,
     target_node_type: String,
@@ -40,7 +44,8 @@ struct RevertPlan {
 struct RepoRevertPlan {
     repo_id: String,
     worktree_path: String,
-    expected_head_sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    expected_head_sha: Option<String>,
     operations: Vec<RevertOperation>,
 }
 
@@ -48,7 +53,10 @@ struct RepoRevertPlan {
 #[serde(rename_all = "camelCase")]
 struct RevertOperation {
     kind: String,
-    sha: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    selector: Option<String>,
 }
 
 pub fn revert_target(target: &str, apply: bool) -> Result<()> {
@@ -103,6 +111,14 @@ fn apply_revert(target: &str) -> Result<()> {
     }
 
     preflight_plan(&active, &plan)?;
+    if plan_uses_provider_revert(&plan) {
+        return apply_provider_revert(&mut active, &plan, path);
+    }
+
+    apply_local_revert(&mut active, &plan, path)
+}
+
+fn apply_local_revert(active: &mut ActiveBundle, plan: &RevertPlan, path: PathBuf) -> Result<()> {
     let group_id = revert_group_id();
     let created_at = now_iso();
     let logical_message = format!("Revert {}", plan.target_message);
@@ -114,7 +130,7 @@ fn apply_revert(target: &str) -> Result<()> {
     let mut repo_changes = Vec::new();
 
     for repo_plan in &plan.repos {
-        let (repo_index, worktree) = repo_context(&active, &repo_plan.repo_id)?;
+        let (repo_index, worktree) = repo_context(active, &repo_plan.repo_id)?;
         let before_sha = rev_parse(&worktree, "HEAD")
             .with_context(|| format!("{}: failed to read current HEAD", repo_plan.repo_id))?;
 
@@ -187,7 +203,7 @@ fn apply_revert(target: &str) -> Result<()> {
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
-    save_active_bundle(&active)?;
+    save_active_bundle(active)?;
     let _ = fs::remove_file(path);
 
     println!(
@@ -198,11 +214,118 @@ fn apply_revert(target: &str) -> Result<()> {
     Ok(())
 }
 
+fn apply_provider_revert(
+    active: &mut ActiveBundle,
+    plan: &RevertPlan,
+    path: PathBuf,
+) -> Result<()> {
+    let group_id = revert_group_id();
+    let created_at = now_iso();
+    let logical_message = format!("Revert {}", plan.target_message);
+    let mut repo_ids = BTreeSet::new();
+    let mut publication_urls = BTreeSet::new();
+    let mut failures = Vec::new();
+
+    for repo_plan in &plan.repos {
+        let (repo_index, target, forge) = provider_context(active, plan, &repo_plan.repo_id)?;
+        let repo = active.bundle.repos[repo_index].clone();
+
+        for operation in &repo_plan.operations {
+            let selector = match operation_selector(operation) {
+                Ok(selector) => selector,
+                Err(error) => {
+                    failures.push(format!("{}: {error:#}", repo_plan.repo_id));
+                    continue;
+                }
+            };
+            let title = format!("Revert {} ({})", active.bundle.title, repo_plan.repo_id);
+            let body = format!(
+                "Reverts {selector}\n\nKnit-Reverts: {}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
+                plan.target_node_id, active.bundle.id
+            );
+            match forge.revert_pull_request(&target, selector, &title, &body) {
+                Ok(url) => {
+                    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
+                        number: pr_number_from_url(&url).unwrap_or(0),
+                        url: url.clone(),
+                        state: Some("OPEN".to_string()),
+                        title: Some(title.clone()),
+                        base_ref_name: Some(repo.base_branch.clone()),
+                        head_ref_name: None,
+                        body: None,
+                        is_draft: None,
+                        head_ref_oid: None,
+                        mergeable: None,
+                        merge_state_status: None,
+                        review_decision: None,
+                    });
+                    providers::upsert_publication(
+                        &mut active.bundle,
+                        &repo,
+                        forge.as_ref(),
+                        &summary,
+                    );
+                    repo_ids.insert(repo_plan.repo_id.clone());
+                    publication_urls.insert(summary.url.clone());
+                    println!(
+                        "{}: {} {}",
+                        out::repo(&repo_plan.repo_id),
+                        out::movement("revert PR"),
+                        summary.url
+                    );
+                }
+                Err(error) => failures.push(format!("{}: {error:#}", repo_plan.repo_id)),
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        save_active_bundle(active)?;
+        bail!(
+            "PR revert completed with failures:\n{}",
+            failures.join("\n")
+        );
+    }
+    if publication_urls.is_empty() {
+        bail!("PR revert produced no review objects.");
+    }
+
+    let provider = plan
+        .provider
+        .clone()
+        .unwrap_or_else(|| "provider".to_string());
+    active.bundle.nodes.push(BundleNode::pr_revert(
+        group_id.clone(),
+        created_at,
+        plan.target_node_id.clone(),
+        logical_message,
+        provider,
+        repo_ids.into_iter().collect(),
+        publication_urls.into_iter().collect(),
+    ));
+    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+    active.bundle.updated_at = now_iso();
+    save_active_bundle(active)?;
+    let _ = fs::remove_file(path);
+
+    println!(
+        "{} {}",
+        out::heading("Recorded PR revert group"),
+        out::node(group_id)
+    );
+    Ok(())
+}
+
 fn build_plan(active: &ActiveBundle, target: &str) -> Result<RevertPlan> {
     let target_node = resolve_log_node(&active.bundle.nodes, target)?;
+    let mut provider = None;
     let mut repos = match target_node.node_type.as_str() {
         "commit.group" | "revert.group" => plans_for_commits(active, &target_node.commits)?,
         "git.observed" | "land.update" => plans_for_observed(active, target_node)?,
+        "feature.landed" => {
+            provider = target_node.provider.clone();
+            plans_for_landed_prs(active, target_node)?
+        }
         "repo.removed" => bail!(
             "{} is a metadata node. Knit cannot safely restore a removed repo entry because bundle nodes do not yet store the full removed repo record.",
             target_node.id
@@ -220,6 +343,7 @@ fn build_plan(active: &ActiveBundle, target: &str) -> Result<RevertPlan> {
         kind: REVERT_PLAN_KIND.to_string(),
         id: revert_plan_id(),
         bundle_id: active.bundle.id.clone(),
+        provider,
         target_ref: target.to_string(),
         target_node_id: target_node.id.clone(),
         target_node_type: target_node.node_type.clone(),
@@ -246,7 +370,8 @@ fn plans_for_commits(active: &ActiveBundle, commits: &[CommitRef]) -> Result<Vec
                 .rev()
                 .map(|sha| RevertOperation {
                     kind: OP_REVERT.to_string(),
-                    sha,
+                    sha: Some(sha),
+                    selector: None,
                 })
                 .collect();
             repo_plan(active, &repo_id, operations)
@@ -263,23 +388,27 @@ fn plans_for_observed(active: &ActiveBundle, node: &BundleNode) -> Result<Vec<Re
                 "advanced" => {
                     operations.extend(change.commits.iter().rev().map(|sha| RevertOperation {
                         kind: OP_REVERT.to_string(),
-                        sha: sha.clone(),
+                        sha: Some(sha.clone()),
+                        selector: None,
                     }));
                 }
                 "rewound" => {
                     operations.extend(change.dropped_commits.iter().map(|sha| RevertOperation {
                         kind: OP_CHERRY_PICK.to_string(),
-                        sha: sha.clone(),
+                        sha: Some(sha.clone()),
+                        selector: None,
                     }));
                 }
                 "diverged" => {
                     operations.extend(change.commits.iter().rev().map(|sha| RevertOperation {
                         kind: OP_REVERT.to_string(),
-                        sha: sha.clone(),
+                        sha: Some(sha.clone()),
+                        selector: None,
                     }));
                     operations.extend(change.dropped_commits.iter().map(|sha| RevertOperation {
                         kind: OP_CHERRY_PICK.to_string(),
-                        sha: sha.clone(),
+                        sha: Some(sha.clone()),
+                        selector: None,
                     }));
                 }
                 movement => bail!(
@@ -288,6 +417,51 @@ fn plans_for_observed(active: &ActiveBundle, node: &BundleNode) -> Result<Vec<Re
                 ),
             }
             repo_plan(active, &change.repo_id, operations)
+        })
+        .collect()
+}
+
+fn plans_for_landed_prs(active: &ActiveBundle, node: &BundleNode) -> Result<Vec<RepoRevertPlan>> {
+    let repo_ids = node
+        .repo_ids
+        .as_ref()
+        .filter(|ids| !ids.is_empty())
+        .with_context(|| format!("landed node {} does not record repo ids", node.id))?;
+    let landed_urls = node
+        .publication_urls
+        .iter()
+        .map(String::as_str)
+        .collect::<BTreeSet<_>>();
+
+    repo_ids
+        .iter()
+        .map(|repo_id| {
+            let publication = publication_for_repo(&active.bundle, repo_id).with_context(|| {
+                format!(
+                    "{repo_id}: no current review publication recorded for landed node {}",
+                    node.id
+                )
+            })?;
+            if !landed_urls.is_empty() && !landed_urls.contains(publication.url.as_str()) {
+                bail!(
+                    "{}: current review publication {} is not one of the PRs recorded on landed node {}. Knit can only provider-revert the current landed PR group.",
+                    repo_id,
+                    publication.url,
+                    node.id
+                );
+            }
+            if let Some(provider) = &node.provider {
+                if publication.provider != *provider {
+                    bail!(
+                        "{}: landed node provider is {}, but publication {} uses {}.",
+                        repo_id,
+                        provider,
+                        publication.url,
+                        publication.provider
+                    );
+                }
+            }
+            pr_revert_repo_plan(active, repo_id, &publication.url)
         })
         .collect()
 }
@@ -313,21 +487,65 @@ fn repo_plan(
             .worktree_path
             .clone()
             .unwrap_or_else(|| worktree.display().to_string()),
-        expected_head_sha,
+        expected_head_sha: Some(expected_head_sha),
         operations,
+    })
+}
+
+fn pr_revert_repo_plan(
+    active: &ActiveBundle,
+    repo_id: &str,
+    selector: &str,
+) -> Result<RepoRevertPlan> {
+    let repo = active
+        .bundle
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
+    let worktree_path = repo
+        .worktree_path
+        .clone()
+        .or_else(|| checkout_dir(active, repo).map(|path| path.display().to_string()))
+        .unwrap_or_else(|| repo.path.clone());
+
+    Ok(RepoRevertPlan {
+        repo_id: repo_id.to_string(),
+        worktree_path,
+        expected_head_sha: None,
+        operations: vec![RevertOperation {
+            kind: OP_PR_REVERT.to_string(),
+            sha: None,
+            selector: Some(selector.to_string()),
+        }],
     })
 }
 
 fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result<()> {
     for repo_plan in &plan.repos {
+        if repo_plan
+            .operations
+            .iter()
+            .any(|operation| operation.kind == OP_PR_REVERT)
+        {
+            preflight_provider_revert(active, plan, repo_plan)?;
+            continue;
+        }
+
         let (_, worktree) = repo_context(active, &repo_plan.repo_id)?;
         let current_head = rev_parse(&worktree, "HEAD")
             .with_context(|| format!("{}: failed to read current HEAD", repo_plan.repo_id))?;
-        if current_head != repo_plan.expected_head_sha {
+        let expected_head_sha = repo_plan.expected_head_sha.as_ref().with_context(|| {
+            format!(
+                "{}: revert plan is missing expectedHeadSha for local git operations",
+                repo_plan.repo_id
+            )
+        })?;
+        if current_head != expected_head_sha.as_str() {
             bail!(
                 "{}: HEAD changed since the revert plan was written (expected {}, found {}). Re-run `knit revert {}`.",
                 repo_plan.repo_id,
-                short_sha(&repo_plan.expected_head_sha),
+                short_sha(expected_head_sha),
                 short_sha(&current_head),
                 plan.target_ref
             );
@@ -353,38 +571,75 @@ fn verify_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperati
     if !matches!(operation.kind.as_str(), OP_REVERT | OP_CHERRY_PICK) {
         bail!("{repo_id}: unknown revert operation `{}`.", operation.kind);
     }
+    let sha = operation_sha(operation)?;
 
     git_output(
         worktree,
         [
             OsString::from("rev-parse"),
             OsString::from("--verify"),
-            OsString::from(format!("{}^{{commit}}", operation.sha)),
+            OsString::from(format!("{sha}^{{commit}}")),
         ],
     )
     .with_context(|| {
         format!(
             "{repo_id}: commit {} is not available locally",
-            short_sha(&operation.sha)
+            short_sha(sha)
         )
     })?;
     Ok(())
 }
 
+fn preflight_provider_revert(
+    active: &ActiveBundle,
+    plan: &RevertPlan,
+    repo_plan: &RepoRevertPlan,
+) -> Result<()> {
+    if repo_plan
+        .operations
+        .iter()
+        .any(|operation| operation.kind != OP_PR_REVERT)
+    {
+        bail!(
+            "{}: provider PR revert operations cannot be mixed with local git operations.",
+            repo_plan.repo_id
+        );
+    }
+
+    let (_, target, forge) = provider_context(active, plan, &repo_plan.repo_id)?;
+    for operation in &repo_plan.operations {
+        let selector = operation_selector(operation)?;
+        let pr = forge
+            .view(&target, selector)
+            .with_context(|| format!("{}: failed to load {}", repo_plan.repo_id, selector))?;
+        if !pull_request_is_merged(&pr) {
+            bail!(
+                "{}: PR #{} is {}, expected MERGED before provider revert.",
+                repo_plan.repo_id,
+                pr.number,
+                pr.state.as_deref().unwrap_or("UNKNOWN")
+            );
+        }
+    }
+
+    Ok(())
+}
+
 fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
+    let sha = operation_sha(operation)?;
     match operation.kind.as_str() {
         OP_REVERT => git_output(
             worktree,
             [
                 OsString::from("revert"),
                 OsString::from("--no-commit"),
-                OsString::from(&operation.sha),
+                OsString::from(sha),
             ],
         )
         .with_context(|| {
             format!(
                 "{repo_id}: failed to revert {}. Resolve the git state manually before retrying.",
-                short_sha(&operation.sha)
+                short_sha(sha)
             )
         })?,
         OP_CHERRY_PICK => git_output(
@@ -392,19 +647,91 @@ fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperatio
             [
                 OsString::from("cherry-pick"),
                 OsString::from("--no-commit"),
-                OsString::from(&operation.sha),
+                OsString::from(sha),
             ],
         )
         .with_context(|| {
             format!(
                 "{repo_id}: failed to cherry-pick {}. Resolve the git state manually before retrying.",
-                short_sha(&operation.sha)
+                short_sha(sha)
             )
         })?,
         kind => bail!("{repo_id}: unknown revert operation `{kind}`."),
     };
 
     Ok(())
+}
+
+fn operation_sha(operation: &RevertOperation) -> Result<&str> {
+    operation
+        .sha
+        .as_deref()
+        .with_context(|| format!("{} operation is missing sha", operation.kind))
+}
+
+fn operation_selector(operation: &RevertOperation) -> Result<&str> {
+    if operation.kind != OP_PR_REVERT {
+        bail!("{} operation is not a provider PR revert", operation.kind);
+    }
+    operation
+        .selector
+        .as_deref()
+        .with_context(|| "provider PR revert operation is missing selector")
+}
+
+fn plan_uses_provider_revert(plan: &RevertPlan) -> bool {
+    plan.repos.iter().any(|repo| {
+        repo.operations
+            .iter()
+            .any(|operation| operation.kind == OP_PR_REVERT)
+    })
+}
+
+fn provider_context(
+    active: &ActiveBundle,
+    plan: &RevertPlan,
+    repo_id: &str,
+) -> Result<(usize, PrTarget, Box<dyn providers::Forge>)> {
+    let (index, repo) = active
+        .bundle
+        .repos
+        .iter()
+        .enumerate()
+        .find(|(_, repo)| repo.id == repo_id)
+        .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
+    let forge = match plan.provider.as_deref() {
+        Some(provider) => providers::by_id(provider)
+            .with_context(|| format!("{repo_id}: unknown provider `{provider}`"))?,
+        None => providers::for_repo(repo)?,
+    };
+    let target = provider_target(active, repo, forge.as_ref())?;
+
+    Ok((index, target, forge))
+}
+
+fn provider_target(
+    active: &ActiveBundle,
+    repo: &crate::model::RepoEntry,
+    forge: &dyn providers::Forge,
+) -> Result<PrTarget> {
+    if let Some(full_name) = repo
+        .remote
+        .as_deref()
+        .and_then(|remote| forge.repo_full_name(remote))
+    {
+        return Ok(PrTarget::explicit(active.root.clone(), full_name));
+    }
+    if let Some(cwd) = checkout_dir(active, repo) {
+        return Ok(PrTarget::checkout(cwd));
+    }
+    bail!(
+        "{}: no checkout or parseable remote is available for provider PR revert.",
+        repo.id
+    );
+}
+
+fn pull_request_is_merged(pr: &PullRequest) -> bool {
+    pr.state.as_deref() == Some("MERGED")
 }
 
 fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, PathBuf)> {
@@ -431,6 +758,8 @@ fn node_message(node: &BundleNode) -> String {
     match node.node_type.as_str() {
         "git.observed" => "observed git changes".to_string(),
         "land.update" => "feature branch update".to_string(),
+        "feature.landed" => "landed PR group".to_string(),
+        "pr.revert" => "provider PR revert".to_string(),
         "repo.removed" => "removed repos".to_string(),
         node_type => node_type.to_string(),
     }
@@ -458,21 +787,42 @@ fn print_plan(plan: &RevertPlan, path: &PathBuf) {
         out::path(path.display())
     );
     println!("{} {}", out::heading("Summary:"), plan.target_message);
+    if let Some(provider) = &plan.provider {
+        println!("{} {}", out::heading("Provider:"), provider);
+    }
     println!();
 
     for repo in &plan.repos {
-        println!(
-            "{} {} {}",
-            out::repo(&repo.repo_id),
-            out::muted("at"),
-            out::sha(short_sha(&repo.expected_head_sha))
-        );
-        for operation in &repo.operations {
+        if let Some(expected_head_sha) = &repo.expected_head_sha {
             println!(
-                "  {} {}",
-                out::movement(operation.kind.as_str()),
-                out::sha(short_sha(&operation.sha))
+                "{} {} {}",
+                out::repo(&repo.repo_id),
+                out::muted("at"),
+                out::sha(short_sha(expected_head_sha))
             );
+        } else {
+            println!("{}", out::repo(&repo.repo_id));
+        }
+        for operation in &repo.operations {
+            match operation.kind.as_str() {
+                OP_PR_REVERT => println!(
+                    "  {} {}",
+                    out::movement(operation.kind.as_str()),
+                    operation
+                        .selector
+                        .as_deref()
+                        .unwrap_or("(missing selector)")
+                ),
+                _ => println!(
+                    "  {} {}",
+                    out::movement(operation.kind.as_str()),
+                    operation
+                        .sha
+                        .as_deref()
+                        .map(|sha| out::sha(short_sha(sha)))
+                        .unwrap_or_else(|| out::danger("(missing sha)"))
+                ),
+            }
         }
     }
 

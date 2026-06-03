@@ -2231,11 +2231,74 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert_eq!(latest["provider"].as_str(), Some("github"));
     assert_eq!(latest["repoIds"].as_array().unwrap().len(), 2);
     assert_eq!(latest["publicationUrls"].as_array().unwrap().len(), 2);
+    let landed_node_id = latest["id"].as_str().unwrap().to_string();
     assert!(workspace.join(".knit/land-runs").exists());
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
     assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
     let sync_error = knit_fails(&workspace, ["land", "sync"]);
     assert!(sync_error.contains("No KnitHub remote configured"));
+
+    let revert_plan = knit_with_fake_gh(&workspace, ["revert", "HEAD"], &fake_bin, &fake_gh_dir);
+    assert!(revert_plan.contains("Revert plan"), "{revert_plan}");
+    assert!(revert_plan.contains("Provider: github"), "{revert_plan}");
+    assert!(revert_plan.contains("prRevert"), "{revert_plan}");
+    assert!(
+        revert_plan.contains("https://github.com/acme/backend/pull/101"),
+        "{revert_plan}"
+    );
+    assert!(
+        revert_plan.contains("https://github.com/acme/frontend/pull/202"),
+        "{revert_plan}"
+    );
+
+    let revert_apply = knit_with_fake_gh(
+        &workspace,
+        ["revert", "HEAD", "--apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        revert_apply.contains("Recorded PR revert group"),
+        "{revert_apply}"
+    );
+    let revert_order = fs::read_to_string(fake_gh_dir.join("revert-order.txt")).unwrap();
+    let mut revert_order_lines = revert_order.lines().collect::<Vec<_>>();
+    revert_order_lines.sort_unstable();
+    assert_eq!(revert_order_lines, vec!["backend", "frontend"]);
+    let backend_revert_body = fs::read_to_string(fake_gh_dir.join("revert-backend.md")).unwrap();
+    assert!(
+        backend_revert_body.contains(&format!("Knit-Reverts: {landed_node_id}")),
+        "{backend_revert_body}"
+    );
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("pr.revert"));
+    assert_eq!(
+        latest["targetNodeId"].as_str(),
+        Some(landed_node_id.as_str())
+    );
+    assert_eq!(latest["provider"].as_str(), Some("github"));
+    assert_eq!(latest["publicationUrls"].as_array().unwrap().len(), 2);
+    assert!(bundle["publications"].as_array().unwrap().iter().any(|publication| {
+        publication["repoId"].as_str() == Some("backend")
+            && publication["number"].as_u64() == Some(901)
+            && publication["state"].as_str() == Some("OPEN")
+    }));
+    assert!(bundle["publications"].as_array().unwrap().iter().any(|publication| {
+        publication["repoId"].as_str() == Some("frontend")
+            && publication["number"].as_u64() == Some(902)
+            && publication["state"].as_str() == Some("OPEN")
+    }));
+    assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
+    assert!(knit(&workspace, ["log", "-1"]).contains("pr revert"));
+    let show_revert = knit(&workspace, ["show", "HEAD"]);
+    assert!(show_revert.contains("pr.revert"), "{show_revert}");
+    assert!(show_revert.contains(&landed_node_id), "{show_revert}");
+    assert!(
+        show_revert.contains("https://github.com/acme/backend/pull/901"),
+        "{show_revert}"
+    );
 
     let mut stale_bundle = read_bundle(&workspace);
     stale_bundle["publications"] = json!([]);
@@ -3812,7 +3875,13 @@ case "$sub" in
       base="$(cat "$GH_FAKE_DIR/create-$pr_repo.base")"
     fi
     state="OPEN"
-    if [ -f "$GH_FAKE_DIR/merged-$pr_repo" ]; then
+    title="$pr_repo PR"
+    head="knit/venue-capacity"
+    if [ -f "$GH_FAKE_DIR/revert-$pr_repo.number" ] && [ "$number" = "$(cat "$GH_FAKE_DIR/revert-$pr_repo.number")" ]; then
+      state="OPEN"
+      title="Revert $pr_repo PR"
+      head="knit/revert-$pr_repo"
+    elif [ -f "$GH_FAKE_DIR/merged-$pr_repo" ]; then
       state="MERGED"
     fi
     draft="false"
@@ -3826,7 +3895,7 @@ case "$sub" in
       mergestate="DIRTY"
     fi
     review="${GH_FAKE_REVIEW:-}"
-    printf '{"number":%s,"url":"%s","state":"%s","title":"%s PR","baseRefName":"%s","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$pr_repo" "$base" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s","baseRefName":"%s","headRefName":"%s","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$title" "$base" "$head" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
     ;;
   edit)
     url="$1"
@@ -3834,6 +3903,46 @@ case "$sub" in
     pr_repo="${tail%%/*}"
     cat > "$GH_FAKE_DIR/edit-$pr_repo.md"
     printf '%s\n' "$url"
+    ;;
+  revert)
+    url="$1"
+    shift
+    tail="${url#https://github.com/acme/}"
+    pr_repo="${tail%%/*}"
+    title="Revert $pr_repo PR"
+    body_written=0
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --title)
+          title="$2"
+          shift 2
+          ;;
+        --body-file)
+          if [ "$2" = "-" ]; then
+            cat > "$GH_FAKE_DIR/revert-$pr_repo.md"
+          else
+            cp "$2" "$GH_FAKE_DIR/revert-$pr_repo.md"
+          fi
+          body_written=1
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ "$body_written" -eq 0 ]; then
+      : > "$GH_FAKE_DIR/revert-$pr_repo.md"
+    fi
+    case "$pr_repo" in
+      backend) number=901 ;;
+      frontend) number=902 ;;
+      *) number=903 ;;
+    esac
+    printf '%s\n' "$number" > "$GH_FAKE_DIR/revert-$pr_repo.number"
+    printf '%s\n' "$title" > "$GH_FAKE_DIR/revert-$pr_repo.title"
+    printf '%s\n' "$pr_repo" >> "$GH_FAKE_DIR/revert-order.txt"
+    printf 'https://github.com/acme/%s/pull/%s\n' "$pr_repo" "$number"
     ;;
   checks)
     if [ "${GH_FAKE_NO_REQUIRED_CHECKS_ERROR:-0}" = "1" ]; then
