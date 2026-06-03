@@ -7,7 +7,10 @@ use super::client::{
     normalize_base_url, prepare_feature_branches, token_from_env,
 };
 use super::{RemoteExportRepository, RemoteProjectExport};
-use crate::commands::agents::{print_worktree_agents_summary, write_worktree_agents_md};
+use crate::commands::agents::{
+    print_bundle_worktree_agents_summary, print_worktree_agents_summary,
+    write_bundle_worktree_agents_md, write_worktree_agents_md,
+};
 use crate::commands::worktree::materialize_repos;
 use crate::git::{current_branch, git_output, is_git_worktree, ref_exists};
 use crate::ids::slugify;
@@ -329,7 +332,9 @@ fn materialize_imported_bundle(root: &Path, bundle_id: &str) -> Result<()> {
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), bundle_path, bundle);
     materialize_repos(&mut active, None)?;
     fast_forward_feature_checkouts(&mut active)?;
+    let bundle_agents = write_bundle_worktree_agents_md(&active)?;
     let worktree_agents = write_worktree_agents_md(&active)?;
+    print_bundle_worktree_agents_summary(bundle_agents.as_deref());
     print_worktree_agents_summary(&worktree_agents);
     crate::store::save_active_bundle(&active)
 }

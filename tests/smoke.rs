@@ -148,7 +148,7 @@ fn bundle_start_cd_opens_project_worktree_root() {
 
     let output = knit_with_env(
         &workspace,
-        ["bundle", "start", "project feature", "--cd"],
+        ["bundle", "start", "project feature", "--agents", "--cd"],
         &[("SHELL", "/bin/pwd")],
     );
     let checkout = workspace
@@ -157,6 +157,13 @@ fn bundle_start_cd_opens_project_worktree_root() {
         .unwrap();
     assert!(checkout.join("backend").exists());
     assert!(checkout.join("frontend").exists());
+    assert!(output.contains("Bundle AGENTS.md:"));
+    let bundle_agents = fs::read_to_string(checkout.join("AGENTS.md")).unwrap();
+    assert!(bundle_agents.contains("Knit Bundle Worktree Guide"));
+    assert!(bundle_agents.contains("bundle `project-feature`"));
+    assert!(bundle_agents.contains("knit status"));
+    assert!(bundle_agents.contains("`backend`: `.knit/worktrees/project-feature/backend`"));
+    assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/project-feature/frontend`"));
     assert!(output.contains("cd:"));
     assert!(
         output
@@ -549,8 +556,14 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(start.contains("Worktree AGENTS.md: 2 repo worktree(s)"));
     assert!(!workspace.join("AGENTS.md").exists());
 
+    let bundle_agents_path = workspace.join(".knit/worktrees/agent-docs/AGENTS.md");
     let backend_agents_path = workspace.join(".knit/worktrees/agent-docs/backend/AGENTS.md");
     let frontend_agents_path = workspace.join(".knit/worktrees/agent-docs/frontend/AGENTS.md");
+    let bundle_agents = fs::read_to_string(&bundle_agents_path).unwrap();
+    assert!(bundle_agents.contains("Knit Bundle Worktree Guide"));
+    assert!(bundle_agents.contains("bundle `agent-docs`"));
+    assert!(bundle_agents.contains("`backend`: `.knit/worktrees/agent-docs/backend`"));
+    assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
     let backend_agents = fs::read_to_string(&backend_agents_path).unwrap();
     assert!(backend_agents.contains("Knit Worktree Guide"));
     assert!(backend_agents.contains("bundle `agent-docs`"));
