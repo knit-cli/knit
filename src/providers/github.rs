@@ -152,6 +152,30 @@ impl Forge for GitHub {
         Ok(())
     }
 
+    fn revert_pull_request(
+        &self,
+        target: &PrTarget,
+        selector: &str,
+        title: &str,
+        body: &str,
+    ) -> Result<String> {
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("revert"),
+                OsString::from(selector),
+                OsString::from("--title"),
+                OsString::from(title),
+                OsString::from("--body-file"),
+                OsString::from("-"),
+            ],
+        );
+        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        parse_pr_url(&output).context("`gh pr revert` did not print a PR URL")
+    }
+
     fn check_runs(
         &self,
         target: &PrTarget,
@@ -220,7 +244,10 @@ mod tests {
             full_name("git@github.com:acme/backend.git").as_deref(),
             Some("acme/backend")
         );
-        assert_eq!(full_name("https://example.com/acme/backend").as_deref(), None);
+        assert_eq!(
+            full_name("https://example.com/acme/backend").as_deref(),
+            None
+        );
     }
 
     #[test]

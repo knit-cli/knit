@@ -399,4 +399,31 @@ impl BundleNode {
             repo_changes: Vec::new(),
         }
     }
+
+    pub fn pr_revert(
+        id: String,
+        created_at: String,
+        target_node_id: String,
+        message: String,
+        provider: String,
+        repo_ids: Vec<String>,
+        publication_urls: Vec<String>,
+    ) -> Self {
+        Self {
+            id,
+            node_type: "pr.revert".to_string(),
+            created_at,
+            title: None,
+            repo_ids: Some(repo_ids),
+            commit_group_id: None,
+            message: Some(message),
+            target_node_id: Some(target_node_id),
+            plan_id: None,
+            run_id: None,
+            provider: Some(provider),
+            publication_urls,
+            commits: Vec::new(),
+            repo_changes: Vec::new(),
+        }
+    }
 }

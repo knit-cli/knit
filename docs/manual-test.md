@@ -65,7 +65,7 @@ Expected result:
 - `knit commit` creates one commit in each staged checkout.
 - `knit log -1` shows one logical commit group with both repo SHAs, and the bundle has a `commit.group` node.
 - `knit show HEAD` shows the node details and git stats for the latest logical group.
-- `knit revert HEAD` writes a plan, and `knit revert HEAD --apply` creates one revert commit per affected repo plus a `revert.group` node.
+- `knit revert HEAD` writes a plan, and `knit revert HEAD --apply` creates one revert commit per affected repo plus a `revert.group` node. When `HEAD` is a `feature.landed` node, the plan uses provider-native PR reverts and records the newly opened cross-repo review group as `pr.revert`.
 
 To test a raw git commit outside Knit:
 
