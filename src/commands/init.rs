@@ -1,6 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::commands::agents::{
-    print_worktree_agents_summary, upsert_managed_section, write_worktree_agents_md,
+    print_bundle_worktree_agents_summary, print_worktree_agents_summary, upsert_managed_section,
+    write_bundle_worktree_agents_md, write_worktree_agents_md,
 };
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
@@ -55,12 +56,14 @@ pub fn start_bundle(
             let bundle: ChangeGroup = read_json(&bundle_path)?;
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             let agents_path = write_agents_md(&root)?;
+            let bundle_agents = write_bundle_worktree_agents_md(&active)?;
             let worktree_agents = write_worktree_agents_md(&active)?;
             println!(
                 "{} {}",
                 out::heading("AGENTS.md:"),
                 out::path(agents_path.display())
             );
+            print_bundle_worktree_agents_summary(bundle_agents.as_deref());
             print_worktree_agents_summary(&worktree_agents);
             return Ok(());
         }
@@ -122,7 +125,9 @@ pub fn start_bundle(
 
     let bundle: ChangeGroup = read_json(&bundle_path)?;
     let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
+    let bundle_agents = write_bundle_worktree_agents_md(&active)?;
     let worktree_agents = write_worktree_agents_md(&active)?;
+    print_bundle_worktree_agents_summary(bundle_agents.as_deref());
     print_worktree_agents_summary(&worktree_agents);
 
     if let Some(selector) = cd {
@@ -385,7 +390,7 @@ knit bundle start "feature a" --repo backend
 knit bundle start "feature b" --repo backend
 ```
 
-Use `knit bundle start "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle start "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
 

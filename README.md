@@ -290,7 +290,7 @@ knit bundle add docs
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
 
-Use `knit bundle start "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle start "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
@@ -326,7 +326,7 @@ knit bundle split feature-x abc123 def456 --repo backend --repo frontend --title
 
 `knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 
-Generated worktrees get a local `AGENTS.md` by default. That worktree guide assumes the agent opened the worktree folder directly, so its examples rely on cwd and do not include `--bundle`.
+Generated worktrees get local `AGENTS.md` guidance by default: one bundle-wide guide at `.knit/worktrees/<bundle>/AGENTS.md`, plus repo-local guides inside each generated repo checkout. Those worktree guides assume the agent opened the generated worktree folder directly, so their examples rely on cwd and do not include `--bundle`.
 
 Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit project init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
 

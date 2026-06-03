@@ -1,4 +1,4 @@
-use crate::checkout::{checkout_dir, is_in_place};
+use crate::checkout::{checkout_dir, checkout_display_path, is_in_place};
 use crate::git::git_output;
 use crate::model::{KnitProject, RepoEntry, DEFAULT_LANDING_MERGE_METHOD};
 use crate::output as out;
@@ -10,6 +10,34 @@ use std::path::{Path, PathBuf};
 
 const KNIT_AGENTS_BEGIN: &str = "<!-- BEGIN KNIT AGENTS -->";
 const KNIT_AGENTS_END: &str = "<!-- END KNIT AGENTS -->";
+
+pub(crate) fn write_bundle_worktree_agents_md(active: &ActiveBundle) -> Result<Option<PathBuf>> {
+    if active.bundle.repos.is_empty() {
+        return Ok(None);
+    }
+
+    let bundle_root = active.root.join(".knit/worktrees").join(&active.bundle.id);
+    if !bundle_root.exists() {
+        return Ok(None);
+    }
+
+    let path = bundle_root.join("AGENTS.md");
+    let section = bundle_worktree_agents_section(active, &bundle_root);
+    let next = if path.exists() {
+        let existing = fs::read_to_string(&path)
+            .with_context(|| format!("failed to read existing {}", path.display()))?;
+        upsert_managed_section(&existing, &section)
+    } else {
+        format!("# AGENTS.md\n\n{section}")
+    };
+    fs::write(&path, next).with_context(|| {
+        format!(
+            "failed to write Knit bundle worktree guidance at {}",
+            path.display()
+        )
+    })?;
+    Ok(Some(path))
+}
 
 pub(crate) fn write_worktree_agents_md(active: &ActiveBundle) -> Result<Vec<PathBuf>> {
     let mut paths = Vec::new();
@@ -41,6 +69,16 @@ pub(crate) fn write_worktree_agents_md(active: &ActiveBundle) -> Result<Vec<Path
     Ok(paths)
 }
 
+pub(crate) fn print_bundle_worktree_agents_summary(path: Option<&Path>) {
+    if let Some(path) = path {
+        println!(
+            "{} {}",
+            out::heading("Bundle AGENTS.md:"),
+            out::path(path.display())
+        );
+    }
+}
+
 pub(crate) fn print_worktree_agents_summary(paths: &[PathBuf]) {
     if !paths.is_empty() {
         println!(
@@ -49,6 +87,60 @@ pub(crate) fn print_worktree_agents_summary(paths: &[PathBuf]) {
             paths.len()
         );
     }
+}
+
+fn bundle_worktree_agents_section(active: &ActiveBundle, bundle_root: &Path) -> String {
+    let bundle_root_display = bundle_root
+        .strip_prefix(&active.root)
+        .unwrap_or(bundle_root)
+        .display()
+        .to_string();
+    let checkouts = active
+        .bundle
+        .repos
+        .iter()
+        .map(|repo| format!("- `{}`: `{}`", repo.id, checkout_display_path(repo)))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let runtime_section = worktree_runtime_section(active);
+
+    format!(
+        r#"<!-- BEGIN KNIT AGENTS -->
+## Knit Bundle Worktree Guide
+
+This directory is the generated worktree root for Knit bundle `{bundle}`.
+
+```txt
+{bundle_root}
+```
+
+Bundle-scoped Knit commands resolve this bundle automatically from this cwd:
+
+```sh
+knit status
+knit add
+knit commit --stage -m "Describe the feature change"
+knit push --set-upstream
+```
+{runtime_section}
+For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
+
+Tracked checkouts for this bundle:
+
+{checkouts}
+
+Do not edit the original source checkout for feature work unless the bundle was created with `--in-place`.
+<!-- END KNIT AGENTS -->
+"#,
+        bundle = active.bundle.id,
+        bundle_root = bundle_root_display,
+        runtime_section = runtime_section,
+        checkouts = if checkouts.is_empty() {
+            "(none)".to_string()
+        } else {
+            checkouts
+        }
+    )
 }
 
 pub(crate) fn write_project_agents_md(root: &Path, project: &KnitProject) -> Result<PathBuf> {

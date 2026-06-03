@@ -1,4 +1,7 @@
-use crate::commands::agents::{print_worktree_agents_summary, write_worktree_agents_md};
+use crate::commands::agents::{
+    print_bundle_worktree_agents_summary, print_worktree_agents_summary,
+    write_bundle_worktree_agents_md, write_worktree_agents_md,
+};
 use crate::commands::worktree::materialize_repos;
 use crate::git::{
     current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
@@ -39,7 +42,9 @@ pub fn track_repos(
     let plans = resolve_repo_plans(repo_paths, base_override, checkout_mode)?;
     apply_repo_plans(&mut active, plans, materialize)?;
     if materialize {
+        let bundle_agents = write_bundle_worktree_agents_md(&active)?;
         let worktree_agents = write_worktree_agents_md(&active)?;
+        print_bundle_worktree_agents_summary(bundle_agents.as_deref());
         print_worktree_agents_summary(&worktree_agents);
     }
     save_active_bundle(&active)?;
@@ -74,7 +79,9 @@ pub fn track_repo_selectors(
     ensure_unique_paths(&plans)?;
     apply_repo_plans(&mut active, plans, materialize)?;
     if materialize {
+        let bundle_agents = write_bundle_worktree_agents_md(&active)?;
         let worktree_agents = write_worktree_agents_md(&active)?;
+        print_bundle_worktree_agents_summary(bundle_agents.as_deref());
         print_worktree_agents_summary(&worktree_agents);
     }
     save_active_bundle(&active)?;
