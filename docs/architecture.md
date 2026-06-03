@@ -93,7 +93,7 @@ The bundle carries both current state and history:
 
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: flat list of logical commits across repos.
-- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `feature.landed`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
+- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `feature.landed`, `pr.revert`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
 - `publications`: provider metadata for PRs or other forge review objects created or synced by Knit.
 - `headNodeId`: the latest node in the ledger.
 

@@ -94,10 +94,11 @@ Current node types:
 - `land.update`
 - `revert.group`
 - `feature.landed`
+- `pr.revert`
 - `feature.closed`
 - `repo.removed`
 
-`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`. `feature.closed` nodes include an optional `reason`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`. `pr.revert` nodes include `targetNodeId`, `provider`, `repoIds`, and the newly created revert PR `publicationUrls`. `feature.closed` nodes include an optional `reason`.
 
 `repoChanges` records how a repo moved:
 
@@ -232,6 +233,6 @@ Knit ships JSON Schema files under `schemas/` and prints them with `knit schema 
 
 Project files can carry a reusable `landing` template with merge priority, merge defaults, and deployment entries. The generated land plan is still bundle-local and editable, so a one-off release can alter dependencies, commands, checkout branches, or deployment modes without changing the project default. `deploy` steps are structured: `deploymentMode: "command"` runs an argv command, while `deploymentMode: "push"` records a deployment triggered by the merge itself.
 
-`knit land apply` and `knit land resume` write run logs under `.knit/land-runs/`. Run files are operational logs, not the source of truth for code state. The bundle records only the final `feature.landed` summary node after every step succeeds.
+`knit land apply` and `knit land resume` write run logs under `.knit/land-runs/`. Run files are operational logs, not the source of truth for code state. The bundle records only the final `feature.landed` summary node after every step succeeds. A later `knit revert <feature.landed> --apply` can create provider-native revert PRs across the landed repos and records that follow-up review group as `pr.revert`.
 
 Gloss should treat the bundle as read-only input. Gloss can analyze the current `headNodeId`, a specific `commit.group` node, or the full current bundle.
