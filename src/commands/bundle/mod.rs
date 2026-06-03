@@ -834,6 +834,26 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record publicationUrls", node.id));
             }
         }
+        "pr.revert" => {
+            if node
+                .target_node_id
+                .as_deref()
+                .unwrap_or("")
+                .trim()
+                .is_empty()
+            {
+                errors.push(format!("node `{}` must record targetNodeId", node.id));
+            }
+            if node.provider.as_deref().unwrap_or("").trim().is_empty() {
+                errors.push(format!("node `{}` must record provider", node.id));
+            }
+            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
+                errors.push(format!("node `{}` must record repoIds", node.id));
+            }
+            if node.publication_urls.is_empty() {
+                errors.push(format!("node `{}` must record publicationUrls", node.id));
+            }
+        }
         "feature.closed" => {}
         _ => {}
     }

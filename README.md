@@ -561,7 +561,7 @@ knit merge x-y-compat --into feature-y
 
 `knit show <target>` uses the same bundle log selectors as `knit revert`: `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, commit group ids, and recorded git commit SHAs. Commit and revert group nodes show `git show --stat --oneline` for each repo commit. Observed git nodes show the branch movement and the relevant added or dropped commits when those commits are still available locally.
 
-`knit revert <target>` resolves bundle log selectors like `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, and git commit SHAs shown in `knit log`. A commit SHA resolves to the latest bundle node that mentions that commit, so if a commit was later observed as dropped by a reset, reverting by that SHA restores it from the latest rewind node. By default it writes a checked revert plan under `.knit/revert-plans/` and prints the per-repo operations. `knit revert <target> --apply` requires that plan to exist, verifies each affected worktree is still clean and at the planned head, then creates one revert commit per affected repo and appends a `revert.group` node.
+`knit revert <target>` resolves bundle log selectors like `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, and git commit SHAs shown in `knit log`. A commit SHA resolves to the latest bundle node that mentions that commit, so if a commit was later observed as dropped by a reset, reverting by that SHA restores it from the latest rewind node. By default it writes a checked revert plan under `.knit/revert-plans/` and prints the per-repo operations. `knit revert <target> --apply` requires that plan to exist. For local git entries, it verifies each affected worktree is still clean and at the planned head, then creates one revert commit per affected repo and appends a `revert.group` node. For a landed PR group, it verifies the recorded PRs are merged, runs the provider-native PR revert for each repo (`gh pr revert` for GitHub), records the newly opened revert PRs as the current publications, and appends a `pr.revert` node so the group can be landed through Knit.
 
 Revert behavior is based on the target node:
 
@@ -569,6 +569,7 @@ Revert behavior is based on the target node:
 - `git.observed` with `advanced`: revert the observed commits.
 - `git.observed` with `rewound`: cherry-pick the dropped commits back.
 - `git.observed` with `diverged`: revert added commits, then cherry-pick dropped commits.
+- `feature.landed`: create provider-native revert PRs for the landed PR group across repos.
 
 `knit git` passes arguments directly to git in tracked checkouts. With no repo selector it runs against every tracked repo:
 
@@ -624,6 +625,7 @@ Typical node types:
 - `git.observed`
 - `revert.group`
 - `feature.landed`
+- `pr.revert`
 - `land.update`
 - `repo.removed`
 
