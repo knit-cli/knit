@@ -14,6 +14,8 @@ pub struct KnitConfig {
     pub active_project: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sync_remote: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_remotes: Vec<String>,
     #[serde(default = "default_advice")]
     pub advice: bool,
     /// When true (default), git-pushing commands also push the bundle artifact to
@@ -31,6 +33,7 @@ impl KnitConfig {
             active_bundle: Some(active_bundle),
             active_project: None,
             sync_remote: None,
+            sync_remotes: Vec::new(),
             advice: true,
             push_sync: true,
             remotes: BTreeMap::new(),
@@ -43,6 +46,7 @@ impl KnitConfig {
             active_bundle: None,
             active_project: Some(active_project),
             sync_remote: None,
+            sync_remotes: Vec::new(),
             advice: true,
             push_sync: true,
             remotes: BTreeMap::new(),

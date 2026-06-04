@@ -8,6 +8,11 @@
     "activeBundle": { "type": "string" },
     "activeProject": { "type": "string" },
     "syncRemote": { "type": "string" },
+    "syncRemotes": {
+      "type": "array",
+      "items": { "type": "string" },
+      "uniqueItems": true
+    },
     "advice": { "type": "boolean" },
     "pushSync": { "type": "boolean" },
     "remotes": {

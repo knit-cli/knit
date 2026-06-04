@@ -2,10 +2,10 @@
 //! wide), list/fetch remote bundles, and delete remote bundle records.
 
 use super::client::{
-    decode_bundle_payload, ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts,
-    fetch_project_export, localize_bundle, load_project_if_present, prepare_feature_branches,
-    request_json, resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
-    workspace_config,
+    configured_sync_remote_names, decode_bundle_payload, ensure_remote_bundle_fast_forward,
+    fast_forward_feature_checkouts, fetch_project_export, localize_bundle, load_project_if_present,
+    prepare_feature_branches, request_json, resolve_project_id, resolve_remote,
+    resolve_sync_remote_name, resolve_token, workspace_config,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
@@ -91,8 +91,8 @@ pub struct RemoteBundleRecord {
 /// Resolve the configured KnitHub remote and fetch the project export a single
 /// time. Returns `None` when the pull opts out (`--no-remote`) or no remote is
 /// configured, so callers can skip the artifact step without it being an error.
-/// Remote resolution matches push-sync: explicit override, then `sync_remote`,
-/// then a remote literally named `knithub`.
+/// Remote resolution matches the primary push-sync remote: explicit override,
+/// then `syncRemotes[0]`/`sync_remote`, then a remote literally named `knithub`.
 pub fn prepare_remote_pull(
     remote_override: Option<&str>,
     skip_remote: bool,
@@ -103,13 +103,7 @@ pub fn prepare_remote_pull(
     let (root, config) = workspace_config()?;
     let Some(remote_name) = remote_override
         .map(crate::ids::slugify)
-        .or_else(|| config.sync_remote.clone())
-        .or_else(|| {
-            config
-                .remotes
-                .contains_key("knithub")
-                .then(|| "knithub".to_string())
-        })
+        .or_else(|| configured_sync_remote_names(&config).into_iter().next())
     else {
         return Ok(None);
     };
@@ -371,9 +365,12 @@ pub fn fetch_bundles_from_remote(
     config: &KnitConfig,
     remote_name: Option<&str>,
 ) -> Result<()> {
-    let remote_name = remote_name.map(crate::ids::slugify).or(config.sync_remote.clone()).with_context(|| {
-        "No remote configured for bundle fetch. Configure a remote with `knit remote add` or set sync_remote."
-    })?;
+    let remote_name = remote_name
+        .map(crate::ids::slugify)
+        .or_else(|| configured_sync_remote_names(config).into_iter().next())
+        .with_context(|| {
+            "No remote configured for bundle fetch. Configure a remote with `knit remote add` or set sync-remotes."
+        })?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
 
