@@ -78,14 +78,58 @@ pub(super) fn token_from_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Resolve the name of the KnitHub sync remote, preferring an explicit `sync_remote`
-/// and otherwise falling back to a remote literally named `knithub`.
+/// Return configured KnitHub sync remotes in priority order. `syncRemotes` is the
+/// multi-target form; `syncRemote` remains the legacy single-target form.
+pub(super) fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
+    let mut names = Vec::new();
+    if !config.sync_remotes.is_empty() {
+        for name in &config.sync_remotes {
+            push_unique_remote_name(&mut names, name);
+        }
+    }
+    if names.is_empty() {
+        if let Some(name) = config.sync_remote.as_deref() {
+            push_unique_remote_name(&mut names, name);
+        }
+    }
+    if names.is_empty() && config.remotes.contains_key("knithub") {
+        names.push("knithub".to_string());
+    }
+    names
+}
+
+pub(super) fn explicit_remote_names(remote_overrides: &[String]) -> Vec<String> {
+    let mut names = Vec::new();
+    for name in remote_overrides {
+        push_unique_remote_name(&mut names, name);
+    }
+    names
+}
+
+pub(super) fn resolve_sync_remote_names(
+    config: &KnitConfig,
+    remote_overrides: &[String],
+) -> Vec<String> {
+    if remote_overrides.is_empty() {
+        configured_sync_remote_names(config)
+    } else {
+        explicit_remote_names(remote_overrides)
+    }
+}
+
+fn push_unique_remote_name(names: &mut Vec<String>, name: &str) {
+    let name = slugify(name);
+    if !name.is_empty() && !names.contains(&name) {
+        names.push(name);
+    }
+}
+
+/// Resolve the primary KnitHub sync remote, preferring `syncRemotes[0]`, then
+/// legacy `syncRemote`, then a remote literally named `knithub`.
 pub(super) fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
-    config
-        .sync_remote
-        .clone()
-        .or_else(|| config.remotes.contains_key("knithub").then(|| "knithub".to_string()))
-        .context("No KnitHub sync remote configured. Run `knit remote add knithub <url>` or use explicit prune flags instead of --all.")
+    configured_sync_remote_names(config).into_iter().next().context(
+        "No KnitHub sync remote configured. Run `knit remote add knithub <url>`, `knit config set sync-remote <name>`, or use explicit prune flags instead of --all.",
+    )
 }
 
 pub(super) fn load_project_if_present(root: &Path, project_id: &str) -> Result<Option<KnitProject>> {
