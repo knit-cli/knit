@@ -3,6 +3,7 @@ use super::{
     PULL_REQUEST_KIND,
 };
 use anyhow::{bail, Context, Result};
+use serde_json::json;
 use std::ffi::OsString;
 
 const CLI: &str = "gh";
@@ -68,6 +69,10 @@ impl Forge for GitHub {
         body: &str,
         draft: bool,
     ) -> Result<String> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return create_with_api(target, repo_full_name, base, head, title, body, draft);
+        }
+
         let mut args = vec![
             OsString::from("pr"),
             OsString::from("create"),
@@ -205,6 +210,56 @@ impl Forge for GitHub {
     }
 }
 
+fn create_with_api(
+    target: &PrTarget,
+    repo_full_name: &str,
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String> {
+    let payload = create_pull_request_payload(base, head, title, body, draft)?;
+    let args = vec![
+        OsString::from("api"),
+        OsString::from("--method"),
+        OsString::from("POST"),
+        OsString::from(pull_request_api_endpoint(repo_full_name)),
+        OsString::from("--input"),
+        OsString::from("-"),
+        OsString::from("--jq"),
+        OsString::from(".html_url"),
+    ];
+    let output = cli_output(CLI, &target.cwd, args, Some(&payload))?;
+    parse_pr_url(&output)
+        .or_else(|| {
+            let trimmed = output.trim();
+            trimmed.starts_with("http").then(|| trimmed.to_string())
+        })
+        .context("`gh api` did not return a PR URL")
+}
+
+fn pull_request_api_endpoint(repo_full_name: &str) -> String {
+    format!("repos/{repo_full_name}/pulls")
+}
+
+fn create_pull_request_payload(
+    base: &str,
+    head: &str,
+    title: &str,
+    body: &str,
+    draft: bool,
+) -> Result<String> {
+    serde_json::to_string(&json!({
+        "base": base,
+        "head": head,
+        "title": title,
+        "body": body,
+        "draft": draft,
+    }))
+    .context("failed to encode GitHub pull request payload")
+}
+
 /// Parse `owner/name` from a GitHub remote URL.
 pub(crate) fn full_name(remote: &str) -> Option<String> {
     let remote = remote.trim().trim_end_matches(".git");
@@ -265,5 +320,29 @@ mod tests {
             super::super::pr_number_from_url("https://github.com/acme/backend/pull/42"),
             Some(42)
         );
+    }
+
+    #[test]
+    fn artifact_create_uses_repo_scoped_api_payload() {
+        assert_eq!(
+            pull_request_api_endpoint("acme/backend"),
+            "repos/acme/backend/pulls"
+        );
+
+        let payload = create_pull_request_payload(
+            "main",
+            "knit/testbun",
+            "feature title",
+            "Body line one\nBody line two",
+            true,
+        )
+        .unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+
+        assert_eq!(value["base"], "main");
+        assert_eq!(value["head"], "knit/testbun");
+        assert_eq!(value["title"], "feature title");
+        assert_eq!(value["body"], "Body line one\nBody line two");
+        assert_eq!(value["draft"], true);
     }
 }
