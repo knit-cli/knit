@@ -144,7 +144,13 @@ fn setup_three_repo_project(workspace: &Path, root: &Path) {
     );
     knit(
         workspace,
-        ["project", "add", "docs", docs.to_str().unwrap(), "--observe"],
+        [
+            "project",
+            "add",
+            "docs",
+            docs.to_str().unwrap(),
+            "--observe",
+        ],
     );
 }
 
@@ -167,11 +173,20 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
     let workspace = root.join("workspace");
     setup_three_repo_project(&workspace, &root);
 
-    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+    knit(
+        &workspace,
+        ["view", "save", "backend", "--exclude", "frontend"],
+    );
     knit(
         &workspace,
         [
-            "view", "save", "frontend", "--include", "docs", "--exclude", "backend",
+            "view",
+            "save",
+            "frontend",
+            "--include",
+            "docs",
+            "--exclude",
+            "backend",
         ],
     );
     knit(&workspace, ["view", "default", "backend"]);
@@ -182,13 +197,22 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
 
     // Default view (backend) drops frontend; docs is observed, so backend only.
     knit(&workspace, ["bundle", "start", "default feature"]);
-    assert_eq!(bundle_repo_ids(&workspace, "default-feature"), vec!["backend"]);
+    assert_eq!(
+        bundle_repo_ids(&workspace, "default-feature"),
+        vec!["backend"]
+    );
 
     // Named view "frontend" => {frontend, docs}; ad-hoc --include adds backend.
     knit(
         &workspace,
         [
-            "bundle", "start", "named feature", "--view", "frontend", "--include", "backend",
+            "bundle",
+            "start",
+            "named feature",
+            "--view",
+            "frontend",
+            "--include",
+            "backend",
         ],
     );
     let ids = bundle_repo_ids(&workspace, "named-feature");
@@ -202,11 +226,16 @@ fn view_flag_conflicts_with_repo_selection() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
     setup_three_repo_project(&workspace, &root);
-    knit(&workspace, ["view", "save", "backend", "--exclude", "frontend"]);
+    knit(
+        &workspace,
+        ["view", "save", "backend", "--exclude", "frontend"],
+    );
 
     let error = knit_fails(
         &workspace,
-        ["bundle", "start", "x", "--view", "backend", "--repo", "backend"],
+        [
+            "bundle", "start", "x", "--view", "backend", "--repo", "backend",
+        ],
     );
     assert!(error.contains("not together with --repo"), "{error}");
 
@@ -235,20 +264,23 @@ fn bundle_include_and_exclude_manage_worktrees() {
     assert!(!worktrees.join("frontend").exists());
     assert!(!bundle_repo_ids(&workspace, "live-feature").contains(&"frontend".to_string()));
     assert!(
-        git(&root.join("frontend"), ["branch", "--list", "knit/live-feature"])
-            .contains("knit/live-feature"),
+        git(
+            &root.join("frontend"),
+            ["branch", "--list", "knit/live-feature"]
+        )
+        .contains("knit/live-feature"),
         "feature branch should be preserved by default"
     );
 
     // Exclude with --delete-branch: worktree removed and branch deleted.
-    knit(
-        &workspace,
-        ["bundle", "exclude", "docs", "--delete-branch"],
-    );
+    knit(&workspace, ["bundle", "exclude", "docs", "--delete-branch"]);
     assert!(!worktrees.join("docs").exists());
     assert!(
-        !git(&root.join("docs"), ["branch", "--list", "knit/live-feature"])
-            .contains("knit/live-feature"),
+        !git(
+            &root.join("docs"),
+            ["branch", "--list", "knit/live-feature"]
+        )
+        .contains("knit/live-feature"),
         "feature branch should be deleted with --delete-branch"
     );
 
@@ -2088,6 +2120,85 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 }
 
 #[test]
+fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "artifact publish"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
+    append_line(&backend_feature.join("app.txt"), "artifact PR change");
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Artifact PR change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let artifact = workspace.join(".knit/bundles/artifact-publish.bundle.json");
+    let mut artifact_payload: Value =
+        serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    artifact_payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    fs::write(
+        &artifact,
+        serde_json::to_string_pretty(&artifact_payload).unwrap(),
+    )
+    .unwrap();
+
+    let out = root.join("artifact-publish.out.bundle.json");
+    let create = knit_with_fake_gh(
+        &root,
+        vec![
+            "publish".to_string(),
+            "github".to_string(),
+            "create".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+            "--no-push".to_string(),
+            "--no-sync".to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(create.contains("backend"));
+    assert!(create.contains("created"));
+    assert!(!fake_gh_dir.join("create-backend.args").exists());
+
+    let endpoint = fs::read_to_string(fake_gh_dir.join("api-backend.endpoint")).unwrap();
+    assert_eq!(endpoint.trim(), "repos/acme/backend/pulls");
+    let prompt = fs::read_to_string(fake_gh_dir.join("api-backend.prompt")).unwrap();
+    assert_eq!(prompt.trim(), "1");
+
+    let payload: Value =
+        serde_json::from_str(&fs::read_to_string(fake_gh_dir.join("api-backend.json")).unwrap())
+            .unwrap();
+    assert_eq!(payload["base"].as_str(), Some("main"));
+    assert_eq!(payload["head"].as_str(), Some("knit/artifact-publish"));
+    assert_eq!(
+        payload["title"].as_str(),
+        Some("artifact publish (backend)")
+    );
+    assert!(payload["body"]
+        .as_str()
+        .unwrap()
+        .contains("This PR is part of Knit bundle `artifact-publish`."));
+
+    let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(
+        published["publications"][0]["url"].as_str(),
+        Some("https://github.com/acme/backend/pull/101")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pr_create_can_override_base_branch() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -2220,10 +2331,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     let methods = fs::read_to_string(fake_gh_dir.join("merge-methods.txt")).unwrap();
     let mut method_lines = methods.lines().collect::<Vec<_>>();
     method_lines.sort_unstable();
-    assert_eq!(
-        method_lines,
-        vec!["backend --merge", "frontend --merge"]
-    );
+    assert_eq!(method_lines, vec!["backend --merge", "frontend --merge"]);
 
     let bundle = read_bundle(&workspace);
     let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
@@ -2280,16 +2388,24 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     );
     assert_eq!(latest["provider"].as_str(), Some("github"));
     assert_eq!(latest["publicationUrls"].as_array().unwrap().len(), 2);
-    assert!(bundle["publications"].as_array().unwrap().iter().any(|publication| {
-        publication["repoId"].as_str() == Some("backend")
-            && publication["number"].as_u64() == Some(901)
-            && publication["state"].as_str() == Some("OPEN")
-    }));
-    assert!(bundle["publications"].as_array().unwrap().iter().any(|publication| {
-        publication["repoId"].as_str() == Some("frontend")
-            && publication["number"].as_u64() == Some(902)
-            && publication["state"].as_str() == Some("OPEN")
-    }));
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|publication| {
+            publication["repoId"].as_str() == Some("backend")
+                && publication["number"].as_u64() == Some(901)
+                && publication["state"].as_str() == Some("OPEN")
+        }));
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|publication| {
+            publication["repoId"].as_str() == Some("frontend")
+                && publication["number"].as_u64() == Some(902)
+                && publication["state"].as_str() == Some("OPEN")
+        }));
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
     assert!(knit(&workspace, ["log", "-1"]).contains("pr revert"));
     let show_revert = knit(&workspace, ["show", "HEAD"]);
@@ -2326,7 +2442,11 @@ fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     knit(&workspace, ["init", "venue capacity"]);
     knit(
         &workspace,
-        ["track", backend.to_str().unwrap(), frontend.to_str().unwrap()],
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
     );
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
@@ -2368,7 +2488,11 @@ fn land_apply_skips_already_merged_pr() {
     assert!(apply.contains("Feature landed"), "{apply}");
     // Only frontend should be merged; backend was skipped as already merged.
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
-    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["frontend"], "{order}");
+    assert_eq!(
+        order.lines().collect::<Vec<_>>(),
+        vec!["frontend"],
+        "{order}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -3060,7 +3184,8 @@ fn delete_recovers_generated_worktree_when_recorded_path_was_lost() {
 
     // Simulate the post-localize state: the recorded worktree path is gone.
     let bundle_path = workspace.join(".knit/bundles/throwaway.bundle.json");
-    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
     bundle["repos"][0]["worktreePath"] = Value::Null;
     fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
     assert!(worktree.exists());
@@ -3827,6 +3952,57 @@ fn write_fake_gh(fake_bin: &Path, fake_gh_dir: &Path) {
         &script,
         r#"#!/bin/sh
 set -eu
+
+if [ "$1" = "api" ]; then
+  shift
+  method="GET"
+  endpoint=""
+  input=""
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --method)
+        method="$2"
+        shift 2
+        ;;
+      --input)
+        input="$2"
+        shift 2
+        ;;
+      --jq)
+        shift 2
+        ;;
+      -*)
+        shift
+        ;;
+      *)
+        if [ -z "$endpoint" ]; then
+          endpoint="$1"
+        fi
+        shift
+        ;;
+    esac
+  done
+  case "$endpoint" in
+    repos/acme/backend/pulls) pr_repo=backend ;;
+    repos/acme/frontend/pulls) pr_repo=frontend ;;
+    *) pr_repo=other ;;
+  esac
+  if [ "$input" = "-" ]; then
+    cat > "$GH_FAKE_DIR/api-$pr_repo.json"
+  else
+    : > "$GH_FAKE_DIR/api-$pr_repo.json"
+  fi
+  printf '%s\n' "$method" > "$GH_FAKE_DIR/api-$pr_repo.method"
+  printf '%s\n' "$endpoint" > "$GH_FAKE_DIR/api-$pr_repo.endpoint"
+  printf '%s\n' "${GH_PROMPT_DISABLED:-}" > "$GH_FAKE_DIR/api-$pr_repo.prompt"
+  case "$pr_repo" in
+    backend) number=101 ;;
+    frontend) number=202 ;;
+    *) number=303 ;;
+  esac
+  printf 'https://github.com/acme/%s/pull/%s\n' "$pr_repo" "$number"
+  exit 0
+fi
 
 if [ "$1" != "pr" ]; then
   echo "unexpected gh command: $*" >&2
