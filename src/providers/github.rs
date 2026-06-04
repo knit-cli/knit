@@ -1,8 +1,9 @@
 use super::{
-    cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
-    PULL_REQUEST_KIND,
+    cli_output, parse_pr_url, pr_number_from_url, repo_scoped_args, CheckRun, Forge, PrTarget,
+    PullRequest, PULL_REQUEST_KIND,
 };
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::json;
 use std::ffi::OsString;
 
@@ -36,6 +37,10 @@ impl Forge for GitHub {
         head: &str,
         base: &str,
     ) -> Result<Option<PullRequest>> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return find_existing_with_api(target, repo_full_name, head, base);
+        }
+
         let args = repo_scoped_args(
             target,
             "--repo",
@@ -94,6 +99,10 @@ impl Forge for GitHub {
     }
 
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return view_with_api(target, repo_full_name, selector);
+        }
+
         let args = repo_scoped_args(
             target,
             "--repo",
@@ -110,6 +119,10 @@ impl Forge for GitHub {
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return edit_body_with_api(target, repo_full_name, selector, body);
+        }
+
         let args = repo_scoped_args(
             target,
             "--repo",
@@ -210,6 +223,90 @@ impl Forge for GitHub {
     }
 }
 
+#[derive(Debug, Deserialize)]
+struct GitHubApiPullRequest {
+    number: u64,
+    html_url: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    draft: Option<bool>,
+    #[serde(default)]
+    head: Option<GitHubApiRef>,
+    #[serde(default)]
+    base: Option<GitHubApiRef>,
+    #[serde(default)]
+    merged: Option<bool>,
+    #[serde(default)]
+    mergeable: Option<bool>,
+    #[serde(default)]
+    mergeable_state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiRef {
+    #[serde(rename = "ref")]
+    ref_name: Option<String>,
+    #[serde(default)]
+    sha: Option<String>,
+}
+
+impl GitHubApiPullRequest {
+    fn into_pull_request(self) -> PullRequest {
+        let head = self.head.unwrap_or_default();
+        let base = self.base.unwrap_or_default();
+        let merged = self.merged.unwrap_or(false);
+        PullRequest {
+            number: self.number,
+            url: self.html_url,
+            state: github_api_state(self.state.as_deref(), merged),
+            title: self.title,
+            base_ref_name: base.ref_name,
+            head_ref_name: head.ref_name,
+            body: self.body,
+            is_draft: self.draft,
+            head_ref_oid: head.sha,
+            mergeable: github_api_mergeable(self.mergeable, self.mergeable_state.as_deref()),
+            merge_state_status: self.mergeable_state.map(|state| state.to_ascii_uppercase()),
+            review_decision: None,
+        }
+    }
+}
+
+impl Default for GitHubApiRef {
+    fn default() -> Self {
+        Self {
+            ref_name: None,
+            sha: None,
+        }
+    }
+}
+
+fn find_existing_with_api(
+    target: &PrTarget,
+    repo_full_name: &str,
+    head: &str,
+    base: &str,
+) -> Result<Option<PullRequest>> {
+    let endpoint = pull_request_search_api_endpoint(repo_full_name, head, base)?;
+    let output = cli_output(
+        CLI,
+        &target.cwd,
+        vec![OsString::from("api"), OsString::from(endpoint)],
+        None,
+    )?;
+    let prs: Vec<GitHubApiPullRequest> =
+        serde_json::from_str(&output).context("failed to parse GitHub pulls API JSON")?;
+    Ok(prs
+        .into_iter()
+        .next()
+        .map(GitHubApiPullRequest::into_pull_request))
+}
+
 fn create_with_api(
     target: &PrTarget,
     repo_full_name: &str,
@@ -239,8 +336,68 @@ fn create_with_api(
         .context("`gh api` did not return a PR URL")
 }
 
+fn view_with_api(target: &PrTarget, repo_full_name: &str, selector: &str) -> Result<PullRequest> {
+    let number = selector_pr_number(selector)
+        .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
+    let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
+    let output = cli_output(
+        CLI,
+        &target.cwd,
+        vec![OsString::from("api"), OsString::from(endpoint)],
+        None,
+    )?;
+    let pr: GitHubApiPullRequest =
+        serde_json::from_str(&output).context("failed to parse GitHub pull API JSON")?;
+    Ok(pr.into_pull_request())
+}
+
+fn edit_body_with_api(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    body: &str,
+) -> Result<()> {
+    let number = selector_pr_number(selector)
+        .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
+    let payload = serde_json::to_string(&json!({ "body": body }))
+        .context("failed to encode GitHub pull request edit payload")?;
+    let args = vec![
+        OsString::from("api"),
+        OsString::from("--method"),
+        OsString::from("PATCH"),
+        OsString::from(pull_request_api_item_endpoint(repo_full_name, number)),
+        OsString::from("--input"),
+        OsString::from("-"),
+    ];
+    cli_output(CLI, &target.cwd, args, Some(&payload))?;
+    Ok(())
+}
+
 fn pull_request_api_endpoint(repo_full_name: &str) -> String {
     format!("repos/{repo_full_name}/pulls")
+}
+
+fn pull_request_api_item_endpoint(repo_full_name: &str, number: u64) -> String {
+    format!("{}/{number}", pull_request_api_endpoint(repo_full_name))
+}
+
+fn pull_request_search_api_endpoint(
+    repo_full_name: &str,
+    head: &str,
+    base: &str,
+) -> Result<String> {
+    let head_owner = repo_owner(repo_full_name)?;
+    let head = if head.contains(':') {
+        head.to_string()
+    } else {
+        format!("{head_owner}:{head}")
+    };
+    Ok(format!(
+        "{}?state=all&head={}&base={}&per_page=1",
+        pull_request_api_endpoint(repo_full_name),
+        encode_query_component(&head),
+        encode_query_component(base)
+    ))
 }
 
 fn create_pull_request_payload(
@@ -258,6 +415,54 @@ fn create_pull_request_payload(
         "draft": draft,
     }))
     .context("failed to encode GitHub pull request payload")
+}
+
+fn repo_owner(repo_full_name: &str) -> Result<&str> {
+    repo_full_name
+        .split_once('/')
+        .map(|(owner, _repo)| owner)
+        .filter(|owner| !owner.is_empty())
+        .with_context(|| format!("invalid GitHub repository name `{repo_full_name}`"))
+}
+
+fn selector_pr_number(selector: &str) -> Option<u64> {
+    selector
+        .trim()
+        .parse()
+        .ok()
+        .or_else(|| pr_number_from_url(selector))
+}
+
+fn github_api_state(state: Option<&str>, merged: bool) -> Option<String> {
+    if merged {
+        return Some("MERGED".to_string());
+    }
+    state.map(|state| state.to_ascii_uppercase())
+}
+
+fn github_api_mergeable(mergeable: Option<bool>, mergeable_state: Option<&str>) -> Option<String> {
+    match (mergeable, mergeable_state) {
+        (Some(true), _) => Some("MERGEABLE".to_string()),
+        (Some(false), Some("dirty" | "DIRTY")) => Some("CONFLICTING".to_string()),
+        (Some(false), _) => Some("CONFLICTING".to_string()),
+        (None, _) => None,
+    }
+}
+
+fn encode_query_component(input: &str) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                write!(&mut encoded, "%{byte:02X}").expect("writing to a string cannot fail");
+            }
+        }
+    }
+    encoded
 }
 
 /// Parse `owner/name` from a GitHub remote URL.
@@ -327,6 +532,10 @@ mod tests {
         assert_eq!(
             pull_request_api_endpoint("acme/backend"),
             "repos/acme/backend/pulls"
+        );
+        assert_eq!(
+            pull_request_search_api_endpoint("acme/backend", "knit/testbun", "main").unwrap(),
+            "repos/acme/backend/pulls?state=all&head=acme%3Aknit%2Ftestbun&base=main&per_page=1"
         );
 
         let payload = create_pull_request_payload(
