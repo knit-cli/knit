@@ -5,7 +5,7 @@ use super::client::{
     configured_sync_remote_names, decode_bundle_payload, ensure_remote_bundle_fast_forward,
     fast_forward_feature_checkouts, fetch_project_export, localize_bundle, load_project_if_present,
     prepare_feature_branches, request_json, resolve_project_id, resolve_remote,
-    resolve_sync_remote_name, resolve_token, workspace_config,
+    resolve_sync_remote_name, resolve_token, effective_workspace_config,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
@@ -27,7 +27,7 @@ use std::path::Path;
 /// Pull the current user's saved views for a project from the KnitHub remote,
 /// replacing the local views artifact.
 pub fn pull_views_from_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
-    let (root, config) = workspace_config()?;
+    let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
@@ -100,7 +100,7 @@ pub fn prepare_remote_pull(
     if skip_remote {
         return Ok(None);
     }
-    let (root, config) = workspace_config()?;
+    let (root, config) = effective_workspace_config()?;
     let Some(remote_name) = remote_override
         .map(crate::ids::slugify)
         .or_else(|| configured_sync_remote_names(&config).into_iter().next())

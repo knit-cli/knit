@@ -19,7 +19,7 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::store::{bundle_path, find_knit_root, load_config, project_path, read_json, write_json, ActiveBundle};
+use crate::store::{bundle_path, find_knit_root, project_path, read_json, write_json, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -128,7 +128,7 @@ fn resolve_remote_for_clone(
 ) -> Result<(KnitRemote, Option<String>, String)> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let configured = find_knit_root(&cwd)
-        .and_then(|root| load_config(&root).ok())
+        .and_then(|root| crate::store::load_effective_config(&root).ok())
         .and_then(|config| config.remotes.get(remote_name).cloned());
     let remote_url = url
         .map(ToString::to_string)

@@ -11,7 +11,7 @@ use crate::git::{git_output, is_git_worktree};
 use crate::model::{ChangeGroup, KnitConfig, RepoEntry};
 use crate::output as out;
 use crate::providers::{self, Forge, PrTarget, PullRequest};
-use crate::store::{bundle_exists, load_config, read_json, write_json};
+use crate::store::{bundle_exists, read_json, write_json};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeSet, HashMap};
 use std::ffi::OsString;
@@ -225,7 +225,7 @@ pub fn prune_merged_bundles(
 
     let root = current_root()?;
     let config = if remote_bundles {
-        Some(load_config(&root)?)
+        Some(crate::store::load_effective_config(&root)?)
     } else {
         None
     };
