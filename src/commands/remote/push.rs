@@ -3,21 +3,30 @@
 //! sync-on-push.
 
 use super::client::{
-    configured_sync_remote_names, decode_response, load_project_if_present, normalize_base_url,
-    request, request_json, resolve_project_id, resolve_remote, resolve_sync_remote_names,
-    resolve_token, token_from_env, workspace_config,
+    configured_sync_remote_names, decode_response, effective_workspace_config,
+    load_project_if_present, normalize_base_url, request, request_json, resolve_project_id,
+    resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry};
 use crate::output as out;
-use crate::store::{load_active_bundle, load_config, save_config};
+use crate::store::{
+    find_knit_root, load_active_bundle, load_config, load_effective_config, load_global_config,
+    save_config, save_global_config,
+};
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::path::Path;
 
-pub fn add_remote(name: &str, url: &str, token: Option<&str>) -> Result<()> {
-    let (root, mut config) = workspace_config()?;
+pub fn add_remote(name: &str, url: &str, token: Option<&str>, global: bool) -> Result<()> {
+    let (root, mut config) = if global {
+        (None, load_global_config()?)
+    } else {
+        let (root, config) = workspace_config()?;
+        (Some(root), config)
+    };
     let remote_name = slugify(name);
     config.remotes.insert(
         remote_name.clone(),
@@ -26,13 +35,23 @@ pub fn add_remote(name: &str, url: &str, token: Option<&str>) -> Result<()> {
             token: token.map(ToString::to_string),
         },
     );
-    save_config(&root, &config)?;
-    println!("{} {}", out::movement("configured"), out::repo(remote_name));
+    if let Some(root) = root {
+        save_config(&root, &config)?;
+    } else {
+        save_global_config(&config)?;
+    }
+    let scope = if global { "global " } else { "" };
+    println!(
+        "{} {}{}",
+        out::movement("configured"),
+        scope,
+        out::repo(remote_name)
+    );
     Ok(())
 }
 
-pub fn list_remotes() -> Result<()> {
-    let (_root, config) = workspace_config()?;
+pub fn list_remotes(global: bool) -> Result<()> {
+    let (config, sources) = remote_listing(global)?;
     if config.remotes.is_empty() {
         println!("{}", out::muted("No KnitHub remotes configured."));
         return Ok(());
@@ -40,6 +59,10 @@ pub fn list_remotes() -> Result<()> {
 
     let sync_remotes = configured_sync_remote_names(&config);
     for (name, remote) in config.remotes {
+        let source = sources
+            .get(&name)
+            .map(String::as_str)
+            .unwrap_or("workspace");
         let token_label = if token_from_env(&name).is_some() {
             "token from env"
         } else if remote.token.is_some() {
@@ -52,9 +75,10 @@ pub fn list_remotes() -> Result<()> {
             .then_some("sync")
             .unwrap_or("not sync");
         println!(
-            "{} {} {} {}",
+            "{} {} {} {} {}",
             out::repo(name),
             remote.url,
+            out::muted(source),
             out::muted(token_label),
             out::muted(sync_label)
         );
@@ -62,15 +86,33 @@ pub fn list_remotes() -> Result<()> {
     Ok(())
 }
 
-pub fn show_remote(name: &str) -> Result<()> {
-    let (_root, config) = workspace_config()?;
+pub fn show_remote(name: &str, global: bool) -> Result<()> {
+    let (config, sources) = remote_listing(global)?;
     let remote_name = slugify(name);
     let remote = config
         .remotes
         .get(&remote_name)
         .with_context(|| format!("No KnitHub remote named `{remote_name}`."))?;
+    let sync_remotes = configured_sync_remote_names(&config);
     println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
     println!("{} {}", out::heading("URL:"), remote.url);
+    println!(
+        "{} {}",
+        out::heading("Scope:"),
+        sources
+            .get(&remote_name)
+            .map(String::as_str)
+            .unwrap_or("workspace")
+    );
+    println!(
+        "{} {}",
+        out::heading("Sync:"),
+        if sync_remotes.contains(&remote_name) {
+            "enabled"
+        } else {
+            "disabled"
+        }
+    );
     println!(
         "{} {}",
         out::heading("Token:"),
@@ -85,15 +127,20 @@ pub fn show_remote(name: &str) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_remote(name: &str) -> Result<()> {
-    let (root, mut config) = workspace_config()?;
+pub fn remove_remote(name: &str, global: bool) -> Result<()> {
+    let (root, mut config) = if global {
+        (None, load_global_config()?)
+    } else {
+        let (root, config) = workspace_config()?;
+        (Some(root), config)
+    };
     let remote_name = slugify(name);
     if config.remotes.remove(&remote_name).is_none() {
         bail!("No KnitHub remote named `{remote_name}`.");
     }
     config
         .sync_remotes
-        .retain(|name| slugify(name) != remote_name);
+        .retain(|entry| slugify(entry) != remote_name);
     let removed_sync_remote = config
         .sync_remote
         .as_deref()
@@ -103,13 +150,28 @@ pub fn remove_remote(name: &str) -> Result<()> {
     if removed_sync_remote {
         config.sync_remote = config.sync_remotes.first().cloned();
     }
-    save_config(&root, &config)?;
-    println!("{} {}", out::movement("removed"), out::repo(remote_name));
+    if let Some(root) = root {
+        save_config(&root, &config)?;
+    } else {
+        save_global_config(&config)?;
+    }
+    let scope = if global { "global " } else { "" };
+    println!(
+        "{} {}{}",
+        out::movement("removed"),
+        scope,
+        out::repo(remote_name)
+    );
     Ok(())
 }
 
-pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool) -> Result<()> {
-    let (root, mut config) = workspace_config()?;
+pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bool) -> Result<()> {
+    let (root, mut config) = if global {
+        (None, load_global_config()?)
+    } else {
+        let (root, config) = workspace_config()?;
+        (Some(root), config)
+    };
     let remote_name = slugify(name);
     let remote = config
         .remotes
@@ -125,12 +187,16 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool) -> Result<
         println!("{} {}", out::movement("stored"), out::repo(remote_name));
     }
 
-    save_config(&root, &config)?;
+    if let Some(root) = root {
+        save_config(&root, &config)?;
+    } else {
+        save_global_config(&config)?;
+    }
     Ok(())
 }
 
 pub fn push_project_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
-    let (root, config) = workspace_config()?;
+    let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
@@ -179,7 +245,7 @@ fn upload_views(remote: &KnitRemote, token: &str, root: &Path, project_slug: &st
 
 /// Push the current user's saved views for a project to the KnitHub remote.
 pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
-    let (root, config) = workspace_config()?;
+    let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
@@ -206,7 +272,7 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
 
 pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result<()> {
     let active = load_active_bundle()?;
-    let config = load_config(&active.root)?;
+    let config = load_effective_config(&active.root)?;
     let project_id = project
         .map(slugify)
         .or_else(|| active.bundle.project_id.clone())
@@ -251,7 +317,7 @@ pub fn maybe_sync_bundle_to_remote(remote_overrides: &[String], no_remote: bool)
     if no_remote {
         return Ok(());
     }
-    let Ok((_, config)) = workspace_config() else {
+    let Ok((_, config)) = effective_workspace_config() else {
         return Ok(());
     };
     if !config.push_sync && remote_overrides.is_empty() {
@@ -302,7 +368,7 @@ pub fn sync_bundle_to_remote_if_enabled(
     if no_remote {
         return Ok(());
     }
-    let Ok((_, config)) = workspace_config() else {
+    let Ok((_, config)) = effective_workspace_config() else {
         return Ok(());
     };
     if !config.push_sync && remote_overrides.is_empty() {
@@ -319,11 +385,11 @@ pub fn sync_bundle_to_remote_if_enabled(
 /// Push the resolved bundle artifact to KnitHub, failing if no remote is
 /// configured or if the sync cannot complete.
 pub fn sync_bundle_to_remote(remote_overrides: &[String]) -> Result<()> {
-    let (_, config) = workspace_config()?;
+    let (_, config) = effective_workspace_config()?;
     let remote_names = resolve_sync_remote_names(&config, remote_overrides);
     if remote_names.is_empty() {
         bail!(
-            "No KnitHub remote configured. Run `knit remote add knithub <url>` or `knit config set sync-remotes <name>[,<name>...]` first."
+            "No KnitHub remote configured. Run `knit remote add --global knithub <url>`, `knit remote add knithub <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
         );
     }
     sync_bundle_to_remote_names(&config, &remote_names)
@@ -527,4 +593,41 @@ fn fallback_repo_identity(repo_id: &str) -> RepoIdentity {
         name: repo_id.to_string(),
         full_name: repo_id.to_string(),
     }
+}
+
+fn remote_listing(global: bool) -> Result<(KnitConfig, BTreeMap<String, String>)> {
+    if global {
+        let config = load_global_config()?;
+        let sources = config
+            .remotes
+            .keys()
+            .map(|name| (name.clone(), "global".to_string()))
+            .collect();
+        return Ok((config, sources));
+    }
+
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let Some(root) = find_knit_root(&cwd) else {
+        let config = load_global_config()?;
+        let sources = config
+            .remotes
+            .keys()
+            .map(|name| (name.clone(), "global".to_string()))
+            .collect();
+        return Ok((config, sources));
+    };
+
+    let global_config = load_global_config()?;
+    let workspace_config = load_config(&root)?;
+    let mut sources = BTreeMap::new();
+    for name in global_config.remotes.keys() {
+        sources.insert(name.clone(), "global".to_string());
+    }
+    for name in workspace_config.remotes.keys() {
+        sources.insert(name.clone(), "workspace".to_string());
+    }
+
+    let effective = crate::store::merge_effective_config(global_config, workspace_config);
+
+    Ok((effective, sources))
 }
