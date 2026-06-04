@@ -7,7 +7,7 @@ use crate::checkout::is_in_place;
 use crate::git::{branch_exists, current_branch, git_output, is_ancestor, ref_exists, rev_parse};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, RepoEntry};
-use crate::store::{find_knit_root, load_config, project_path, read_json, ActiveBundle};
+use crate::store::{find_knit_root, load_config, load_effective_config, project_path, read_json, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -28,6 +28,13 @@ pub(super) fn workspace_config() -> Result<(PathBuf, KnitConfig)> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let config = load_config(&root)?;
+    Ok((root, config))
+}
+
+pub(super) fn effective_workspace_config() -> Result<(PathBuf, KnitConfig)> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_effective_config(&root)?;
     Ok((root, config))
 }
 
@@ -80,7 +87,7 @@ pub(super) fn token_from_env(name: &str) -> Option<String> {
 
 /// Return configured KnitHub sync remotes in priority order. `syncRemotes` is the
 /// multi-target form; `syncRemote` remains the legacy single-target form.
-pub(super) fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
+pub fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
     let mut names = Vec::new();
     if !config.sync_remotes.is_empty() {
         for name in &config.sync_remotes {

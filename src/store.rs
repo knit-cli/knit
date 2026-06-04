@@ -4,6 +4,7 @@ use crate::model::{
 };
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
+use std::env;
 use std::fs::{self, OpenOptions};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -114,6 +115,73 @@ pub fn load_config(root: &Path) -> Result<KnitConfig> {
 
 pub fn save_config(root: &Path, config: &KnitConfig) -> Result<()> {
     write_json(&root.join(".knit/config.json"), config)
+}
+
+pub fn global_config_path() -> Result<PathBuf> {
+    if let Some(home) = env::var_os("KNIT_HOME") {
+        return Ok(PathBuf::from(home).join("config.json"));
+    }
+    if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
+        return Ok(PathBuf::from(config_home).join("knit/config.json"));
+    }
+    let home = env::var_os("HOME").context(
+        "No home directory found. Set KNIT_HOME or HOME before using global Knit config.",
+    )?;
+    Ok(PathBuf::from(home).join(".config/knit/config.json"))
+}
+
+pub fn load_global_config() -> Result<KnitConfig> {
+    let path = global_config_path()?;
+    if path.exists() {
+        read_json(&path)
+    } else {
+        Ok(KnitConfig::empty())
+    }
+}
+
+pub fn save_global_config(config: &KnitConfig) -> Result<()> {
+    let path = global_config_path()?;
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create {}", parent.display()))?;
+    }
+    write_json(&path, config)
+}
+
+/// Merge user-global config with workspace config. Workspace remotes override global
+/// remotes of the same name; workspace sync targets override global sync targets when set.
+pub fn merge_effective_config(global: KnitConfig, workspace: KnitConfig) -> KnitConfig {
+    let mut effective = global;
+
+    effective.active_bundle = workspace.active_bundle;
+    effective.active_project = workspace.active_project;
+
+    if !workspace.sync_remotes.is_empty() {
+        effective.sync_remotes = workspace.sync_remotes;
+        effective.sync_remote = workspace
+            .sync_remote
+            .or_else(|| effective.sync_remotes.first().cloned());
+    } else if workspace.sync_remote.is_some() {
+        effective.sync_remote = workspace.sync_remote.clone();
+        effective.sync_remotes = effective
+            .sync_remote
+            .iter()
+            .cloned()
+            .collect();
+    }
+
+    effective.advice = workspace.advice;
+    effective.push_sync = workspace.push_sync;
+    effective.remotes.extend(workspace.remotes);
+
+    effective
+}
+
+pub fn load_effective_config(root: &Path) -> Result<KnitConfig> {
+    Ok(merge_effective_config(
+        load_global_config()?,
+        load_config(root)?,
+    ))
 }
 
 pub fn bundle_path(root: &Path, bundle_id: &str) -> PathBuf {

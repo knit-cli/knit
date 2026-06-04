@@ -60,6 +60,8 @@ Knit stores local state under the directory where `knit project init`, `knit bun
 
 The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths and optional folder contexts let multiple agents work in parallel bundles without fighting over one global active bundle.
 
+User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. Workspace `.knit/config.json` overrides global values of the same name.
+
 ## Quickstart
 
 From a workspace folder that sits beside your local repos:
@@ -504,10 +506,21 @@ knit publish status
 
 When KnitHub sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and KnitHub stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`.
 
+Remotes can be workspace-local or user-global. Workspace `.knit/config.json` remotes override global remotes of the same name; otherwise commands fall back to the user-level config at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. This lets every workspace share the same hosted KnitHub remote unless a workspace deliberately points that name somewhere else:
+
+```sh
+knit remote add --global knithub https://api.knithub.dev
+export KNIT_REMOTE_KNITHUB_TOKEN="<KnitHub API token>"
+knit config set --global sync-remotes knithub
+knit config show
+knit remote show knithub
+```
+
+Workspace-only overrides stay local:
+
 ```sh
 knit remote add local http://localhost:4000
-knit remote add prod https://knithub.dev
-knit config set sync-remotes local,prod
+knit config set sync-remotes local,knithub
 knit push
 ```
 

@@ -293,7 +293,7 @@ pub fn delete_bundle(
         let config = match config {
             Some(config) => config,
             None => {
-                loaded_config = load_config(&root)?;
+                loaded_config = crate::store::load_effective_config(&root)?;
                 &loaded_config
             }
         };

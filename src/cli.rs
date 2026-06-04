@@ -1089,18 +1089,31 @@ pub enum RemoteCommand {
         /// Optional KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
+        /// Store this remote in the user-level Knit config instead of the workspace.
+        #[arg(long)]
+        global: bool,
     },
     /// List configured remotes.
-    List,
+    List {
+        /// Show only user-level remotes.
+        #[arg(long)]
+        global: bool,
+    },
     /// Show a configured remote.
     Show {
         /// Remote name.
         name: String,
+        /// Show only the user-level remote.
+        #[arg(long)]
+        global: bool,
     },
     /// Remove a configured remote.
     Remove {
         /// Remote name.
         name: String,
+        /// Remove the user-level remote instead of the workspace remote.
+        #[arg(long)]
+        global: bool,
     },
     /// Store or clear a token for a remote.
     Token {
@@ -1111,17 +1124,29 @@ pub enum RemoteCommand {
         /// Remove the stored token.
         #[arg(long)]
         clear: bool,
+        /// Store or clear the token in the user-level Knit config.
+        #[arg(long)]
+        global: bool,
     },
 }
 
 #[derive(Subcommand)]
 pub enum ConfigCommand {
+    /// Show Knit config (global, workspace, and effective when inside a workspace).
+    Show {
+        /// Show only the user-level config.
+        #[arg(long)]
+        global: bool,
+    },
     /// Set a Knit config value.
     Set {
         /// Config key: advice, push-sync, sync-remote, or sync-remotes.
         key: String,
         /// Config value.
         value: String,
+        /// Store the value in the user-level Knit config instead of the workspace.
+        #[arg(long)]
+        global: bool,
     },
 }
 
