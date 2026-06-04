@@ -44,7 +44,7 @@ pub use cherrypick::{cherrypick_from_bundle, split_bundle};
 pub use clean::clean_generated;
 pub use close::close_bundle;
 pub use commit::commit_staged;
-pub use config::set_config_value;
+pub use config::{set_config_value, show_config};
 pub use diff::show_diff;
 pub use doctor::{doctor_workspace, migrate_workspace};
 pub use fetch::fetch_repos;

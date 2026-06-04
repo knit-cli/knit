@@ -22,6 +22,7 @@ pub use push::{
     push_project_to_remote, push_views_to_remote, remove_remote, set_remote_token, show_remote,
     sync_bundle_to_remote, sync_bundle_to_remote_if_enabled,
 };
+pub use client::configured_sync_remote_names;
 
 use crate::model::{KnitProject, ProjectView};
 use serde::Deserialize;

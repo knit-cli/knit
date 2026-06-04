@@ -1409,6 +1409,61 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
 }
 
 #[test]
+fn remote_config_supports_global_fallback_and_workspace_override() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    let knit_home = root.join("knit-home");
+    fs::create_dir_all(&workspace).unwrap();
+    let env = [("KNIT_HOME", knit_home.to_str().unwrap())];
+
+    knit_with_env(
+        &workspace,
+        [
+            "remote",
+            "add",
+            "--global",
+            "knithub",
+            "https://api.knithub.dev",
+            "--token",
+            "global-token",
+        ],
+        &env,
+    );
+    let global_config: Value =
+        serde_json::from_str(&fs::read_to_string(knit_home.join("config.json")).unwrap()).unwrap();
+    assert_eq!(
+        global_config["remotes"]["knithub"]["url"].as_str(),
+        Some("https://api.knithub.dev")
+    );
+
+    knit_with_env(&workspace, ["project", "init", "arbient"], &env);
+    let inherited = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
+    assert!(inherited.contains("https://api.knithub.dev"));
+    assert!(inherited.contains("Scope: global"));
+    assert!(inherited.contains("Token: stored"));
+
+    knit_with_env(
+        &workspace,
+        ["remote", "add", "knithub", "http://localhost:4000"],
+        &env,
+    );
+    let overridden = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
+    assert!(overridden.contains("http://localhost:4000"));
+    assert!(overridden.contains("Scope: workspace"));
+
+    let global_only = knit_with_env(&workspace, ["remote", "show", "--global", "knithub"], &env);
+    assert!(global_only.contains("https://api.knithub.dev"));
+    assert!(global_only.contains("Scope: global"));
+
+    let show = knit_with_env(&workspace, ["config", "show"], &env);
+    assert!(show.contains("Global config"));
+    assert!(show.contains("Effective config"));
+    assert!(show.contains("https://api.knithub.dev"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn config_can_target_multiple_knithub_sync_remotes() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");

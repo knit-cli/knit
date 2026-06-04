@@ -1,10 +1,10 @@
-//! Workspace-level config: `.knit/config.json` and the folder→bundle context map.
+//! Knit config: user-global (`~/.config/knit/config.json`) and workspace (`.knit/config.json`).
 
 use super::SCHEMA_VERSION;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnitConfig {
     pub schema_version: String,
@@ -27,6 +27,19 @@ pub struct KnitConfig {
 }
 
 impl KnitConfig {
+    pub fn empty() -> Self {
+        Self {
+            schema_version: SCHEMA_VERSION.to_string(),
+            active_bundle: None,
+            active_project: None,
+            sync_remote: None,
+            sync_remotes: Vec::new(),
+            advice: true,
+            push_sync: true,
+            remotes: BTreeMap::new(),
+        }
+    }
+
     pub fn new(active_bundle: String) -> Self {
         Self {
             schema_version: SCHEMA_VERSION.to_string(),

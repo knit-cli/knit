@@ -4,7 +4,7 @@ use crate::model::{
     BUNDLE_STATE_OPEN,
 };
 use crate::output as out;
-use crate::store::{find_knit_root, read_json, write_json};
+use crate::store::{find_knit_root, global_config_path, load_effective_config, read_json, write_json};
 use crate::tracking::ledger_recorded_head_sha;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -18,6 +18,16 @@ pub fn doctor_workspace() -> Result<()> {
     match read_json::<KnitConfig>(&config_path) {
         Ok(config) => inspect_config(&root, &config, &mut issues),
         Err(error) => issues.push(format!("config: {error:#}")),
+    }
+    if let Ok(global_path) = global_config_path() {
+        if global_path.exists() {
+            if let Err(error) = read_json::<KnitConfig>(&global_path) {
+                issues.push(format!("global config: {error:#}"));
+            }
+        }
+    }
+    if let Ok(effective) = load_effective_config(&root) {
+        inspect_effective_remotes(&effective, &mut issues);
     }
     inspect_json_dir::<ChangeGroup>(&root.join(".knit/bundles"), "bundle", &mut issues);
     inspect_json_dir::<KnitProject>(&root.join(".knit/projects"), "project", &mut issues);
@@ -96,6 +106,17 @@ fn inspect_config(root: &Path, config: &KnitConfig, issues: &mut Vec<String>) {
             .join(format!("{project_id}.project.json"));
         if !path.exists() {
             issues.push(format!("active project `{project_id}` does not exist"));
+        }
+    }
+}
+
+fn inspect_effective_remotes(config: &KnitConfig, issues: &mut Vec<String>) {
+    use crate::commands::remote::configured_sync_remote_names;
+    for remote_name in configured_sync_remote_names(config) {
+        if !config.remotes.contains_key(&remote_name) {
+            issues.push(format!(
+                "sync remote `{remote_name}` is configured but no matching remote entry exists"
+            ));
         }
     }
 }

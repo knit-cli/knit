@@ -189,15 +189,21 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Remote { command } => match command {
-            RemoteCommand::Add { name, url, token } => {
-                commands::add_remote(&name, &url, token.as_deref())
-            }
-            RemoteCommand::List => commands::list_remotes(),
-            RemoteCommand::Show { name } => commands::show_remote(&name),
-            RemoteCommand::Remove { name } => commands::remove_remote(&name),
-            RemoteCommand::Token { name, token, clear } => {
-                commands::set_remote_token(&name, token.as_deref(), clear)
-            }
+            RemoteCommand::Add {
+                name,
+                url,
+                token,
+                global,
+            } => commands::add_remote(&name, &url, token.as_deref(), global),
+            RemoteCommand::List { global } => commands::list_remotes(global),
+            RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
+            RemoteCommand::Remove { name, global } => commands::remove_remote(&name, global),
+            RemoteCommand::Token {
+                name,
+                token,
+                clear,
+                global,
+            } => commands::set_remote_token(&name, token.as_deref(), clear, global),
         },
         Commands::Clone {
             project,
@@ -666,7 +672,10 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { target } => commands::show_target(&target),
         Commands::Config { command } => match command {
-            ConfigCommand::Set { key, value } => commands::set_config_value(&key, &value),
+            ConfigCommand::Show { global } => commands::show_config(global),
+            ConfigCommand::Set { key, value, global } => {
+                commands::set_config_value(&key, &value, global)
+            }
         },
         Commands::Schema { command } => match command {
             SchemaCommand::Print { name } => commands::print_schema(&name),
