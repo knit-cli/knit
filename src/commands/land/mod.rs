@@ -323,11 +323,7 @@ pub fn land_default() -> Result<()> {
     generate_land_plan(None, None, false)
 }
 
-pub fn apply_land_plan(
-    plan_path: Option<&Path>,
-    remote: Option<&str>,
-    no_remote: bool,
-) -> Result<()> {
+pub fn apply_land_plan(plan_path: Option<&Path>, remote: &[String], no_remote: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_plan_path(&active, plan_path)?;
     if !path.exists() {
@@ -353,11 +349,7 @@ pub fn apply_land_plan(
     Ok(())
 }
 
-pub fn resume_land_run(
-    run_path: Option<&Path>,
-    remote: Option<&str>,
-    no_remote: bool,
-) -> Result<()> {
+pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
@@ -383,7 +375,7 @@ pub fn resume_land_run(
     Ok(())
 }
 
-pub fn sync_landed_bundle(remote: Option<&str>) -> Result<()> {
+pub fn sync_landed_bundle(remote: &[String]) -> Result<()> {
     let active = load_active_bundle()?;
     if crate::commands::bundle::bundle_state(&active.bundle) != "landed" {
         bail!(

@@ -13,7 +13,7 @@ pub fn push_repos(
     selectors: &[String],
     all: bool,
     set_upstream: bool,
-    remote: Option<&str>,
+    remote: &[String],
     no_remote: bool,
 ) -> Result<()> {
     let active = load_active_bundle()?;

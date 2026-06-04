@@ -1409,6 +1409,64 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
 }
 
 #[test]
+fn config_can_target_multiple_knithub_sync_remotes() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "remote fanout"]);
+    knit(
+        &workspace,
+        ["remote", "add", "local", "http://localhost:4000"],
+    );
+    knit(&workspace, ["remote", "add", "prod", "https://knithub.dev"]);
+
+    let set = knit(&workspace, ["config", "set", "sync-remotes", "local,prod"]);
+    assert!(set.contains("sync-remotes=local,prod"), "{set}");
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["syncRemote"].as_str(), Some("local"));
+    assert_eq!(
+        config["syncRemotes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["local", "prod"]
+    );
+
+    let list = knit(&workspace, ["remote", "list"]);
+    assert!(list.contains("local"), "{list}");
+    assert!(list.contains("prod"), "{list}");
+    assert_eq!(list.matches("sync").count(), 2, "{list}");
+
+    let missing = knit_fails(&workspace, ["config", "set", "sync-remotes", "missing"]);
+    assert!(
+        missing.contains("No KnitHub remote named `missing`"),
+        "{missing}"
+    );
+
+    knit(&workspace, ["remote", "remove", "local"]);
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["syncRemote"].as_str(), Some("prod"));
+    assert_eq!(
+        config["syncRemotes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|value| value.as_str().unwrap())
+            .collect::<Vec<_>>(),
+        vec!["prod"]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
