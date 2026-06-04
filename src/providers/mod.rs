@@ -364,7 +364,8 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect::<Vec<_>>();
-    let mut child = Command::new(bin)
+    let mut command = Command::new(bin);
+    command
         .args(&args)
         .current_dir(cwd)
         .stdin(if stdin.is_some() {
@@ -373,7 +374,13 @@ where
             Stdio::null()
         })
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stderr(Stdio::piped());
+    if bin == "gh" {
+        command
+            .env("GH_PROMPT_DISABLED", "1")
+            .env("GH_NO_UPDATE_NOTIFIER", "1");
+    }
+    let mut child = command
         .spawn()
         .with_context(|| {
             format!(
@@ -391,6 +398,7 @@ where
         child_stdin
             .write_all(input.as_bytes())
             .with_context(|| format!("failed to write input to `{bin}`"))?;
+        drop(child_stdin);
     }
 
     let output = child
