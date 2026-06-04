@@ -3,6 +3,7 @@ pub mod github;
 pub mod gitlab;
 
 use crate::model::{ChangeGroup, PublicationEntry, RepoEntry};
+use crate::output as out;
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -10,6 +11,7 @@ use std::ffi::{OsStr, OsString};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Once;
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -350,6 +352,10 @@ fn checks_state(runs: &[CheckRun]) -> ChecksState {
 
 /// Run a forge CLI and capture stdout, returning a helpful error when the tool
 /// is missing or exits non-zero.
+///
+/// For `gh`, an invalid `GITHUB_TOKEN` or `GH_TOKEN` in the environment overrides
+/// `gh auth login`. When a host-token call fails with an auth error, Knit retries
+/// once without those variables so interactive credentials can succeed.
 pub(crate) fn cli_output<I, S>(
     bin: &str,
     cwd: &Path,
@@ -364,9 +370,36 @@ where
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect::<Vec<_>>();
+
+    match run_cli_output(bin, cwd, &args, stdin, false) {
+        Ok(output) => Ok(output),
+        Err(first) if should_retry_gh_without_env_token(bin, &first) => {
+            match run_cli_output(bin, cwd, &args, stdin, true) {
+                Ok(output) => {
+                    warn_gh_env_token_override();
+                    Ok(output)
+                }
+                Err(retry) => Err(enhance_gh_auth_error(retry)),
+            }
+        }
+        Err(err) => Err(if bin == "gh" {
+            enhance_gh_auth_error(err)
+        } else {
+            err
+        }),
+    }
+}
+
+fn run_cli_output(
+    bin: &str,
+    cwd: &Path,
+    args: &[OsString],
+    stdin: Option<&str>,
+    strip_host_tokens: bool,
+) -> Result<String> {
     let mut command = Command::new(bin);
     command
-        .args(&args)
+        .args(args)
         .current_dir(cwd)
         .stdin(if stdin.is_some() {
             Stdio::piped()
@@ -379,13 +412,16 @@ where
         command
             .env("GH_PROMPT_DISABLED", "1")
             .env("GH_NO_UPDATE_NOTIFIER", "1");
+        if strip_host_tokens {
+            command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
+        }
     }
     let mut child = command
         .spawn()
         .with_context(|| {
             format!(
                 "failed to run `{bin} {}` in {}. Install and authenticate `{bin}` to use this Knit code host provider.",
-                display_args(&args),
+                display_args(args),
                 cwd.display()
             )
         })?;
@@ -403,7 +439,7 @@ where
 
     let output = child
         .wait_with_output()
-        .with_context(|| format!("failed to wait for `{bin} {}`", display_args(&args)))?;
+        .with_context(|| format!("failed to wait for `{bin} {}`", display_args(args)))?;
 
     if output.status.success() {
         return Ok(String::from_utf8_lossy(&output.stdout)
@@ -420,10 +456,67 @@ where
     };
     bail!(
         "{bin} {} failed in {}: {}",
-        display_args(&args),
+        display_args(args),
         cwd.display(),
         detail
     );
+}
+
+fn gh_env_token_vars() -> Vec<&'static str> {
+    let mut vars = Vec::new();
+    if std::env::var_os("GH_TOKEN")
+        .is_some_and(|value| !value.is_empty())
+    {
+        vars.push("GH_TOKEN");
+    }
+    if std::env::var_os("GITHUB_TOKEN")
+        .is_some_and(|value| !value.is_empty())
+    {
+        vars.push("GITHUB_TOKEN");
+    }
+    vars
+}
+
+fn should_retry_gh_without_env_token(bin: &str, err: &anyhow::Error) -> bool {
+    bin == "gh" && !gh_env_token_vars().is_empty() && looks_like_gh_auth_failure(&err.to_string())
+}
+
+fn looks_like_gh_auth_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("401")
+        || lower.contains("bad credentials")
+        || lower.contains("authentication failed")
+        || lower.contains("not authenticated")
+        || (lower.contains("403") && lower.contains("denied"))
+}
+
+pub(crate) fn is_likely_host_auth_failure(err: &anyhow::Error) -> bool {
+    looks_like_gh_auth_failure(&err.to_string())
+}
+
+fn enhance_gh_auth_error(err: anyhow::Error) -> anyhow::Error {
+    let vars = gh_env_token_vars();
+    if vars.is_empty() || !looks_like_gh_auth_failure(&err.to_string()) {
+        return err;
+    }
+    let names = vars.join(" and ");
+    anyhow::anyhow!(
+        "{err:#}\nHint: `{names}` override `gh auth login`. Run `unset GH_TOKEN GITHUB_TOKEN`, then `gh auth login -h github.com`, or fix the token value."
+    )
+}
+
+static GH_ENV_TOKEN_WARNING: Once = Once::new();
+
+fn warn_gh_env_token_override() {
+    GH_ENV_TOKEN_WARNING.call_once(|| {
+        let vars = gh_env_token_vars().join(" and ");
+        eprintln!(
+            "{}",
+            out::warn(format!(
+                "Ignored invalid {vars} for `gh`; retried with `gh auth login` credentials. Unset {vars} in your shell profile to avoid this."
+            ))
+        );
+    });
 }
 
 /// Build CLI args, optionally suffixed with a `<repo_flag> <full_name>` pair.
@@ -499,5 +592,14 @@ mod tests {
         assert_eq!(by_id("github").map(|f| f.id()), Some("github"));
         assert_eq!(by_id("codeberg").map(|f| f.id()), Some("forgejo"));
         assert!(by_id("bitbucket").is_none());
+    }
+
+    #[test]
+    fn detects_gh_auth_failures() {
+        assert!(looks_like_gh_auth_failure(
+            "HTTP 401: Bad credentials (https://api.github.com/graphql)"
+        ));
+        assert!(looks_like_gh_auth_failure("authentication failed"));
+        assert!(!looks_like_gh_auth_failure("graphQL: Could not resolve to a PullRequest"));
     }
 }

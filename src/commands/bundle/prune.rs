@@ -121,6 +121,7 @@ struct PruneCache {
     pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
     pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
     pending_changes: Arc<Mutex<HashMap<String, Pending>>>,
+    gh_auth_failure: Arc<Mutex<bool>>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -136,7 +137,30 @@ impl PruneCache {
             pr_by_url: Arc::new(Mutex::new(HashMap::new())),
             pr_by_branch: Arc::new(Mutex::new(HashMap::new())),
             pending_changes: Arc::new(Mutex::new(HashMap::new())),
+            gh_auth_failure: Arc::new(Mutex::new(false)),
         }
+    }
+
+    fn note_refresh_failure(
+        &self,
+        bundle_id: &str,
+        repo_id: &str,
+        context: &str,
+        err: &anyhow::Error,
+    ) {
+        if providers::is_likely_host_auth_failure(err) {
+            let mut seen = self.gh_auth_failure.lock().unwrap();
+            if !*seen {
+                print_prune_warning(format!(
+                    "GitHub auth failed during prune refresh ({err:#}). Further refresh warnings are suppressed; using last recorded PR state."
+                ));
+                *seen = true;
+            }
+            return;
+        }
+        print_prune_warning(format!(
+            "{bundle_id}/{repo_id}: {context} ({err:#}); using last recorded state"
+        ));
     }
 
     fn view_pr(&self, forge: &dyn Forge, cwd: &Path, url: &str) -> Result<PullRequest> {
@@ -495,10 +519,12 @@ fn assess_bundle(
                             providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
                             publication = providers::publication_for_repo(bundle, &repo.id).cloned();
                         }
-                        Err(err) => print_prune_warning(format!(
-                            "{}/{}: could not refresh {} ({err:#}); using last recorded state",
-                            bundle.id, repo.id, existing.url
-                        )),
+                        Err(err) => cache.note_refresh_failure(
+                            &bundle.id,
+                            &repo.id,
+                            &format!("could not refresh {}", existing.url),
+                            &err,
+                        ),
                     }
                 } else if let Some(branch) = branch {
                     match cache.find_existing_pr(
@@ -512,10 +538,12 @@ fn assess_bundle(
                             publication = providers::publication_for_repo(bundle, &repo.id).cloned();
                         }
                         Ok(None) => {}
-                        Err(err) => print_prune_warning(format!(
-                            "{}/{}: could not check for an open review object on {branch} ({err:#}); using last recorded state",
-                            bundle.id, repo.id
-                        )),
+                        Err(err) => cache.note_refresh_failure(
+                            &bundle.id,
+                            &repo.id,
+                            &format!("could not check for an open review object on {branch}"),
+                            &err,
+                        ),
                     }
                 }
             }
