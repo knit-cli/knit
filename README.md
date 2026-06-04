@@ -688,3 +688,7 @@ See [docs/architecture.md](docs/architecture.md) for the module boundaries and t
 - More host adapters (e.g. Bitbucket) and richer GitLab/Forgejo check integration
 - Better detection of existing registered worktrees
 - Optional bundle export/import flows for handoff to Gloss
+
+---
+
+Documentation last reviewed: June 2026.
