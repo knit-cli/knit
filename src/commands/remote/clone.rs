@@ -85,6 +85,7 @@ pub fn clone_project_from_remote(
         active_bundle: selected_bundle_id.clone(),
         active_project: Some(project.id.clone()),
         sync_remote: Some(remote_name.clone()),
+        sync_remotes: vec![remote_name.clone()],
         advice: true,
         push_sync: true,
         remotes,

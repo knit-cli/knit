@@ -297,9 +297,9 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
-        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        /// Also push the bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
-        remote: Option<String>,
+        remote: Vec<String>,
         /// Skip the KnitHub bundle sync for this push.
         #[arg(long)]
         no_remote: bool,
@@ -1118,7 +1118,7 @@ pub enum RemoteCommand {
 pub enum ConfigCommand {
     /// Set a Knit config value.
     Set {
-        /// Config key. Currently only `advice`.
+        /// Config key: advice, push-sync, sync-remote, or sync-remotes.
         key: String,
         /// Config value.
         value: String,
@@ -1167,9 +1167,9 @@ pub enum PublishCommand {
         /// Set each feature branch's upstream to origin/<branch> while pushing.
         #[arg(long)]
         set_upstream: bool,
-        /// Also push the bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        /// Also push the bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
-        remote: Option<String>,
+        remote: Vec<String>,
         /// Skip the KnitHub bundle sync for this publish.
         #[arg(long)]
         no_remote: bool,
@@ -1232,9 +1232,9 @@ pub enum LandCommand {
         /// When omitted, the updated artifact is printed to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Also push the landed bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        /// Also push the landed bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
-        remote: Option<String>,
+        remote: Vec<String>,
         /// Skip the KnitHub bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
@@ -1244,18 +1244,18 @@ pub enum LandCommand {
         /// Run file to resume. Defaults to the latest run.
         #[arg(long)]
         run: Option<PathBuf>,
-        /// Also push the landed bundle artifact to this KnitHub remote. Overrides the push-sync config.
+        /// Also push the landed bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
-        remote: Option<String>,
+        remote: Vec<String>,
         /// Skip the KnitHub bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
     },
     /// Push the current landed bundle artifact to a KnitHub remote.
     Sync {
-        /// Named KnitHub remote. Defaults to sync_remote or `knithub`.
+        /// Named KnitHub remote. Repeat to push to multiple remotes. Defaults to sync-remotes or `knithub`.
         #[arg(long, value_name = "REMOTE")]
-        remote: Option<String>,
+        remote: Vec<String>,
     },
     /// Show the latest landing run or default plan status.
     Status {

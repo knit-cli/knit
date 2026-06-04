@@ -160,11 +160,11 @@ knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
 knit pull [--main] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
-knit push [--all] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
+knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run --list
-knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>] [--no-remote] [repo-id-or-path...]
+knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [repo-id-or-path...]
 knit publish status [--live] [repo-id-or-path...]
 knit publish github <create|sync|status> ...   # back-compat alias
@@ -172,9 +172,9 @@ knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
-knit land apply [--plan <path>] [--remote <remote>] [--no-remote]
-knit land resume [--run <path>] [--remote <remote>] [--no-remote]
-knit land sync [--remote <remote>]
+knit land apply [--plan <path>] [--remote <remote>]... [--no-remote]
+knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
+knit land sync [--remote <remote>]...
 knit land status [--run <path>]
 knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--fetch] [--push] [--set-upstream] [--manual]
 knit merge status [--run <id-or-path>]
@@ -184,6 +184,8 @@ knit merge --continue
 knit merge --abort
 knit config set advice true|false
 knit config set push-sync true|false
+knit config set sync-remote <name>
+knit config set sync-remotes <name>[,<name>...]
 knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
@@ -500,7 +502,14 @@ knit publish status
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
 
-When a KnitHub sync remote is configured, `knit publish create` and `knit push` also push the bundle artifact to that remote so the host and KnitHub stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force a specific remote with `--remote <name>`.
+When KnitHub sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and KnitHub stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`.
+
+```sh
+knit remote add local http://localhost:4000
+knit remote add prod https://knithub.dev
+knit config set sync-remotes local,prod
+knit push
+```
 
 Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
 
@@ -533,7 +542,7 @@ Bare `knit land` is safe: it creates or shows the default plan and stops. It nev
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to the configured KnitHub remote when push-sync is enabled. Use `--remote <name>` to force a remote, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to configured KnitHub remotes when push-sync is enabled. Use repeated `--remote <name>` to force remotes, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
 
 `knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
 
@@ -646,7 +655,7 @@ Sparse advice is enabled by default for new workspaces. It prints a `Next:` line
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
-- `knit push` pushes feature branches to `origin` and, when a KnitHub sync remote is configured and `push-sync` is enabled, the bundle artifact to that remote; use `knit publish create` to publish review objects.
+- `knit push` pushes feature branches to `origin` and, when KnitHub sync remotes are configured and `push-sync` is enabled, the bundle artifact to those remotes; use `knit publish create` to publish review objects.
 - `knit publish` detects the host from each repo's remote: GitLab uses `glab`, Codeberg/Forgejo uses `tea`, and every other remote defaults to GitHub's `gh`. The matching CLI must be installed and authenticated. Bitbucket and other hosts would need new adapters. The GitLab and Forgejo adapters target current `glab`/`tea` JSON; their field mapping may need tuning across CLI versions, and `tea` does not surface commit-status checks, so landing treats Forgejo PRs as having no required checks.
 - `knit publish create` is not perfectly transactional. Branch pushes, review creation, and body updates happen sequentially. If phase two fails after review objects are created, run `knit publish sync`.
 - `knit land` resolves the host adapter per repo from its remote. A merge lands into the recorded base branch. Remote merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`.

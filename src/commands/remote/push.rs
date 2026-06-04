@@ -3,12 +3,13 @@
 //! sync-on-push.
 
 use super::client::{
-    decode_response, load_project_if_present, normalize_base_url, request, request_json,
-    resolve_project_id, resolve_remote, resolve_token, token_from_env, workspace_config,
+    configured_sync_remote_names, decode_response, load_project_if_present, normalize_base_url,
+    request, request_json, resolve_project_id, resolve_remote, resolve_sync_remote_names,
+    resolve_token, token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::ids::slugify;
-use crate::model::{ChangeGroup, KnitProject, KnitRemote, ProjectRepoEntry};
+use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry};
 use crate::output as out;
 use crate::store::{load_active_bundle, load_config, save_config};
 use anyhow::{bail, Context, Result};
@@ -37,6 +38,7 @@ pub fn list_remotes() -> Result<()> {
         return Ok(());
     }
 
+    let sync_remotes = configured_sync_remote_names(&config);
     for (name, remote) in config.remotes {
         let token_label = if token_from_env(&name).is_some() {
             "token from env"
@@ -45,11 +47,16 @@ pub fn list_remotes() -> Result<()> {
         } else {
             "no token"
         };
+        let sync_label = sync_remotes
+            .contains(&name)
+            .then_some("sync")
+            .unwrap_or("not sync");
         println!(
-            "{} {} {}",
+            "{} {} {} {}",
             out::repo(name),
             remote.url,
-            out::muted(token_label)
+            out::muted(token_label),
+            out::muted(sync_label)
         );
     }
     Ok(())
@@ -83,6 +90,18 @@ pub fn remove_remote(name: &str) -> Result<()> {
     let remote_name = slugify(name);
     if config.remotes.remove(&remote_name).is_none() {
         bail!("No KnitHub remote named `{remote_name}`.");
+    }
+    config
+        .sync_remotes
+        .retain(|name| slugify(name) != remote_name);
+    let removed_sync_remote = config
+        .sync_remote
+        .as_deref()
+        .map(slugify)
+        .unwrap_or_default()
+        == remote_name;
+    if removed_sync_remote {
+        config.sync_remote = config.sync_remotes.first().cloned();
     }
     save_config(&root, &config)?;
     println!("{} {}", out::movement("removed"), out::repo(remote_name));
@@ -219,47 +238,54 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
     Ok(())
 }
 
-/// Push the resolved bundle artifact to the configured KnitHub remote alongside a
+/// Push the resolved bundle artifact to configured KnitHub remote(s) alongside a
 /// git push, when enabled.
 ///
-/// Resolution order for the remote: explicit `--remote`, then `sync_remote`, then a
-/// remote literally named `knithub`. With no remote configured this is a silent
-/// no-op. The `push_sync` config disables the implicit sync, but an explicit
-/// `--remote` still forces it. `--no-remote` always skips. A sync failure is
-/// reported as a warning and never fails the git push that already succeeded.
-pub fn maybe_sync_bundle_to_remote(remote_override: Option<&str>, no_remote: bool) -> Result<()> {
+/// Resolution order for remotes: repeated explicit `--remote`, then
+/// `syncRemotes`, then legacy `sync_remote`, then a remote literally named
+/// `knithub`. With no remote configured this is a silent no-op. The `push_sync`
+/// config disables implicit sync, but explicit `--remote` still forces it.
+/// `--no-remote` always skips. Sync failures are reported as warnings and never
+/// fail the git push that already succeeded.
+pub fn maybe_sync_bundle_to_remote(remote_overrides: &[String], no_remote: bool) -> Result<()> {
     if no_remote {
         return Ok(());
     }
     let Ok((_, config)) = workspace_config() else {
         return Ok(());
     };
-    if !config.push_sync && remote_override.is_none() {
+    if !config.push_sync && remote_overrides.is_empty() {
         return Ok(());
     }
-    let Some(remote_name) = remote_override
-        .map(slugify)
-        .or_else(|| config.sync_remote.clone())
-        .or_else(|| {
-            config
-                .remotes
-                .contains_key("knithub")
-                .then(|| "knithub".to_string())
-        })
-    else {
-        return Ok(());
-    };
-    if resolve_remote(&config, &remote_name).is_err() {
-        // An explicitly requested remote that does not exist is an error; an
-        // implicit fallback that is missing is just skipped.
-        if remote_override.is_some() {
-            resolve_remote(&config, &remote_name)?;
-        }
+    let remote_names = resolve_sync_remote_names(&config, remote_overrides);
+    if remote_names.is_empty() {
         return Ok(());
     }
+    let explicit = !remote_overrides.is_empty();
+    let multiple = remote_names.len() > 1;
 
-    if let Err(error) = push_bundle_to_remote(&remote_name, None) {
-        println!("{} {error:#}", out::warn("KnitHub sync skipped:"));
+    for remote_name in remote_names {
+        if let Err(error) = resolve_remote(&config, &remote_name) {
+            // An explicitly requested remote that does not exist is an error; an
+            // implicit configured remote is skipped as best-effort sync.
+            if explicit {
+                return Err(error);
+            }
+            println!(
+                "{} {error:#}",
+                out::warn(format!("KnitHub sync skipped ({remote_name}):"))
+            );
+            continue;
+        }
+        if multiple {
+            println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
+        }
+        if let Err(error) = push_bundle_to_remote(&remote_name, None) {
+            println!(
+                "{} {error:#}",
+                out::warn(format!("KnitHub sync skipped ({remote_name}):"))
+            );
+        }
     }
     Ok(())
 }
@@ -270,7 +296,7 @@ pub fn maybe_sync_bundle_to_remote(remote_override: Option<&str>, no_remote: boo
 /// caller. This is used after landing so a stale remote lifecycle state is
 /// visible instead of being hidden behind a best-effort warning.
 pub fn sync_bundle_to_remote_if_enabled(
-    remote_override: Option<&str>,
+    remote_overrides: &[String],
     no_remote: bool,
 ) -> Result<()> {
     if no_remote {
@@ -279,47 +305,54 @@ pub fn sync_bundle_to_remote_if_enabled(
     let Ok((_, config)) = workspace_config() else {
         return Ok(());
     };
-    if !config.push_sync && remote_override.is_none() {
+    if !config.push_sync && remote_overrides.is_empty() {
         return Ok(());
     }
-    let Some(remote_name) = remote_override
-        .map(slugify)
-        .or_else(|| config.sync_remote.clone())
-        .or_else(|| {
-            config
-                .remotes
-                .contains_key("knithub")
-                .then(|| "knithub".to_string())
-        })
-    else {
-        return Ok(());
-    };
-    if resolve_remote(&config, &remote_name).is_err() {
-        if remote_override.is_some() {
-            resolve_remote(&config, &remote_name)?;
-        }
+    let remote_names = resolve_sync_remote_names(&config, remote_overrides);
+    if remote_names.is_empty() {
         return Ok(());
     }
 
-    push_bundle_to_remote(&remote_name, None)
+    sync_bundle_to_remote_names(&config, &remote_names)
 }
 
 /// Push the resolved bundle artifact to KnitHub, failing if no remote is
 /// configured or if the sync cannot complete.
-pub fn sync_bundle_to_remote(remote_override: Option<&str>) -> Result<()> {
+pub fn sync_bundle_to_remote(remote_overrides: &[String]) -> Result<()> {
     let (_, config) = workspace_config()?;
-    let remote_name = remote_override
-        .map(slugify)
-        .or_else(|| config.sync_remote.clone())
-        .or_else(|| {
-            config
-                .remotes
-                .contains_key("knithub")
-                .then(|| "knithub".to_string())
-        })
-        .context("No KnitHub remote configured. Run `knit remote add knithub <url>` first.")?;
-    resolve_remote(&config, &remote_name)?;
-    push_bundle_to_remote(&remote_name, None)
+    let remote_names = resolve_sync_remote_names(&config, remote_overrides);
+    if remote_names.is_empty() {
+        bail!(
+            "No KnitHub remote configured. Run `knit remote add knithub <url>` or `knit config set sync-remotes <name>[,<name>...]` first."
+        );
+    }
+    sync_bundle_to_remote_names(&config, &remote_names)
+}
+
+fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> Result<()> {
+    let multiple = remote_names.len() > 1;
+    let mut failures = Vec::new();
+    for remote_name in remote_names {
+        if let Err(error) = resolve_remote(config, remote_name) {
+            failures.push(format!("{remote_name}: {error:#}"));
+            continue;
+        }
+        if multiple {
+            println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
+        }
+        if let Err(error) = push_bundle_to_remote(remote_name, None) {
+            failures.push(format!("{remote_name}: {error:#}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "KnitHub sync failed for {} remote(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
 }
 
 fn upsert_project(

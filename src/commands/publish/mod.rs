@@ -24,7 +24,7 @@ pub fn create_publications(
     bases: &[String],
     sync: bool,
     set_upstream: bool,
-    remote: Option<&str>,
+    remote: &[String],
     no_remote: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
