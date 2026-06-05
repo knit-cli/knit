@@ -486,11 +486,14 @@ fn should_retry_gh_without_env_token(bin: &str, err: &anyhow::Error) -> bool {
 }
 
 pub(crate) fn is_gh_checks_access_error(err: &anyhow::Error) -> bool {
-    let message = err.to_string().to_ascii_lowercase();
-    message.contains("statuscheckrollup")
-        || message.contains("resource not accessible")
-        || message.contains("insufficient_scope")
-        || (message.contains("graphql") && message.contains("not accessible"))
+    err.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("statuscheckrollup")
+            || message.contains("resource not accessible")
+            || message.contains("insufficient_scope")
+            || (message.contains("graphql") && message.contains("not accessible"))
+            || (message.contains("gh pr checks") && message.contains("failed"))
+    })
 }
 
 fn looks_like_gh_auth_failure(detail: &str) -> bool {
