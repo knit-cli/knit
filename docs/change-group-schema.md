@@ -8,6 +8,8 @@ Knit writes a bundle as a language-neutral JSON file:
 
 The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 
+Project-wide history is stored separately from bundle artifacts. Local history events live in `.knit/history/<project>.history.jsonl` and KnitHub stores the same event shape in its backend. Those events point back to bundle nodes and Git commit SHAs; they do not store patches or file contents.
+
 ## Top-Level Fields
 
 ```json
@@ -153,6 +155,12 @@ Rewind example:
 Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each review body. The `provider` and `kind` identify the host adapter and review object: `github`/`pull_request`, `gitlab`/`merge_request`, or `forgejo`/`pull_request`. Knit records at most one review object per repo per bundle.
 
 The `baseBranch` field is the review target recorded by the provider. `knit land` uses that metadata, so a review object lands into the same base branch shown on its host.
+
+## Project History Events
+
+Project history events are metadata-only records derived from bundle ledgers. They include fields such as `eventId`, `projectId`, `kind`, `bundleId`, `repoId`, `branch`, `commit`, `beforeSha`, `afterSha`, `nodeId`, `nodeType`, `commitGroupId`, `occurredAt`, and `recordedAt`.
+
+Knit uses deterministic event ids so local JSONL history and KnitHub history can be merged idempotently. `knit related` joins Git path history to these events by commit SHA, then expands the result to the related bundle and commit-group context.
 
 ## Merge Runs
 

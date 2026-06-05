@@ -122,6 +122,15 @@ knit add
 knit commit --stage -m "Describe the feature change"
 knit push --set-upstream
 ```
+
+Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
+
+```sh
+knit related --repo <repo-id> path/inside/repo
+knit history related --repo <repo-id> path/inside/repo --pull
+```
+
+Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
 {runtime_section}
 For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
 
@@ -305,6 +314,16 @@ knit add
 knit commit --stage -m "Describe the feature change"
 knit push --set-upstream
 ```
+
+Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
+
+```sh
+knit related path/inside/repo
+knit related --repo <repo-id> path/inside/repo
+knit history related --repo <repo-id> path/inside/repo --pull
+```
+
+Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
 {runtime_section}
 Sibling worktrees for this bundle:
 
@@ -493,6 +512,16 @@ For narrower or unusual work, inspect the project first and then choose repo ids
 knit project show {project_id}
 knit bundle start "feature title" --project {project_id} --repo <repo-id>
 ```
+
+Before changing a file or subsystem, use project history to find Knit-managed work that previously touched it and see any cross-repo companion commits:
+
+```sh
+knit related --repo <repo-id> path/inside/repo
+knit related <repo-id>/path/inside/repo
+knit history related --repo <repo-id> path/inside/repo --pull
+```
+
+Use `--pull` when you want to refresh the local history ledger from KnitHub first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.
 {runtime_section}{landing_section}
 {end}
 "#,
