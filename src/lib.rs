@@ -680,7 +680,41 @@ pub fn run(cli: Cli) -> Result<()> {
             Some(HistoryCommand::Sync { project, remote }) => {
                 commands::sync_history(project.as_deref(), &remote)
             }
+            Some(HistoryCommand::Related {
+                paths,
+                repo,
+                project,
+                limit,
+                commit_limit,
+                pull,
+                remote,
+            }) => commands::show_related_history(
+                project.as_deref(),
+                repo.as_deref(),
+                &paths,
+                limit,
+                commit_limit,
+                pull,
+                &remote,
+            ),
         },
+        Commands::Related {
+            paths,
+            repo,
+            project,
+            limit,
+            commit_limit,
+            pull,
+            remote,
+        } => commands::show_related_history(
+            project.as_deref(),
+            repo.as_deref(),
+            &paths,
+            limit,
+            commit_limit,
+            pull,
+            &remote,
+        ),
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {
             limit,

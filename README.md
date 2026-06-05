@@ -192,6 +192,11 @@ knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
 knit sync
+knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--project <project>]
+knit history refresh [--project <project>]
+knit history push|pull|sync [--project <project>] [--remote <name>]
+knit history related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
+knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
 knit log [-n [count]]
@@ -580,6 +585,20 @@ knit merge x-y-compat --into feature-y
 ```
 
 `knit sync` records commits that happened outside Knit as `git.observed` nodes and advances each affected repo's remembered `headSha`. `knit log` shows both Knit commit groups and observed git movement from the node ledger. Use `knit log -2` for the latest two log entries. `knit log -n 3` also works, and `knit log -n` defaults to the latest ten.
+
+Knit also keeps a project-wide history ledger under `.knit/history/<project>.history.jsonl` and syncs it with KnitHub when history APIs are available. This ledger is metadata only: it records bundle ids, repo ids, branch names, Knit node ids, timestamps, and Git commit SHAs. Git remains the source of truth for file contents, diffs, and file-level history.
+
+Use `knit history list` to inspect the local project history, `knit history refresh` to rebuild it from local bundle artifacts, and `knit history push`, `knit history pull`, or `knit history sync` to exchange history events with a KnitHub remote.
+
+Use `knit related` before editing a file or area with possible cross-repo coupling. The command asks Git which commits touched the path, joins those SHAs to Knit history, then expands matching events to their bundle, commit group, and companion repo commits:
+
+```sh
+knit related --repo frontend src/routes/billing.tsx
+knit related frontend/src/routes/billing.tsx
+knit history related --repo frontend src/routes/billing.tsx --pull
+```
+
+The output includes the touched-path commits, related commits in the same Knit scope, other commits from the same bundle, and `git show --stat` commands for inspection. Commits made wholly outside Knit appear in Git history but only appear in Knit-related results after they have been recorded into a bundle, for example with `knit sync`.
 
 `knit show <target>` uses the same bundle log selectors as `knit revert`: `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, commit group ids, and recorded git commit SHAs. Commit and revert group nodes show `git show --stat --oneline` for each repo commit. Observed git nodes show the branch movement and the relevant added or dropped commits when those commits are still available locally.
 

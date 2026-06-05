@@ -82,6 +82,17 @@ knit show HEAD
 
 Expected result: `knit status` reports `unrecorded commits: 1` for `frontend`, `knit sync` appends a `git.observed` node to the bundle, `knit log` shows `observed git changes` with the frontend commit SHA, and `knit show HEAD` shows the raw commit stats.
 
+To test project history and related-work lookup:
+
+```sh
+knit history refresh
+knit history list --repo frontend -n 5
+knit related --repo frontend app.txt --limit 5 --commit-limit 20
+knit history related frontend/app.txt --limit 5 --commit-limit 20
+```
+
+Expected result: `knit history refresh` records any missing project history events from local bundles. `knit history list` shows frontend commit events with timestamps, bundle ids, and Git SHAs. `knit related` asks Git which commits touched `app.txt`, matches those SHAs against Knit history, and prints the matching bundle scope plus any related same-scope or same-bundle repo commits. If a touched Git commit was never recorded by Knit, the command reports that no Knit history event matched it.
+
 To test a reset/rewind:
 
 ```sh

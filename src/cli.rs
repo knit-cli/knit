@@ -386,6 +386,30 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<HistoryCommand>,
     },
+    /// Find Knit bundles related to paths touched in Git history.
+    Related {
+        /// Paths to inspect. Paths are repo-relative unless they include a project repo id prefix.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Repo id. Defaults to the repo containing cwd or a repo id prefix in the path.
+        #[arg(short = 'r', long = "repo")]
+        repo: Option<String>,
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Maximum related Knit instances to show.
+        #[arg(short = 'n', long = "limit", default_value_t = 10)]
+        limit: usize,
+        /// Maximum Git commits to inspect for the path query.
+        #[arg(long = "commit-limit", default_value_t = 200)]
+        commit_limit: usize,
+        /// Pull Knit history from a remote before querying.
+        #[arg(long)]
+        pull: bool,
+        /// Named KnitHub remote used with --pull.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+    },
     /// Commit staged changes across tracked checkouts.
     Commit {
         /// Commit message to use in every repo with staged changes.
@@ -519,6 +543,30 @@ pub enum HistoryCommand {
         #[arg(long)]
         project: Option<String>,
         /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+    },
+    /// Find Knit bundles related to paths touched in Git history.
+    Related {
+        /// Paths to inspect. Paths are repo-relative unless they include a project repo id prefix.
+        #[arg(required = true)]
+        paths: Vec<PathBuf>,
+        /// Repo id. Defaults to the repo containing cwd or a repo id prefix in the path.
+        #[arg(short = 'r', long = "repo")]
+        repo: Option<String>,
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Maximum related Knit instances to show.
+        #[arg(short = 'n', long = "limit", default_value_t = 10)]
+        limit: usize,
+        /// Maximum Git commits to inspect for the path query.
+        #[arg(long = "commit-limit", default_value_t = 200)]
+        commit_limit: usize,
+        /// Pull Knit history from a remote before querying.
+        #[arg(long)]
+        pull: bool,
+        /// Named KnitHub remote used with --pull.
         #[arg(long, default_value = "knithub")]
         remote: String,
     },
