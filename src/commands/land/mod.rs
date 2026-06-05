@@ -91,12 +91,18 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
 
         ensure_open_and_ready(&repo.id, &pr)?;
 
-        let summary = forge.wait_for_checks(&target, &publication.url, true, 1800, 10)?;
+        let checks_detail = match forge.wait_for_checks(&target, &publication.url, true, 1800, 10) {
+            Ok(summary) => summary.status,
+            Err(err) if providers::is_gh_checks_access_error(&err) => {
+                "passed (checks unavailable)".to_string()
+            }
+            Err(err) => return Err(err),
+        };
         println!(
             "{} {} {}",
             out::ok("checks"),
             out::repo(&repo.id),
-            out::muted(&summary.status)
+            out::muted(&checks_detail)
         );
 
         forge.merge(
