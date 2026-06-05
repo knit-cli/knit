@@ -99,6 +99,14 @@ The bundle carries both current state and history:
 
 Command files should append nodes when they create meaningful reviewable state. Gloss can consume a node or the current bundle head without owning git lifecycle.
 
+## Project History Ledger
+
+Knit also maintains project-wide history events derived from bundle ledgers. Locally these events live in `.knit/history/<project>.history.jsonl`; KnitHub stores the same metadata in its project history table and includes it in project exports.
+
+History events are pointers, not patches. They record the project, bundle, repo, branch, Knit node, commit group, Git commit SHA, movement, and timestamps. Git remains the source of truth for file contents and file-level history.
+
+This split enables related-work queries without duplicating Git. `knit related` first asks Git which commits touched a path, then joins those SHAs to Knit history to recover the bundle and cross-repo commit context. If a commit was made wholly outside Knit and never recorded into a bundle, Git can still report it for the path, but Knit history has no bundle context for it.
+
 ## Project And Context State
 
 Projects are optional templates for repeated repo sets. They live under `.knit/projects/<project>.project.json`, record stable repo ids, default base branches, checkout mode, and whether a repo is included by default or only observed.
