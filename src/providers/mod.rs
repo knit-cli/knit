@@ -172,7 +172,11 @@ pub trait Forge {
         let interval = Duration::from_secs(interval_seconds.max(1));
 
         loop {
-            let runs = self.check_runs(target, selector, required_only)?;
+            let runs = match self.check_runs(target, selector, required_only) {
+                Ok(runs) => runs,
+                Err(err) if is_gh_checks_access_error(&err) => Vec::new(),
+                Err(err) => return Err(err),
+            };
             match checks_state(&runs) {
                 ChecksState::NoChecks => {
                     return Ok(CheckWaitSummary {
@@ -479,6 +483,17 @@ fn gh_env_token_vars() -> Vec<&'static str> {
 
 fn should_retry_gh_without_env_token(bin: &str, err: &anyhow::Error) -> bool {
     bin == "gh" && !gh_env_token_vars().is_empty() && looks_like_gh_auth_failure(&err.to_string())
+}
+
+pub(crate) fn is_gh_checks_access_error(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("statuscheckrollup")
+            || message.contains("resource not accessible")
+            || message.contains("insufficient_scope")
+            || (message.contains("graphql") && message.contains("not accessible"))
+            || (message.contains("gh pr checks") && message.contains("failed"))
+    })
 }
 
 fn looks_like_gh_auth_failure(detail: &str) -> bool {

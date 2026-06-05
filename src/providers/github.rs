@@ -492,16 +492,20 @@ fn is_no_checks_error(error: &anyhow::Error) -> bool {
 }
 
 fn is_checks_permission_error(error: &anyhow::Error) -> bool {
-    let message = error.to_string().to_lowercase();
-    message.contains("resource not accessible by personal access token")
-        || message.contains("resource not accessible by integration")
-        || message.contains("insufficient_scope")
-        || (message.contains("graphql") && message.contains("not accessible"))
+    super::is_gh_checks_access_error(error)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn treats_checks_permission_errors_as_nonfatal() {
+        let err = anyhow::anyhow!(
+            "gh pr checks https://github.com/marc-merino/betsnitch-frontend/pull/45 --json name,state,bucket --required --repo Marc-Merino/betsnitch-frontend failed in /tmp: GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)"
+        );
+        assert!(is_checks_permission_error(&err));
+    }
 
     #[test]
     fn parses_full_name_from_remote_forms() {

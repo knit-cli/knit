@@ -262,10 +262,27 @@ fn build_plan(
         .map(|repo| PathBuf::from(&repo.path))
         .unwrap_or_else(|| workspace_root.join("gloss-web-ui"));
 
+    let knit_src = project
+        .repos
+        .iter()
+        .find(|repo| repo.id == "knit")
+        .map(|repo| PathBuf::from(&repo.path))
+        .unwrap_or_else(|| workspace_root.join("knit"));
+    let knit_checkout = active
+        .bundle
+        .repos
+        .iter()
+        .find(|repo| repo.id == "knit")
+        .and_then(|repo| checkout_dir(active, repo))
+        .unwrap_or(knit_src);
+
     let in_worktree = is_worktree_checkout(stack_checkout);
     let stack_rel = relative_path(workspace_root, stack_checkout)?;
     let frontend_rel = relative_path(workspace_root, &frontend_checkout)?;
     let gloss_rel = relative_path(workspace_root, &gloss_path)?;
+    let knit_rel = relative_path(workspace_root, &knit_checkout)?;
+    let knit_rev = checkout_git_revision(&knit_checkout);
+    let knithub_rev = checkout_git_revision(stack_checkout);
 
     let profile_path = runtime.profile_path.clone().unwrap_or_else(|| "/app/profile".to_string());
     let project_name = format!("knit-run-{}", active.bundle.id);
@@ -280,6 +297,9 @@ fn build_plan(
             &project_name,
             workspace_root,
             &stack_rel,
+            &knit_rel,
+            &knit_rev,
+            &knithub_rev,
             &dockerfile_rel,
             &frontend_rel,
             &gloss_rel,
@@ -294,6 +314,9 @@ fn build_plan(
             &project_name,
             workspace_root,
             &stack_rel,
+            &knit_rel,
+            &knit_rev,
+            &knithub_rev,
             &dockerfile_rel,
             &frontend_rel,
             &gloss_rel,
@@ -310,6 +333,9 @@ fn generate_worktree_compose(
     project_name: &str,
     workspace_root: &Path,
     knithub_src: &str,
+    knit_src: &str,
+    knit_rev: &str,
+    knithub_rev: &str,
     dockerfile: &str,
     frontend_src: &str,
     gloss_src: &str,
@@ -337,6 +363,9 @@ services:
       dockerfile: {dockerfile}
       args:
         KNITHUB_SRC: {knithub_src}
+        KNITHUB_REV: {knithub_rev}
+        KNIT_SRC: {knit_src}
+        KNIT_REV: {knit_rev}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     environment:
@@ -377,6 +406,9 @@ services:
         workspace = workspace,
         dockerfile = dockerfile,
         knithub_src = knithub_src,
+        knithub_rev = knithub_rev,
+        knit_src = knit_src,
+        knit_rev = knit_rev,
         db_service = db_service,
         db_host = database.host,
         db_port = database.port,
@@ -394,6 +426,9 @@ fn generate_main_compose(
     project_name: &str,
     workspace_root: &Path,
     knithub_src: &str,
+    knit_src: &str,
+    knit_rev: &str,
+    knithub_rev: &str,
     _compose_file: &str,
     frontend_src: &str,
     gloss_src: &str,
@@ -405,6 +440,9 @@ fn generate_main_compose(
         project_name,
         workspace_root,
         knithub_src,
+        knit_src,
+        knit_rev,
+        knithub_rev,
         &format!("{knithub_src}/Dockerfile"),
         frontend_src,
         gloss_src,
@@ -412,6 +450,18 @@ fn generate_main_compose(
         database,
         profile_path,
     )
+}
+
+fn checkout_git_revision(path: &Path) -> String {
+    let output = Command::new("git")
+        .args(["-C", path.to_str().unwrap_or_default(), "rev-parse", "HEAD"])
+        .output();
+    match output {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        }
+        _ => "unknown".to_string(),
+    }
 }
 
 fn allocate_ports(
