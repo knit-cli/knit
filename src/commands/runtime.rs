@@ -13,6 +13,8 @@ use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::thread;
+use std::time::Duration;
 
 const RUNTIME_KIND_DOCKER_COMPOSE: &str = "docker-compose";
 
@@ -50,7 +52,7 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
     let database = runtime.database.clone().unwrap_or_default();
     let resolved_database = resolve_database(&database, &active.bundle.id)?;
     if resolved_database.mode == DATABASE_MODE_SHARED {
-        ensure_shared_database_reachable(&database)?;
+        ensure_shared_database_reachable(&database, &active.root)?;
     }
 
     let ports = allocate_ports(&active.root, &active.bundle.id, runtime.ports.clone())?;
@@ -525,13 +527,61 @@ fn port_available(port: u16) -> bool {
     TcpListener::bind(("0.0.0.0", port)).is_ok() && TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
-fn ensure_shared_database_reachable(database: &ProjectRuntimeDatabase) -> Result<()> {
+fn ensure_shared_database_reachable(
+    database: &ProjectRuntimeDatabase,
+    workspace_root: &Path,
+) -> Result<()> {
     let addr = format!("127.0.0.1:{}", database.port);
-    if TcpStream::connect(&addr).is_err() {
-        bail!(
-            "Could not connect to the shared dev database on localhost:{}. Start it first with `docker compose up -d db` from the main stack repo, or switch the project runtime database mode to `bundle`.",
-            database.port
-        );
+    if TcpStream::connect(&addr).is_ok() {
+        return Ok(());
+    }
+
+    try_start_shared_dev_database(workspace_root, database.port)?;
+
+    for _ in 0..30 {
+        if TcpStream::connect(&addr).is_ok() {
+            return Ok(());
+        }
+        thread::sleep(Duration::from_millis(500));
+    }
+
+    bail!(
+        "Could not connect to the shared dev database on localhost:{}. Start it with `docker compose up -d db` from the knithub checkout, or switch the project runtime database mode to `bundle`.",
+        database.port
+    );
+}
+
+fn try_start_shared_dev_database(workspace_root: &Path, port: u16) -> Result<()> {
+    if port != 5436 {
+        return Ok(());
+    }
+
+    if Command::new("docker")
+        .args(["start", "knithub-db"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .unwrap_or(false)
+    {
+        return Ok(());
+    }
+
+    let compose = workspace_root.join("knithub/docker-compose.yml");
+    if !compose.exists() {
+        return Ok(());
+    }
+
+    let status = Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&compose)
+        .args(["up", "-d", "db"])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .context("failed to start shared dev database with docker compose")?;
+    if !status.success() {
+        bail!("docker compose up -d db exited with status {status}");
     }
     Ok(())
 }
