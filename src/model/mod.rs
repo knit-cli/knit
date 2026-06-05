@@ -7,9 +7,11 @@
 //! - [`org`] org-level repo universe
 //! - [`workitem`] actionable work items
 //! - [`bundle`] the bundle (`ChangeGroup`) and its contents
+//! - [`history`] project-wide metadata events pointing at Git commits
 
 mod bundle;
 mod config;
+mod history;
 mod org;
 mod project;
 mod view;
@@ -17,6 +19,7 @@ mod workitem;
 
 pub use bundle::*;
 pub use config::*;
+pub use history::*;
 pub use org::*;
 pub use project::*;
 pub use view::*;

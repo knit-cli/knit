@@ -288,6 +288,13 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
 
     let pushed_bundle = upsert_bundle(remote, &token, &pushed_project.slug, &active.bundle)?;
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle)?;
+    let history_result = super::history::push_project_history_events(
+        remote,
+        &token,
+        &pushed_project.slug,
+        &active.root,
+        &project_id,
+    );
 
     println!(
         "{} {} -> {}",
@@ -301,6 +308,19 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
         artifact.id,
         out::muted(artifact.artifact_hash)
     );
+    match history_result {
+        Ok(history_count) if history_count > 0 => {
+            println!(
+                "{} {}",
+                out::heading("History:"),
+                out::muted(format!("{history_count} event(s) synced"))
+            );
+        }
+        Ok(_) => {}
+        Err(error) => {
+            println!("{} {error:#}", out::warn("History sync skipped:"));
+        }
+    }
     Ok(())
 }
 
@@ -437,6 +457,15 @@ fn upsert_project(
     }
 }
 
+pub(super) fn upsert_project_for_history(
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<RemoteProject> {
+    upsert_project(remote, token, project_id, project)
+}
+
 fn push_repositories(
     remote: &KnitRemote,
     token: &str,
@@ -454,6 +483,15 @@ fn push_repositories(
         )?;
     }
     Ok(repos.len())
+}
+
+pub(super) fn push_repositories_for_history(
+    remote: &KnitRemote,
+    token: &str,
+    project_slug: &str,
+    repos: &[ProjectRepoEntry],
+) -> Result<usize> {
+    push_repositories(remote, token, project_slug, repos)
 }
 
 fn upsert_bundle(
