@@ -106,7 +106,9 @@ fn load_active_bundle_inner(lock_for_update: bool) -> Result<ActiveBundle> {
 }
 
 pub fn save_active_bundle(active: &ActiveBundle) -> Result<()> {
-    write_json(&active.bundle_path, &active.bundle)
+    write_json(&active.bundle_path, &active.bundle)?;
+    crate::history::record_bundle_history(&active.root, &active.bundle)?;
+    Ok(())
 }
 
 pub fn load_config(root: &Path) -> Result<KnitConfig> {
@@ -201,6 +203,11 @@ pub fn org_path(root: &Path, org_id: &str) -> PathBuf {
 pub fn views_path(root: &Path, project_id: &str) -> PathBuf {
     root.join(".knit/views")
         .join(format!("{project_id}.views.json"))
+}
+
+pub fn history_path(root: &Path, project_id: &str) -> PathBuf {
+    root.join(".knit/history")
+        .join(format!("{project_id}.history.jsonl"))
 }
 
 /// Load the current user's views artifact for a project, returning an empty
