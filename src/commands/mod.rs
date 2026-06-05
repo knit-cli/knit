@@ -50,7 +50,9 @@ pub use diff::show_diff;
 pub use doctor::{doctor_workspace, migrate_workspace};
 pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
-pub use history::{pull_history, push_history, refresh_history, show_history, sync_history};
+pub use history::{
+    pull_history, push_history, refresh_history, show_history, show_related_history, sync_history,
+};
 pub use init::{init_bundle, start_bundle};
 pub use land::{
     apply_land_from_artifact, apply_land_plan, check_landing, generate_land_plan, land_default,
