@@ -3,6 +3,7 @@ pub mod checkout;
 pub mod cli;
 pub mod commands;
 pub mod git;
+pub mod history;
 pub mod ids;
 pub mod model;
 pub mod output;
@@ -18,9 +19,9 @@ pub mod tracking;
 use anyhow::{bail, Result};
 
 pub use cli::{
-    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, LandCommand, OrgCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand, ViewCommand,
-    WorkItemCommand,
+    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, HistoryCommand, LandCommand,
+    OrgCommand, ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    ViewCommand, WorkItemCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -578,9 +579,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     out,
                     all,
                 } => match from_artifact {
-                    Some(path) => {
-                        commands::sync_publications_from_artifact(&path, out.as_deref(), &repos, all)
-                    }
+                    Some(path) => commands::sync_publications_from_artifact(
+                        &path,
+                        out.as_deref(),
+                        &repos,
+                        all,
+                    ),
                     None => commands::sync_publications(&repos, all),
                 },
                 GithubPublishCommand::Status { repos, all, live } => {
@@ -651,6 +655,32 @@ pub fn run(cli: Cli) -> Result<()> {
             dry_run,
         } => commands::cherrypick_from_bundle(&from_bundle, &targets, &repos, dry_run),
         Commands::Sync => commands::sync_bundle(),
+        Commands::History { command } => match command {
+            None => commands::show_history(None, 20, None, None),
+            Some(HistoryCommand::List {
+                limit,
+                repo,
+                bundle,
+                project,
+            }) => commands::show_history(
+                project.as_deref(),
+                limit,
+                repo.as_deref(),
+                bundle.as_deref(),
+            ),
+            Some(HistoryCommand::Refresh { project }) => {
+                commands::refresh_history(project.as_deref())
+            }
+            Some(HistoryCommand::Push { project, remote }) => {
+                commands::push_history(project.as_deref(), &remote)
+            }
+            Some(HistoryCommand::Pull { project, remote }) => {
+                commands::pull_history(project.as_deref(), &remote)
+            }
+            Some(HistoryCommand::Sync { project, remote }) => {
+                commands::sync_history(project.as_deref(), &remote)
+            }
+        },
         Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
         Commands::Log {
             limit,

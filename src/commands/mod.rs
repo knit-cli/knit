@@ -10,6 +10,7 @@ pub mod diff;
 pub mod doctor;
 pub mod fetch;
 pub mod git_passthrough;
+pub mod history;
 pub mod init;
 pub mod land;
 pub mod log;
@@ -24,9 +25,9 @@ pub mod remove;
 pub mod reset;
 pub mod revert;
 pub mod run;
-pub mod shape;
 pub mod runtime;
 pub mod schema;
+pub mod shape;
 pub mod stage;
 pub mod status;
 pub mod sync;
@@ -49,6 +50,7 @@ pub use diff::show_diff;
 pub use doctor::{doctor_workspace, migrate_workspace};
 pub use fetch::fetch_repos;
 pub use git_passthrough::run_git;
+pub use history::{pull_history, push_history, refresh_history, show_history, sync_history};
 pub use init::{init_bundle, start_bundle};
 pub use land::{
     apply_land_from_artifact, apply_land_plan, check_landing, generate_land_plan, land_default,
@@ -58,9 +60,8 @@ pub use log::{show_log, show_target};
 pub use merge::{create_compat_bundle, merge_command};
 pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
-    add_project_repo, init_project, list_project_run_commands, list_projects,
-    refresh_project_agents, remove_project, remove_project_run_command, pull_project_config,
-    set_project_org,
+    add_project_repo, init_project, list_project_run_commands, list_projects, pull_project_config,
+    refresh_project_agents, remove_project, remove_project_run_command, set_project_org,
     set_project_run_command, show_project,
 };
 pub use publish::{
@@ -70,9 +71,9 @@ pub use publish::{
 pub use pull::{pull, pull_repos};
 pub use push::push_repos;
 pub use remote::{
-    add_remote, clone_project_from_remote, fetch_bundles_from_remote, list_remotes, pull_remote_state,
-    pull_views_from_remote, push_bundle_to_remote, push_project_to_remote, push_views_to_remote,
-    remove_remote, set_remote_token, show_remote,
+    add_remote, clone_project_from_remote, fetch_bundles_from_remote, list_remotes,
+    pull_remote_state, pull_views_from_remote, push_bundle_to_remote, push_project_to_remote,
+    push_views_to_remote, remove_remote, set_remote_token, show_remote,
 };
 pub use remove::remove_repos;
 pub use reset::reset_checkouts;

@@ -19,7 +19,9 @@ use crate::model::{
     SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::store::{bundle_path, find_knit_root, project_path, read_json, write_json, ActiveBundle};
+use crate::store::{
+    bundle_path, find_knit_root, project_path, read_json, write_json, ActiveBundle,
+};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -70,6 +72,8 @@ pub fn clone_project_from_remote(
     for bundle in &bundles {
         write_json(&bundle_path(&target_root, &bundle.id), bundle)?;
     }
+    let history_count =
+        crate::history::append_history_events(&target_root, &project.id, &export.history_events)?;
 
     let selected_bundle_id = select_active_bundle(&bundles, active_bundle)?;
     let mut remotes = BTreeMap::new();
@@ -118,6 +122,9 @@ pub fn clone_project_from_remote(
         project.repos.len(),
         bundles.len()
     );
+    if history_count > 0 {
+        println!("{} {} event(s)", out::heading("History:"), history_count);
+    }
     Ok(())
 }
 
@@ -234,7 +241,10 @@ pub(super) fn clone_export_repositories(
     Ok(paths)
 }
 
-fn checkout_export_base_branch(repo_path: &Path, repository: &RemoteExportRepository) -> Result<()> {
+fn checkout_export_base_branch(
+    repo_path: &Path,
+    repository: &RemoteExportRepository,
+) -> Result<()> {
     let Some(base_branch) = repository
         .default_branch
         .as_deref()
@@ -329,7 +339,10 @@ fn localized_export_bundles(
         .collect()
 }
 
-fn select_active_bundle(bundles: &[ChangeGroup], requested: Option<&str>) -> Result<Option<String>> {
+fn select_active_bundle(
+    bundles: &[ChangeGroup],
+    requested: Option<&str>,
+) -> Result<Option<String>> {
     if let Some(requested) = requested {
         let requested = slugify(requested);
         if bundles.iter().any(|bundle| bundle.id == requested) {

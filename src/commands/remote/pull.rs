@@ -126,6 +126,7 @@ pub fn prepare_remote_pull(
     let mut project = load_project_if_present(&root, &project_id)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
     let export = fetch_project_export(remote, &token, &project_id)?;
+    crate::history::append_history_events(&root, &project_id, &export.history_events)?;
     reconcile_project_repositories(&root, &mut project, &export)?;
     Ok(Some(RemotePullContext { project, export }))
 }
@@ -380,6 +381,7 @@ pub fn fetch_bundles_from_remote(
         .context("Bundle fetch requires active_project. Set with `knit project init <name>`.")?;
 
     let export = fetch_project_export(remote, &token, &project_id)?;
+    crate::history::append_history_events(root, &project_id, &export.history_events)?;
 
     let Some(local_project) = load_project_if_present(root, &project_id)? else {
         bail!("No local project `{project_id}` found. Cannot localize bundles.");

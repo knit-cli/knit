@@ -381,6 +381,11 @@ pub enum Commands {
     },
     /// Record git commits that happened outside Knit.
     Sync,
+    /// Show and sync project-wide commit history.
+    History {
+        #[command(subcommand)]
+        command: Option<HistoryCommand>,
+    },
     /// Commit staged changes across tracked checkouts.
     Commit {
         /// Commit message to use in every repo with staged changes.
@@ -464,6 +469,58 @@ pub enum Commands {
         /// Report required migrations without writing files.
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HistoryCommand {
+    /// Show local project history.
+    List {
+        /// Show only the latest N events.
+        #[arg(short = 'n', long = "limit", default_value_t = 20)]
+        limit: usize,
+        /// Limit to a repo id.
+        #[arg(long)]
+        repo: Option<String>,
+        /// Limit to a bundle id.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Rebuild local project history from bundle ledgers.
+    Refresh {
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Push local project history events to KnitHub.
+    Push {
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+    },
+    /// Pull project history events from KnitHub.
+    Pull {
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
+    },
+    /// Pull then push project history events with KnitHub.
+    Sync {
+        /// Project id. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+        /// Named KnitHub remote.
+        #[arg(long, default_value = "knithub")]
+        remote: String,
     },
 }
 
