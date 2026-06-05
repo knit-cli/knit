@@ -218,6 +218,7 @@ impl Forge for GitHub {
                 serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON")
             }
             Err(error) if is_no_checks_error(&error) => Ok(Vec::new()),
+            Err(error) if is_checks_permission_error(&error) => Ok(Vec::new()),
             Err(error) => Err(error),
         }
     }
@@ -488,6 +489,14 @@ fn is_no_checks_error(error: &anyhow::Error) -> bool {
         || message.contains("no check suites")
         || message.contains("no checks reported")
         || message.contains("no required checks reported")
+}
+
+fn is_checks_permission_error(error: &anyhow::Error) -> bool {
+    let message = error.to_string().to_lowercase();
+    message.contains("resource not accessible by personal access token")
+        || message.contains("resource not accessible by integration")
+        || message.contains("insufficient_scope")
+        || (message.contains("graphql") && message.contains("not accessible"))
 }
 
 #[cfg(test)]
