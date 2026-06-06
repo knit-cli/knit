@@ -270,33 +270,84 @@ pub(super) fn ensure_remote_bundle_fast_forward(
 
 pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Result<()> {
     let root = active.root.clone();
-    for repo in &mut active.bundle.repos {
-        let Some(branch) = repo.feature_branch.as_deref() else {
-            continue;
-        };
-        let Some(checkout) = remote_checkout_dir(&root, repo) else {
-            continue;
-        };
-        let actual = current_branch(&checkout)?.unwrap_or_else(|| "(detached HEAD)".to_string());
-        if actual != branch {
-            bail!(
-                "{}: expected feature checkout branch `{branch}`, found `{actual}` in {}.",
-                repo.id,
-                checkout.display()
-            );
-        }
-        let remote_ref = format!("origin/{branch}");
-        if ref_exists(&checkout, &remote_ref) {
-            git_output(&checkout, ["merge", "--ff-only", &remote_ref])
-                .with_context(|| format!("{}: failed to fast-forward {branch}", repo.id))?;
-        }
-        repo.head_sha = Some(
-            rev_parse(&checkout, "HEAD")
-                .with_context(|| format!("{}: failed to read feature checkout HEAD", repo.id))?,
-        );
+    let jobs: Vec<(usize, String, PathBuf, String)> = active
+        .bundle
+        .repos
+        .iter()
+        .enumerate()
+        .filter_map(|(repo_index, repo)| {
+            let branch = repo.feature_branch.as_deref()?;
+            let checkout = remote_checkout_dir(&root, repo)?;
+            Some((repo_index, repo.id.clone(), checkout, branch.to_string()))
+        })
+        .collect();
+
+    if jobs.is_empty() {
+        return Ok(());
     }
+
+    let results: Vec<(String, Result<(usize, String)>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(repo_index, repo_id, checkout, branch)| {
+                let repo_index = *repo_index;
+                let repo_id = repo_id.clone();
+                let checkout = checkout.clone();
+                let branch = branch.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id.clone(),
+                        fast_forward_one_checkout(repo_index, &repo_id, &checkout, &branch),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("fast-forward worker thread panicked"))
+            .collect()
+    });
+
+    let mut failures = Vec::new();
+    for (repo_id, result) in results {
+        match result {
+            Ok((repo_index, head_sha)) => {
+                active.bundle.repos[repo_index].head_sha = Some(head_sha);
+            }
+            Err(error) => failures.push(format!("{repo_id}: {error:#}")),
+        }
+    }
+
+    if !failures.is_empty() {
+        bail!("fast-forward failed:\n{}", failures.join("\n"));
+    }
+
     active.bundle.updated_at = now_iso();
     Ok(())
+}
+
+fn fast_forward_one_checkout(
+    repo_index: usize,
+    repo_id: &str,
+    checkout: &Path,
+    branch: &str,
+) -> Result<(usize, String)> {
+    let actual = current_branch(checkout)?.unwrap_or_else(|| "(detached HEAD)".to_string());
+    if actual != branch {
+        bail!(
+            "{repo_id}: expected feature checkout branch `{branch}`, found `{actual}` in {}.",
+            checkout.display()
+        );
+    }
+    let remote_ref = format!("origin/{branch}");
+    if ref_exists(checkout, &remote_ref) {
+        git_output(checkout, ["merge", "--ff-only", &remote_ref])
+            .with_context(|| format!("{repo_id}: failed to fast-forward {branch}"))?;
+    }
+    let head_sha = rev_parse(checkout, "HEAD")
+        .with_context(|| format!("{repo_id}: failed to read feature checkout HEAD"))?;
+    Ok((repo_index, head_sha))
 }
 
 fn remote_checkout_dir(root: &Path, repo: &RepoEntry) -> Option<PathBuf> {
