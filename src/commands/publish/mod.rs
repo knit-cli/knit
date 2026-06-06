@@ -55,9 +55,9 @@ pub fn create_publications(
         }
     }
 
-    if sync {
+    if failures.is_empty() && sync {
         failures.extend(sync_publications_for_indexes(&mut active, &indexes)?);
-    } else {
+    } else if !sync {
         println!(
             "{}",
             out::warn(
@@ -121,9 +121,13 @@ pub fn create_publications_from_artifact(
         }
     }
 
-    if sync {
-        failures.extend(sync_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?);
-    } else {
+    if failures.is_empty() && sync {
+        failures.extend(sync_publications_for_indexes_from_artifact(
+            &cwd,
+            &mut bundle,
+            &indexes,
+        )?);
+    } else if !sync {
         println!(
             "{}",
             out::warn(
