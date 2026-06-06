@@ -577,12 +577,17 @@ fn curl_github_api_output(method: &str, endpoint: &str, body: Option<&str>) -> R
     }
     args.push(url);
 
-    let result = run_curl_github_api(&args, body);
+    let result = run_curl_github_api(&args, body, method, endpoint);
     let _ = fs::remove_file(&netrc_path);
     result
 }
 
-fn run_curl_github_api(args: &[String], body: Option<&str>) -> Result<String> {
+fn run_curl_github_api(
+    args: &[String],
+    body: Option<&str>,
+    method: &str,
+    endpoint: &str,
+) -> Result<String> {
     let mut command = Command::new("curl");
     command
         .args(args)
@@ -625,7 +630,13 @@ fn run_curl_github_api(args: &[String], body: Option<&str>) -> Result<String> {
         .filter(|part| !part.is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    bail!("curl GitHub API request failed: {detail}");
+    let operation = format!("{method} /{}", endpoint.trim_start_matches('/'));
+    if looks_like_curl_auth_failure(&detail) {
+        bail!(
+            "curl GitHub API request failed during {operation}: {detail}\nHint: GitHub rejected GH_TOKEN/GITHUB_TOKEN. Replace the saved GitHub credential with an active token that can access this repository, then retry."
+        );
+    }
+    bail!("curl GitHub API request failed during {operation}: {detail}");
 }
 
 fn github_api_token() -> Option<String> {
@@ -635,6 +646,11 @@ fn github_api_token() -> Option<String> {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty())
     })
+}
+
+fn looks_like_curl_auth_failure(detail: &str) -> bool {
+    let lower = detail.to_ascii_lowercase();
+    lower.contains("401") || lower.contains("bad credentials") || lower.contains("unauthorized")
 }
 
 fn write_github_netrc(token: &str) -> Result<std::path::PathBuf> {
@@ -928,5 +944,15 @@ mod tests {
         assert_eq!(value["title"], "feature title");
         assert_eq!(value["body"], "Body line one\nBody line two");
         assert_eq!(value["draft"], true);
+    }
+
+    #[test]
+    fn curl_auth_failure_detects_bad_credentials() {
+        assert!(looks_like_curl_auth_failure(
+            "curl: (22) The requested URL returned error: 401\n{\"message\":\"Bad credentials\"}"
+        ));
+        assert!(!looks_like_curl_auth_failure(
+            "curl: (22) The requested URL returned error: 404"
+        ));
     }
 }

@@ -2136,6 +2136,58 @@ fn push_sends_feature_branch_and_can_set_upstream() {
 }
 
 #[test]
+#[cfg(unix)]
+fn push_sends_selected_feature_branches_in_parallel() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+
+    append_line(&backend_feature.join("app.txt"), "parallel backend push");
+    append_line(&frontend_feature.join("app.txt"), "parallel frontend push");
+    knit(&workspace, ["commit", "--stage", "-m", "Parallel push"]);
+    let backend_sha = git(&backend_feature, ["rev-parse", "HEAD"]);
+    let frontend_sha = git(&frontend_feature, ["rev-parse", "HEAD"]);
+
+    let gate = root.join("push-gate");
+    install_parallel_push_hook(&backend_feature, &gate, "backend", "frontend");
+    install_parallel_push_hook(&frontend_feature, &gate, "frontend", "backend");
+
+    let push = knit(&workspace, ["push", "backend", "frontend"]);
+    assert!(push.contains("backend"));
+    assert!(push.contains("frontend"));
+    assert_eq!(
+        git(
+            &backend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        backend_sha
+    );
+    assert_eq!(
+        git(
+            &frontend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        frontend_sha
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let root = unique_temp_dir();
     let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -4106,6 +4158,54 @@ fn append_line(path: &Path, line: &str) {
     text.push_str(line);
     text.push('\n');
     fs::write(path, text).unwrap();
+}
+
+#[cfg(unix)]
+fn install_parallel_push_hook(repo: &Path, gate: &Path, id: &str, peer: &str) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(gate).unwrap();
+    let hook_path = git(repo, ["rev-parse", "--git-path", "hooks/pre-push"]);
+    let hook_path = PathBuf::from(hook_path.trim());
+    let hook_path = if hook_path.is_absolute() {
+        hook_path
+    } else {
+        repo.join(hook_path)
+    };
+    fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    fs::write(
+        &hook_path,
+        format!(
+            r#"#!/bin/sh
+set -eu
+gate={gate}
+id={id}
+peer={peer}
+touch "$gate/$id"
+i=0
+while [ ! -f "$gate/$peer" ]; do
+  i=$((i + 1))
+  if [ "$i" -ge 100 ]; then
+    echo "timed out waiting for parallel push peer $peer" >&2
+    exit 42
+  fi
+  sleep 0.05
+done
+"#,
+            gate = shell_quote(&gate.to_string_lossy()),
+            id = shell_quote(id),
+            peer = shell_quote(peer)
+        ),
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&hook_path).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&hook_path, permissions).unwrap();
+}
+
+#[cfg(unix)]
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\\''"))
 }
 
 fn read_bundle(workspace: &Path) -> Value {
