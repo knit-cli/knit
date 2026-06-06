@@ -2466,6 +2466,100 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
 }
 
 #[test]
+fn artifact_land_apply_can_use_curl_ipv4_transport() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "artifact publish"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
+    append_line(&backend_feature.join("app.txt"), "artifact land change");
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Artifact land change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    write_fake_curl(&fake_bin, &fake_gh_dir);
+
+    let artifact = workspace.join(".knit/bundles/artifact-publish.bundle.json");
+    let mut artifact_payload: Value =
+        serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    artifact_payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    artifact_payload["publications"] = json!([
+        {
+            "repoId": "backend",
+            "provider": "github",
+            "kind": "pull_request",
+            "number": 101,
+            "url": "https://github.com/acme/backend/pull/101",
+            "baseBranch": "main",
+            "headBranch": "knit/artifact-publish",
+            "state": "OPEN",
+            "title": "artifact publish (backend)",
+            "updatedAt": "2026-06-06T00:00:00.000Z"
+        }
+    ]);
+    fs::write(
+        &artifact,
+        serde_json::to_string_pretty(&artifact_payload).unwrap(),
+    )
+    .unwrap();
+
+    let out = root.join("artifact-land.out.bundle.json");
+    let landed = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "land".to_string(),
+            "apply".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+        ],
+    );
+    assert!(landed.contains("checks backend"), "{landed}");
+    assert!(landed.contains("merged backend"), "{landed}");
+    assert!(!fake_gh_dir.join("merge-order.txt").exists());
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("curl.ipv4"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+
+    let payload: Value = serde_json::from_str(
+        &fs::read_to_string(fake_gh_dir.join("curl-backend-merge.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["merge_method"].as_str(), Some("merge"));
+    assert_eq!(payload["sha"].as_str(), Some("backend-head"));
+
+    let landed_bundle: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(
+        landed_bundle["publications"][0]["state"].as_str(),
+        Some("MERGED")
+    );
+    assert!(landed_bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"].as_str() == Some("feature.landed")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pr_create_can_override_base_branch() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -4516,7 +4610,13 @@ set -eu
 
 api_pr_json() {
   number="$1"
-  printf '{"number":%s,"html_url":"https://github.com/acme/backend/pull/%s","state":"open","title":"backend PR","body":"Existing body","draft":false,"head":{"ref":"knit/artifact-publish","sha":"backend-head"},"base":{"ref":"main"},"merged":false,"mergeable":true,"mergeable_state":"clean"}\n' "$number" "$number"
+  state="open"
+  merged="false"
+  if [ -f "$GH_FAKE_DIR/merged-backend" ]; then
+    state="closed"
+    merged="true"
+  fi
+  printf '{"number":%s,"html_url":"https://github.com/acme/backend/pull/%s","state":"%s","title":"backend PR","body":"Existing body","draft":false,"head":{"ref":"knit/artifact-publish","sha":"backend-head"},"base":{"ref":"main"},"merged":%s,"mergeable":true,"mergeable_state":"clean"}\n' "$number" "$number" "$state" "$merged"
 }
 
 method="GET"
@@ -4580,6 +4680,18 @@ case "$endpoint_path" in
       exit 1
     fi
     ;;
+  repos/acme/backend/pulls/*/merge)
+    if [ "$method" = "PUT" ]; then
+      if [ "$data" = "@-" ]; then
+        cat > "$GH_FAKE_DIR/curl-backend-merge.json"
+      fi
+      touch "$GH_FAKE_DIR/merged-backend"
+      printf '{"merged":true,"message":"Pull Request successfully merged","sha":"merge-sha"}\n'
+    else
+      echo "unexpected curl method for merge: $method" >&2
+      exit 1
+    fi
+    ;;
   repos/acme/backend/pulls/*)
     if [ "$method" = "GET" ]; then
       api_pr_json "${endpoint_path##*/}"
@@ -4590,6 +4702,22 @@ case "$endpoint_path" in
       api_pr_json "${endpoint_path##*/}"
     else
       echo "unexpected curl method for pull item: $method" >&2
+      exit 1
+    fi
+    ;;
+  repos/acme/backend/commits/*/check-runs)
+    if [ "$method" = "GET" ]; then
+      printf '{"total_count":0,"check_runs":[]}\n'
+    else
+      echo "unexpected curl method for check runs: $method" >&2
+      exit 1
+    fi
+    ;;
+  repos/acme/backend/commits/*/status)
+    if [ "$method" = "GET" ]; then
+      printf '{"state":"success","statuses":[]}\n'
+    else
+      echo "unexpected curl method for statuses: $method" >&2
       exit 1
     fi
     ;;
