@@ -51,24 +51,44 @@ pub fn pull_repos(
 
     preflight_clean(&targets, force)?;
 
+    let results: Vec<(String, Result<PullOutcome>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|target| {
+                let repo_id = target.repo_id.clone();
+                scope.spawn(move || (repo_id, run_pull_target(target, rebase)))
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("pull worker thread panicked"))
+            .collect()
+    });
+
     let mut bundle_changed = false;
-    for target in &targets {
-        let before = rev_parse(&target.cwd, "HEAD")
-            .with_context(|| format!("{}: failed to read HEAD before pull", target.repo_id))?;
-        run_pull(&target.cwd, rebase)
-            .with_context(|| format!("{}: git pull failed", target.repo_id))?;
-        let after = rev_parse(&target.cwd, "HEAD")
-            .with_context(|| format!("{}: failed to read HEAD after pull", target.repo_id))?;
-
-        print_pull_summary(target, &before, &after);
-
-        if !feature {
-            let repo = &mut active.bundle.repos[target.repo_index];
-            if repo.base_sha.as_deref() != Some(after.as_str()) {
-                repo.base_sha = Some(after);
-                bundle_changed = true;
+    let mut failures = Vec::new();
+    for (repo_id, result) in results {
+        match result {
+            Ok(outcome) => {
+                print_pull_summary(&repo_id, &outcome.before, &outcome.after);
+                if !feature {
+                    let repo = &mut active.bundle.repos[outcome.repo_index];
+                    if repo.base_sha.as_deref() != Some(outcome.after.as_str()) {
+                        repo.base_sha = Some(outcome.after);
+                        bundle_changed = true;
+                    }
+                }
+            }
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("pull failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
             }
         }
+    }
+
+    if !failures.is_empty() {
+        bail!("pull failed:\n{}", failures.join("\n"));
     }
 
     if feature {
@@ -95,6 +115,26 @@ struct PullTarget {
     repo_index: usize,
     repo_id: String,
     cwd: PathBuf,
+}
+
+struct PullOutcome {
+    repo_index: usize,
+    before: String,
+    after: String,
+}
+
+fn run_pull_target(target: &PullTarget, rebase: bool) -> Result<PullOutcome> {
+    let before = rev_parse(&target.cwd, "HEAD")
+        .with_context(|| format!("{}: failed to read HEAD before pull", target.repo_id))?;
+    run_pull(&target.cwd, rebase)
+        .with_context(|| format!("{}: git pull failed", target.repo_id))?;
+    let after = rev_parse(&target.cwd, "HEAD")
+        .with_context(|| format!("{}: failed to read HEAD after pull", target.repo_id))?;
+    Ok(PullOutcome {
+        repo_index: target.repo_index,
+        before,
+        after,
+    })
 }
 
 fn pull_cwd(active: &ActiveBundle, repo: &RepoEntry, feature: bool) -> Result<PathBuf> {
@@ -199,18 +239,18 @@ fn run_pull(cwd: &Path, rebase: bool) -> Result<()> {
     Ok(())
 }
 
-fn print_pull_summary(target: &PullTarget, before: &str, after: &str) {
+fn print_pull_summary(repo_id: &str, before: &str, after: &str) {
     if before == after {
         println!(
             "{}: {} {}",
-            out::repo(&target.repo_id),
+            out::repo(repo_id),
             out::muted("unchanged"),
             out::sha(short_sha(after))
         );
     } else {
         println!(
             "{}: {} {} -> {}",
-            out::repo(&target.repo_id),
+            out::repo(repo_id),
             out::movement("advanced"),
             out::sha(short_sha(before)),
             out::sha(short_sha(after))

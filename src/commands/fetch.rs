@@ -1,6 +1,7 @@
 use crate::cli::FetchMode;
 use crate::git::{git_output, git_output_optional};
 use crate::ids::short_sha;
+use crate::model::RepoEntry;
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::load_active_bundle;
@@ -26,15 +27,44 @@ pub fn fetch_repos(
         }
 
         let indexes = resolve_repo_indexes(&active, selectors, false)?;
-        for index in indexes {
-            let repo = &active.bundle.repos[index];
-            if let Err(error) = fetch_repo(repo) {
-                println!(
-                    "{}: {}",
-                    out::repo(&repo.id),
-                    out::danger("fetch failed")
-                );
-                git_failures.push(format!("{}: {error:#}", repo.id));
+        let repos: Vec<&RepoEntry> = indexes
+            .iter()
+            .map(|index| &active.bundle.repos[*index])
+            .collect();
+
+        let results: Vec<(String, Result<FetchOutcome>)> = std::thread::scope(|scope| {
+            let handles: Vec<_> = repos
+                .iter()
+                .map(|repo| {
+                    let repo_id = repo.id.clone();
+                    scope.spawn(move || (repo_id, fetch_repo(repo)))
+                })
+                .collect();
+
+            handles
+                .into_iter()
+                .map(|handle| handle.join().expect("fetch worker thread panicked"))
+                .collect()
+        });
+
+        for (repo_id, result) in results {
+            match result {
+                Ok(outcome) => {
+                    print_fetch_summary(
+                        &outcome.repo_id,
+                        &outcome.remote_ref,
+                        outcome.before.as_deref(),
+                        outcome.after.as_deref(),
+                    );
+                }
+                Err(error) => {
+                    println!(
+                        "{}: {}",
+                        out::repo(&repo_id),
+                        out::danger("fetch failed")
+                    );
+                    git_failures.push(format!("{repo_id}: {error:#}"));
+                }
             }
         }
     }
@@ -65,25 +95,35 @@ pub fn fetch_repos(
     Ok(())
 }
 
-fn fetch_repo(repo: &crate::model::RepoEntry) -> Result<()> {
+struct FetchOutcome {
+    repo_id: String,
+    remote_ref: String,
+    before: Option<String>,
+    after: Option<String>,
+}
+
+fn fetch_repo(repo: &RepoEntry) -> Result<FetchOutcome> {
     let cwd = PathBuf::from(&repo.path);
     if !cwd.exists() {
         bail!("original repo path does not exist: {}", cwd.display());
     }
 
     let remote = "origin";
-    git_output_optional(&cwd, ["remote", "get-url", remote])?
-        .with_context(|| {
-            format!("no `{remote}` remote configured in {}", cwd.display())
-        })?;
+    git_output_optional(&cwd, ["remote", "get-url", remote])?.with_context(|| {
+        format!("no `{remote}` remote configured in {}", cwd.display())
+    })?;
 
     let remote_ref = format!("{remote}/{}", repo.base_branch);
     let before = ref_sha(&cwd, &remote_ref)?;
     git_output(&cwd, ["fetch", remote])?;
     let after = ref_sha(&cwd, &remote_ref)?;
 
-    print_fetch_summary(&repo.id, &remote_ref, before.as_deref(), after.as_deref());
-    Ok(())
+    Ok(FetchOutcome {
+        repo_id: repo.id.clone(),
+        remote_ref,
+        before,
+        after,
+    })
 }
 
 fn ref_sha(cwd: &Path, reference: &str) -> Result<Option<String>> {

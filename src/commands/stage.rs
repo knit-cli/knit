@@ -25,22 +25,86 @@ pub fn stage_paths(
         bail!("--intent-to-add requires at least one pathspec.");
     }
 
+    let mut no_checkouts = Vec::new();
+    let mut targets = Vec::new();
     for repo in repos {
         let Some(worktree_abs) = checkout_dir(&active, repo) else {
-            println!("{}: {}", out::repo(&repo.id), out::muted("no checkout"));
+            no_checkouts.push(repo.id.clone());
             continue;
         };
         ensure_expected_branch(repo, &worktree_abs)?;
-        run_git_add(&worktree_abs, &pathspecs, intent_to_add, update)?;
-        let short_status = git_output(&worktree_abs, ["status", "--short"])?;
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::status(status_label(&short_status))
-        );
+        targets.push(StageTarget {
+            repo_id: repo.id.clone(),
+            worktree_abs,
+            pathspecs: pathspecs.clone(),
+            intent_to_add,
+            update,
+        });
+    }
+
+    for repo_id in &no_checkouts {
+        println!("{}: {}", out::repo(repo_id), out::muted("no checkout"));
+    }
+
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let results: Vec<(String, Result<String>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|target| {
+                let target = target.clone();
+                let repo_id = target.repo_id.clone();
+                scope.spawn(move || {
+                    let result = (|| {
+                        run_git_add(
+                            &target.worktree_abs,
+                            &target.pathspecs,
+                            target.intent_to_add,
+                            target.update,
+                        )?;
+                        let short_status = git_output(&target.worktree_abs, ["status", "--short"])?;
+                        Ok(status_label(&short_status).to_string())
+                    })();
+                    (repo_id, result)
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("stage worker thread panicked"))
+            .collect()
+    });
+
+    let mut failures = Vec::new();
+    for (repo_id, result) in results {
+        match result {
+            Ok(status) => {
+                println!("{}: {}", out::repo(&repo_id), out::status(&status));
+            }
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("add failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
+            }
+        }
+    }
+
+    if !failures.is_empty() {
+        bail!("add failed:\n{}", failures.join("\n"));
     }
 
     Ok(())
+}
+
+#[derive(Clone)]
+struct StageTarget {
+    repo_id: String,
+    worktree_abs: PathBuf,
+    pathspecs: Vec<String>,
+    intent_to_add: bool,
+    update: bool,
 }
 
 fn run_git_add(
