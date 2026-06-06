@@ -150,6 +150,17 @@ impl Forge for GitHub {
         delete_branch: bool,
         match_head: Option<&str>,
     ) -> Result<()> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return merge_with_api(
+                target,
+                repo_full_name,
+                selector,
+                method,
+                delete_branch,
+                match_head,
+            );
+        }
+
         let method_flag = match method {
             "merge" => "--merge",
             "rebase" => "--rebase",
@@ -372,6 +383,28 @@ fn edit_body_with_api(
     Ok(())
 }
 
+fn merge_with_api(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    method: &str,
+    delete_branch: bool,
+    match_head: Option<&str>,
+) -> Result<()> {
+    if delete_branch {
+        bail!(
+            "GitHub API merge transport cannot delete branches; disable deleteBranch for artifact landing."
+        );
+    }
+
+    let number = selector_pr_number(selector)
+        .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
+    let payload = merge_pull_request_payload(method, match_head)?;
+    let endpoint = pull_request_merge_api_endpoint(repo_full_name, number);
+    github_api_output(target, "PUT", &endpoint, Some(&payload))?;
+    Ok(())
+}
+
 fn github_api_output(
     target: &PrTarget,
     method: &str,
@@ -543,6 +576,13 @@ fn pull_request_api_item_endpoint(repo_full_name: &str, number: u64) -> String {
     format!("{}/{number}", pull_request_api_endpoint(repo_full_name))
 }
 
+fn pull_request_merge_api_endpoint(repo_full_name: &str, number: u64) -> String {
+    format!(
+        "{}/{number}/merge",
+        pull_request_api_endpoint(repo_full_name)
+    )
+}
+
 fn pull_request_search_api_endpoint(
     repo_full_name: &str,
     head: &str,
@@ -577,6 +617,20 @@ fn create_pull_request_payload(
         "draft": draft,
     }))
     .context("failed to encode GitHub pull request payload")
+}
+
+fn merge_pull_request_payload(method: &str, match_head: Option<&str>) -> Result<String> {
+    if !matches!(method, "merge" | "squash" | "rebase") {
+        bail!("unknown GitHub merge method `{method}`");
+    }
+
+    let mut payload = serde_json::Map::new();
+    payload.insert("merge_method".to_string(), json!(method));
+    if let Some(sha) = match_head.map(str::trim).filter(|sha| !sha.is_empty()) {
+        payload.insert("sha".to_string(), json!(sha));
+    }
+
+    serde_json::to_string(&payload).context("failed to encode GitHub pull request merge payload")
 }
 
 fn repo_owner(repo_full_name: &str) -> Result<&str> {
@@ -727,5 +781,45 @@ mod tests {
         assert_eq!(value["title"], "feature title");
         assert_eq!(value["body"], "Body line one\nBody line two");
         assert_eq!(value["draft"], true);
+    }
+
+    #[test]
+    fn artifact_merge_uses_repo_scoped_api_payload() {
+        assert_eq!(
+            pull_request_merge_api_endpoint("acme/backend", 42),
+            "repos/acme/backend/pulls/42/merge"
+        );
+
+        let payload = merge_pull_request_payload("squash", Some("abc123")).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["merge_method"], "squash");
+        assert_eq!(value["sha"], "abc123");
+
+        let payload = merge_pull_request_payload("merge", None).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
+        assert_eq!(value["merge_method"], "merge");
+        assert!(value.get("sha").is_none());
+
+        assert!(merge_pull_request_payload("octopus", None)
+            .unwrap_err()
+            .to_string()
+            .contains("unknown GitHub merge method"));
+    }
+
+    #[test]
+    fn api_merge_rejects_delete_branch() {
+        let target = PrTarget::explicit(std::path::Path::new("/tmp"), "acme/backend".to_string());
+
+        let err = GitHub
+            .merge(
+                &target,
+                "https://github.com/acme/backend/pull/42",
+                "squash",
+                true,
+                Some("abc123"),
+            )
+            .unwrap_err();
+
+        assert!(err.to_string().contains("cannot delete branches"));
     }
 }
