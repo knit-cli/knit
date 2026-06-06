@@ -6,6 +6,10 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::ffi::OsString;
+use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
@@ -294,12 +298,7 @@ fn find_existing_with_api(
     base: &str,
 ) -> Result<Option<PullRequest>> {
     let endpoint = pull_request_search_api_endpoint(repo_full_name, head, base)?;
-    let output = cli_output(
-        CLI,
-        &target.cwd,
-        vec![OsString::from("api"), OsString::from(endpoint)],
-        None,
-    )?;
+    let output = github_api_output(target, "GET", &endpoint, None)?;
     let prs: Vec<GitHubApiPullRequest> =
         serde_json::from_str(&output).context("failed to parse GitHub pulls API JSON")?;
     Ok(prs
@@ -318,6 +317,17 @@ fn create_with_api(
     draft: bool,
 ) -> Result<String> {
     let payload = create_pull_request_payload(base, head, title, body, draft)?;
+    if use_curl_ipv4_api(target) {
+        let output = curl_github_api_output(
+            "POST",
+            &pull_request_api_endpoint(repo_full_name),
+            Some(&payload),
+        )?;
+        let pr: GitHubApiPullRequest =
+            serde_json::from_str(&output).context("failed to parse GitHub pull create API JSON")?;
+        return Ok(pr.html_url);
+    }
+
     let args = vec![
         OsString::from("api"),
         OsString::from("--method"),
@@ -341,12 +351,7 @@ fn view_with_api(target: &PrTarget, repo_full_name: &str, selector: &str) -> Res
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
     let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
-    let output = cli_output(
-        CLI,
-        &target.cwd,
-        vec![OsString::from("api"), OsString::from(endpoint)],
-        None,
-    )?;
+    let output = github_api_output(target, "GET", &endpoint, None)?;
     let pr: GitHubApiPullRequest =
         serde_json::from_str(&output).context("failed to parse GitHub pull API JSON")?;
     Ok(pr.into_pull_request())
@@ -362,16 +367,172 @@ fn edit_body_with_api(
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
     let payload = serde_json::to_string(&json!({ "body": body }))
         .context("failed to encode GitHub pull request edit payload")?;
-    let args = vec![
-        OsString::from("api"),
-        OsString::from("--method"),
-        OsString::from("PATCH"),
-        OsString::from(pull_request_api_item_endpoint(repo_full_name, number)),
-        OsString::from("--input"),
-        OsString::from("-"),
-    ];
-    cli_output(CLI, &target.cwd, args, Some(&payload))?;
+    let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
+    github_api_output(target, "PATCH", &endpoint, Some(&payload))?;
     Ok(())
+}
+
+fn github_api_output(
+    target: &PrTarget,
+    method: &str,
+    endpoint: &str,
+    body: Option<&str>,
+) -> Result<String> {
+    if use_curl_ipv4_api(target) {
+        return curl_github_api_output(method, endpoint, body);
+    }
+
+    let mut args = vec![OsString::from("api")];
+    if method != "GET" {
+        args.push(OsString::from("--method"));
+        args.push(OsString::from(method));
+    }
+    args.push(OsString::from(endpoint));
+    if body.is_some() {
+        args.push(OsString::from("--input"));
+        args.push(OsString::from("-"));
+    }
+    cli_output(CLI, &target.cwd, args, body)
+}
+
+fn use_curl_ipv4_api(target: &PrTarget) -> bool {
+    target.repo_full_name.is_some()
+        && std::env::var("KNIT_GITHUB_API_TRANSPORT")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "curl" | "curl-ipv4" | "ipv4"
+                )
+            })
+            .unwrap_or(false)
+}
+
+fn curl_github_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
+    let token = github_api_token()
+        .context("KNIT_GITHUB_API_TRANSPORT=curl requires GH_TOKEN or GITHUB_TOKEN")?;
+    let netrc_path = write_github_netrc(&token)?;
+    let url = format!(
+        "https://api.github.com/{}",
+        endpoint.trim_start_matches('/')
+    );
+
+    let mut args = vec![
+        "--silent".to_string(),
+        "--show-error".to_string(),
+        "--fail-with-body".to_string(),
+        "--location".to_string(),
+        "--ipv4".to_string(),
+        "--connect-timeout".to_string(),
+        "5".to_string(),
+        "--max-time".to_string(),
+        "20".to_string(),
+        "--request".to_string(),
+        method.to_string(),
+        "--netrc-file".to_string(),
+        netrc_path.to_string_lossy().to_string(),
+        "--header".to_string(),
+        "Accept: application/vnd.github+json".to_string(),
+        "--header".to_string(),
+        "X-GitHub-Api-Version: 2022-11-28".to_string(),
+        "--header".to_string(),
+        "User-Agent: knit".to_string(),
+    ];
+
+    if body.is_some() {
+        args.extend([
+            "--header".to_string(),
+            "Content-Type: application/json".to_string(),
+            "--data-binary".to_string(),
+            "@-".to_string(),
+        ]);
+    }
+    args.push(url);
+
+    let result = run_curl_github_api(&args, body);
+    let _ = fs::remove_file(&netrc_path);
+    result
+}
+
+fn run_curl_github_api(args: &[String], body: Option<&str>) -> Result<String> {
+    let mut command = Command::new("curl");
+    command
+        .args(args)
+        .stdin(if body.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+
+    let mut child = command
+        .spawn()
+        .context("failed to run `curl` for GitHub API transport")?;
+
+    if let Some(input) = body {
+        let mut child_stdin = child
+            .stdin
+            .take()
+            .context("failed to open stdin for `curl`")?;
+        child_stdin
+            .write_all(input.as_bytes())
+            .context("failed to write GitHub API payload to `curl`")?;
+        drop(child_stdin);
+    }
+
+    let output = child
+        .wait_with_output()
+        .context("failed to wait for `curl` GitHub API call")?;
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = [stderr.trim(), stdout.trim()]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!("curl GitHub API request failed: {detail}");
+}
+
+fn github_api_token() -> Option<String> {
+    ["GH_TOKEN", "GITHUB_TOKEN"].into_iter().find_map(|name| {
+        std::env::var(name)
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty())
+    })
+}
+
+fn write_github_netrc(token: &str) -> Result<std::path::PathBuf> {
+    let suffix = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos();
+    let path = std::env::temp_dir().join(format!(
+        "knit-github-api-{}-{suffix}.netrc",
+        std::process::id()
+    ));
+    fs::write(
+        &path,
+        format!("machine api.github.com\n  login x-access-token\n  password {token}\n"),
+    )
+    .context("failed to write temporary GitHub API credentials")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(&path)
+            .context("failed to stat temporary GitHub API credentials")?
+            .permissions();
+        permissions.set_mode(0o600);
+        fs::set_permissions(&path, permissions)
+            .context("failed to protect temporary GitHub API credentials")?;
+    }
+    Ok(path)
 }
 
 fn pull_request_api_endpoint(repo_full_name: &str) -> String {

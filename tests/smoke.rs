@@ -2317,6 +2317,87 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
 }
 
 #[test]
+fn artifact_pr_create_can_use_curl_ipv4_transport() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "artifact publish"]);
+    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
+    append_line(&backend_feature.join("app.txt"), "artifact PR change");
+    knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Artifact PR change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    write_fake_curl(&fake_bin, &fake_gh_dir);
+
+    let artifact = workspace.join(".knit/bundles/artifact-publish.bundle.json");
+    let mut artifact_payload: Value =
+        serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    artifact_payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    fs::write(
+        &artifact,
+        serde_json::to_string_pretty(&artifact_payload).unwrap(),
+    )
+    .unwrap();
+
+    let out = root.join("artifact-publish.out.bundle.json");
+    let create = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "publish".to_string(),
+            "github".to_string(),
+            "create".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+            "--no-push".to_string(),
+            "--no-sync".to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+        ],
+    );
+    assert!(create.contains("backend"));
+    assert!(create.contains("created"));
+    assert!(!fake_gh_dir.join("api-backend.endpoint").exists());
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("curl.ipv4"))
+            .unwrap()
+            .trim(),
+        "1"
+    );
+    assert!(fs::read_to_string(fake_gh_dir.join("curl.netrc"))
+        .unwrap()
+        .contains("password gho_fake_token"));
+
+    let payload: Value = serde_json::from_str(
+        &fs::read_to_string(fake_gh_dir.join("curl-backend-create.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(payload["base"].as_str(), Some("main"));
+    assert_eq!(payload["head"].as_str(), Some("knit/artifact-publish"));
+
+    let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(
+        published["publications"][0]["url"].as_str(),
+        Some("https://github.com/acme/backend/pull/101")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -4419,4 +4500,113 @@ esac
 #[cfg(not(unix))]
 fn write_fake_gh(_fake_bin: &Path, _fake_gh_dir: &Path) {
     panic!("fake gh smoke test requires a unix-like shell");
+}
+
+#[cfg(unix)]
+fn write_fake_curl(fake_bin: &Path, fake_gh_dir: &Path) {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::create_dir_all(fake_bin).unwrap();
+    fs::create_dir_all(fake_gh_dir).unwrap();
+    let script = fake_bin.join("curl");
+    fs::write(
+        &script,
+        r#"#!/bin/sh
+set -eu
+
+api_pr_json() {
+  number="$1"
+  printf '{"number":%s,"html_url":"https://github.com/acme/backend/pull/%s","state":"open","title":"backend PR","body":"Existing body","draft":false,"head":{"ref":"knit/artifact-publish","sha":"backend-head"},"base":{"ref":"main"},"merged":false,"mergeable":true,"mergeable_state":"clean"}\n' "$number" "$number"
+}
+
+method="GET"
+url=""
+netrc=""
+ipv4=0
+data=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --request)
+      method="$2"
+      shift 2
+      ;;
+    --netrc-file)
+      netrc="$2"
+      shift 2
+      ;;
+    --ipv4)
+      ipv4=1
+      shift
+      ;;
+    --data-binary)
+      data="$2"
+      shift 2
+      ;;
+    --header|--connect-timeout|--max-time)
+      shift 2
+      ;;
+    --silent|--show-error|--fail-with-body|--location)
+      shift
+      ;;
+    http*)
+      url="$1"
+      shift
+      ;;
+    *)
+      shift
+      ;;
+  esac
+done
+
+printf '%s\n' "$ipv4" > "$GH_FAKE_DIR/curl.ipv4"
+if [ -n "$netrc" ]; then
+  cat "$netrc" > "$GH_FAKE_DIR/curl.netrc"
+fi
+
+endpoint="${url#https://api.github.com/}"
+endpoint_path="${endpoint%%\?*}"
+
+case "$endpoint_path" in
+  repos/acme/backend/pulls)
+    if [ "$method" = "GET" ]; then
+      printf '[]\n'
+    elif [ "$method" = "POST" ]; then
+      if [ "$data" = "@-" ]; then
+        cat > "$GH_FAKE_DIR/curl-backend-create.json"
+      fi
+      api_pr_json 101
+    else
+      echo "unexpected curl method for pull collection: $method" >&2
+      exit 1
+    fi
+    ;;
+  repos/acme/backend/pulls/*)
+    if [ "$method" = "GET" ]; then
+      api_pr_json "${endpoint_path##*/}"
+    elif [ "$method" = "PATCH" ]; then
+      if [ "$data" = "@-" ]; then
+        cat > "$GH_FAKE_DIR/curl-backend-edit.json"
+      fi
+      api_pr_json "${endpoint_path##*/}"
+    else
+      echo "unexpected curl method for pull item: $method" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "unexpected curl endpoint: $endpoint" >&2
+    exit 1
+    ;;
+esac
+"#,
+    )
+    .unwrap();
+    let mut permissions = fs::metadata(&script).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&script, permissions).unwrap();
+}
+
+#[cfg(not(unix))]
+fn write_fake_curl(_fake_bin: &Path, _fake_gh_dir: &Path) {
+    panic!("fake curl smoke test requires a unix-like shell");
 }
