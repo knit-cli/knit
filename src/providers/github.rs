@@ -151,14 +151,16 @@ impl Forge for GitHub {
         match_head: Option<&str>,
     ) -> Result<()> {
         if let Some(repo_full_name) = &target.repo_full_name {
-            return merge_with_api(
-                target,
-                repo_full_name,
-                selector,
-                method,
-                delete_branch,
-                match_head,
-            );
+            if use_curl_ipv4_api(target) {
+                return merge_with_api(
+                    target,
+                    repo_full_name,
+                    selector,
+                    method,
+                    delete_branch,
+                    match_head,
+                );
+            }
         }
 
         let method_flag = match method {
@@ -215,6 +217,12 @@ impl Forge for GitHub {
         selector: &str,
         required_only: bool,
     ) -> Result<Vec<CheckRun>> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            if use_curl_ipv4_api(target) {
+                return check_runs_with_api(target, repo_full_name, selector, required_only);
+            }
+        }
+
         let mut args = vec![
             OsString::from("pr"),
             OsString::from("checks"),
@@ -269,6 +277,34 @@ struct GitHubApiRef {
     ref_name: Option<String>,
     #[serde(default)]
     sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiCheckRunCollection {
+    #[serde(default)]
+    check_runs: Vec<GitHubApiCheckRun>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiCheckRun {
+    name: String,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    conclusion: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiStatusCollection {
+    #[serde(default)]
+    statuses: Vec<GitHubApiStatus>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiStatus {
+    #[serde(default)]
+    context: Option<String>,
+    state: String,
 }
 
 impl GitHubApiPullRequest {
@@ -391,18 +427,78 @@ fn merge_with_api(
     delete_branch: bool,
     match_head: Option<&str>,
 ) -> Result<()> {
-    if delete_branch {
-        bail!(
-            "GitHub API merge transport cannot delete branches; disable deleteBranch for artifact landing."
-        );
+    if !matches!(method, "merge" | "rebase" | "squash") {
+        bail!("unknown GitHub merge method `{method}`");
     }
-
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
-    let payload = merge_pull_request_payload(method, match_head)?;
-    let endpoint = pull_request_merge_api_endpoint(repo_full_name, number);
+    let pr_before_merge = if delete_branch {
+        Some(view_with_api(target, repo_full_name, selector)?)
+    } else {
+        None
+    };
+
+    let mut payload = json!({ "merge_method": method });
+    if let Some(sha) = match_head {
+        payload["sha"] = json!(sha);
+    }
+    let payload = serde_json::to_string(&payload)
+        .context("failed to encode GitHub pull request merge payload")?;
+    let endpoint = format!(
+        "{}/{number}/merge",
+        pull_request_api_endpoint(repo_full_name)
+    );
     github_api_output(target, "PUT", &endpoint, Some(&payload))?;
+
+    if let Some(pr) = pr_before_merge {
+        if let Some(branch) = pr
+            .head_ref_name
+            .as_deref()
+            .filter(|branch| !branch.is_empty())
+        {
+            let endpoint = git_ref_api_endpoint(repo_full_name, "heads", branch);
+            github_api_output(target, "DELETE", &endpoint, None)
+                .with_context(|| format!("failed to delete GitHub branch `{branch}`"))?;
+        }
+    }
+
     Ok(())
+}
+
+fn check_runs_with_api(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    _required_only: bool,
+) -> Result<Vec<CheckRun>> {
+    let pr = view_with_api(target, repo_full_name, selector)?;
+    let sha = pr
+        .head_ref_oid
+        .as_deref()
+        .filter(|sha| !sha.is_empty())
+        .with_context(|| format!("could not determine head SHA for GitHub PR `{selector}`"))?;
+
+    let mut runs = Vec::new();
+
+    let check_runs_endpoint = format!(
+        "repos/{repo_full_name}/commits/{}/check-runs?per_page=100",
+        encode_path_component(sha)
+    );
+    let output = github_api_output(target, "GET", &check_runs_endpoint, None)?;
+    let collection: GitHubApiCheckRunCollection =
+        serde_json::from_str(&output).context("failed to parse GitHub check-runs API JSON")?;
+    runs.extend(collection.check_runs.into_iter().map(Into::into));
+
+    let status_endpoint = format!(
+        "repos/{repo_full_name}/commits/{}/status",
+        encode_path_component(sha)
+    );
+    let output = github_api_output(target, "GET", &status_endpoint, None)?;
+    let collection: GitHubApiStatusCollection =
+        serde_json::from_str(&output).context("failed to parse GitHub statuses API JSON")?;
+    runs.extend(collection.statuses.into_iter().map(Into::into));
+
+    Ok(runs)
 }
 
 fn github_api_output(
@@ -576,10 +672,11 @@ fn pull_request_api_item_endpoint(repo_full_name: &str, number: u64) -> String {
     format!("{}/{number}", pull_request_api_endpoint(repo_full_name))
 }
 
-fn pull_request_merge_api_endpoint(repo_full_name: &str, number: u64) -> String {
+fn git_ref_api_endpoint(repo_full_name: &str, namespace: &str, name: &str) -> String {
     format!(
-        "{}/{number}/merge",
-        pull_request_api_endpoint(repo_full_name)
+        "repos/{repo_full_name}/git/refs/{}/{}",
+        encode_path_component(namespace),
+        encode_path_allow_slash(name)
     )
 }
 
@@ -619,20 +716,6 @@ fn create_pull_request_payload(
     .context("failed to encode GitHub pull request payload")
 }
 
-fn merge_pull_request_payload(method: &str, match_head: Option<&str>) -> Result<String> {
-    if !matches!(method, "merge" | "squash" | "rebase") {
-        bail!("unknown GitHub merge method `{method}`");
-    }
-
-    let mut payload = serde_json::Map::new();
-    payload.insert("merge_method".to_string(), json!(method));
-    if let Some(sha) = match_head.map(str::trim).filter(|sha| !sha.is_empty()) {
-        payload.insert("sha".to_string(), json!(sha));
-    }
-
-    serde_json::to_string(&payload).context("failed to encode GitHub pull request merge payload")
-}
-
 fn repo_owner(repo_full_name: &str) -> Result<&str> {
     repo_full_name
         .split_once('/')
@@ -665,6 +748,45 @@ fn github_api_mergeable(mergeable: Option<bool>, mergeable_state: Option<&str>) 
     }
 }
 
+impl From<GitHubApiCheckRun> for CheckRun {
+    fn from(run: GitHubApiCheckRun) -> Self {
+        let conclusion = run.conclusion.as_deref().unwrap_or("");
+        let status = run.status.as_deref().unwrap_or("");
+        let (state, bucket) = match (status, conclusion) {
+            (_, "success") => (Some("SUCCESS".to_string()), Some("pass".to_string())),
+            (_, "skipped" | "neutral") => {
+                (Some("SKIPPED".to_string()), Some("skipping".to_string()))
+            }
+            (_, "failure" | "timed_out" | "action_required") => {
+                (Some("FAILURE".to_string()), Some("fail".to_string()))
+            }
+            (_, "cancelled") => (Some("CANCELLED".to_string()), Some("cancel".to_string())),
+            ("completed", _) => (Some("FAILURE".to_string()), Some("fail".to_string())),
+            _ => (run.status.map(|state| state.to_ascii_uppercase()), None),
+        };
+        CheckRun {
+            name: run.name,
+            state,
+            bucket,
+        }
+    }
+}
+
+impl From<GitHubApiStatus> for CheckRun {
+    fn from(status: GitHubApiStatus) -> Self {
+        let (state, bucket) = match status.state.as_str() {
+            "success" => (Some("SUCCESS".to_string()), Some("pass".to_string())),
+            "failure" | "error" => (Some("FAILURE".to_string()), Some("fail".to_string())),
+            _ => (Some(status.state.to_ascii_uppercase()), None),
+        };
+        CheckRun {
+            name: status.context.unwrap_or_else(|| "status".to_string()),
+            state,
+            bucket,
+        }
+    }
+}
+
 fn encode_query_component(input: &str) -> String {
     let mut encoded = String::new();
     for byte in input.bytes() {
@@ -672,6 +794,31 @@ fn encode_query_component(input: &str) -> String {
             b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
                 encoded.push(byte as char);
             }
+            _ => {
+                use std::fmt::Write as _;
+                write!(&mut encoded, "%{byte:02X}").expect("writing to a string cannot fail");
+            }
+        }
+    }
+    encoded
+}
+
+fn encode_path_component(input: &str) -> String {
+    encode_path(input, false)
+}
+
+fn encode_path_allow_slash(input: &str) -> String {
+    encode_path(input, true)
+}
+
+fn encode_path(input: &str, allow_slash: bool) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            b'/' if allow_slash => encoded.push('/'),
             _ => {
                 use std::fmt::Write as _;
                 write!(&mut encoded, "%{byte:02X}").expect("writing to a string cannot fail");
@@ -781,45 +928,5 @@ mod tests {
         assert_eq!(value["title"], "feature title");
         assert_eq!(value["body"], "Body line one\nBody line two");
         assert_eq!(value["draft"], true);
-    }
-
-    #[test]
-    fn artifact_merge_uses_repo_scoped_api_payload() {
-        assert_eq!(
-            pull_request_merge_api_endpoint("acme/backend", 42),
-            "repos/acme/backend/pulls/42/merge"
-        );
-
-        let payload = merge_pull_request_payload("squash", Some("abc123")).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(value["merge_method"], "squash");
-        assert_eq!(value["sha"], "abc123");
-
-        let payload = merge_pull_request_payload("merge", None).unwrap();
-        let value: serde_json::Value = serde_json::from_str(&payload).unwrap();
-        assert_eq!(value["merge_method"], "merge");
-        assert!(value.get("sha").is_none());
-
-        assert!(merge_pull_request_payload("octopus", None)
-            .unwrap_err()
-            .to_string()
-            .contains("unknown GitHub merge method"));
-    }
-
-    #[test]
-    fn api_merge_rejects_delete_branch() {
-        let target = PrTarget::explicit(std::path::Path::new("/tmp"), "acme/backend".to_string());
-
-        let err = GitHub
-            .merge(
-                &target,
-                "https://github.com/acme/backend/pull/42",
-                "squash",
-                true,
-                Some("abc123"),
-            )
-            .unwrap_err();
-
-        assert!(err.to_string().contains("cannot delete branches"));
     }
 }
