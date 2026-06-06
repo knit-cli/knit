@@ -35,24 +35,69 @@ pub fn create_publications(
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let base_overrides = BaseOverrides::parse(bases)?;
     base_overrides.validate_tracked_repos(&active.bundle)?;
+    let bundle_snapshot = active.bundle.clone();
     let mut failures = Vec::new();
+    let mut bundle_changed = false;
 
-    for index in indexes.iter().copied() {
-        let repo = active.bundle.repos[index].clone();
-        let base_branch =
-            base_overrides.branch_for(&repo, publication_for_repo(&active.bundle, &repo.id));
-        match create_or_reuse_pr(&mut active, &repo, &base_branch, draft, set_upstream) {
-            Ok(()) => save_active_bundle(&active)?,
+    let jobs: Vec<PublishJob> = indexes
+        .iter()
+        .map(|&index| {
+            let repo = active.bundle.repos[index].clone();
+            let base_branch = base_overrides.branch_for(
+                &repo,
+                publication_for_repo(&active.bundle, &repo.id),
+            );
+            PublishJob {
+                repo_index: index,
+                repo,
+                base_branch,
+            }
+        })
+        .collect();
+
+    let results: Vec<(String, Result<PublishRemoteResult>)> = std::thread::scope(|scope| {
+        let active = &active;
+        let bundle = &bundle_snapshot;
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|job| {
+                let job = job.clone();
+                let repo_id = job.repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        publish_repo_remote(active, bundle, &job, draft, set_upstream),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publish worker thread panicked"))
+            .collect()
+    });
+
+    for (repo_id, result) in results {
+        match result {
+            Ok(outcome) => {
+                if apply_publish_remote_result(&mut active, &outcome)? {
+                    bundle_changed = true;
+                }
+            }
             Err(error) => {
                 println!(
                     "{}: {}",
-                    out::repo(&repo.id),
+                    out::repo(&repo_id),
                     out::danger("PR create failed")
                 );
-                failures.push(format!("{}: {error:#}", repo.id));
-                save_active_bundle(&active)?;
+                failures.push(format!("{repo_id}: {error:#}"));
             }
         }
+    }
+
+    if bundle_changed {
+        save_active_bundle(&active)?;
     }
 
     if failures.is_empty() && sync {
@@ -103,20 +148,56 @@ pub fn create_publications_from_artifact(
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
     let base_overrides = BaseOverrides::parse(bases)?;
     base_overrides.validate_tracked_repos(&bundle)?;
+    let bundle_snapshot = bundle.clone();
     let mut failures = Vec::new();
 
-    for index in indexes.iter().copied() {
-        let repo = bundle.repos[index].clone();
-        let base_branch = base_overrides.branch_for(&repo, publication_for_repo(&bundle, &repo.id));
-        match create_or_reuse_pr_from_artifact(&cwd, &mut bundle, &repo, &base_branch, draft) {
-            Ok(()) => {}
+    let jobs: Vec<PublishJob> = indexes
+        .iter()
+        .map(|&index| {
+            let repo = bundle.repos[index].clone();
+            let base_branch =
+                base_overrides.branch_for(&repo, publication_for_repo(&bundle, &repo.id));
+            PublishJob {
+                repo_index: index,
+                repo,
+                base_branch,
+            }
+        })
+        .collect();
+
+    let results: Vec<(String, Result<ArtifactPublishResult>)> = std::thread::scope(|scope| {
+        let cwd = cwd.as_ref();
+        let bundle = &bundle_snapshot;
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|job| {
+                let job = job.clone();
+                let repo_id = job.repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        publish_repo_remote_from_artifact(cwd, bundle, &job, draft),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("artifact publish worker thread panicked"))
+            .collect()
+    });
+
+    for (repo_id, result) in results {
+        match result {
+            Ok(outcome) => apply_artifact_publish_result(&mut bundle, &outcome),
             Err(error) => {
                 println!(
                     "{}: {}",
-                    out::repo(&repo.id),
+                    out::repo(&repo_id),
                     out::danger("PR create failed")
                 );
-                failures.push(format!("{}: {error:#}", repo.id));
+                failures.push(format!("{repo_id}: {error:#}"));
             }
         }
     }
@@ -385,13 +466,59 @@ fn resolve_publish_repo_indexes_for_bundle(
     Ok(indexes)
 }
 
-fn create_or_reuse_pr(
-    active: &mut ActiveBundle,
-    repo: &RepoEntry,
-    base_branch: &str,
+#[derive(Clone)]
+struct PublishJob {
+    repo_index: usize,
+    repo: RepoEntry,
+    base_branch: String,
+}
+
+struct PushedInfo {
+    sha: String,
+    branch: String,
+}
+
+enum PublishStatus {
+    ExistsRecorded(String),
+    FoundExisting(PullRequest),
+    Created(PullRequest),
+}
+
+struct PublishRemoteResult {
+    repo_index: usize,
+    repo_id: String,
+    pushed: PushedInfo,
+    status: PublishStatus,
+}
+
+struct ArtifactPublishResult {
+    repo_index: usize,
+    repo_id: String,
+    status: PublishStatus,
+}
+
+enum SyncFetchResult {
+    NoReviewObject,
+    Summary {
+        repo_index: usize,
+        summary: PullRequest,
+    },
+}
+
+enum SyncBodyResult {
+    Synced(String),
+    AlreadySynced,
+}
+
+fn publish_repo_remote(
+    active: &ActiveBundle,
+    bundle: &ChangeGroup,
+    job: &PublishJob,
     draft: bool,
     set_upstream: bool,
-) -> Result<()> {
+) -> Result<PublishRemoteResult> {
+    let repo = &job.repo;
+    let base_branch = &job.base_branch;
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
             "{}: no feature branch recorded. Run `knit worktree`.",
@@ -410,124 +537,34 @@ fn create_or_reuse_pr(
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
     run_push(&cwd, branch, set_upstream)
         .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
-    println!(
-        "{}: {} {} {}",
-        out::repo(&repo.id),
-        out::movement("pushed"),
-        out::branch(format!("origin/{branch}")),
-        out::sha(short_sha(&sha))
-    );
-
-    if let Some(existing) = publication_for_repo(&active.bundle, &repo.id) {
-        if existing.base_branch != base_branch {
-            bail!(
-                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
-                repo.id,
-                out::branch(&existing.base_branch)
-            );
-        }
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("exists"),
-            existing.url
-        );
-        return Ok(());
-    }
-
-    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
-        providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &existing);
-        let pr =
-            publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("exists"),
-            pr.url
-        );
-        return Ok(());
-    }
-
-    let title = format!("{} ({})", active.bundle.title, repo.id);
-    let initial_body = initial_pr_body(&active.bundle, &repo.id);
-    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
-    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
-        number: pr_number_from_url(&url).unwrap_or(0),
-        url: url.clone(),
-        state: Some("OPEN".to_string()),
-        title: Some(title),
-        base_ref_name: Some(base_branch.to_string()),
-        head_ref_name: Some(branch.to_string()),
-        body: None,
-        is_draft: None,
-        head_ref_oid: None,
-        mergeable: None,
-        merge_state_status: None,
-        review_decision: None,
-    });
-    providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &summary);
-
-    let pr = publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
-    println!(
-        "{}: {} #{} {}",
-        out::repo(&repo.id),
-        out::movement("created"),
-        pr.number,
-        pr.url
-    );
-    Ok(())
-}
-
-fn create_or_reuse_pr_from_artifact(
-    cwd: &Path,
-    bundle: &mut ChangeGroup,
-    repo: &RepoEntry,
-    base_branch: &str,
-    draft: bool,
-) -> Result<()> {
-    let branch = repo.feature_branch.as_deref().with_context(|| {
-        format!(
-            "{}: no feature branch recorded in the bundle artifact.",
-            repo.id
-        )
-    })?;
-    let remote = repo
-        .remote
-        .as_deref()
-        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
-    let forge = providers::for_repo(repo)?;
-    let repo_full_name = forge
-        .repo_full_name(remote)
-        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
-    let target = PrTarget::explicit(cwd, repo_full_name);
+    let pushed = PushedInfo {
+        sha,
+        branch: format!("origin/{branch}"),
+    };
 
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
-        if existing.base_branch != base_branch {
+        if existing.base_branch != *base_branch {
             bail!(
                 "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
                 repo.id,
                 out::branch(&existing.base_branch)
             );
         }
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("exists"),
-            existing.url
-        );
-        return Ok(());
+        return Ok(PublishRemoteResult {
+            repo_index: job.repo_index,
+            repo_id: repo.id.clone(),
+            pushed,
+            status: PublishStatus::ExistsRecorded(existing.url.clone()),
+        });
     }
 
     if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
-        providers::upsert_publication(bundle, repo, forge.as_ref(), &existing);
-        let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("exists"),
-            pr.url
-        );
-        return Ok(());
+        return Ok(PublishRemoteResult {
+            repo_index: job.repo_index,
+            repo_id: repo.id.clone(),
+            pushed,
+            status: PublishStatus::FoundExisting(existing),
+        });
     }
 
     let title = format!("{} ({})", bundle.title, repo.id);
@@ -547,17 +584,291 @@ fn create_or_reuse_pr_from_artifact(
         merge_state_status: None,
         review_decision: None,
     });
-    providers::upsert_publication(bundle, repo, forge.as_ref(), &summary);
+    Ok(PublishRemoteResult {
+        repo_index: job.repo_index,
+        repo_id: repo.id.clone(),
+        pushed,
+        status: PublishStatus::Created(summary),
+    })
+}
 
-    let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
+fn publish_repo_remote_from_artifact(
+    cwd: &Path,
+    bundle: &ChangeGroup,
+    job: &PublishJob,
+    draft: bool,
+) -> Result<ArtifactPublishResult> {
+    let repo = &job.repo;
+    let base_branch = &job.base_branch;
+    let branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: no feature branch recorded in the bundle artifact.",
+            repo.id
+        )
+    })?;
+    let remote = repo
+        .remote
+        .as_deref()
+        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let forge = providers::for_repo(repo)?;
+    let repo_full_name = forge
+        .repo_full_name(remote)
+        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
+    let target = PrTarget::explicit(cwd, repo_full_name);
+
+    if let Some(existing) = publication_for_repo(bundle, &repo.id) {
+        if existing.base_branch != *base_branch {
+            bail!(
+                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
+                repo.id,
+                out::branch(&existing.base_branch)
+            );
+        }
+        return Ok(ArtifactPublishResult {
+            repo_index: job.repo_index,
+            repo_id: repo.id.clone(),
+            status: PublishStatus::ExistsRecorded(existing.url.clone()),
+        });
+    }
+
+    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
+        return Ok(ArtifactPublishResult {
+            repo_index: job.repo_index,
+            repo_id: repo.id.clone(),
+            status: PublishStatus::FoundExisting(existing),
+        });
+    }
+
+    let title = format!("{} ({})", bundle.title, repo.id);
+    let initial_body = initial_pr_body(bundle, &repo.id);
+    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
+    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
+        number: pr_number_from_url(&url).unwrap_or(0),
+        url: url.clone(),
+        state: Some("OPEN".to_string()),
+        title: Some(title),
+        base_ref_name: Some(base_branch.to_string()),
+        head_ref_name: Some(branch.to_string()),
+        body: None,
+        is_draft: None,
+        head_ref_oid: None,
+        mergeable: None,
+        merge_state_status: None,
+        review_decision: None,
+    });
+    Ok(ArtifactPublishResult {
+        repo_index: job.repo_index,
+        repo_id: repo.id.clone(),
+        status: PublishStatus::Created(summary),
+    })
+}
+
+fn apply_publish_remote_result(
+    active: &mut ActiveBundle,
+    outcome: &PublishRemoteResult,
+) -> Result<bool> {
     println!(
-        "{}: {} #{} {}",
-        out::repo(&repo.id),
-        out::movement("created"),
-        pr.number,
-        pr.url
+        "{}: {} {} {}",
+        out::repo(&outcome.repo_id),
+        out::movement("pushed"),
+        out::branch(&outcome.pushed.branch),
+        out::sha(short_sha(&outcome.pushed.sha))
     );
-    Ok(())
+
+    let repo = active.bundle.repos[outcome.repo_index].clone();
+    let mut changed = false;
+    match &outcome.status {
+        PublishStatus::ExistsRecorded(url) => {
+            println!(
+                "{}: {} {}",
+                out::repo(&outcome.repo_id),
+                out::movement("exists"),
+                url
+            );
+        }
+        PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) => {
+            let forge = providers::for_repo(&repo)?;
+            providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), summary);
+            let pr = publication_for_repo(&active.bundle, &outcome.repo_id)
+                .expect("publication was just inserted");
+            match &outcome.status {
+                PublishStatus::FoundExisting(_) => println!(
+                    "{}: {} {}",
+                    out::repo(&outcome.repo_id),
+                    out::movement("exists"),
+                    pr.url
+                ),
+                PublishStatus::Created(_) => println!(
+                    "{}: {} #{} {}",
+                    out::repo(&outcome.repo_id),
+                    out::movement("created"),
+                    pr.number,
+                    pr.url
+                ),
+                PublishStatus::ExistsRecorded(_) => unreachable!(),
+            }
+            changed = true;
+        }
+    }
+    Ok(changed)
+}
+
+fn apply_artifact_publish_result(bundle: &mut ChangeGroup, outcome: &ArtifactPublishResult) {
+    let repo = bundle.repos[outcome.repo_index].clone();
+    match &outcome.status {
+        PublishStatus::ExistsRecorded(url) => {
+            println!(
+                "{}: {} {}",
+                out::repo(&outcome.repo_id),
+                out::movement("exists"),
+                url
+            );
+        }
+        PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) => {
+            let forge = providers::for_repo(&repo).expect("forge resolves for published repo");
+            providers::upsert_publication(bundle, &repo, forge.as_ref(), summary);
+            let pr = publication_for_repo(bundle, &outcome.repo_id)
+                .expect("publication was just inserted");
+            match &outcome.status {
+                PublishStatus::FoundExisting(_) => println!(
+                    "{}: {} {}",
+                    out::repo(&outcome.repo_id),
+                    out::movement("exists"),
+                    pr.url
+                ),
+                PublishStatus::Created(_) => println!(
+                    "{}: {} #{} {}",
+                    out::repo(&outcome.repo_id),
+                    out::movement("created"),
+                    pr.number,
+                    pr.url
+                ),
+                PublishStatus::ExistsRecorded(_) => unreachable!(),
+            }
+        }
+    }
+}
+
+fn fetch_pr_summary_for_sync(
+    active: &ActiveBundle,
+    repo_index: usize,
+    repo: &RepoEntry,
+) -> Result<SyncFetchResult> {
+    let branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: no feature branch recorded. Run `knit worktree`.",
+            repo.id
+        )
+    })?;
+    let Some(cwd) = checkout_dir(active, repo) else {
+        bail!("{}: no feature checkout is recorded.", repo.id);
+    };
+    let forge = providers::for_repo(repo)?;
+    let target = PrTarget::checkout(&cwd);
+
+    let summary = if let Some(pr) = publication_for_repo(&active.bundle, &repo.id) {
+        forge.view(&target, &pr.url)?
+    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
+        existing
+    } else {
+        return Ok(SyncFetchResult::NoReviewObject);
+    };
+
+    Ok(SyncFetchResult::Summary {
+        repo_index,
+        summary,
+    })
+}
+
+fn fetch_pr_summary_for_sync_from_artifact(
+    cwd: &Path,
+    bundle: &ChangeGroup,
+    repo_index: usize,
+    repo: &RepoEntry,
+) -> Result<SyncFetchResult> {
+    let branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: no feature branch recorded in the bundle artifact.",
+            repo.id
+        )
+    })?;
+    let remote = repo
+        .remote
+        .as_deref()
+        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let forge = providers::for_repo(repo)?;
+    let repo_full_name = forge
+        .repo_full_name(remote)
+        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
+    let target = PrTarget::explicit(cwd, repo_full_name);
+
+    let summary = if let Some(pr) = publication_for_repo(bundle, &repo.id) {
+        forge.view(&target, &pr.url)?
+    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
+        existing
+    } else {
+        return Ok(SyncFetchResult::NoReviewObject);
+    };
+
+    Ok(SyncFetchResult::Summary {
+        repo_index,
+        summary,
+    })
+}
+
+fn sync_pr_body_remote(
+    active: &ActiveBundle,
+    _repo_index: usize,
+    repo: &RepoEntry,
+) -> Result<SyncBodyResult> {
+    let Some(cwd) = checkout_dir(active, repo) else {
+        bail!("{}: no feature checkout is recorded.", repo.id);
+    };
+    let forge = providers::for_repo(repo)?;
+    let target = PrTarget::checkout(&cwd);
+    let pr = publication_for_repo(&active.bundle, &repo.id)
+        .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
+    let current_body = forge
+        .view(&target, &pr.url)?
+        .body
+        .unwrap_or_default();
+    let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
+    let next_body = upsert_knit_pr_block(&current_body, &block);
+    if next_body == current_body {
+        return Ok(SyncBodyResult::AlreadySynced);
+    }
+    forge.edit_body(&target, &pr.url, &next_body)?;
+    Ok(SyncBodyResult::Synced(pr.url.clone()))
+}
+
+fn sync_pr_body_remote_from_artifact(
+    cwd: &Path,
+    bundle: &ChangeGroup,
+    _repo_index: usize,
+    repo: &RepoEntry,
+) -> Result<SyncBodyResult> {
+    let remote = repo
+        .remote
+        .as_deref()
+        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let forge = providers::for_repo(repo)?;
+    let repo_full_name = forge
+        .repo_full_name(remote)
+        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
+    let target = PrTarget::explicit(cwd, repo_full_name);
+    let pr = publication_for_repo(bundle, &repo.id)
+        .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
+    let current_body = forge
+        .view(&target, &pr.url)?
+        .body
+        .unwrap_or_default();
+    let block = render_knit_pr_block(bundle, Some(&repo.id));
+    let next_body = upsert_knit_pr_block(&current_body, &block);
+    if next_body == current_body {
+        return Ok(SyncBodyResult::AlreadySynced);
+    }
+    forge.edit_body(&target, &pr.url, &next_body)?;
+    Ok(SyncBodyResult::Synced(pr.url.clone()))
 }
 
 #[derive(Debug, Default)]
@@ -617,16 +928,106 @@ fn sync_publications_for_indexes(
     active: &mut ActiveBundle,
     indexes: &[usize],
 ) -> Result<Vec<String>> {
-    let mut failures = Vec::new();
+    let jobs: Vec<(usize, RepoEntry)> = indexes
+        .iter()
+        .map(|&index| (index, active.bundle.repos[index].clone()))
+        .collect();
 
-    for index in indexes.iter().copied() {
-        let repo = active.bundle.repos[index].clone();
-        match sync_one_pr(active, &repo) {
-            Ok(()) => save_active_bundle(active)?,
+    let active_read = &*active;
+    let fetched: Vec<(String, Result<SyncFetchResult>)> = std::thread::scope(|scope| {
+        let active_read = active_read;
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(repo_index, repo)| {
+                let repo_index = *repo_index;
+                let repo = repo.clone();
+                let repo_id = repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        fetch_pr_summary_for_sync(active_read, repo_index, &repo),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publish sync fetch thread panicked"))
+            .collect()
+    });
+
+    let mut failures = Vec::new();
+    let mut synced_repo_indexes = Vec::new();
+    for (repo_id, result) in fetched {
+        match result {
+            Ok(SyncFetchResult::NoReviewObject) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("no review object recorded")
+                );
+            }
+            Ok(SyncFetchResult::Summary {
+                repo_index,
+                summary,
+            }) => {
+                let repo = active.bundle.repos[repo_index].clone();
+                let forge = providers::for_repo(&repo)?;
+                providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
+                synced_repo_indexes.push(repo_index);
+            }
             Err(error) => {
-                println!("{}: {}", out::repo(&repo.id), out::danger("PR sync failed"));
-                failures.push(format!("{}: {error:#}", repo.id));
-                save_active_bundle(active)?;
+                println!("{}: {}", out::repo(&repo_id), out::danger("PR sync failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
+            }
+        }
+    }
+
+    if !synced_repo_indexes.is_empty() {
+        save_active_bundle(active)?;
+    }
+
+    let active_read = &*active;
+    let body_results: Vec<(String, Result<SyncBodyResult>)> = std::thread::scope(|scope| {
+        let active_read = active_read;
+        let handles: Vec<_> = synced_repo_indexes
+            .iter()
+            .map(|&repo_index| {
+                let repo = active_read.bundle.repos[repo_index].clone();
+                let repo_id = repo.id.clone();
+                scope.spawn(move || {
+                    (repo_id, sync_pr_body_remote(active_read, repo_index, &repo))
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("publish sync body thread panicked"))
+            .collect()
+    });
+
+    for (repo_id, result) in body_results {
+        match result {
+            Ok(SyncBodyResult::Synced(url)) => {
+                println!(
+                    "{}: {} {}",
+                    out::repo(&repo_id),
+                    out::movement("synced"),
+                    url
+                );
+            }
+            Ok(SyncBodyResult::AlreadySynced) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("PR body already synced")
+                );
+            }
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("PR sync failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
             }
         }
     }
@@ -639,123 +1040,109 @@ fn sync_publications_for_indexes_from_artifact(
     bundle: &mut ChangeGroup,
     indexes: &[usize],
 ) -> Result<Vec<String>> {
+    let jobs: Vec<(usize, RepoEntry)> = indexes
+        .iter()
+        .map(|&index| (index, bundle.repos[index].clone()))
+        .collect();
+    let bundle_snapshot = bundle.clone();
+
+    let fetched: Vec<(String, Result<SyncFetchResult>)> = std::thread::scope(|scope| {
+        let bundle = &bundle_snapshot;
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(repo_index, repo)| {
+                let repo_index = *repo_index;
+                let repo = repo.clone();
+                let repo_id = repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        fetch_pr_summary_for_sync_from_artifact(cwd, bundle, repo_index, &repo),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("artifact publish sync fetch thread panicked"))
+            .collect()
+    });
+
     let mut failures = Vec::new();
-    for index in indexes.iter().copied() {
-        let repo = bundle.repos[index].clone();
-        match sync_one_pr_from_artifact(cwd, bundle, &repo) {
-            Ok(()) => {}
+    let mut synced_repo_indexes = Vec::new();
+    for (repo_id, result) in fetched {
+        match result {
+            Ok(SyncFetchResult::NoReviewObject) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("no review object recorded")
+                );
+            }
+            Ok(SyncFetchResult::Summary {
+                repo_index,
+                summary,
+            }) => {
+                let repo = bundle.repos[repo_index].clone();
+                let forge = providers::for_repo(&repo)?;
+                providers::upsert_publication(bundle, &repo, forge.as_ref(), &summary);
+                synced_repo_indexes.push(repo_index);
+            }
             Err(error) => {
-                println!("{}: {}", out::repo(&repo.id), out::danger("PR sync failed"));
-                failures.push(format!("{}: {error:#}", repo.id));
+                println!("{}: {}", out::repo(&repo_id), out::danger("PR sync failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
             }
         }
     }
+
+    let body_results: Vec<(String, Result<SyncBodyResult>)> = std::thread::scope(|scope| {
+        let bundle_read = &*bundle;
+        let handles: Vec<_> = synced_repo_indexes
+            .iter()
+            .map(|&repo_index| {
+                let repo = bundle_read.repos[repo_index].clone();
+                let repo_id = repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        sync_pr_body_remote_from_artifact(cwd, bundle_read, repo_index, &repo),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("artifact publish sync body thread panicked"))
+            .collect()
+    });
+
+    for (repo_id, result) in body_results {
+        match result {
+            Ok(SyncBodyResult::Synced(url)) => {
+                println!(
+                    "{}: {} {}",
+                    out::repo(&repo_id),
+                    out::movement("synced"),
+                    url
+                );
+            }
+            Ok(SyncBodyResult::AlreadySynced) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("PR body already synced")
+                );
+            }
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("PR sync failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
+            }
+        }
+    }
+
     Ok(failures)
-}
-
-fn sync_one_pr(active: &mut ActiveBundle, repo: &RepoEntry) -> Result<()> {
-    let branch = repo.feature_branch.as_deref().with_context(|| {
-        format!(
-            "{}: no feature branch recorded. Run `knit worktree`.",
-            repo.id
-        )
-    })?;
-    let Some(cwd) = checkout_dir(active, repo) else {
-        bail!("{}: no feature checkout is recorded.", repo.id);
-    };
-    let forge = providers::for_repo(repo)?;
-    let target = PrTarget::checkout(&cwd);
-
-    let summary = if let Some(pr) = publication_for_repo(&active.bundle, &repo.id) {
-        forge.view(&target, &pr.url)?
-    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
-        existing
-    } else {
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::muted("no review object recorded")
-        );
-        return Ok(());
-    };
-
-    providers::upsert_publication(&mut active.bundle, repo, forge.as_ref(), &summary);
-    let current_body = summary.body.unwrap_or_default();
-    let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
-    let next_body = upsert_knit_pr_block(&current_body, &block);
-    if next_body != current_body {
-        let pr =
-            publication_for_repo(&active.bundle, &repo.id).expect("publication was just inserted");
-        forge.edit_body(&target, &pr.url, &next_body)?;
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("synced"),
-            pr.url
-        );
-    } else {
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::muted("PR body already synced")
-        );
-    }
-
-    Ok(())
-}
-
-fn sync_one_pr_from_artifact(cwd: &Path, bundle: &mut ChangeGroup, repo: &RepoEntry) -> Result<()> {
-    let branch = repo.feature_branch.as_deref().with_context(|| {
-        format!(
-            "{}: no feature branch recorded in the bundle artifact.",
-            repo.id
-        )
-    })?;
-    let remote = repo
-        .remote
-        .as_deref()
-        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
-    let forge = providers::for_repo(repo)?;
-    let repo_full_name = forge
-        .repo_full_name(remote)
-        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
-    let target = PrTarget::explicit(cwd, repo_full_name);
-
-    let summary = if let Some(pr) = publication_for_repo(bundle, &repo.id) {
-        forge.view(&target, &pr.url)?
-    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
-        existing
-    } else {
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::muted("no review object recorded")
-        );
-        return Ok(());
-    };
-
-    providers::upsert_publication(bundle, repo, forge.as_ref(), &summary);
-    let current_body = summary.body.unwrap_or_default();
-    let block = render_knit_pr_block(bundle, Some(&repo.id));
-    let next_body = upsert_knit_pr_block(&current_body, &block);
-    if next_body != current_body {
-        let pr = publication_for_repo(bundle, &repo.id).expect("publication was just inserted");
-        forge.edit_body(&target, &pr.url, &next_body)?;
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::movement("synced"),
-            pr.url
-        );
-    } else {
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::muted("PR body already synced")
-        );
-    }
-
-    Ok(())
 }
 
 fn ensure_feature_branch(repo: &RepoEntry, expected: &str, cwd: &Path) -> Result<()> {
