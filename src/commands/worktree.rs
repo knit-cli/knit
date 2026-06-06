@@ -7,14 +7,14 @@ use crate::git::{
     branch_exists, current_branch, git_output, is_git_worktree, resolve_base_ref, rev_parse,
 };
 use crate::ids::node_id;
-use crate::model::BundleNode;
+use crate::model::{BundleNode, RepoEntry};
 use crate::output as out;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub fn create_worktrees() -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
@@ -46,131 +46,253 @@ pub fn materialize_repos(
     let bundle_id = active.bundle.id.clone();
     fs::create_dir_all(active.root.join(".knit/worktrees").join(&bundle_id))
         .context("failed to create bundle worktree directory")?;
+
+    let jobs: Vec<(usize, RepoEntry)> = active
+        .bundle
+        .repos
+        .iter()
+        .enumerate()
+        .filter(|(_, repo)| {
+            only_repo_ids.is_none_or(|repo_ids| repo_ids.iter().any(|repo_id| repo_id == &repo.id))
+        })
+        .map(|(index, repo)| (index, repo.clone()))
+        .collect();
+
+    if jobs.is_empty() {
+        return Ok(Vec::new());
+    }
+
+    let root = active.root.clone();
+    let results: Vec<(String, Result<MaterializeResult>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = jobs
+            .iter()
+            .map(|(repo_index, repo)| {
+                let repo_index = *repo_index;
+                let repo = repo.clone();
+                let root = root.clone();
+                let bundle_id = bundle_id.clone();
+                let repo_id = repo.id.clone();
+                scope.spawn(move || {
+                    (
+                        repo_id,
+                        materialize_one_repo(&root, &bundle_id, repo_index, &repo),
+                    )
+                })
+            })
+            .collect();
+
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("worktree worker thread panicked"))
+            .collect()
+    });
+
     let mut materialized_repo_ids = Vec::new();
-
-    for repo in &mut active.bundle.repos {
-        if let Some(repo_ids) = only_repo_ids {
-            if !repo_ids.iter().any(|repo_id| repo_id == &repo.id) {
-                continue;
+    let mut failures = Vec::new();
+    for (repo_id, result) in results {
+        match result {
+            Ok(update) => {
+                apply_materialize_result(&mut active.bundle.repos[update.repo_index], &update);
+                print_materialize_result(&update);
+                materialized_repo_ids.push(repo_id);
             }
-        }
-
-        let repo_root = PathBuf::from(&repo.path);
-        let feature_branch = format!("knit/{bundle_id}");
-        if is_in_place(repo) {
-            materialize_in_place(repo, &repo_root, &feature_branch)?;
-            materialized_repo_ids.push(repo.id.clone());
-            continue;
-        }
-
-        let worktree_path = format!(".knit/worktrees/{}/{}", bundle_id, repo.id);
-        let worktree_abs = active.root.join(&worktree_path);
-        let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
-        let base_sha = rev_parse(&repo_root, &base_ref)
-            .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
-
-        if repo.base_sha.is_none() {
-            repo.base_sha = Some(base_sha.clone());
-        }
-        repo.feature_branch = Some(feature_branch.clone());
-        repo.worktree_path = Some(worktree_path.clone());
-
-        if worktree_abs.exists() {
-            if is_git_worktree(&worktree_abs) {
-                if repo.head_sha.is_none() {
-                    repo.head_sha =
-                        Some(rev_parse(&worktree_abs, "HEAD").with_context(|| {
-                            format!("{}: failed to read worktree HEAD", repo.id)
-                        })?);
-                }
-                println!(
-                    "{}: worktree already present at {}",
-                    out::repo(&repo.id),
-                    out::path(&worktree_path)
-                );
-                materialized_repo_ids.push(repo.id.clone());
-                continue;
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("worktree failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
             }
-            bail!(
-                "{}: {} exists but is not a git worktree",
-                repo.id,
-                worktree_abs.display()
-            );
-        }
-
-        if let Some(parent) = worktree_abs.parent() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("failed to create worktree parent {}", parent.display())
-            })?;
-        }
-
-        if branch_exists(&repo_root, &feature_branch) {
-            git_output(
-                &repo_root,
-                [
-                    OsString::from("worktree"),
-                    OsString::from("add"),
-                    worktree_abs.as_os_str().to_os_string(),
-                    OsString::from(&feature_branch),
-                ],
-            )
-            .with_context(|| format!("failed to add worktree for {}", repo.id))?;
-            if repo.head_sha.is_none() {
-                repo.head_sha = Some(
-                    rev_parse(&worktree_abs, "HEAD")
-                        .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
-                );
-            }
-            println!(
-                "{}: {} worktree from existing branch",
-                out::repo(&repo.id),
-                out::movement("created")
-            );
-            materialized_repo_ids.push(repo.id.clone());
-        } else {
-            git_output(
-                &repo_root,
-                [
-                    OsString::from("worktree"),
-                    OsString::from("add"),
-                    OsString::from("-b"),
-                    OsString::from(&feature_branch),
-                    worktree_abs.as_os_str().to_os_string(),
-                    OsString::from(base_ref),
-                ],
-            )
-            .with_context(|| format!("failed to create branch/worktree for {}", repo.id))?;
-            repo.head_sha = Some(
-                rev_parse(&worktree_abs, "HEAD")
-                    .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
-            );
-            println!(
-                "{}: {} {}",
-                out::repo(&repo.id),
-                out::movement("created"),
-                out::branch(feature_branch)
-            );
-            materialized_repo_ids.push(repo.id.clone());
         }
     }
+
+    if !failures.is_empty() {
+        bail!("worktree failed:\n{}", failures.join("\n"));
+    }
+
+    materialized_repo_ids.sort_by(|left, right| {
+        active
+            .bundle
+            .repos
+            .iter()
+            .position(|repo| &repo.id == left)
+            .cmp(&active.bundle.repos.iter().position(|repo| &repo.id == right))
+    });
 
     Ok(materialized_repo_ids)
 }
 
+struct MaterializeResult {
+    repo_index: usize,
+    repo_id: String,
+    base_sha: Option<String>,
+    feature_branch: Option<String>,
+    worktree_path: Option<String>,
+    head_sha: Option<String>,
+    log: MaterializeLog,
+}
+
+enum MaterializeLog {
+    InPlace,
+    WorktreeExists(String),
+    WorktreeFromBranch,
+    WorktreeCreated(String),
+}
+
+fn apply_materialize_result(repo: &mut RepoEntry, update: &MaterializeResult) {
+    if let Some(base_sha) = &update.base_sha {
+        if repo.base_sha.is_none() {
+            repo.base_sha = Some(base_sha.clone());
+        }
+    }
+    if let Some(feature_branch) = &update.feature_branch {
+        repo.feature_branch = Some(feature_branch.clone());
+    }
+    if let Some(worktree_path) = &update.worktree_path {
+        repo.worktree_path = Some(worktree_path.clone());
+    }
+    if let Some(head_sha) = &update.head_sha {
+        match &update.log {
+            MaterializeLog::WorktreeExists(_) if repo.head_sha.is_some() => {}
+            _ => repo.head_sha = Some(head_sha.clone()),
+        }
+    }
+}
+
+fn print_materialize_result(update: &MaterializeResult) {
+    match &update.log {
+        MaterializeLog::InPlace => println!(
+            "{}: using in-place checkout at {}",
+            out::repo(&update.repo_id),
+            out::path(
+                update
+                    .worktree_path
+                    .as_deref()
+                    .unwrap_or(update.repo_id.as_str())
+            )
+        ),
+        MaterializeLog::WorktreeExists(worktree_path) => println!(
+            "{}: worktree already present at {}",
+            out::repo(&update.repo_id),
+            out::path(worktree_path)
+        ),
+        MaterializeLog::WorktreeFromBranch => println!(
+            "{}: {} worktree from existing branch",
+            out::repo(&update.repo_id),
+            out::movement("created")
+        ),
+        MaterializeLog::WorktreeCreated(feature_branch) => println!(
+            "{}: {} {}",
+            out::repo(&update.repo_id),
+            out::movement("created"),
+            out::branch(feature_branch)
+        ),
+    }
+}
+
+fn materialize_one_repo(
+    root: &Path,
+    bundle_id: &str,
+    repo_index: usize,
+    repo: &RepoEntry,
+) -> Result<MaterializeResult> {
+    let feature_branch = format!("knit/{bundle_id}");
+    let repo_root = PathBuf::from(&repo.path);
+
+    if is_in_place(repo) {
+        let update = materialize_in_place(repo_index, repo, &repo_root, &feature_branch)?;
+        return Ok(update);
+    }
+
+    let worktree_path = format!(".knit/worktrees/{bundle_id}/{}", repo.id);
+    let worktree_abs = root.join(&worktree_path);
+    let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
+    let base_sha = rev_parse(&repo_root, &base_ref)
+        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+
+    let mut update = MaterializeResult {
+        repo_index,
+        repo_id: repo.id.clone(),
+        base_sha: if repo.base_sha.is_none() {
+            Some(base_sha)
+        } else {
+            None
+        },
+        feature_branch: Some(feature_branch.clone()),
+        worktree_path: Some(worktree_path.clone()),
+        head_sha: None,
+        log: MaterializeLog::WorktreeCreated(feature_branch.clone()),
+    };
+
+    if worktree_abs.exists() {
+        if is_git_worktree(&worktree_abs) {
+            update.head_sha = Some(
+                rev_parse(&worktree_abs, "HEAD")
+                    .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+            );
+            update.log = MaterializeLog::WorktreeExists(worktree_path);
+            return Ok(update);
+        }
+        bail!(
+            "{}: {} exists but is not a git worktree",
+            repo.id,
+            worktree_abs.display()
+        );
+    }
+
+    if let Some(parent) = worktree_abs.parent() {
+        fs::create_dir_all(parent).with_context(|| {
+            format!("failed to create worktree parent {}", parent.display())
+        })?;
+    }
+
+    if branch_exists(&repo_root, &feature_branch) {
+        git_output(
+            &repo_root,
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                worktree_abs.as_os_str().to_os_string(),
+                OsString::from(&feature_branch),
+            ],
+        )
+        .with_context(|| format!("failed to add worktree for {}", repo.id))?;
+        update.head_sha = Some(
+            rev_parse(&worktree_abs, "HEAD")
+                .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+        );
+        update.log = MaterializeLog::WorktreeFromBranch;
+        return Ok(update);
+    }
+
+    git_output(
+        &repo_root,
+        [
+            OsString::from("worktree"),
+            OsString::from("add"),
+            OsString::from("-b"),
+            OsString::from(&feature_branch),
+            worktree_abs.as_os_str().to_os_string(),
+            OsString::from(base_ref),
+        ],
+    )
+    .with_context(|| format!("failed to create branch/worktree for {}", repo.id))?;
+    update.head_sha = Some(
+        rev_parse(&worktree_abs, "HEAD")
+            .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+    );
+    Ok(update)
+}
+
 fn materialize_in_place(
-    repo: &mut crate::model::RepoEntry,
-    repo_root: &PathBuf,
+    repo_index: usize,
+    repo: &RepoEntry,
+    repo_root: &Path,
     feature_branch: &str,
-) -> Result<()> {
+) -> Result<MaterializeResult> {
     let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
     let base_sha = rev_parse(repo_root, &base_ref)
         .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
-    if repo.base_sha.is_none() {
-        repo.base_sha = Some(base_sha);
-    }
 
-    let current_branch = current_branch(repo_root)?;
-    if current_branch.as_deref() != Some(feature_branch) {
+    let current = current_branch(repo_root)?;
+    if current.as_deref() != Some(feature_branch) {
         let short_status = git_output(repo_root, ["status", "--short"])?;
         if !short_status.trim().is_empty() {
             bail!(
@@ -196,17 +318,20 @@ fn materialize_in_place(
         }
     }
 
-    repo.feature_branch = Some(feature_branch.to_string());
-    repo.worktree_path = Some(repo.path.clone());
-    repo.head_sha = Some(
-        rev_parse(repo_root, "HEAD")
-            .with_context(|| format!("{}: failed to read in-place HEAD", repo.id))?,
-    );
-    println!(
-        "{}: using in-place checkout at {}",
-        out::repo(&repo.id),
-        out::path(&repo.path)
-    );
-
-    Ok(())
+    Ok(MaterializeResult {
+        repo_index,
+        repo_id: repo.id.clone(),
+        base_sha: if repo.base_sha.is_none() {
+            Some(base_sha)
+        } else {
+            None
+        },
+        feature_branch: Some(feature_branch.to_string()),
+        worktree_path: Some(repo.path.clone()),
+        head_sha: Some(
+            rev_parse(repo_root, "HEAD")
+                .with_context(|| format!("{}: failed to read in-place HEAD", repo.id))?,
+        ),
+        log: MaterializeLog::InPlace,
+    })
 }
