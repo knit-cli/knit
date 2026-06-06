@@ -117,7 +117,6 @@ impl PruneAssessment {
     }
 }
 
-#[derive(Clone)]
 struct PruneCache {
     pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
     pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
@@ -455,19 +454,29 @@ fn assess_bundles(
         }
     }
 
-    let results: Vec<(String, Result<PruneAssessment>)> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (path, mut bundle) in bundles {
-            handles.push(scope.spawn(move || {
-                let id = bundle.id.clone();
-                (id, assess_bundle(root, &path, &mut bundle, refresh, cache))
-            }));
-        }
-        handles
+    let results: Vec<(String, Result<PruneAssessment>)> = if refresh {
+        std::thread::scope(|scope| {
+            let mut handles = Vec::new();
+            for (path, mut bundle) in bundles {
+                handles.push(scope.spawn(move || {
+                    let id = bundle.id.clone();
+                    (id, assess_bundle(root, &path, &mut bundle, true, cache))
+                }));
+            }
+            handles
+                .into_iter()
+                .map(|handle| handle.join().unwrap())
+                .collect()
+        })
+    } else {
+        bundles
             .into_iter()
-            .map(|handle| handle.join().unwrap())
+            .map(|(path, mut bundle)| {
+                let id = bundle.id.clone();
+                (id, assess_bundle(root, &path, &mut bundle, false, cache))
+            })
             .collect()
-    });
+    };
 
     let mut assessments = Vec::new();
     for (id, result) in results {
@@ -488,71 +497,82 @@ fn assess_bundle(
     refresh: bool,
     cache: &PruneCache,
 ) -> Result<PruneAssessment> {
-    let bundle_id = bundle.id.clone();
-    let jobs: Vec<(usize, RepoEntry, Option<crate::model::PublicationEntry>)> = bundle
-        .repos
-        .iter()
-        .enumerate()
-        .map(|(index, repo)| {
-            (
-                index,
-                repo.clone(),
-                providers::publication_for_repo(bundle, &repo.id).cloned(),
-            )
-        })
-        .collect();
-
-    let repo_results: Vec<(usize, Result<RepoPruneSignals>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .iter()
-            .map(|(index, repo, recorded)| {
-                let index = *index;
-                let repo = repo.clone();
-                let recorded = recorded.clone();
-                let bundle_id = bundle_id.clone();
-                scope.spawn(move || {
-                    (
-                        index,
-                        assess_repo_signals(
-                            root,
-                            &bundle_id,
-                            &repo,
-                            recorded.as_ref(),
-                            refresh,
-                            cache,
-                        ),
-                    )
-                })
-            })
-            .collect();
-
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("prune repo worker thread panicked"))
-            .collect()
-    });
-
+    let repos = bundle.repos.clone();
     let mut saw_publication = false;
     let mut saw_merged_publication = false;
     let mut saw_open_publication = false;
     let mut pending = Pending::default();
+    for repo in repos {
+        let branch = repo.feature_branch.as_deref();
+        let mut publication = providers::publication_for_repo(bundle, &repo.id).cloned();
 
-    for (index, result) in repo_results {
-        let repo_id = bundle.repos[index].id.clone();
-        let signals = result.with_context(|| format!("{bundle_id}/{repo_id}"))?;
-        if let Some(pr) = signals.publication_update {
-            let repo = bundle.repos[index].clone();
+        // Skip review-state refresh for repos whose host is not recognized;
+        // prune still proceeds on the remaining signals.
+        // A failed lookup or checkout probe must not abort the whole prune: warn
+        // and fall back to the last recorded state, keeping the bundle when the
+        // checkout is unverifiable.
+        if refresh {
             if let Ok(forge) = providers::for_repo(&repo) {
-                providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                if let Some(existing) = publication.as_ref() {
+                    match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
+                        Ok(pr) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Err(err) => cache.note_refresh_failure(
+                            &bundle.id,
+                            &repo.id,
+                            &format!("could not refresh {}", existing.url),
+                            &err,
+                        ),
+                    }
+                } else if let Some(branch) = branch {
+                    match cache.find_existing_pr(
+                        forge.as_ref(),
+                        Path::new(&repo.path),
+                        branch,
+                        &repo.base_branch,
+                    ) {
+                        Ok(Some(pr)) => {
+                            providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                            publication = providers::publication_for_repo(bundle, &repo.id).cloned();
+                        }
+                        Ok(None) => {}
+                        Err(err) => cache.note_refresh_failure(
+                            &bundle.id,
+                            &repo.id,
+                            &format!("could not check for an open review object on {branch}"),
+                            &err,
+                        ),
+                    }
+                }
             }
         }
-        pending.merge(signals.pending);
-        if signals.pending_check_failed {
-            pending.tracked = true;
+
+        match cache.checkout_has_pending_changes(root, &repo) {
+            Ok(found) => pending.merge(found),
+            Err(err) => {
+                print_prune_warning(format!(
+                    "{}/{}: could not inspect checkout for pending changes ({err:#}); keeping the bundle to be safe",
+                    bundle.id, repo.id
+                ));
+                pending.tracked = true;
+            }
         }
-        saw_publication |= signals.saw_publication;
-        saw_open_publication |= signals.saw_open_publication;
-        saw_merged_publication |= signals.saw_merged_publication;
+
+        let Some(publication) = publication else {
+            continue;
+        };
+        saw_publication = true;
+        if Some(publication.head_branch.as_str()) != branch {
+            saw_open_publication = true;
+            continue;
+        }
+        if publication_state_is_merged(&publication.state) {
+            saw_merged_publication = true;
+        } else if !publication_state_is_closed(&publication.state) {
+            saw_open_publication = true;
+        }
     }
 
     if refresh {
@@ -567,116 +587,6 @@ fn assess_bundle(
         saw_merged_publication,
         pending,
     })
-}
-
-struct RepoPruneSignals {
-    publication_update: Option<PullRequest>,
-    pending: Pending,
-    pending_check_failed: bool,
-    saw_publication: bool,
-    saw_open_publication: bool,
-    saw_merged_publication: bool,
-}
-
-fn assess_repo_signals(
-    root: &Path,
-    bundle_id: &str,
-    repo: &RepoEntry,
-    recorded: Option<&crate::model::PublicationEntry>,
-    refresh: bool,
-    cache: &PruneCache,
-) -> Result<RepoPruneSignals> {
-    let branch = repo.feature_branch.as_deref();
-    let mut publication_update = None;
-
-    if refresh {
-        if let Ok(forge) = providers::for_repo(repo) {
-            if let Some(existing) = recorded {
-                match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
-                    Ok(pr) => publication_update = Some(pr),
-                    Err(err) => cache.note_refresh_failure(
-                        bundle_id,
-                        &repo.id,
-                        &format!("could not refresh {}", existing.url),
-                        &err,
-                    ),
-                }
-            } else if let Some(branch) = branch {
-                match cache.find_existing_pr(
-                    forge.as_ref(),
-                    Path::new(&repo.path),
-                    branch,
-                    &repo.base_branch,
-                ) {
-                    Ok(Some(pr)) => publication_update = Some(pr),
-                    Ok(None) => {}
-                    Err(err) => cache.note_refresh_failure(
-                        bundle_id,
-                        &repo.id,
-                        &format!("could not check for an open review object on {branch}"),
-                        &err,
-                    ),
-                }
-            }
-        }
-    }
-
-    let (saw_publication, saw_open_publication, saw_merged_publication) =
-        if let Some(pr) = publication_update.as_ref() {
-            publication_flags_from_pr(
-                branch,
-                pr.head_ref_name.as_deref().unwrap_or(""),
-                pr.state.as_deref().unwrap_or("UNKNOWN"),
-            )
-        } else if let Some(existing) = recorded {
-            publication_flags_from_publication(branch, existing)
-        } else {
-            (false, false, false)
-        };
-
-    let (pending, pending_check_failed) = match cache.checkout_has_pending_changes(root, repo) {
-        Ok(found) => (found, false),
-        Err(err) => {
-            print_prune_warning(format!(
-                "{bundle_id}/{}: could not inspect checkout for pending changes ({err:#}); keeping the bundle to be safe",
-                repo.id
-            ));
-            (Pending::default(), true)
-        }
-    };
-
-    Ok(RepoPruneSignals {
-        publication_update,
-        pending,
-        pending_check_failed,
-        saw_publication,
-        saw_open_publication,
-        saw_merged_publication,
-    })
-}
-
-fn publication_flags_from_publication(
-    branch: Option<&str>,
-    publication: &crate::model::PublicationEntry,
-) -> (bool, bool, bool) {
-    publication_flags_from_pr(branch, &publication.head_branch, &publication.state)
-}
-
-fn publication_flags_from_pr(
-    branch: Option<&str>,
-    head_branch: &str,
-    state: &str,
-) -> (bool, bool, bool) {
-    if Some(head_branch) != branch {
-        return (true, true, false);
-    }
-    if publication_state_is_merged(state) {
-        (true, false, true)
-    } else if publication_state_is_closed(state) {
-        (true, false, false)
-    } else {
-        (true, true, false)
-    }
 }
 
 /// Find KnitHub remote bundle records that have no local artifact and whose recorded
@@ -707,64 +617,22 @@ fn remote_orphan_candidates(
         }
     };
     let mut orphans = Vec::new();
-    let cache = PruneCache::new();
-    let jobs: Vec<RemoteOrphanJob> = records
-        .into_iter()
-        .filter_map(|record| {
-            if record.lifecycle_state == "deleted" || local_ids.contains(&record.slug) {
-                return None;
-            }
-            let payload = record.payload?;
-            Some(RemoteOrphanJob {
+    for record in records {
+        if record.lifecycle_state == "deleted" || local_ids.contains(&record.slug) {
+            continue;
+        }
+        let Some(payload) = record.payload.as_ref() else {
+            continue;
+        };
+        if let Some(reason) = remote_payload_dead_reason(root, payload, refresh) {
+            orphans.push(RemoteOrphan {
                 remote_id: record.remote_id,
                 slug: record.slug,
-                payload,
-            })
-        })
-        .collect();
-
-    let results: Vec<(String, Option<RemoteOrphan>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .iter()
-            .map(|job| {
-                let slug = job.slug.clone();
-                let remote_id = job.remote_id.clone();
-                let payload = job.payload.clone();
-                let cache = cache.clone();
-                scope.spawn(move || {
-                    (
-                        slug.clone(),
-                        remote_payload_dead_reason(root, &payload, refresh, &cache)
-                            .map(|reason| RemoteOrphan {
-                                remote_id,
-                                slug,
-                                reason,
-                            }),
-                    )
-                })
-            })
-            .collect();
-
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("remote orphan worker thread panicked"))
-            .collect()
-    });
-
-    for (slug, orphan) in results {
-        if let Some(orphan) = orphan {
-            orphans.push(orphan);
-        } else {
-            let _ = slug;
+                reason,
+            });
         }
     }
     orphans
-}
-
-struct RemoteOrphanJob {
-    remote_id: String,
-    slug: String,
-    payload: ChangeGroup,
 }
 
 /// Classify an orphaned remote bundle's pull requests. The remote's stored artifact can be
@@ -776,69 +644,36 @@ fn remote_payload_dead_reason(
     root: &Path,
     payload: &ChangeGroup,
     refresh: bool,
-    cache: &PruneCache,
 ) -> Option<&'static str> {
-    if payload.publications.is_empty() {
-        return None;
-    }
-
-    let states: Vec<String> = if refresh {
-        std::thread::scope(|scope| {
-            let handles: Vec<_> = payload
-                .publications
-                .iter()
-                .map(|publication| {
-                    let publication = publication.clone();
-                    scope.spawn(move || {
-                        refresh_remote_publication_state(root, &publication, cache)
-                    })
-                })
-                .collect();
-
-            handles
-                .into_iter()
-                .map(|handle| handle.join().expect("remote publication worker thread panicked"))
-                .collect()
-        })
-    } else {
-        payload
-            .publications
-            .iter()
-            .map(|publication| publication.state.clone())
-            .collect()
-    };
-
-    classify_remote_publication_states(&states)
-}
-
-fn refresh_remote_publication_state(
-    root: &Path,
-    publication: &crate::model::PublicationEntry,
-    cache: &PruneCache,
-) -> String {
-    match providers::by_id(&publication.provider) {
-        Some(forge) => match cache.view_pr(forge.as_ref(), root, &publication.url) {
-            Ok(pr) => pr.state.unwrap_or_else(|| publication.state.clone()),
-            Err(err) => {
-                print_prune_warning(format!(
-                    "could not refresh remote review object {} ({err:#}); using last synced state",
-                    publication.url
-                ));
-                publication.state.clone()
-            }
-        },
-        None => publication.state.clone(),
-    }
-}
-
-fn classify_remote_publication_states(states: &[String]) -> Option<&'static str> {
+    let mut saw_publication = false;
     let mut saw_merged = false;
-    for state in states {
-        if publication_state_is_merged(state) {
+    for publication in &payload.publications {
+        saw_publication = true;
+        let state = if refresh {
+            match providers::by_id(&publication.provider) {
+                Some(forge) => match forge.view(&PrTarget::checkout(root), &publication.url) {
+                    Ok(pr) => pr.state.unwrap_or_else(|| publication.state.clone()),
+                    Err(err) => {
+                        print_prune_warning(format!(
+                            "{}: could not refresh remote review object {} ({err:#}); using last synced state",
+                            payload.id, publication.url
+                        ));
+                        publication.state.clone()
+                    }
+                },
+                None => publication.state.clone(),
+            }
+        } else {
+            publication.state.clone()
+        };
+        if publication_state_is_merged(&state) {
             saw_merged = true;
-        } else if !publication_state_is_closed(state) {
+        } else if !publication_state_is_closed(&state) {
             return None;
         }
+    }
+    if !saw_publication {
+        return None;
     }
     if saw_merged {
         Some("remote PRs are merged")
@@ -1112,12 +947,10 @@ mod prune_tests {
     // refresh=false keeps these pure (no host lookups), exercising the classification of
     // an orphan remote bundle from its recorded publication states.
     fn dead_reason(states: &[&str]) -> Option<&'static str> {
-        let cache = PruneCache::new();
         remote_payload_dead_reason(
             Path::new("/nonexistent"),
             &bundle_with_publication_states(states),
             false,
-            &cache,
         )
     }
 
