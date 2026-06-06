@@ -482,7 +482,7 @@ knit pull --rebase frontend
 
 Single-bundle pulls still default to the original repo path on the recorded base branch with `git pull --ff-only`, updating the recorded `baseSha`, and refuse on uncommitted changes unless `--force` (use `--rebase` for `git pull --rebase`). Use `knit pull --feature` to pull the tracked Knit feature checkout instead; feature pulls are recorded as `git.observed` nodes when the feature branch head moves.
 
-`knit push` pushes tracked feature branches to `origin`. It does not create PRs, update GitHub metadata, or change bundle state. By default it pushes the current feature branch to `origin/<branch>` without setting upstream; use `--set-upstream` when you want git's upstream tracking configured:
+`knit push` pushes tracked feature branches to `origin`. It does not create PRs, update GitHub metadata, or change bundle state. Selected repo pushes run in parallel; bundle artifact and history sync wait until every Git push succeeds. By default it pushes the current feature branch to `origin/<branch>` without setting upstream; use `--set-upstream` when you want git's upstream tracking configured:
 
 ```sh
 knit push

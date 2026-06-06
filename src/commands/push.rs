@@ -9,6 +9,11 @@ use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
 use std::path::Path;
 
+struct PushSuccess {
+    upstream: String,
+    sha: String,
+}
+
 pub fn push_repos(
     selectors: &[String],
     all: bool,
@@ -22,13 +27,39 @@ pub fn push_repos(
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
-    let mut failures = Vec::new();
+    let results: Vec<(String, Result<PushSuccess>)> = std::thread::scope(|scope| {
+        let handles: Vec<_> = indexes
+            .iter()
+            .map(|&index| {
+                let active = &active;
+                let repo = &active.bundle.repos[index];
+                let repo_id = repo.id.clone();
+                scope.spawn(move || (repo_id, push_repo(active, repo, set_upstream)))
+            })
+            .collect();
 
-    for index in indexes {
-        let repo = &active.bundle.repos[index];
-        if let Err(error) = push_repo(&active, repo, set_upstream) {
-            println!("{}: {}", out::repo(&repo.id), out::danger("push failed"));
-            failures.push(format!("{}: {error:#}", repo.id));
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("push worker thread panicked"))
+            .collect()
+    });
+
+    let mut failures = Vec::new();
+    for (repo_id, result) in results {
+        match result {
+            Ok(success) => {
+                println!(
+                    "{}: {} {} {}",
+                    out::repo(&repo_id),
+                    out::movement("pushed"),
+                    out::branch(success.upstream),
+                    out::sha(short_sha(&success.sha))
+                );
+            }
+            Err(error) => {
+                println!("{}: {}", out::repo(&repo_id), out::danger("push failed"));
+                failures.push(format!("{repo_id}: {error:#}"));
+            }
         }
     }
 
@@ -43,7 +74,7 @@ pub fn push_repos(
     Ok(())
 }
 
-fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Result<()> {
+fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Result<PushSuccess> {
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
             "{}: no feature branch recorded. Run `knit worktree`.",
@@ -66,14 +97,7 @@ fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Res
     } else {
         format!("origin/{branch}")
     };
-    println!(
-        "{}: {} {} {}",
-        out::repo(&repo.id),
-        out::movement("pushed"),
-        out::branch(upstream),
-        out::sha(short_sha(&sha))
-    );
-    Ok(())
+    Ok(PushSuccess { upstream, sha })
 }
 
 fn ensure_feature_branch(repo: &RepoEntry, expected: &str, cwd: &Path) -> Result<()> {
