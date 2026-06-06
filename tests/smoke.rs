@@ -2188,6 +2188,45 @@ fn push_sends_selected_feature_branches_in_parallel() {
 }
 
 #[test]
+#[cfg(unix)]
+fn commit_stages_and_commits_repos_in_parallel() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "track",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+
+    append_line(&backend_feature.join("app.txt"), "parallel backend commit");
+    append_line(&frontend_feature.join("app.txt"), "parallel frontend commit");
+
+    let gate = root.join("commit-gate");
+    install_parallel_gate_hook(&backend_feature, "pre-commit", &gate, "backend", "frontend");
+    install_parallel_gate_hook(&frontend_feature, "pre-commit", &gate, "frontend", "backend");
+
+    let commit = knit(
+        &workspace,
+        ["commit", "--stage", "-m", "Parallel commit"],
+    );
+    assert!(commit.contains("backend"));
+    assert!(commit.contains("frontend"));
+    assert!(commit.contains("Recorded commit group"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let root = unique_temp_dir();
     let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -4162,10 +4201,15 @@ fn append_line(path: &Path, line: &str) {
 
 #[cfg(unix)]
 fn install_parallel_push_hook(repo: &Path, gate: &Path, id: &str, peer: &str) {
+    install_parallel_gate_hook(repo, "pre-push", gate, id, peer);
+}
+
+#[cfg(unix)]
+fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str, peer: &str) {
     use std::os::unix::fs::PermissionsExt;
 
     fs::create_dir_all(gate).unwrap();
-    let hook_path = git(repo, ["rev-parse", "--git-path", "hooks/pre-push"]);
+    let hook_path = git(repo, ["rev-parse", "--git-path", &format!("hooks/{hook}")]);
     let hook_path = PathBuf::from(hook_path.trim());
     let hook_path = if hook_path.is_absolute() {
         hook_path
