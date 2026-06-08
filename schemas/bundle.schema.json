@@ -10,7 +10,26 @@
     "title": { "type": "string" },
     "state": { "enum": ["open", "closed", "archived", "deleted"] },
     "repos": { "type": "array" },
-    "commitGroups": { "type": "array" },
+    "commitGroups": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "message": { "type": "string" },
+          "createdAt": { "type": "string" },
+          "commits": { "type": "array" },
+          "author": {
+            "type": "object",
+            "description": "Git author captured at commit time. Optional for backward compatibility with older artifacts.",
+            "properties": {
+              "name": { "type": "string" },
+              "email": { "type": "string" }
+            }
+          }
+        }
+      }
+    },
     "nodes": { "type": "array" },
     "publications": { "type": "array" }
   }
