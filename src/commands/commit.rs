@@ -1,7 +1,7 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch, ensure_mutable_checkouts};
-use crate::git::{git_output, rev_parse};
+use crate::git::{commit_author, git_output, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
-use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange, RepoEntry};
+use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, RepoChange, RepoEntry};
 use crate::output as out;
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
@@ -62,6 +62,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     });
 
     let mut failures = Vec::new();
+    let mut group_author: Option<CommitAuthor> = None;
     for (repo_id, result) in results {
         match result {
             Ok(outcome) => {
@@ -71,6 +72,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
                     out::movement("committed"),
                     out::sha(short_sha(&outcome.sha))
                 );
+                group_author.get_or_insert_with(|| outcome.author.clone());
                 commits.push(CommitRef {
                     repo_id: repo_id.clone(),
                     sha: outcome.sha.clone(),
@@ -101,6 +103,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
         message: message.to_string(),
         created_at: created_at.clone(),
         commits: commits.clone(),
+        author: group_author,
     });
     active.bundle.nodes.push(BundleNode::commit_group(
         group_id.clone(),
@@ -125,6 +128,7 @@ struct CommitOutcome {
     repo_index: usize,
     before_sha: String,
     sha: String,
+    author: CommitAuthor,
 }
 
 fn run_commit(target: &CommitTarget, commit_message: &str) -> Result<CommitOutcome> {
@@ -139,10 +143,13 @@ fn run_commit(target: &CommitTarget, commit_message: &str) -> Result<CommitOutco
     .with_context(|| format!("{}: git commit failed", target.repo_id))?;
     let sha = rev_parse(&target.worktree_abs, "HEAD")
         .with_context(|| format!("{}: failed to read commit sha", target.repo_id))?;
+    let author = commit_author(&target.worktree_abs, &sha)
+        .with_context(|| format!("{}: failed to read commit author", target.repo_id))?;
     Ok(CommitOutcome {
         repo_index: target.repo_index,
         before_sha: target.before_sha.clone(),
         sha,
+        author,
     })
 }
 

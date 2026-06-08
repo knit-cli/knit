@@ -823,6 +823,15 @@ fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
         bundle["repos"][0]["headSha"].as_str(),
         Some(group_sha.as_str())
     );
+    assert_eq!(
+        bundle["commitGroups"][0]["author"]["email"].as_str(),
+        Some("knit@example.test"),
+        "commit group should record the git author email"
+    );
+    assert_eq!(
+        bundle["commitGroups"][0]["author"]["name"].as_str(),
+        Some("Knit Smoke")
+    );
 
     bundle["repos"][0]["headSha"] = json!(base_sha);
     fs::write(

@@ -1,3 +1,4 @@
+use crate::model::CommitAuthor;
 use anyhow::{bail, Context, Result};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -83,6 +84,26 @@ pub fn rev_parse(cwd: &Path, reference: &str) -> Result<String> {
     Ok(git_output(cwd, ["rev-parse", reference])?
         .trim()
         .to_string())
+}
+
+/// Reads the recorded Git author (name + email) of a commit. Reads the actual
+/// commit, so it reflects per-repo `user.name`/`user.email` rather than guessing.
+pub fn commit_author(cwd: &Path, sha: &str) -> Result<CommitAuthor> {
+    let output = git_output(
+        cwd,
+        [
+            OsString::from("show"),
+            OsString::from("-s"),
+            OsString::from("--format=%an%n%ae"),
+            OsString::from(sha),
+        ],
+    )?;
+
+    let mut lines = output.lines();
+    let name = lines.next().unwrap_or_default().trim().to_string();
+    let email = lines.next().unwrap_or_default().trim().to_string();
+
+    Ok(CommitAuthor { name, email })
 }
 
 pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<String>> {

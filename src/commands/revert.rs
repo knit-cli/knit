@@ -1,7 +1,7 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch};
-use crate::git::{git_output, rev_parse};
+use crate::git::{commit_author, git_output, rev_parse};
 use crate::ids::{revert_group_id, revert_plan_id, short_sha};
-use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
+use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
 use crate::output as out;
 use crate::providers::{self, pr_number_from_url, publication_for_repo, PrTarget, PullRequest};
 use crate::selectors::resolve_log_node;
@@ -128,6 +128,7 @@ fn apply_local_revert(active: &mut ActiveBundle, plan: &RevertPlan, path: PathBu
     );
     let mut commits = Vec::new();
     let mut repo_changes = Vec::new();
+    let mut group_author: Option<CommitAuthor> = None;
 
     for repo_plan in &plan.repos {
         let (repo_index, worktree) = repo_context(active, &repo_plan.repo_id)?;
@@ -162,6 +163,11 @@ fn apply_local_revert(active: &mut ActiveBundle, plan: &RevertPlan, path: PathBu
 
         let sha = rev_parse(&worktree, "HEAD")
             .with_context(|| format!("{}: failed to read revert commit sha", repo_plan.repo_id))?;
+        if group_author.is_none() {
+            group_author = Some(commit_author(&worktree, &sha).with_context(|| {
+                format!("{}: failed to read revert commit author", repo_plan.repo_id)
+            })?);
+        }
         println!(
             "{}: {} {}",
             out::repo(&repo_plan.repo_id),
@@ -192,6 +198,7 @@ fn apply_local_revert(active: &mut ActiveBundle, plan: &RevertPlan, path: PathBu
         message: logical_message.clone(),
         created_at: created_at.clone(),
         commits: commits.clone(),
+        author: group_author,
     });
     active.bundle.nodes.push(BundleNode::revert_group(
         group_id.clone(),
