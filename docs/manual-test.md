@@ -32,11 +32,11 @@ git -C docs add app.txt
 git -C docs commit -m "Initial docs"
 
 cd workspace
-knit project init venues
+knit init venues
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
-knit bundle start "venue capacity"
+knit bundle "venue capacity"
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
@@ -59,7 +59,7 @@ Expected result:
 
 - `.knit/projects/venues.project.json` exists with `backend` and `frontend` included by default and `docs` observed.
 - `.knit/bundles/venue-capacity.bundle.json` exists.
-- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit bundle start`.
+- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit bundle`.
 - `.knit/worktrees/venue-capacity/backend` and `.knit/worktrees/venue-capacity/frontend` exist, while `docs` is not tracked until explicitly added.
 - `knit add` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged checkout.
@@ -108,7 +108,7 @@ Expected result: `knit status` reports `rewound commits: 1` for `frontend`, `kni
 To test parallel bundles over the same repo:
 
 ```sh
-knit bundle start "backend only" --repo backend
+knit bundle "backend only" --repo backend
 knit bundle list
 
 knit status

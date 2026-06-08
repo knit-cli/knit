@@ -368,7 +368,7 @@ knit log
 Projects are reusable repo templates. Most ongoing work should start from a project:
 
 ```sh
-knit project init my-project
+knit init my-project
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
@@ -378,7 +378,7 @@ knit bundle "feature title"
 
 A bundle is the cross-repo analogue of a git branch: `knit bundle "feature title"`
 creates one (like `git branch <name>`), `knit bundle` alone shows the current one, and
-`knit bundle start ... <flags>` is the long form when you need `--project`/`--repo`/`--view`/`--cd`.
+creation flags go straight on it, e.g. `knit bundle "feature title" --project x --repo backend`.
 
 For ad-hoc bundles, create a bundle and add local repositories directly:
 
@@ -390,11 +390,11 @@ knit bundle add ../backend ../frontend ../scraper
 For parallel work, use separate bundles. The same repo can appear in many bundles; each bundle gets its own `knit/<bundle>` branch and `.knit/worktrees/<bundle>/<repo>/` checkout:
 
 ```sh
-knit bundle start "feature a" --repo backend
-knit bundle start "feature b" --repo backend
+knit bundle "feature a" --repo backend
+knit bundle "feature b" --repo backend
 ```
 
-Use `knit bundle start "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
 
@@ -402,7 +402,7 @@ Each user can save named views (bundle shapes) as include/exclude deltas over th
 knit view save backend --exclude frontend,docs
 knit view default backend
 knit bundle "feature title"                    # uses the default view
-knit bundle start "feature title" --view frontend --include docs
+knit bundle "feature title" --view frontend --include docs
 knit bundle add docs                           # materialize a repo into the live bundle
 knit bundle remove frontend                    # tear down its worktree
 knit bundle apply-view backend                 # reshape the live bundle to a saved view
@@ -516,11 +516,11 @@ knit cherrypick --from feature-a --repo backend abc123
 
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` creates a bundle (the git-branch-style shorthand).
-- `knit bundle start "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
+- `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip).
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
-- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for `knit bundle start`.
+- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
 - `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit view push`/`knit view pull` sync them to KnitHub.
 - `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
 - `knit bundle split <bundle> <selector>...` creates a fresh bundle and cherry-picks selected source commits into it.

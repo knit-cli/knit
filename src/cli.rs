@@ -25,6 +25,14 @@ pub enum FetchMode {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Initialize a reusable project repo template (like `git init`, for a project).
+    Init {
+        /// Project name.
+        name: String,
+        /// Write or refresh project-specific AGENTS.md guidance.
+        #[arg(long)]
+        agents: bool,
+    },
     /// Manage reusable project repo templates.
     Project {
         #[command(subcommand)]
@@ -86,8 +94,44 @@ pub enum Commands {
         /// Optional repo selectors or pathspecs.
         args: Vec<String>,
     },
-    /// Inspect the resolved bundle, or create one: `knit bundle "feature title"`.
+    /// Show the resolved bundle, create one (`knit bundle "feature title"`), or manage it.
+    #[command(args_conflicts_with_subcommands = true)]
     Bundle {
+        /// Title of a new bundle to create. With no title and no subcommand, shows the current bundle.
+        title: Option<String>,
+        /// Project template to use. Defaults to the active project when present.
+        #[arg(long)]
+        project: Option<String>,
+        /// Project repo id to include. Repeat to include several repos.
+        #[arg(long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Include every project repo, including observed repos.
+        #[arg(long)]
+        all_repos: bool,
+        /// Apply a saved view (named bundle shape). Conflicts with --repo/--all-repos.
+        #[arg(long, value_name = "NAME")]
+        view: Option<String>,
+        /// Add a project repo on top of the resolved set. Repeatable.
+        #[arg(long = "include", value_name = "REPO")]
+        include: Vec<String>,
+        /// Drop a repo from the resolved set. Repeatable.
+        #[arg(long = "exclude", value_name = "REPO")]
+        exclude: Vec<String>,
+        /// Only update the bundle; do not create branches or worktrees.
+        #[arg(long)]
+        no_worktree: bool,
+        /// Use each original repo checkout directly instead of creating a Knit worktree.
+        #[arg(long)]
+        in_place: bool,
+        /// Replace an existing bundle with the same slug.
+        #[arg(long)]
+        force: bool,
+        /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
+        #[arg(long)]
+        agents: bool,
+        /// Start a shell in .knit/worktrees/<bundle>. Pass a repo selector to cd into that repo checkout instead.
+        #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
+        cd: Option<String>,
         #[command(subcommand)]
         command: Option<BundleCommand>,
     },
@@ -446,49 +490,8 @@ pub enum HistoryCommand {
 
 #[derive(Subcommand)]
 pub enum BundleCommand {
-    /// Create a new feature bundle.
-    Start {
-        /// Human-readable feature title.
-        title: String,
-        /// Project template to use. Defaults to the active project when present.
-        #[arg(long)]
-        project: Option<String>,
-        /// Project repo id to include. Repeat to include several repos.
-        #[arg(long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-        /// Include every project repo, including observed repos.
-        #[arg(long)]
-        all_repos: bool,
-        /// Apply a saved view (named bundle shape). Conflicts with --repo/--all-repos.
-        #[arg(long, value_name = "NAME")]
-        view: Option<String>,
-        /// Add a project repo on top of the resolved set. Repeatable.
-        #[arg(long = "include", value_name = "REPO")]
-        include: Vec<String>,
-        /// Drop a repo from the resolved set. Repeatable.
-        #[arg(long = "exclude", value_name = "REPO")]
-        exclude: Vec<String>,
-        /// Only update the bundle; do not create branches or worktrees.
-        #[arg(long)]
-        no_worktree: bool,
-        /// Use each original repo checkout directly instead of creating a Knit worktree.
-        #[arg(long)]
-        in_place: bool,
-        /// Replace an existing bundle with the same slug.
-        #[arg(long)]
-        force: bool,
-        /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
-        #[arg(long)]
-        agents: bool,
-        /// Start a shell in .knit/worktrees/<bundle>. Pass a repo selector to cd into that repo checkout instead.
-        #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
-        cd: Option<String>,
-    },
     /// Materialize per-repo worktrees for the resolved bundle.
     Worktree,
-    /// Create a bundle titled from these words. Shorthand for `bundle start "<title>"`.
-    #[command(external_subcommand)]
-    Create(Vec<String>),
     /// Add repos or project repo ids to the current bundle.
     Add {
         /// Paths to local git repositories or project repo ids.
@@ -680,14 +683,6 @@ pub enum BundleCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
-    /// Create a project repo template.
-    Init {
-        /// Project name.
-        name: String,
-        /// Write or refresh project-specific AGENTS.md guidance.
-        #[arg(long)]
-        agents: bool,
-    },
     /// Add or update a repo in the active project.
     Add {
         /// Stable repo id inside the project.
@@ -983,7 +978,7 @@ pub enum ViewCommand {
         #[arg(long)]
         project: Option<String>,
     },
-    /// Set or clear the default view applied by bare `knit bundle start`.
+    /// Set or clear the default view applied by new bundles.
     Default {
         /// View name to make the default.
         name: Option<String>,

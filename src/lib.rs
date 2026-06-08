@@ -27,8 +27,8 @@ pub use cli::{
 pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
     match cli.command {
+        Commands::Init { name, agents } => commands::init_project(&name, agents),
         Commands::Project { command } => match command {
-            ProjectCommand::Init { name, agents } => commands::init_project(&name, agents),
             ProjectCommand::Add {
                 repo_id,
                 repo_path,
@@ -224,44 +224,39 @@ pub fn run(cli: Cli) -> Result<()> {
             update,
             args,
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
-        Commands::Bundle { command } => match command {
-            None => commands::show_current_bundle(),
+        Commands::Bundle {
+            title,
+            project,
+            repos,
+            all_repos,
+            view,
+            include,
+            exclude,
+            no_worktree,
+            in_place,
+            force,
+            agents,
+            cd,
+            command,
+        } => match command {
+            None => match title {
+                Some(title) => commands::start_bundle(
+                    &title,
+                    project.as_deref(),
+                    &repos,
+                    all_repos,
+                    view.as_deref(),
+                    &include,
+                    &exclude,
+                    !no_worktree,
+                    in_place,
+                    force,
+                    agents,
+                    cd.as_deref(),
+                ),
+                None => commands::show_current_bundle(),
+            },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
-            Some(BundleCommand::Create(words)) => {
-                if let Some(flag) = words.iter().find(|word| word.starts_with('-')) {
-                    anyhow::bail!(
-                        "`knit bundle \"<title>\"` is the no-flag shorthand; `{flag}` looks like a flag. Use `knit bundle start \"<title>\" {flag} ...` for the flagful form."
-                    );
-                }
-                commands::init_bundle(&words.join(" "), false, false)
-            }
-            Some(BundleCommand::Start {
-                title,
-                project,
-                repos,
-                all_repos,
-                view,
-                include,
-                exclude,
-                no_worktree,
-                in_place,
-                force,
-                agents,
-                cd,
-            }) => commands::start_bundle(
-                &title,
-                project.as_deref(),
-                &repos,
-                all_repos,
-                view.as_deref(),
-                &include,
-                &exclude,
-                !no_worktree,
-                in_place,
-                force,
-                agents,
-                cd.as_deref(),
-            ),
             Some(BundleCommand::Add {
                 repos,
                 base,

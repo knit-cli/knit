@@ -499,7 +499,7 @@ knit project show {project_id}
 Start most new `{project_id}` work with:
 
 ```sh
-knit bundle start "feature title" --project {project_id}
+knit bundle "feature title" --project {project_id}
 ```
 
 That command adds these default repos from the project data:
@@ -510,7 +510,7 @@ For narrower or unusual work, inspect the project first and then choose repo ids
 
 ```sh
 knit project show {project_id}
-knit bundle start "feature title" --project {project_id} --repo <repo-id>
+knit bundle "feature title" --project {project_id} --repo <repo-id>
 ```
 
 Before changing a file or subsystem, use project history to find Knit-managed work that previously touched it and see any cross-repo companion commits:

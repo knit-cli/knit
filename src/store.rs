@@ -73,7 +73,7 @@ pub fn load_active_bundle_for_update() -> Result<ActiveBundle> {
 fn load_active_bundle_inner(lock_for_update: bool) -> Result<ActiveBundle> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd)
-        .context("No Knit workspace found. Run `knit bundle start \"feature title\"` first.")?;
+        .context("No Knit workspace found. Run `knit bundle \"feature title\"` first.")?;
     let config = load_config(&root)?;
     let (bundle_id, resolution_source) = resolve_bundle_id(&root, &cwd, &config)?;
     let bundle_path = root
@@ -362,7 +362,7 @@ fn resolve_bundle_id(
         return Ok((bundle_id.clone(), BundleResolutionSource::Config));
     }
 
-    bail!("No active Knit bundle found. Run `knit bundle start \"feature title\"` first.")
+    bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first.")
 }
 
 pub fn ensure_workspace_fallback_status_is_unambiguous(active: &ActiveBundle) -> Result<()> {
