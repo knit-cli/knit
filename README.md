@@ -26,7 +26,7 @@ Gloss reads a bundle later and produces review/ranking/explanation output. Gloss
 
 ## Storage
 
-Knit stores local state under the directory where `knit project init`, or `knit bundle start` first creates a workspace:
+Knit stores local state under the directory where `knit init`, or `knit bundle` first creates a workspace:
 
 ```txt
 .knit/
@@ -67,18 +67,18 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 From a workspace folder that sits beside your local repos:
 
 ```sh
-knit project init venues
+knit init venues
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add scraper ../scraper --observe
 knit project command set dev --repo frontend -- docker compose up
-knit bundle start "venue capacity" --agents
+knit bundle "venue capacity" --agents
 ```
 
 For one-off work without a project, start a bundle and add repos directly:
 
 ```sh
-knit bundle start "venue capacity"
+knit bundle "venue capacity"
 knit bundle add ../backend ../frontend ../scraper
 ```
 
@@ -97,7 +97,7 @@ For a one-step stage-and-commit:
 knit commit --stage -m "Add venue capacity integration"
 ```
 
-The created bundle is printed by `knit bundle start` and lives at:
+The created bundle is printed by `knit bundle` and lives at:
 
 ```txt
 .knit/bundles/venue-capacity.bundle.json
@@ -108,7 +108,7 @@ Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, 
 ## Commands
 
 ```sh
-knit project init <name> [--agents]
+knit init <name> [--agents]
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
 knit project agents [name]
 knit project command set <name> [--repo <repo>]... [--cwd <path>] [--env KEY=VALUE]... -- <command> [args...]
@@ -130,7 +130,7 @@ knit view push [--project <name>] [--remote <name>]
 knit view pull [--project <name>] [--remote <name>]
 knit bundle                          # show the resolved bundle
 knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
-knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
+knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
@@ -198,14 +198,14 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
 
-A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and `knit bundle start` is the long form when you need flags. Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, `reset`, …) live at the top level; bundle/repo management lives under `knit bundle`.
+A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and creation flags go straight on it, e.g. `knit bundle "<title>" --project <name> --repo <repo>`. A project is initialized once with `knit init <name>` (like `git init`). Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, `reset`, …) live at the top level; bundle/repo management lives under `knit bundle`.
 
 ## Projects And Bundles
 
 Projects are optional repo templates. They remove the repetitive step of adding the same repo set for every bundle:
 
 ```sh
-knit project init venues
+knit init venues
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
@@ -233,12 +233,12 @@ A project's repo list is shared by everyone, with `--observe` marking repos kept
 ```sh
 knit view save backend --exclude frontend,docs
 knit view save frontend --include design-system --exclude backend
-knit view default backend            # bare `knit bundle start` now uses this shape
+knit view default backend            # bare `knit bundle` now uses this shape
 knit view list                       # `*` marks the default
 knit view show frontend --repos      # print the repos this view resolves to
 ```
 
-`knit bundle start "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle start "x" --view backend --include docs` and `knit bundle start "y" --all-repos --exclude sej` both work.
+`knit bundle "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle "x" --view backend --include docs` and `knit bundle "y" --all-repos --exclude sej` both work.
 
 A live bundle can be reshaped at any time, with the worktree consequences:
 
@@ -281,16 +281,16 @@ Projects can define a default landing template. `knit land plan` expands it into
 
 Deployment entries are first-class landing steps. Command deployments run without a shell unless the command explicitly invokes one, and a deployment checkout uses a managed `.knit/land-worktrees/<bundle>/<repo>/<branch>/` checkout so the feature worktree is not switched away from its Knit branch. `update: "pull"` and `update: "fetch"` both refresh the managed checkout from the configured remote branch before running the command.
 
-Default project repos are included by `knit bundle start`; observed repos are available by id but are not branched or tracked until added explicitly:
+Default project repos are included by `knit bundle`; observed repos are available by id but are not branched or tracked until added explicitly:
 
 ```sh
-knit bundle start "venue capacity"
+knit bundle "venue capacity"
 knit bundle add docs
 ```
 
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
 
-Use `knit bundle start "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 
@@ -328,7 +328,7 @@ knit bundle split feature-x abc123 def456 --repo backend --repo frontend --title
 
 Generated worktrees get local `AGENTS.md` guidance by default: one bundle-wide guide at `.knit/worktrees/<bundle>/AGENTS.md`, plus repo-local guides inside each generated repo checkout. Those worktree guides assume the agent opened the generated worktree folder directly, so their examples rely on cwd and do not include `--bundle`.
 
-Use `knit bundle start "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit project init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+Use `knit bundle "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
 
 Use `knit bundle add --in-place` or `knit bundle add --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
