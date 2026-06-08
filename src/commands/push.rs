@@ -77,7 +77,7 @@ pub fn push_repos(
 fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Result<PushSuccess> {
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit worktree`.",
+            "{}: no feature branch recorded. Run `knit bundle worktree`.",
             repo.id
         )
     })?;

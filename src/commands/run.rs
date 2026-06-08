@@ -236,7 +236,7 @@ fn run_invocation(active: &ActiveBundle, invocation: RunInvocation) -> Result<()
 fn command_cwd(active: &ActiveBundle, repo: &RepoEntry, subdir: Option<&str>) -> Result<PathBuf> {
     let checkout = checkout_dir(active, repo).with_context(|| {
         format!(
-            "{} has no active checkout. Run `knit worktree` to materialize it.",
+            "{} has no active checkout. Run `knit bundle worktree` to materialize it.",
             repo.id
         )
     })?;

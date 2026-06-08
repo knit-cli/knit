@@ -159,7 +159,7 @@ fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
     let repo = &active.bundle.repos[index];
     checkout_dir(active, repo).with_context(|| {
         format!(
-            "{} has no materialized checkout. Run `knit worktree` first.",
+            "{} has no materialized checkout. Run `knit bundle worktree` first.",
             repo.id
         )
     })
@@ -373,13 +373,17 @@ knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
 knit project command set dev --repo frontend -- docker compose up
-knit bundle start "feature title"
+knit bundle "feature title"
 ```
 
-For ad-hoc bundles, start a bundle and add local repositories directly:
+A bundle is the cross-repo analogue of a git branch: `knit bundle "feature title"`
+creates one (like `git branch <name>`), `knit bundle` alone shows the current one, and
+`knit bundle start ... <flags>` is the long form when you need `--project`/`--repo`/`--view`/`--cd`.
+
+For ad-hoc bundles, create a bundle and add local repositories directly:
 
 ```sh
-knit bundle start "feature title"
+knit bundle "feature title"
 knit bundle add ../backend ../frontend ../scraper
 ```
 
@@ -397,10 +401,10 @@ Each user can save named views (bundle shapes) as include/exclude deltas over th
 ```sh
 knit view save backend --exclude frontend,docs
 knit view default backend
-knit bundle start "feature title"              # uses the default view
+knit bundle "feature title"                    # uses the default view
 knit bundle start "feature title" --view frontend --include docs
-knit bundle include docs                       # materialize a repo into the live bundle
-knit bundle exclude frontend                   # tear down its worktree, keep the branch
+knit bundle add docs                           # materialize a repo into the live bundle
+knit bundle remove frontend                    # tear down its worktree
 knit bundle apply-view backend                 # reshape the live bundle to a saved view
 ```
 
@@ -511,12 +515,10 @@ knit cherrypick --from feature-a --repo backend abc123
 ## Useful Commands
 
 - `knit bundle` shows the resolved bundle and where it came from.
-- `knit bundle start "Feature title"` creates a bundle.
-- `knit bundle start "Feature title" --cd` creates a bundle and starts a shell in `.knit/worktrees/<bundle>`.
-- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle.
-- `knit bundle remove --repo <repo-id>` removes repos from the current bundle while leaving branches and checkouts in place.
-- `knit bundle include <repo>...` adds project repos to the current bundle and materializes their worktrees.
-- `knit bundle exclude <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
+- `knit bundle "Feature title"` creates a bundle (the git-branch-style shorthand).
+- `knit bundle start "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
+- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip).
+- `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
 - `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for `knit bundle start`.
 - `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit view push`/`knit view pull` sync them to KnitHub.
@@ -533,10 +535,10 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
 - `knit bundle prune` refreshes GitHub PR states and lists clean dead-work bundles with no recorded open PRs.
 - `knit bundle prune --no-refresh` performs the same scan using cached recorded PR states only.
-- `knit prune --apply --worktrees --branches` is the short form for deleting dead bundle artifacts and their generated local state.
-- `knit prune --apply --all` removes dead bundle artifacts, generated and orphaned worktrees, local feature branches, matching `origin` branches, and matching KnitHub remote bundle records.
+- `knit bundle prune --apply --worktrees --branches` is the short form for deleting dead bundle artifacts and their generated local state.
+- `knit bundle prune --apply --all` removes dead bundle artifacts, generated and orphaned worktrees, local feature branches, matching `origin` branches, and matching KnitHub remote bundle records.
 - Remote bundle cleanup uses the configured KnitHub sync remote and requires a token with `bundle:delete`.
-- `knit bundle switch <bundle>` changes the workspace or folder fallback bundle.
+- `knit switch <bundle>` changes the workspace or folder fallback bundle (`--workspace`/`--here` to target one explicitly).
 - `knit project remove <project> --force` removes a reusable project template artifact.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
 - `knit run --repo <repo> -- <command>` runs a one-off command inside a tracked checkout.
@@ -551,20 +553,17 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
 - `knit config set sync-remotes local,knithub` makes push-sync upload bundle artifacts to multiple KnitHub remotes.
-- `knit switch <bundle>` is the short alias for bundle switching.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
 - `knit push --remote local --remote knithub` pushes the resolved bundle to both configured KnitHub remotes so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit checkpoint "note"` records non-Git progress in the bundle ledger.
-- `knit close --reason "merged"` marks the bundle closed without deleting branches or worktrees.
+- `knit bundle close --reason "merged"` marks the bundle closed without deleting branches or worktrees.
 - `knit status` still shows a closed bundle's worktrees and branches while they remain on disk.
 - `knit clean --closed --worktrees` removes generated worktrees for closed bundles while preserving local feature branches.
 
 Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
-
-Aliases such as `knit init "feature title"` and `knit track ../backend` are also supported.
 
 ## Knit And Gloss
 

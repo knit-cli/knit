@@ -47,7 +47,7 @@ pub fn ensure_expected_branch(repo: &RepoEntry, checkout_dir: &Path) -> Result<(
 
     let Some(expected) = &repo.feature_branch else {
         bail!(
-            "{}: in-place repo has no feature branch recorded. Run `knit worktree` to repair it.",
+            "{}: in-place repo has no feature branch recorded. Run `knit bundle worktree` to repair it.",
             repo.id
         );
     };
