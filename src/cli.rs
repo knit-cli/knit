@@ -162,10 +162,6 @@ pub enum Commands {
         /// Apply pruning after listing candidate bundles.
         #[arg(long)]
         apply: bool,
-        /// Deprecated alias for --apply.
-        #[arg(long)]
-        #[arg(hide = true)]
-        force: bool,
         /// Refresh recorded PR states from GitHub before deciding. This is the default.
         #[arg(long, conflicts_with = "no_refresh")]
         refresh: bool,
@@ -184,6 +180,9 @@ pub enum Commands {
         /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
         #[arg(long)]
         worktrees: bool,
+        /// Pass --force to git worktree remove and discard uncommitted work in orphan worktree dirs.
+        #[arg(long, requires = "worktrees")]
+        force: bool,
         /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
         #[arg(long)]
         branches: bool,
@@ -693,10 +692,6 @@ pub enum BundleCommand {
         /// Apply pruning after listing candidate bundles.
         #[arg(long)]
         apply: bool,
-        /// Deprecated alias for --apply.
-        #[arg(long)]
-        #[arg(hide = true)]
-        force: bool,
         /// Refresh recorded PR states from GitHub before deciding. This is the default.
         #[arg(long, conflicts_with = "no_refresh")]
         refresh: bool,
@@ -715,6 +710,9 @@ pub enum BundleCommand {
         /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
         #[arg(long)]
         worktrees: bool,
+        /// Pass --force to git worktree remove and discard uncommitted work in orphan worktree dirs.
+        #[arg(long, requires = "worktrees")]
+        force: bool,
         /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
         #[arg(long)]
         branches: bool,

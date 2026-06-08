@@ -3946,8 +3946,9 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     let preview = knit(&workspace, ["prune", "--no-refresh", "--worktrees"]);
     assert!(preview.contains("Orphan worktree candidates"));
     assert!(preview.contains("empty-orphan"));
+    assert!(preview.contains("Blocked orphan worktrees"));
     assert!(preview.contains("dirty-orphan"));
-    assert!(preview.contains("pending files, preserved"));
+    assert!(preview.contains("--force"));
     assert!(!preview.contains("dirty-active"));
 
     let pruned = knit(
@@ -3957,6 +3958,20 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     assert!(pruned.contains("removed orphan worktree"));
     assert!(!workspace.join(".knit/worktrees/empty-orphan").exists());
     assert!(dirty_orphan.exists());
+    assert!(active_feature.exists());
+
+    let forced = knit(
+        &workspace,
+        [
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--worktrees",
+            "--force",
+        ],
+    );
+    assert!(forced.contains("removed orphan worktree"));
+    assert!(!dirty_orphan.exists());
     assert!(active_feature.exists());
     assert!(workspace
         .join(".knit/bundles/dirty-active.bundle.json")
