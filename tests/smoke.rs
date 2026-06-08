@@ -31,7 +31,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("requires a token with `bundle:delete`"));
     assert!(agents.contains("knit project remove <project> --force"));
     assert!(agents.contains("knit --bundle feature-a commit"));
-    assert!(agents.contains("knit --bundle feature-a commit --stage"));
+    assert!(agents.contains("knit --bundle feature-a commit --all"));
     assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
     assert!(agents.contains("Project JSON can define a default `landing` template"));
     assert!(agents.contains(".knit/land-plans/<bundle>.land.json"));
@@ -730,7 +730,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(backend_agents.contains("Knit Worktree Guide"));
     assert!(backend_agents.contains("bundle `agent-docs`"));
     assert!(backend_agents.contains("repo `backend`"));
-    assert!(backend_agents.contains("knit commit --stage"));
+    assert!(backend_agents.contains("knit commit --all"));
     assert!(backend_agents.contains("knit push --set-upstream"));
     assert!(!backend_agents.contains("knit --bundle"));
     assert!(backend_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
@@ -758,7 +758,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
         fs::read_to_string(workspace.join(".knit/worktrees/agent-docs-two/backend/AGENTS.md"))
             .unwrap();
     assert!(second_agents.contains("bundle `agent-docs-two`"));
-    assert!(second_agents.contains("knit commit --stage"));
+    assert!(second_agents.contains("knit commit --all"));
     assert!(second_agents.contains("knit push --set-upstream"));
     assert!(!second_agents.contains("knit --bundle"));
 
@@ -809,7 +809,7 @@ fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
     .unwrap();
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Add venue capacity integration"],
+        ["commit", "--all", "-m", "Add venue capacity integration"],
     );
 
     let bundle_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
@@ -928,11 +928,11 @@ fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
     let test_checkout = workspace.join(".knit/worktrees/test/backend");
     fs::write(test_checkout.join("test.md"), "test\n").unwrap();
     assert!(
-        knit_fails(&workspace, ["commit", "--stage", "-m", "Add test"])
+        knit_fails(&workspace, ["commit", "--all", "-m", "Add test"])
             .contains("multiple open bundles")
     );
 
-    let commit = knit(&test_checkout, ["commit", "--stage", "-m", "Add test"]);
+    let commit = knit(&test_checkout, ["commit", "--all", "-m", "Add test"]);
     assert!(commit.contains("Recorded commit group"));
 
     let test_bundle: Value = serde_json::from_str(
@@ -1087,7 +1087,7 @@ fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
             "--bundle",
             "feature-x",
             "commit",
-            "--stage",
+            "--all",
             "-m",
             "Feature X",
         ],
@@ -1106,7 +1106,7 @@ fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
             "--bundle",
             "feature-y",
             "commit",
-            "--stage",
+            "--all",
             "-m",
             "Feature Y",
         ],
@@ -1157,7 +1157,7 @@ fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
             "--bundle",
             "feature-x",
             "commit",
-            "--stage",
+            "--all",
             "-m",
             "Feature X",
         ],
@@ -1176,7 +1176,7 @@ fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
             "--bundle",
             "feature-y",
             "commit",
-            "--stage",
+            "--all",
             "-m",
             "Feature Y",
         ],
@@ -1290,7 +1290,7 @@ fn merge_fetch_push_status_and_target_locks_work() {
     .unwrap();
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Feature merge push"],
+        ["commit", "--all", "-m", "Feature merge push"],
     );
 
     fs::create_dir_all(workspace.join(".knit/locks")).unwrap();
@@ -1818,7 +1818,7 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
         &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
         "feature frontend",
     );
-    knit(&workspace, ["commit", "--stage", "-m", "Feature change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Feature change"]);
     let bundle = read_bundle(&workspace);
     let feature_backend_sha = bundle["nodes"]
         .as_array()
@@ -2099,7 +2099,7 @@ fn push_sends_feature_branch_and_can_set_upstream() {
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
 
     append_line(&feature.join("app.txt"), "feature push");
-    knit(&workspace, ["commit", "--stage", "-m", "Feature push"]);
+    knit(&workspace, ["commit", "--all", "-m", "Feature push"]);
     let first_sha = git(&feature, ["rev-parse", "HEAD"]);
 
     let push = knit(&workspace, ["push", "backend"]);
@@ -2114,7 +2114,7 @@ fn push_sends_feature_branch_and_can_set_upstream() {
     append_line(&feature.join("app.txt"), "feature push with upstream");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Feature push with upstream"],
+        ["commit", "--all", "-m", "Feature push with upstream"],
     );
     let second_sha = git(&feature, ["rev-parse", "HEAD"]);
 
@@ -2161,7 +2161,7 @@ fn push_sends_selected_feature_branches_in_parallel() {
 
     append_line(&backend_feature.join("app.txt"), "parallel backend push");
     append_line(&frontend_feature.join("app.txt"), "parallel frontend push");
-    knit(&workspace, ["commit", "--stage", "-m", "Parallel push"]);
+    knit(&workspace, ["commit", "--all", "-m", "Parallel push"]);
     let backend_sha = git(&backend_feature, ["rev-parse", "HEAD"]);
     let frontend_sha = git(&frontend_feature, ["rev-parse", "HEAD"]);
 
@@ -2221,7 +2221,7 @@ fn commit_stages_and_commits_repos_in_parallel() {
 
     let commit = knit(
         &workspace,
-        ["commit", "--stage", "-m", "Parallel commit"],
+        ["commit", "--all", "-m", "Parallel commit"],
     );
     assert!(commit.contains("backend"));
     assert!(commit.contains("frontend"));
@@ -2253,7 +2253,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
     append_line(&backend_feature.join("app.txt"), "backend PR change");
     append_line(&frontend_feature.join("app.txt"), "frontend PR change");
-    knit(&workspace, ["commit", "--stage", "-m", "PR change"]);
+    knit(&workspace, ["commit", "--all", "-m", "PR change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -2341,7 +2341,7 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Artifact PR change"],
+        ["commit", "--all", "-m", "Artifact PR change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -2425,7 +2425,7 @@ fn artifact_pr_create_can_use_curl_ipv4_transport() {
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Artifact PR change"],
+        ["commit", "--all", "-m", "Artifact PR change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -2506,7 +2506,7 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Artifact PR change"],
+        ["commit", "--all", "-m", "Artifact PR change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -2574,7 +2574,7 @@ fn artifact_land_apply_can_use_curl_ipv4_transport() {
     append_line(&backend_feature.join("app.txt"), "artifact land change");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Artifact land change"],
+        ["commit", "--all", "-m", "Artifact land change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -2666,7 +2666,7 @@ fn pr_create_can_override_base_branch() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/release-target/backend");
     append_line(&backend_feature.join("app.txt"), "release PR change");
-    knit(&workspace, ["commit", "--stage", "-m", "Release PR change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Release PR change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -2739,7 +2739,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
         "frontend land",
     );
-    knit(&workspace, ["commit", "--stage", "-m", "Landing change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Landing change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -2915,7 +2915,7 @@ fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
         &workspace.join(".knit/worktrees/venue-capacity/frontend/app.txt"),
         "frontend land",
     );
-    knit(&workspace, ["commit", "--stage", "-m", "Landing change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Landing change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -3084,7 +3084,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     );
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Project landing change"],
+        ["commit", "--all", "-m", "Project landing change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -3144,7 +3144,7 @@ fn land_update_merges_base_and_records_explicit_node() {
 
     let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
     append_line(&backend_feature.join("app.txt"), "backend feature update");
-    knit(&workspace, ["commit", "--stage", "-m", "Feature update"]);
+    knit(&workspace, ["commit", "--all", "-m", "Feature update"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -3227,7 +3227,7 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     );
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Landing resume change"],
+        ["commit", "--all", "-m", "Landing resume change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -3293,7 +3293,7 @@ fn land_apply_refuses_draft_publications() {
     );
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Draft landing change"],
+        ["commit", "--all", "-m", "Draft landing change"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -3334,7 +3334,7 @@ fn land_apply_stops_when_required_checks_fail() {
     );
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Check failure landing"],
+        ["commit", "--all", "-m", "Check failure landing"],
     );
 
     let fake_gh_dir = root.join("fake-gh");
@@ -3374,7 +3374,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
         &workspace.join(".knit/worktrees/docs-cleanup/backend/app.txt"),
         "docs cleanup landing",
     );
-    knit(&workspace, ["commit", "--stage", "-m", "Docs cleanup"]);
+    knit(&workspace, ["commit", "--all", "-m", "Docs cleanup"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -3525,7 +3525,7 @@ fn clean_removes_plans_and_generated_worktrees_only() {
     let worktree = workspace.join(".knit/worktrees/venue-capacity/backend");
 
     append_line(&worktree.join("app.txt"), "clean test change");
-    knit(&workspace, ["commit", "--stage", "-m", "Clean test change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Clean test change"]);
     knit(&workspace, ["revert", "HEAD"]);
     assert!(workspace.join(".knit/revert-plans").exists());
 
@@ -3573,7 +3573,7 @@ fn bundle_delete_can_remove_generated_worktrees_and_force_delete_branches() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let worktree = workspace.join(".knit/worktrees/throwaway/backend");
     append_line(&worktree.join("app.txt"), "throwaway change");
-    knit(&workspace, ["commit", "--stage", "-m", "Throwaway change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Throwaway change"]);
     assert!(git(&backend, ["branch", "--list", "knit/throwaway"]).contains("knit/throwaway"));
 
     let safe_delete = knit_fails(
@@ -3639,7 +3639,7 @@ fn delete_recovers_generated_worktree_when_recorded_path_was_lost() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let worktree = workspace.join(".knit/worktrees/throwaway/backend");
     append_line(&worktree.join("app.txt"), "throwaway change");
-    knit(&workspace, ["commit", "--stage", "-m", "Throwaway change"]);
+    knit(&workspace, ["commit", "--all", "-m", "Throwaway change"]);
 
     // Simulate the post-localize state: the recorded worktree path is gone.
     let bundle_path = workspace.join(".knit/bundles/throwaway.bundle.json");
@@ -4007,7 +4007,7 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
     append_line(&feature.join("app.txt"), "remote cleanup change");
     knit(
         &workspace,
-        ["commit", "--stage", "-m", "Remote cleanup change"],
+        ["commit", "--all", "-m", "Remote cleanup change"],
     );
     git(&feature, ["push", "origin", "knit/remote-cleanup"]);
     assert!(git_success(
@@ -4144,7 +4144,7 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     assert!(diff.contains("backend"));
     assert!(diff.contains("app.txt"));
 
-    knit(&workspace, ["commit", "--stage", "-m", "In-place feature"]);
+    knit(&workspace, ["commit", "--all", "-m", "In-place feature"]);
     assert!(git(&backend, ["log", "-1", "--pretty=%B"]).contains("In-place feature"));
 
     git(&backend, ["checkout", "main"]);
