@@ -321,16 +321,18 @@ pub fn run(cli: Cli) -> Result<()> {
             }) => {
                 let refresh = refresh || !no_refresh;
                 let worktrees = all || worktrees;
+                let force = all || force;
                 let branches = all || branches;
                 let force_branches = all || force_branches;
                 let remote_branches = all || remote_branches;
                 let remote_bundles = all || remote_bundles;
                 commands::prune_merged_bundles(
-                    apply || force,
+                    apply,
                     refresh,
                     untracked,
                     report,
                     worktrees,
+                    force,
                     branches,
                     force_branches,
                     remote_branches,
@@ -416,16 +418,18 @@ pub fn run(cli: Cli) -> Result<()> {
         } => {
             let refresh = refresh || !no_refresh;
             let worktrees = all || worktrees;
+            let force = all || force;
             let branches = all || branches;
             let force_branches = all || force_branches;
             let remote_branches = all || remote_branches;
             let remote_bundles = all || remote_bundles;
             commands::prune_merged_bundles(
-                apply || force,
+                apply,
                 refresh,
                 untracked,
                 report,
                 worktrees,
+                force,
                 branches,
                 force_branches,
                 remote_branches,

@@ -28,6 +28,7 @@ struct PruneCandidate {
 struct OrphanWorktree {
     id: String,
     path: PathBuf,
+    discards_pending: bool,
 }
 
 /// A bundle that exists on the KnitHub sync remote but has no local artifact and
@@ -231,6 +232,7 @@ pub fn prune_merged_bundles(
     untracked: bool,
     report: bool,
     worktrees: bool,
+    force: bool,
     branches: bool,
     force_branches: bool,
     remote_branches: bool,
@@ -279,10 +281,10 @@ pub fn prune_merged_bundles(
         }
     }
 
-    let orphan_worktrees = if worktrees {
-        orphan_worktree_candidates(&root)?
+    let (orphan_worktrees, blocked_orphan_worktrees) = if worktrees {
+        orphan_worktree_candidates(&root, force)?
     } else {
-        Vec::new()
+        (Vec::new(), Vec::new())
     };
     let remote_orphans = if remote_bundles {
         remote_orphan_candidates(config.as_ref(), &local_ids, &root, refresh)
@@ -297,6 +299,7 @@ pub fn prune_merged_bundles(
     if candidates.is_empty()
         && orphan_worktrees.is_empty()
         && blocked_untracked.is_empty()
+        && blocked_orphan_worktrees.is_empty()
         && remote_orphans.is_empty()
     {
         println!(
@@ -332,14 +335,36 @@ pub fn prune_merged_bundles(
             );
         }
     }
-    if !orphan_worktrees.is_empty() {
-        println!("{}", out::heading("Orphan worktree candidates:"));
-        for orphan in &orphan_worktrees {
+    if !blocked_orphan_worktrees.is_empty() {
+        println!(
+            "{}",
+            out::heading("Blocked orphan worktrees (use --force to prune):")
+        );
+        for orphan in &blocked_orphan_worktrees {
             println!(
                 "  {} {}",
                 out::node(&orphan.id),
                 out::path(orphan.path.display())
             );
+        }
+    }
+    if !orphan_worktrees.is_empty() {
+        println!("{}", out::heading("Orphan worktree candidates:"));
+        for orphan in &orphan_worktrees {
+            if orphan.discards_pending {
+                println!(
+                    "  {} {} {}",
+                    out::node(&orphan.id),
+                    out::path(orphan.path.display()),
+                    out::muted("discards uncommitted work")
+                );
+            } else {
+                println!(
+                    "  {} {}",
+                    out::node(&orphan.id),
+                    out::path(orphan.path.display())
+                );
+            }
         }
     }
     if !remote_orphans.is_empty() {
@@ -363,6 +388,7 @@ pub fn prune_merged_bundles(
                 suggested_prune_apply_command(
                     untracked,
                     worktrees,
+                    force || !blocked_orphan_worktrees.is_empty(),
                     branches,
                     force_branches,
                     remote_branches,
@@ -389,7 +415,7 @@ pub fn prune_merged_bundles(
     }
     let mut removed_orphans = 0usize;
     for orphan in orphan_worktrees {
-        remove_orphan_worktree(&orphan, force_branches)?;
+        remove_orphan_worktree(&orphan, force)?;
         removed_orphans += 1;
     }
     let mut removed_remote = 0usize;
@@ -953,12 +979,16 @@ fn path_pending_changes(path: &Path) -> Result<Pending> {
     Ok(pending)
 }
 
-fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
+fn orphan_worktree_candidates(
+    root: &Path,
+    force: bool,
+) -> Result<(Vec<OrphanWorktree>, Vec<OrphanWorktree>)> {
     let worktrees_dir = root.join(".knit/worktrees");
     if !worktrees_dir.exists() {
-        return Ok(Vec::new());
+        return Ok((Vec::new(), Vec::new()));
     }
     let mut candidates = Vec::new();
+    let mut blocked = Vec::new();
     for entry in fs::read_dir(&worktrees_dir)
         .with_context(|| format!("failed to read {}", worktrees_dir.display()))?
     {
@@ -971,19 +1001,27 @@ fn orphan_worktree_candidates(root: &Path) -> Result<Vec<OrphanWorktree>> {
         if id.starts_with('.') || bundle_exists(root, &id) {
             continue;
         }
-        if path_pending_changes(&path)?.any() {
-            println!(
-                "{}: {} {}",
-                out::node(&id),
-                out::muted("orphan worktree has pending files, preserved"),
-                out::path(path.display())
-            );
+        let orphan = OrphanWorktree {
+            id,
+            path,
+            discards_pending: false,
+        };
+        if path_pending_changes(&orphan.path)?.any() {
+            if force {
+                candidates.push(OrphanWorktree {
+                    discards_pending: true,
+                    ..orphan
+                });
+            } else {
+                blocked.push(orphan);
+            }
             continue;
         }
-        candidates.push(OrphanWorktree { id, path });
+        candidates.push(orphan);
     }
     candidates.sort_by(|left, right| left.id.cmp(&right.id));
-    Ok(candidates)
+    blocked.sort_by(|left, right| left.id.cmp(&right.id));
+    Ok((candidates, blocked))
 }
 
 fn remove_orphan_worktree(orphan: &OrphanWorktree, force: bool) -> Result<()> {
@@ -1044,12 +1082,14 @@ fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
 fn suggested_prune_apply_command(
     untracked: bool,
     worktrees: bool,
+    force: bool,
     branches: bool,
     force_branches: bool,
     remote_branches: bool,
     remote_bundles: bool,
 ) -> String {
-    if worktrees && branches && force_branches && remote_branches && remote_bundles {
+    if worktrees && force && branches && force_branches && remote_branches && remote_bundles
+    {
         let base = "knit prune --apply --all";
         return if untracked {
             format!("{base} --untracked")
@@ -1063,6 +1103,9 @@ fn suggested_prune_apply_command(
     }
     if worktrees {
         command.push("--worktrees");
+    }
+    if force {
+        command.push("--force");
     }
     if branches {
         command.push("--branches");
@@ -1144,5 +1187,11 @@ mod prune_tests {
     #[test]
     fn no_publications_is_not_an_orphan() {
         assert_eq!(dead_reason(&[]), None);
+    }
+
+    #[test]
+    fn suggested_command_includes_force_when_needed() {
+        let cmd = suggested_prune_apply_command(false, true, true, false, false, false, false);
+        assert_eq!(cmd, "knit prune --apply --worktrees --force");
     }
 }
