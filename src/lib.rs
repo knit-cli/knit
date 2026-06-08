@@ -228,6 +228,11 @@ pub fn run(cli: Cli) -> Result<()> {
             None => commands::show_current_bundle(),
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
             Some(BundleCommand::Create(words)) => {
+                if let Some(flag) = words.iter().find(|word| word.starts_with('-')) {
+                    anyhow::bail!(
+                        "`knit bundle \"<title>\"` is the no-flag shorthand; `{flag}` looks like a flag. Use `knit bundle start \"<title>\" {flag} ...` for the flagful form."
+                    );
+                }
                 commands::init_bundle(&words.join(" "), false, false)
             }
             Some(BundleCommand::Start {
