@@ -119,7 +119,7 @@ Bundle-scoped Knit commands resolve this bundle automatically from this cwd:
 ```sh
 knit status
 knit add
-knit commit --stage -m "Describe the feature change"
+knit commit --all -m "Describe the feature change"
 knit push --set-upstream
 ```
 
@@ -311,7 +311,7 @@ Make this folder the actual cwd/workdir for repo-local tool calls. Because this 
 ```sh
 knit status
 knit add
-knit commit --stage -m "Describe the feature change"
+knit commit --all -m "Describe the feature change"
 knit push --set-upstream
 ```
 

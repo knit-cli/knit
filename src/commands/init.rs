@@ -413,7 +413,7 @@ For coding agents in the source workspace, moving into a checkout means each she
 ```sh
 knit --bundle feature-a status
 knit --bundle feature-a add
-knit --bundle feature-a commit --stage -m "Describe the feature change"
+knit --bundle feature-a commit --all -m "Describe the feature change"
 ```
 
 Do not use bare `knit switch <bundle>` from the workspace root to recover context. Root-level switching requires `--workspace` so changing the shared fallback is always deliberate.
@@ -437,7 +437,7 @@ knit --bundle feature-a commit -m "Describe the feature change"
 For a one-step stage and commit:
 
 ```sh
-knit --bundle feature-a commit --stage -m "Describe the feature change"
+knit --bundle feature-a commit --all -m "Describe the feature change"
 ```
 
 Push the bundle's feature branches after committing:

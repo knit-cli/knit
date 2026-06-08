@@ -631,7 +631,7 @@ pub fn run(cli: Cli) -> Result<()> {
             pull,
             &remote,
         ),
-        Commands::Commit { message, stage } => commands::commit_staged(&message, stage),
+        Commands::Commit { message, all } => commands::commit_staged(&message, all),
         Commands::Log {
             limit,
             shorthand_limit,

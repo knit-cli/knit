@@ -94,7 +94,7 @@ knit log
 For a one-step stage-and-commit:
 
 ```sh
-knit commit --stage -m "Add venue capacity integration"
+knit commit --all -m "Add venue capacity integration"
 ```
 
 The created bundle is printed by `knit bundle` and lives at:
@@ -299,7 +299,7 @@ For coding agents in the source workspace, "move into the checkout" means each s
 ```sh
 knit --bundle fix-a status
 knit --bundle fix-a add
-knit --bundle fix-a commit --stage -m "Describe the feature change"
+knit --bundle fix-a commit --all -m "Describe the feature change"
 knit --bundle fix-a push --set-upstream
 ```
 
@@ -631,7 +631,7 @@ Knit colors interactive terminal output for scanability. It disables color autom
 
 If a tracked branch is reset backward, `knit status` reports rewound commits and `knit sync` records a `git.observed` node with `movement: "rewound"` and `droppedCommits`. Existing `commit.group` nodes remain as history; current state is derived from each repo's latest `headSha`.
 
-`knit commit` commits only repos with staged changes in their tracked checkouts. With `--stage`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
+`knit commit` commits only repos with staged changes in their tracked checkouts. With `-a`/`--all`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
 
 The git commits are created sequentially, one repo at a time. Knit records them as one logical commit group in the bundle. Every repo commit gets the same logical message plus trailers:
 

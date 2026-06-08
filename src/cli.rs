@@ -355,9 +355,9 @@ pub enum Commands {
         /// Commit message to use in every repo with staged changes.
         #[arg(short, long)]
         message: String,
-        /// Stage all tracked worktree changes before committing.
-        #[arg(long)]
-        stage: bool,
+        /// Stage every tracked change first, then commit, like `git commit -a`.
+        #[arg(short = 'a', long = "all", alias = "stage")]
+        all: bool,
     },
     /// Show bundle ledger entries.
     Log {
