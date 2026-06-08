@@ -521,7 +521,7 @@ fn publish_repo_remote(
     let base_branch = &job.base_branch;
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit worktree`.",
+            "{}: no feature branch recorded. Run `knit bundle worktree`.",
             repo.id
         )
     })?;
@@ -756,7 +756,7 @@ fn fetch_pr_summary_for_sync(
 ) -> Result<SyncFetchResult> {
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit worktree`.",
+            "{}: no feature branch recorded. Run `knit bundle worktree`.",
             repo.id
         )
     })?;

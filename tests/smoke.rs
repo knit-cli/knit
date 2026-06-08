@@ -13,7 +13,7 @@ fn init_can_generate_agents_tutorial() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    let output = knit(&workspace, ["init", "venue capacity", "--agents"]);
+    let output = knit(&workspace, ["bundle", "start", "venue capacity", "--agents"]);
     assert!(output.contains("AGENTS.md"));
 
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
@@ -22,10 +22,10 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit project init"));
     assert!(agents.contains("knit bundle start"));
     assert!(agents.contains("knit bundle add"));
-    assert!(agents.contains("knit bundle remove --repo"));
+    assert!(agents.contains("knit bundle remove <repo>"));
     assert!(agents.contains("knit bundle prune"));
-    assert!(agents.contains("knit prune --apply --worktrees --branches"));
-    assert!(agents.contains("knit prune --apply --all"));
+    assert!(agents.contains("knit bundle prune --apply --worktrees --branches"));
+    assert!(agents.contains("knit bundle prune --apply --all"));
     assert!(agents.contains("--remote-branches"));
     assert!(agents.contains("matching KnitHub remote bundle records"));
     assert!(agents.contains("requires a token with `bundle:delete`"));
@@ -38,7 +38,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("gloss prepare"));
 
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
-    let existing_workspace_output = knit(&workspace, ["init", "venue capacity", "--agents"]);
+    let existing_workspace_output = knit(&workspace, ["bundle", "start", "venue capacity", "--agents"]);
     assert!(existing_workspace_output.contains("AGENTS.md"));
     let existing_workspace_agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(existing_workspace_agents.contains("This is a Knit workspace"));
@@ -46,7 +46,7 @@ fn init_can_generate_agents_tutorial() {
     fs::write(workspace.join("AGENTS.md"), "custom guidance\n").unwrap();
     knit(
         &workspace,
-        ["init", "venue capacity", "--force", "--agents"],
+        ["bundle", "start", "venue capacity", "--force", "--agents"],
     );
     let updated = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(updated.contains("custom guidance"));
@@ -55,7 +55,7 @@ fn init_can_generate_agents_tutorial() {
 
     knit(
         &workspace,
-        ["init", "venue capacity", "--force", "--agents"],
+        ["bundle", "start", "venue capacity", "--force", "--agents"],
     );
     let rerun = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert_eq!(rerun.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
@@ -255,12 +255,12 @@ fn bundle_include_and_exclude_manage_worktrees() {
     assert!(!worktrees.join("docs").exists());
 
     // Include the observed repo: its worktree is materialized.
-    knit(&workspace, ["bundle", "include", "docs"]);
+    knit(&workspace, ["bundle", "add", "docs"]);
     assert!(worktrees.join("docs").exists());
     assert!(bundle_repo_ids(&workspace, "live-feature").contains(&"docs".to_string()));
 
     // Exclude (default): worktree removed, feature branch kept.
-    knit(&workspace, ["bundle", "exclude", "frontend"]);
+    knit(&workspace, ["bundle", "remove", "frontend"]);
     assert!(!worktrees.join("frontend").exists());
     assert!(!bundle_repo_ids(&workspace, "live-feature").contains(&"frontend".to_string()));
     assert!(
@@ -273,7 +273,7 @@ fn bundle_include_and_exclude_manage_worktrees() {
     );
 
     // Exclude with --delete-branch: worktree removed and branch deleted.
-    knit(&workspace, ["bundle", "exclude", "docs", "--delete-branch"]);
+    knit(&workspace, ["bundle", "remove", "docs", "--delete-branch"]);
     assert!(!worktrees.join("docs").exists());
     assert!(
         !git(
@@ -558,7 +558,8 @@ fn bundle_split_preflights_project_repos_before_creating_bundle() {
         [
             "--bundle",
             "source-feature",
-            "track",
+            "bundle",
+            "add",
             frontend.to_str().unwrap(),
         ],
     );
@@ -1344,7 +1345,7 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     assert!(knit(&workspace, ["schema", "print", "bundle"]).contains("ChangeGroup"));
 
-    knit(&workspace, ["close", "--reason", "done"]);
+    knit(&workspace, ["bundle", "close", "--reason", "done"]);
     let closed_bundle_path = workspace.join(".knit/bundles/life-cycle.bundle.json");
     let closed_bundle: Value =
         serde_json::from_str(&fs::read_to_string(&closed_bundle_path).unwrap()).unwrap();
@@ -1469,7 +1470,7 @@ fn config_can_target_multiple_knithub_sync_remotes() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "remote fanout"]);
+    knit(&workspace, ["bundle", "remote fanout"]);
     knit(
         &workspace,
         ["remote", "add", "local", "http://localhost:4000"],
@@ -1534,7 +1535,7 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     init_repo(&frontend, "frontend");
     init_repo(&scraper, "scraper");
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     let bundle_path = knit(&workspace, ["bundle", "path"]);
     assert!(bundle_path
         .trim_end()
@@ -1547,7 +1548,8 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
             scraper.to_str().unwrap(),
@@ -1668,7 +1670,7 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(shorthand_log.contains("observed git changes"));
     assert!(!shorthand_log.contains("Add venue capacity integration"));
 
-    knit(&workspace, ["bundle", "remove", "--repo", "scraper"]);
+    knit(&workspace, ["bundle", "remove", "--keep-worktree", "scraper"]);
 
     let bundle = read_bundle(&workspace);
     assert_eq!(bundle["kind"], "ChangeGroup");
@@ -1798,11 +1800,12 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -1915,8 +1918,8 @@ fn pull_updates_original_base_checkout_and_bundle_base_sha() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature_head_before = git(
         &workspace.join(".knit/worktrees/venue-capacity/backend"),
         ["rev-parse", "HEAD"],
@@ -2054,8 +2057,8 @@ fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let initial_head = git(&backend, ["rev-parse", "HEAD"]);
     let initial_bundle = read_bundle(&workspace);
     let initial_base_sha = initial_bundle["repos"][0]["baseSha"]
@@ -2092,8 +2095,8 @@ fn push_sends_feature_branch_and_can_set_upstream() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
 
     append_line(&feature.join("app.txt"), "feature push");
@@ -2144,11 +2147,12 @@ fn push_sends_selected_feature_branches_in_parallel() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -2196,11 +2200,12 @@ fn commit_stages_and_commits_repos_in_parallel() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -2234,11 +2239,12 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -2330,8 +2336,8 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "artifact publish"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "artifact publish"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
@@ -2414,8 +2420,8 @@ fn artifact_pr_create_can_use_curl_ipv4_transport() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "artifact publish"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "artifact publish"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
@@ -2495,8 +2501,8 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "artifact publish"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "artifact publish"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
     knit(
@@ -2563,8 +2569,8 @@ fn artifact_land_apply_can_use_curl_ipv4_transport() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "artifact publish"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "artifact publish"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact land change");
     knit(
@@ -2657,8 +2663,8 @@ fn pr_create_can_override_base_branch() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "release target"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "release target"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/release-target/backend");
     append_line(&backend_feature.join("app.txt"), "release PR change");
     knit(&workspace, ["commit", "--stage", "-m", "Release PR change"]);
@@ -2716,11 +2722,12 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -2891,11 +2898,12 @@ fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -3132,8 +3140,8 @@ fn land_update_merges_base_and_records_explicit_node() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
 
     let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
     append_line(&backend_feature.join("app.txt"), "backend feature update");
@@ -3212,8 +3220,8 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
         "backend land resume",
@@ -3278,8 +3286,8 @@ fn land_apply_refuses_draft_publications() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
         "backend draft land",
@@ -3319,8 +3327,8 @@ fn land_apply_stops_when_required_checks_fail() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
         "backend check failure",
@@ -3361,8 +3369,8 @@ fn land_apply_treats_no_required_checks_as_ready() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "docs cleanup"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "docs cleanup"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     append_line(
         &workspace.join(".knit/worktrees/docs-cleanup/backend/app.txt"),
         "docs cleanup landing",
@@ -3424,7 +3432,7 @@ fn checkpoint_records_non_git_ledger_note() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     let output = knit(
         &workspace,
         ["checkpoint", "frontend wired, backend pending"],
@@ -3461,12 +3469,12 @@ fn close_records_feature_closed_node_without_git_state() {
     fs::create_dir_all(&workspace).unwrap();
     init_repo(&backend, "backend");
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
     let head_before_close = git(&feature, ["rev-parse", "HEAD"]);
 
-    let close = knit(&workspace, ["close", "--reason", "merged"]);
+    let close = knit(&workspace, ["bundle", "close", "--reason", "merged"]);
     assert!(close.contains("Closed bundle"));
     assert!(close.contains("Preserved"));
     assert!(close.contains("worktrees and local feature branches"));
@@ -3499,7 +3507,7 @@ fn close_records_feature_closed_node_without_git_state() {
         Some(latest["id"].as_str().unwrap())
     );
 
-    let second_close = knit_fails(&workspace, ["close"]);
+    let second_close = knit_fails(&workspace, ["bundle", "close"]);
     assert!(second_close.contains("already closed"));
 
     fs::remove_dir_all(root).unwrap();
@@ -3513,8 +3521,8 @@ fn clean_removes_plans_and_generated_worktrees_only() {
     fs::create_dir_all(&workspace).unwrap();
     init_repo(&backend, "backend");
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let worktree = workspace.join(".knit/worktrees/venue-capacity/backend");
 
     append_line(&worktree.join("app.txt"), "clean test change");
@@ -3548,7 +3556,7 @@ fn clean_removes_plans_and_generated_worktrees_only() {
     let git_after_clean = knit_fails(&workspace, ["git", "status", "--short", "backend"]);
     assert!(git_after_clean.contains("has no active checkout"));
 
-    knit(&workspace, ["worktree"]);
+    knit(&workspace, ["bundle", "worktree"]);
     assert!(worktree.exists());
 
     fs::remove_dir_all(root).unwrap();
@@ -3673,11 +3681,12 @@ fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "merged cleanup"]);
+    knit(&workspace, ["bundle", "merged cleanup"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -3688,7 +3697,8 @@ fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -3750,11 +3760,12 @@ fn bundle_prune_refreshes_stale_publication_states_by_default() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -3791,11 +3802,12 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "partial landed"]);
+    knit(&workspace, ["bundle", "partial landed"]);
     knit(
         &workspace,
         [
-            "track",
+            "bundle",
+            "add",
             backend.to_str().unwrap(),
             frontend.to_str().unwrap(),
         ],
@@ -3803,14 +3815,14 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     write_bundle_publications_for_repos(&workspace, "partial-landed", "MERGED", &["backend"]);
 
     knit(&workspace, ["bundle", "start", "abandoned cleanup"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
 
     knit(&workspace, ["bundle", "start", "dirty cleanup"]);
-    knit(&workspace, ["track", frontend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "add", frontend.to_str().unwrap()]);
     let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
     append_line(&dirty_feature.join("app.txt"), "dirty local edit");
 
-    let preview = knit(&workspace, ["prune", "--no-refresh", "--worktrees"]);
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--worktrees"]);
     assert!(preview.contains("partial-landed"));
     assert!(preview.contains("recorded PRs are merged"));
     assert!(preview.contains("abandoned-cleanup"));
@@ -3820,6 +3832,7 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     let pruned = knit(
         &workspace,
         [
+            "bundle",
             "prune",
             "--no-refresh",
             "--apply",
@@ -3862,25 +3875,25 @@ fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
 
     // Dead work whose only uncommitted content is an untracked file.
     knit(&workspace, ["bundle", "start", "stray cleanup"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let stray_feature = workspace.join(".knit/worktrees/stray-cleanup/backend");
     fs::write(stray_feature.join("PROOF.md"), "untracked proof\n").unwrap();
 
     // Dead work with a tracked modification must stay protected even with --untracked.
     knit(&workspace, ["bundle", "start", "dirty cleanup"]);
-    knit(&workspace, ["track", frontend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "add", frontend.to_str().unwrap()]);
     let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
     append_line(&dirty_feature.join("app.txt"), "dirty local edit");
 
     // Default prune surfaces the untracked-only bundle separately and does not
     // treat it as a deletable candidate.
-    let preview = knit(&workspace, ["prune", "--no-refresh"]);
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
     assert!(preview.contains("Blocked by untracked files"));
     assert!(preview.contains("stray-cleanup"));
     assert!(!preview.contains("Dead bundle candidates"));
 
     // --report names every bundle and its status, including kept ones.
-    let report = knit(&workspace, ["prune", "--no-refresh", "--report"]);
+    let report = knit(&workspace, ["bundle", "prune", "--no-refresh", "--report"]);
     assert!(report.contains("Bundle report:"));
     assert!(report.contains("prunable with --untracked"));
     assert!(report.contains("dirty-cleanup"));
@@ -3888,7 +3901,7 @@ fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
 
     // --untracked promotes the untracked-only bundle to a real candidate while
     // still protecting the tracked-change bundle.
-    let untracked_preview = knit(&workspace, ["prune", "--no-refresh", "--untracked"]);
+    let untracked_preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--untracked"]);
     assert!(untracked_preview.contains("Dead bundle candidates"));
     assert!(untracked_preview.contains("stray-cleanup"));
     assert!(untracked_preview.contains("discards untracked files"));
@@ -3897,6 +3910,7 @@ fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
     let pruned = knit(
         &workspace,
         [
+            "bundle",
             "prune",
             "--no-refresh",
             "--untracked",
@@ -3932,8 +3946,8 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     fs::create_dir_all(&workspace).unwrap();
     init_repo(&backend, "backend");
 
-    knit(&workspace, ["init", "dirty active"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "dirty active"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let active_feature = workspace.join(".knit/worktrees/dirty-active/backend");
     append_line(&active_feature.join("app.txt"), "keep me");
 
@@ -3943,7 +3957,7 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     fs::create_dir_all(&dirty_orphan).unwrap();
     fs::write(dirty_orphan.join("note.txt"), "untracked work\n").unwrap();
 
-    let preview = knit(&workspace, ["prune", "--no-refresh", "--worktrees"]);
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--worktrees"]);
     assert!(preview.contains("Orphan worktree candidates"));
     assert!(preview.contains("empty-orphan"));
     assert!(preview.contains("Blocked orphan worktrees"));
@@ -3953,7 +3967,7 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
 
     let pruned = knit(
         &workspace,
-        ["prune", "--no-refresh", "--apply", "--worktrees"],
+        ["bundle", "prune", "--no-refresh", "--apply", "--worktrees"],
     );
     assert!(pruned.contains("removed orphan worktree"));
     assert!(!workspace.join(".knit/worktrees/empty-orphan").exists());
@@ -3963,6 +3977,7 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     let forced = knit(
         &workspace,
         [
+            "bundle",
             "prune",
             "--no-refresh",
             "--apply",
@@ -3987,8 +4002,8 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "remote cleanup"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "remote cleanup"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature = workspace.join(".knit/worktrees/remote-cleanup/backend");
     append_line(&feature.join("app.txt"), "remote cleanup change");
     knit(
@@ -4010,12 +4025,13 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
     ));
 
     write_bundle_publications(&workspace, "remote-cleanup", "MERGED");
-    let preview = knit(&workspace, ["prune", "--no-refresh", "--all"]);
-    assert!(preview.contains("knit prune --apply --all"));
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--all"]);
+    assert!(preview.contains("knit bundle prune --apply --all"));
 
     let pruned = knit(
         &workspace,
         [
+            "bundle",
             "prune",
             "--no-refresh",
             "--apply",
@@ -4055,8 +4071,8 @@ fn pull_feature_checkout_records_observed_git_movement() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "venue capacity"]);
-    knit(&workspace, ["track", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
     git(&feature, ["push", "-u", "origin", "knit/venue-capacity"]);
 
@@ -4102,10 +4118,10 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
 
     init_repo(&backend, "backend");
 
-    knit(&workspace, ["init", "venue capacity"]);
+    knit(&workspace, ["bundle", "venue capacity"]);
     knit(
         &workspace,
-        ["track", "--in-place", backend.to_str().unwrap()],
+        ["bundle", "add", "--in-place", backend.to_str().unwrap()],
     );
 
     assert!(!workspace
@@ -4135,7 +4151,7 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     git(&backend, ["checkout", "main"]);
     let wrong_branch_status = knit(&workspace, ["status"]);
     assert!(wrong_branch_status.contains("wrong branch"));
-    let stage_failure = knit_fails(&workspace, ["stage"]);
+    let stage_failure = knit_fails(&workspace, ["add"]);
     assert!(stage_failure.contains("expected `knit/venue-capacity`"));
 
     fs::remove_dir_all(root).unwrap();

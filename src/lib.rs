@@ -16,7 +16,7 @@ pub mod store;
 pub mod time;
 pub mod tracking;
 
-use anyhow::{bail, Result};
+use anyhow::Result;
 
 pub use cli::{
     BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, HistoryCommand, LandCommand,
@@ -27,11 +27,6 @@ pub use cli::{
 pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
     match cli.command {
-        Commands::Init {
-            title,
-            force,
-            agents,
-        } => commands::init_bundle(&title, force, agents),
         Commands::Project { command } => match command {
             ProjectCommand::Init { name, agents } => commands::init_project(&name, agents),
             ProjectCommand::Add {
@@ -223,29 +218,18 @@ pub fn run(cli: Cli) -> Result<()> {
             active_bundle.as_deref(),
             !no_worktree,
         ),
-        Commands::Track {
-            repo_paths,
-            base,
-            in_place,
-            no_worktree,
-        } => commands::track_repos(&repo_paths, base.as_deref(), !no_worktree, in_place),
         Commands::Add {
             repos,
             intent_to_add,
             update,
             args,
         } => commands::stage_paths(&repos, &args, intent_to_add, update),
-        Commands::Untrack { repo_ids, repos } => {
-            let repo_ids = remove_repo_ids(repo_ids, repos)?;
-            commands::remove_repos(&repo_ids)
-        }
-        Commands::Remove { repo_ids, repos } => {
-            let repo_ids = remove_repo_ids(repo_ids, repos)?;
-            commands::remove_repos(&repo_ids)
-        }
-        Commands::Worktree => commands::create_worktrees(),
         Commands::Bundle { command } => match command {
             None => commands::show_current_bundle(),
+            Some(BundleCommand::Worktree) => commands::create_worktrees(),
+            Some(BundleCommand::Create(words)) => {
+                commands::init_bundle(&words.join(" "), false, false)
+            }
             Some(BundleCommand::Start {
                 title,
                 project,
@@ -279,16 +263,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 in_place,
                 no_worktree,
             }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
-            Some(BundleCommand::Remove { repo_ids, repos }) => {
-                let repo_ids = remove_repo_ids(repo_ids, repos)?;
-                commands::remove_repos(&repo_ids)
-            }
-            Some(BundleCommand::Include {
-                repos,
-                in_place,
-                no_worktree,
-            }) => commands::bundle_include(&repos, !no_worktree, in_place),
-            Some(BundleCommand::Exclude {
+            Some(BundleCommand::Remove {
                 repos,
                 keep_worktree,
                 delete_branch,
@@ -339,11 +314,6 @@ pub fn run(cli: Cli) -> Result<()> {
                     remote_bundles,
                 )
             }
-            Some(BundleCommand::Switch {
-                bundle,
-                workspace,
-                here,
-            }) => commands::switch_bundle(&bundle, workspace, here),
             Some(BundleCommand::Close { reason }) => commands::close_bundle(reason.as_deref()),
             Some(BundleCommand::Archive { bundle }) => commands::archive_bundle(&bundle),
             Some(BundleCommand::Restore { bundle }) => commands::restore_bundle(&bundle),
@@ -401,41 +371,6 @@ pub fn run(cli: Cli) -> Result<()> {
             here,
         } => commands::switch_bundle(&bundle, workspace, here),
         Commands::Checkpoint { message } => commands::record_checkpoint(&message),
-        Commands::Close { reason } => commands::close_bundle(reason.as_deref()),
-        Commands::Prune {
-            apply,
-            force,
-            refresh,
-            no_refresh,
-            untracked,
-            report,
-            all,
-            worktrees,
-            branches,
-            force_branches,
-            remote_branches,
-            remote_bundles,
-        } => {
-            let refresh = refresh || !no_refresh;
-            let worktrees = all || worktrees;
-            let force = all || force;
-            let branches = all || branches;
-            let force_branches = all || force_branches;
-            let remote_branches = all || remote_branches;
-            let remote_bundles = all || remote_bundles;
-            commands::prune_merged_bundles(
-                apply,
-                refresh,
-                untracked,
-                report,
-                worktrees,
-                force,
-                branches,
-                force_branches,
-                remote_branches,
-                remote_bundles,
-            )
-        }
         Commands::Clean {
             plans,
             worktrees,
@@ -444,12 +379,6 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             force,
         } => commands::clean_generated(plans, worktrees, closed, merge_worktrees, all, force),
-        Commands::Stage {
-            repos,
-            intent_to_add,
-            update,
-            args,
-        } => commands::stage_paths(&repos, &args, intent_to_add, update),
         Commands::Status => commands::show_status(),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
         Commands::Fetch {
@@ -684,23 +613,6 @@ pub fn run(cli: Cli) -> Result<()> {
             Some(HistoryCommand::Sync { project, remote }) => {
                 commands::sync_history(project.as_deref(), &remote)
             }
-            Some(HistoryCommand::Related {
-                paths,
-                repo,
-                project,
-                limit,
-                commit_limit,
-                pull,
-                remote,
-            }) => commands::show_related_history(
-                project.as_deref(),
-                repo.as_deref(),
-                &paths,
-                limit,
-                commit_limit,
-                pull,
-                &remote,
-            ),
         },
         Commands::Related {
             paths,
@@ -753,10 +665,3 @@ pub fn run(cli: Cli) -> Result<()> {
     }
 }
 
-fn remove_repo_ids(repo_ids: Vec<String>, repos: Vec<String>) -> Result<Vec<String>> {
-    let repo_ids = repo_ids.into_iter().chain(repos).collect::<Vec<_>>();
-    if repo_ids.is_empty() {
-        bail!("Pass at least one repo id, for example `knit bundle remove --repo backend`.");
-    }
-    Ok(repo_ids)
-}

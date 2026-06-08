@@ -25,17 +25,6 @@ pub enum FetchMode {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Create a new feature bundle in .knit/.
-    Init {
-        /// Human-readable feature title.
-        title: String,
-        /// Replace an existing bundle with the same slug.
-        #[arg(long)]
-        force: bool,
-        /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
-        #[arg(long)]
-        agents: bool,
-    },
     /// Manage reusable project repo templates.
     Project {
         #[command(subcommand)]
@@ -83,21 +72,6 @@ pub enum Commands {
         #[arg(long)]
         no_worktree: bool,
     },
-    /// Track local git repositories in the resolved bundle and materialize checkouts.
-    Track {
-        /// Paths to local git repositories.
-        #[arg(required = true)]
-        repo_paths: Vec<PathBuf>,
-        /// Override the inferred base branch.
-        #[arg(long)]
-        base: Option<String>,
-        /// Use each original repo checkout directly instead of creating a Knit worktree.
-        #[arg(long)]
-        in_place: bool,
-        /// Only update the bundle; do not create branches or worktrees.
-        #[arg(long)]
-        no_worktree: bool,
-    },
     /// Stage file changes inside tracked checkouts, like git add.
     Add {
         /// Limit staging to one or more repo ids or paths. Positional pathspecs then apply inside those repos.
@@ -112,25 +86,7 @@ pub enum Commands {
         /// Optional repo selectors or pathspecs.
         args: Vec<String>,
     },
-    /// Stop tracking repositories. Leaves git branches/checkouts in place.
-    Untrack {
-        /// Repo ids to remove from the resolved bundle.
-        repo_ids: Vec<String>,
-        /// Repo ids to remove from the resolved bundle.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-    },
-    /// Remove repositories from bundle tracking. Alias for untrack.
-    Remove {
-        /// Repo ids to remove from the resolved bundle.
-        repo_ids: Vec<String>,
-        /// Repo ids to remove from the resolved bundle.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-    },
-    /// Create per-repo worktrees for the resolved bundle.
-    Worktree,
-    /// Inspect the resolved bundle artifact.
+    /// Inspect the resolved bundle, or create one: `knit bundle "feature title"`.
     Bundle {
         #[command(subcommand)]
         command: Option<BundleCommand>,
@@ -150,51 +106,6 @@ pub enum Commands {
     Checkpoint {
         /// Checkpoint note to record.
         message: String,
-    },
-    /// Mark the resolved bundle closed without mutating git state.
-    Close {
-        /// Optional reason to record on the close node.
-        #[arg(long)]
-        reason: Option<String>,
-    },
-    /// Delete dead bundle artifacts and selected branch/worktree state.
-    Prune {
-        /// Apply pruning after listing candidate bundles.
-        #[arg(long)]
-        apply: bool,
-        /// Refresh recorded PR states from GitHub before deciding. This is the default.
-        #[arg(long, conflicts_with = "no_refresh")]
-        refresh: bool,
-        /// Use only cached recorded PR states without querying GitHub.
-        #[arg(long)]
-        no_refresh: bool,
-        /// Treat bundles whose only uncommitted work is untracked files as dead work (the untracked files are discarded when worktrees are removed).
-        #[arg(long)]
-        untracked: bool,
-        /// Report every bundle's prune status, including ones that are kept.
-        #[arg(long)]
-        report: bool,
-        /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
-        #[arg(long)]
-        all: bool,
-        /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
-        #[arg(long)]
-        worktrees: bool,
-        /// Pass --force to git worktree remove and discard uncommitted work in orphan worktree dirs.
-        #[arg(long, requires = "worktrees")]
-        force: bool,
-        /// Delete local feature branches for each pruned bundle after generated worktrees are removed.
-        #[arg(long)]
-        branches: bool,
-        /// Use `git branch -D` instead of `git branch -d` for local feature branches.
-        #[arg(long = "force-branches", requires = "branches")]
-        force_branches: bool,
-        /// Delete matching feature branches from origin.
-        #[arg(long = "remote-branches", requires = "branches")]
-        remote_branches: bool,
-        /// Delete matching KnitHub remote bundle records.
-        #[arg(long = "remote-bundles")]
-        remote_bundles: bool,
     },
     /// Remove Knit-generated local state.
     Clean {
@@ -216,20 +127,6 @@ pub enum Commands {
         /// Pass --force to git worktree remove.
         #[arg(long)]
         force: bool,
-    },
-    /// Stage file changes inside tracked checkouts. Alias for add.
-    Stage {
-        /// Limit staging to one or more repo ids or paths.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-        /// Record only intent to add pathspecs, like git add -N.
-        #[arg(short = 'N', long = "intent-to-add")]
-        intent_to_add: bool,
-        /// Stage modifications/deletions to tracked files only, like git add -u.
-        #[arg(short = 'u', long)]
-        update: bool,
-        /// Optional repo selectors or pathspecs.
-        args: Vec<String>,
     },
     /// Show status for all repos in the resolved bundle.
     Status,
@@ -545,30 +442,6 @@ pub enum HistoryCommand {
         #[arg(long, default_value = "knithub")]
         remote: String,
     },
-    /// Find Knit bundles related to paths touched in Git history.
-    Related {
-        /// Paths to inspect. Paths are repo-relative unless they include a project repo id prefix.
-        #[arg(required = true)]
-        paths: Vec<PathBuf>,
-        /// Repo id. Defaults to the repo containing cwd or a repo id prefix in the path.
-        #[arg(short = 'r', long = "repo")]
-        repo: Option<String>,
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Maximum related Knit instances to show.
-        #[arg(short = 'n', long = "limit", default_value_t = 10)]
-        limit: usize,
-        /// Maximum Git commits to inspect for the path query.
-        #[arg(long = "commit-limit", default_value_t = 200)]
-        commit_limit: usize,
-        /// Pull Knit history from a remote before querying.
-        #[arg(long)]
-        pull: bool,
-        /// Named KnitHub remote used with --pull.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -611,6 +484,11 @@ pub enum BundleCommand {
         #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
         cd: Option<String>,
     },
+    /// Materialize per-repo worktrees for the resolved bundle.
+    Worktree,
+    /// Create a bundle titled from these words. Shorthand for `bundle start "<title>"`.
+    #[command(external_subcommand)]
+    Create(Vec<String>),
     /// Add repos or project repo ids to the current bundle.
     Add {
         /// Paths to local git repositories or project repo ids.
@@ -626,29 +504,9 @@ pub enum BundleCommand {
         #[arg(long)]
         no_worktree: bool,
     },
-    /// Remove repos from bundle tracking.
+    /// Remove repos from the current bundle, tearing down their worktrees.
     Remove {
         /// Repo ids to remove from the current bundle.
-        repo_ids: Vec<String>,
-        /// Repo ids to remove from the current bundle.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-    },
-    /// Add project repos to the current bundle and materialize their worktrees.
-    Include {
-        /// Project repo ids to include.
-        #[arg(required = true)]
-        repos: Vec<String>,
-        /// Use each original repo checkout directly instead of a Knit worktree.
-        #[arg(long)]
-        in_place: bool,
-        /// Only update the bundle; do not create branches or worktrees.
-        #[arg(long)]
-        no_worktree: bool,
-    },
-    /// Remove repos from the current bundle, tearing down their worktrees.
-    Exclude {
-        /// Repo ids to exclude from the current bundle.
         #[arg(required = true)]
         repos: Vec<String>,
         /// Keep the generated worktree on disk (tracking removal only).
@@ -725,17 +583,6 @@ pub enum BundleCommand {
         /// Delete matching KnitHub remote bundle records.
         #[arg(long = "remote-bundles")]
         remote_bundles: bool,
-    },
-    /// Switch the fallback bundle for this workspace or folder.
-    Switch {
-        /// Bundle id to make active.
-        bundle: String,
-        /// Set the workspace fallback bundle.
-        #[arg(long, conflicts_with = "here")]
-        workspace: bool,
-        /// Set the fallback bundle for the current folder.
-        #[arg(long)]
-        here: bool,
     },
     /// Mark the current bundle closed without mutating git state.
     Close {

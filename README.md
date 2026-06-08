@@ -26,7 +26,7 @@ Gloss reads a bundle later and produces review/ranking/explanation output. Gloss
 
 ## Storage
 
-Knit stores local state under the directory where `knit project init`, `knit bundle start`, or `knit init` first creates a workspace:
+Knit stores local state under the directory where `knit project init`, or `knit bundle start` first creates a workspace:
 
 ```txt
 .knit/
@@ -103,7 +103,7 @@ The created bundle is printed by `knit bundle start` and lives at:
 .knit/bundles/venue-capacity.bundle.json
 ```
 
-Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then generated worktree paths such as `.knit/worktrees/<bundle>/<repo>`, then folder contexts from `knit bundle switch --here`, and finally the workspace fallback bundle. This lets parallel agents work in different Knit worktrees without sharing one mutable active bundle.
+Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then generated worktree paths such as `.knit/worktrees/<bundle>/<repo>`, then folder contexts from `knit switch --here`, and finally the workspace fallback bundle. This lets parallel agents work in different Knit worktrees without sharing one mutable active bundle.
 
 ## Commands
 
@@ -128,35 +128,27 @@ knit view rm <name> [--project <name>]
 knit view edit [--project <name>]
 knit view push [--project <name>] [--remote <name>]
 knit view pull [--project <name>] [--remote <name>]
-knit bundle
+knit bundle                          # show the resolved bundle
+knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
 knit bundle start "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
-knit bundle remove [<repo-id>...] [--repo <repo-id>]...
-knit bundle include <repo>... [--in-place] [--no-worktree]
-knit bundle exclude <repo>... [--keep-worktree|--delete-branch] [--force]
+knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
+knit bundle worktree
 knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
 knit bundle list [--all] [--archived] [--deleted]
-knit bundle switch <bundle> [--workspace|--here]
 knit bundle close [--reason <reason>]
 knit bundle archive <bundle>
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
-knit prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
 knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
 knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
 knit bundle split <source-bundle> <selector>... [--title <title>] [--repo <repo>]... [--force]
-knit init "<title>" [--force] [--agents]
-knit track <repo-path>... [--base <branch>] [--in-place] [--no-worktree]
-knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
-knit stage [-r <repo>] [-N] [-u] [repo-or-pathspec...]
-knit untrack [<repo-id>...] [--repo <repo-id>]...
-knit remove [<repo-id>...] [--repo <repo-id>]...
-knit worktree
 knit bundle path
 knit bundle print
 knit bundle validate
+knit switch <bundle> [--workspace|--here]
+knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit checkpoint "<note>"
-knit close [--reason <reason>]
 knit clean [--plans] [--worktrees] [--closed] [--merge-worktrees] [--all] [--force]
 knit status
 knit diff [--stat] [repo-id-or-path...]
@@ -195,7 +187,6 @@ knit sync
 knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--project <project>]
 knit history refresh [--project <project>]
 knit history push|pull|sync [--project <project>] [--remote <name>]
-knit history related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
 knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -207,7 +198,7 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
 
-`knit init`, `knit track`, `knit remove`, and `knit close` are aliases for the bundle workflow.
+A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and `knit bundle start` is the long form when you need flags. Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, `reset`, …) live at the top level; bundle/repo management lives under `knit bundle`.
 
 ## Projects And Bundles
 
@@ -252,13 +243,13 @@ knit view show frontend --repos      # print the repos this view resolves to
 A live bundle can be reshaped at any time, with the worktree consequences:
 
 ```sh
-knit bundle include docs             # materialize the repo's branch + worktree
-knit bundle exclude frontend         # tear down its worktree, keep the branch
-knit bundle exclude frontend --delete-branch   # also delete the local feature branch
+knit bundle add docs                 # materialize the repo's branch + worktree
+knit bundle remove frontend          # tear down its worktree
+knit bundle remove frontend --delete-branch    # also delete the local feature branch
 knit bundle apply-view backend       # reshape the bundle to match a saved view
 ```
 
-`knit bundle exclude` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry (the old `knit bundle remove` behavior). Views sync to KnitHub as the user's own config with `knit view push` / `knit view pull`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
+`knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Views sync to KnitHub as the user's own config with `knit view push` / `knit view pull`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 
@@ -337,13 +328,13 @@ knit bundle split feature-x abc123 def456 --repo backend --repo frontend --title
 
 Generated worktrees get local `AGENTS.md` guidance by default: one bundle-wide guide at `.knit/worktrees/<bundle>/AGENTS.md`, plus repo-local guides inside each generated repo checkout. Those worktree guides assume the agent opened the generated worktree folder directly, so their examples rely on cwd and do not include `--bundle`.
 
-Use `knit bundle start "<title>" --agents` or `knit init "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit project init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
+Use `knit bundle start "<title>" --agents` when you want Knit to write an `AGENTS.md` tutorial into the source workspace. The workspace guide explains projects, bundles, parallel worktrees, and why source-workspace mutating commands should use explicit `--bundle <bundle>`. Use `knit project agents [name]` or replay `knit project init <name> --agents` to write project-specific guidance from the project JSON, including the current default repo list. If `AGENTS.md` already exists, Knit preserves the rest of the file and appends or refreshes its own managed section.
 
-Use `knit bundle add --in-place` or `knit track --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
+Use `knit bundle add --in-place` or `knit bundle add --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
 Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
 
-`knit worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
+`knit bundle worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
 `knit bundle` shows the resolved bundle. `knit bundle path`, `print`, and `validate` inspect the existing `.bundle.json` / `ChangeGroup` artifact. They do not produce a separate review object:
 
@@ -368,7 +359,7 @@ Checkpoints show up in `knit log` and `knit show HEAD`. They do not create commi
 
 ```sh
 knit close
-knit close --reason "merged"
+knit bundle close --reason "merged"
 ```
 
 The close node shows up in `knit log` and `knit show HEAD`. It is a ledger marker only. If that bundle is still the resolved context, `knit status` still shows its generated worktrees and local feature branches because they still exist.
@@ -390,8 +381,8 @@ knit bundle delete documentation-quick-wins --force --worktrees --branches --for
 ```sh
 knit bundle prune
 knit bundle prune --no-refresh
-knit prune --apply --worktrees --branches
-knit prune --apply --all
+knit bundle prune --apply --worktrees --branches
+knit bundle prune --apply --all
 ```
 
 A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not delete it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — combine with `--worktrees` (or `--all`) on `--apply` so the untracked files are discarded with the generated checkout. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
@@ -399,19 +390,19 @@ A bundle whose only uncommitted work is untracked files is otherwise dead work, 
 `--report` prints every scanned bundle and why it is prunable or kept (open PRs, merged PRs, tracked changes, or untracked-only files), not just the deletable candidates:
 
 ```sh
-knit prune --report
-knit prune --untracked
-knit prune --apply --untracked --worktrees
+knit bundle prune --report
+knit bundle prune --untracked
+knit bundle prune --apply --untracked --worktrees
 ```
 
 Remote bundle cleanup uses the configured KnitHub sync remote, requires a token with `bundle:delete`, and marks matching remote bundle records deleted. Use explicit flags instead of `--all` when you want local/Git branch cleanup but want to preserve KnitHub bundle history.
 
-With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit prune --apply` could delete a local artifact while leaving its KnitHub record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
+With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit bundle prune --apply` could delete a local artifact while leaving its KnitHub record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
 
 So the common cleanup distinction is:
 
 ```sh
-knit close --reason "merged"                                           # keep local checkouts/branches
+knit bundle close --reason "merged"                                           # keep local checkouts/branches
 knit clean --closed --worktrees                                        # remove generated worktrees, keep branches
 knit bundle delete documentation-quick-wins --force --worktrees --branches
 ```
@@ -438,7 +429,7 @@ knit add --repo frontend src/App.tsx
 knit add --intent-to-add frontend new-file.ts
 ```
 
-`knit stage` is kept as an alias for `knit add`, because Git also accepts `git stage` as an alias for `git add`.
+`knit add` is the staging command (the standalone `knit stage` alias was removed in the CLI cleanup).
 
 `knit status` shows the resolved bundle source, ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
 
@@ -597,7 +588,7 @@ Use `knit related` before editing a file or area with possible cross-repo coupli
 ```sh
 knit related --repo frontend src/routes/billing.tsx
 knit related frontend/src/routes/billing.tsx
-knit history related --repo frontend src/routes/billing.tsx --pull
+knit related --repo frontend src/routes/billing.tsx --pull
 ```
 
 The output includes the touched-path commits, related commits in the same Knit scope, other commits from the same bundle, and `git show --stat` commands for inspection. Commits made wholly outside Knit appear in Git history but only appear in Knit-related results after they have been recorded into a bundle, for example with `knit sync`.
@@ -651,7 +642,7 @@ Knit-Bundle: <bundle-id>
 
 The bundle records the full mapping from logical commit group to repo commit SHAs.
 
-`knit bundle remove --repo <repo-id>` removes repos from bundle tracking and appends a `repo.removed` node. Positional repo ids are also accepted, as in `knit bundle remove backend frontend`. It intentionally leaves existing git branches and checkouts in place. `knit untrack` and `knit remove` remain as top-level aliases.
+`knit bundle remove <repo-id>...` removes repos from the bundle and appends a `repo.removed` node, tearing down their worktrees by default (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 
 ## Bundle Nodes
 
