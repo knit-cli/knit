@@ -262,6 +262,7 @@ pub enum Commands {
         args: Vec<OsString>,
     },
     /// Publish tracked feature branches to a code hosting provider.
+    #[command(visible_alias = "request")]
     Publish {
         #[command(subcommand)]
         target: PublishCommand,
@@ -1143,6 +1144,12 @@ pub enum PublishCommand {
         /// Skip the KnitHub bundle sync for this publish.
         #[arg(long)]
         no_remote: bool,
+        /// Limit publishing to repos hosted on this provider (github, gitlab, forgejo). Default: every repo's own host.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Shorthand for `--provider github`.
+        #[arg(long, conflicts_with = "provider")]
+        github: bool,
     },
     /// Refresh recorded review metadata and rewrite Knit cross-link blocks.
     Sync {
@@ -1157,6 +1164,12 @@ pub enum PublishCommand {
         /// Sync every tracked repo instead of only repos with recorded work or publications.
         #[arg(long)]
         all: bool,
+        /// Limit the sync to repos hosted on this provider (github, gitlab, forgejo). Default: every repo's own host.
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Shorthand for `--provider github`.
+        #[arg(long, conflicts_with = "provider")]
+        github: bool,
     },
     /// Show recorded review objects for the resolved bundle.
     Status {
@@ -1168,8 +1181,15 @@ pub enum PublishCommand {
         /// Fetch live mergeability, checks, and review state from the host.
         #[arg(long)]
         live: bool,
+        /// Limit the status to repos hosted on this provider (github, gitlab, forgejo).
+        #[arg(long, value_name = "PROVIDER")]
+        provider: Option<String>,
+        /// Shorthand for `--provider github`.
+        #[arg(long, conflicts_with = "provider")]
+        github: bool,
     },
-    /// Publish to GitHub explicitly. Alias kept for back-compat; prefer `knit publish create`.
+    /// Deprecated: prefer `knit publish create` (auto-detects each repo's host) or `knit publish create --github`.
+    #[command(hide = true)]
     Github {
         #[command(subcommand)]
         command: GithubPublishCommand,
