@@ -135,7 +135,7 @@ Rewind example:
 
 ## Publications
 
-`knit publish github create` and `knit publish github sync` record GitHub PR metadata in `publications`:
+`knit publish create` and `knit publish sync` record review-object (PR/MR) metadata in `publications`:
 
 ```json
 {

@@ -452,20 +452,23 @@ Push the bundle to one or more KnitHub remotes so it appears in hosted dashboard
 knit --bundle feature-a push --remote local --remote knithub
 ```
 
-Publish PRs against their intended GitHub base branch:
+Publish review objects (PRs/MRs) against their intended base branch. `create`
+auto-detects each repo's host; pass `--github` (or `--provider <id>`) to limit
+to one host. `knit request` is an alias for `knit publish`:
 
 ```sh
-knit publish github create
-knit publish github create --base release
-knit publish github create --base backend=stable --base frontend=main
-knit publish github status
+knit publish create
+knit publish create --base release
+knit publish create --base backend=stable --base frontend=main
+knit publish create --github
+knit publish status
 ```
 
-Publish from a bundle artifact JSON (no local worktrees; branches must already exist on GitHub):
+Publish from a bundle artifact JSON (no local worktrees; branches must already exist on the host):
 
 ```sh
-knit publish github create --from-artifact bundle.json --out bundle.published.json --no-push
-knit publish github sync --from-artifact bundle.published.json --out bundle.published.json
+knit publish create --from-artifact bundle.json --out bundle.published.json --no-push
+knit publish sync --from-artifact bundle.published.json --out bundle.published.json
 ```
 
 When the PRs are approved and the user says to land, merge, release, ship, or continue after review, start landing through Knit:
