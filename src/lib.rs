@@ -314,8 +314,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     remote_bundles,
                 )
             }
-            Some(BundleCommand::Close { reason }) => commands::close_bundle(reason.as_deref()),
-            Some(BundleCommand::Archive { bundle }) => commands::archive_bundle(&bundle),
+            Some(BundleCommand::Archive {
+                bundle,
+                reason,
+                keep_worktrees,
+                force,
+            }) => commands::archive_bundle(&bundle, reason.as_deref(), keep_worktrees, force),
             Some(BundleCommand::Restore { bundle }) => commands::restore_bundle(&bundle),
             Some(BundleCommand::Delete {
                 bundle,
@@ -334,30 +338,6 @@ pub fn run(cli: Cli) -> Result<()> {
                 false,
                 None,
             ),
-            Some(BundleCommand::Compat {
-                sources,
-                title,
-                project,
-                all_repos,
-                no_worktree,
-                in_place,
-                force,
-            }) => commands::create_compat_bundle(
-                &sources,
-                title.as_deref(),
-                project.as_deref(),
-                all_repos,
-                !no_worktree,
-                in_place,
-                force,
-            ),
-            Some(BundleCommand::Split {
-                source,
-                targets,
-                title,
-                repos,
-                force,
-            }) => commands::split_bundle(&source, title.as_deref(), &targets, &repos, force),
             Some(BundleCommand::Path) => commands::bundle_path(),
             Some(BundleCommand::Print) => commands::print_bundle(),
             Some(BundleCommand::Validate) => commands::validate_bundle(),
@@ -370,15 +350,14 @@ pub fn run(cli: Cli) -> Result<()> {
             workspace,
             here,
         } => commands::switch_bundle(&bundle, workspace, here),
-        Commands::Checkpoint { message } => commands::record_checkpoint(&message),
         Commands::Clean {
             plans,
             worktrees,
-            closed,
+            archived,
             merge_worktrees,
             all,
             force,
-        } => commands::clean_generated(plans, worktrees, closed, merge_worktrees, all, force),
+        } => commands::clean_generated(plans, worktrees, archived, merge_worktrees, all, force),
         Commands::Status => commands::show_status(),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
         Commands::Fetch {
@@ -676,14 +655,6 @@ pub fn run(cli: Cli) -> Result<()> {
             plan: _,
             apply,
         } => commands::revert_target(&target, apply),
-        Commands::Reset {
-            soft,
-            mixed: _,
-            hard,
-            commit,
-            repos,
-            all,
-        } => commands::reset_checkouts(soft, hard, commit.as_deref(), &repos, all),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show { target } => commands::show_target(&target),
         Commands::Config { command } => match command {

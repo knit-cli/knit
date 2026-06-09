@@ -496,22 +496,19 @@ knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 
 Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured KnitHub remotes; use `knit land sync` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
-Use `knit merge` for local integration into staging branches or compatibility bundles:
+Use `knit merge` for local integration into staging branches or other bundles:
 
 ```sh
 knit merge feature-a --into staging --fetch
-knit bundle compat feature-a feature-b --title "feature a b compat"
-knit merge feature-a --into feature-a-b-compat
-knit merge feature-b --into feature-a-b-compat --manual
+knit merge feature-b --into feature-a --manual
 knit merge status
 knit merge --continue
 knit merge push
 ```
 
-Use `knit bundle split` or `knit cherrypick` to move selected recorded commits out of a messy bundle and into a fresh one:
+Use `knit cherrypick` to move selected recorded commits from another bundle into the resolved bundle:
 
 ```sh
-knit bundle split feature-a HEAD~1 --title "feature a clean follow-up"
 knit cherrypick --from feature-a --repo backend abc123
 ```
 
@@ -525,14 +522,12 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
 - `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
 - `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit view push`/`knit view pull` sync them to KnitHub.
-- `knit bundle compat <bundle> <bundle>` creates an ordinary compatibility bundle from source bundle repos.
-- `knit bundle split <bundle> <selector>...` creates a fresh bundle and cherry-picks selected source commits into it.
 - `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.
-- `knit bundle archive <bundle>` marks completed bundle artifacts as archived.
-- `knit bundle restore <bundle>` makes an archived bundle available again.
+- `knit bundle archive <bundle> [--reason "merged"]` marks a bundle done: it records an archive node and removes generated worktrees while preserving local feature branches (`--keep-worktrees` to leave them, `--force` to discard dirty checkouts).
+- `knit bundle restore <bundle>` reopens an archived bundle; run `knit worktree` afterwards to rematerialize checkouts.
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
@@ -561,10 +556,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
 - `knit push --remote local --remote knithub` pushes the resolved bundle to both configured KnitHub remotes so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.
-- `knit checkpoint "note"` records non-Git progress in the bundle ledger.
-- `knit bundle close --reason "merged"` marks the bundle closed without deleting branches or worktrees.
-- `knit status` still shows a closed bundle's worktrees and branches while they remain on disk.
-- `knit clean --closed --worktrees` removes generated worktrees for closed bundles while preserving local feature branches.
+- `knit clean --archived --worktrees` removes generated worktrees left behind by bundles archived with `--keep-worktrees`.
 
 Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
 

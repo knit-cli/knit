@@ -1,9 +1,7 @@
 pub mod agents;
 pub mod bundle;
-pub mod checkpoint;
 pub mod cherrypick;
 pub mod clean;
-pub mod close;
 pub mod commit;
 pub mod config;
 pub mod diff;
@@ -22,7 +20,6 @@ pub mod pull;
 pub mod push;
 pub mod remote;
 pub mod remove;
-pub mod reset;
 pub mod revert;
 pub mod run;
 pub mod runtime;
@@ -40,10 +37,8 @@ pub use bundle::{
     archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
     restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
 };
-pub use checkpoint::record_checkpoint;
-pub use cherrypick::{cherrypick_from_bundle, split_bundle};
+pub use cherrypick::cherrypick_from_bundle;
 pub use clean::clean_generated;
-pub use close::close_bundle;
 pub use commit::commit_staged;
 pub use config::{set_config_value, show_config};
 pub use diff::show_diff;
@@ -59,7 +54,7 @@ pub use land::{
     resume_land_run, show_land_status, sync_landed_bundle, update_land_branches,
 };
 pub use log::{show_log, show_target};
-pub use merge::{create_compat_bundle, merge_command};
+pub use merge::merge_command;
 pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects, pull_project_config,
@@ -78,7 +73,6 @@ pub use remote::{
     push_views_to_remote, remove_remote, set_remote_token, show_remote,
 };
 pub use remove::remove_repos;
-pub use reset::reset_checkouts;
 pub use revert::revert_target;
 pub use run::run_project_command;
 pub use schema::print_schema;

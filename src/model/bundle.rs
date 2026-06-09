@@ -348,29 +348,10 @@ impl BundleNode {
         }
     }
 
-    pub fn checkpoint(id: String, created_at: String, message: String) -> Self {
+    pub fn feature_archived(id: String, created_at: String, reason: Option<String>) -> Self {
         Self {
             id,
-            node_type: "checkpoint".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: None,
-            message: Some(message),
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
-        }
-    }
-
-    pub fn feature_closed(id: String, created_at: String, reason: Option<String>) -> Self {
-        Self {
-            id,
-            node_type: "feature.closed".to_string(),
+            node_type: "feature.archived".to_string(),
             created_at,
             title: None,
             repo_ids: None,
