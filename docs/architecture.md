@@ -12,9 +12,7 @@ src/
   commands/
     mod.rs      command module wiring
     bundle.rs
-    checkpoint.rs
     clean.rs
-    close.rs
     config.rs
     doctor.rs
     init.rs
@@ -93,7 +91,7 @@ The bundle carries both current state and history:
 
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: flat list of logical commits across repos.
-- `nodes`: ordered ledger entries such as `feature.created`, `feature.closed`, `feature.landed`, `pr.revert`, `repo.added`, `worktree.materialized`, `checkpoint`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`.
+- `nodes`: ordered ledger entries such as `feature.created`, `feature.archived`, `feature.landed`, `pr.revert`, `repo.added`, `worktree.materialized`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`. Older artifacts may carry `feature.closed` and `checkpoint` nodes from removed commands; readers must tolerate unknown node types.
 - `publications`: provider metadata for PRs or other forge review objects created or synced by Knit.
 - `headNodeId`: the latest node in the ledger.
 

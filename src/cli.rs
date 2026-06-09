@@ -148,11 +148,6 @@ pub enum Commands {
         #[arg(long)]
         here: bool,
     },
-    /// Add a non-git note to the resolved bundle ledger.
-    Checkpoint {
-        /// Checkpoint note to record.
-        message: String,
-    },
     /// Remove Knit-generated local state.
     Clean {
         /// Remove stored revert plans.
@@ -161,9 +156,9 @@ pub enum Commands {
         /// Remove generated worktrees for the resolved bundle.
         #[arg(long)]
         worktrees: bool,
-        /// Clean selected generated state for closed and archived bundles.
+        /// Clean selected generated state for archived bundles.
         #[arg(long)]
-        closed: bool,
+        archived: bool,
         /// Remove clean merge worktrees for completed merge runs.
         #[arg(long = "merge-worktrees")]
         merge_worktrees: bool,
@@ -382,26 +377,6 @@ pub enum Commands {
         #[arg(long)]
         apply: bool,
     },
-    /// Run git reset across tracked checkouts (resolved bundle, or project source repos from the workspace root).
-    Reset {
-        /// Do not touch the index or working tree (git reset --soft).
-        #[arg(long, conflicts_with_all = ["mixed", "hard"])]
-        soft: bool,
-        /// Reset the index but keep the working tree. This is the default (git reset --mixed).
-        #[arg(long, conflicts_with_all = ["soft", "hard"])]
-        mixed: bool,
-        /// Reset the index and working tree, discarding tracked changes (git reset --hard).
-        #[arg(long, conflicts_with_all = ["soft", "mixed"])]
-        hard: bool,
-        /// Commit-ish to reset to. Defaults to HEAD.
-        commit: Option<String>,
-        /// Target repo id or path. Repeat for multiple repos.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-        /// Run against every tracked repo.
-        #[arg(long)]
-        all: bool,
-    },
     /// Run a git command in tracked checkouts.
     Git {
         /// Target repo id or path. Repeat for multiple repos.
@@ -590,18 +565,21 @@ pub enum BundleCommand {
         #[arg(long = "remote-bundles")]
         remote_bundles: bool,
     },
-    /// Mark the current bundle closed without mutating git state.
-    Close {
-        /// Optional reason to record on the close node.
-        #[arg(long)]
-        reason: Option<String>,
-    },
-    /// Mark a bundle archived while keeping its JSON artifact.
+    /// Mark a bundle done: archive its artifact and remove generated worktrees, keeping branches.
     Archive {
         /// Bundle id to archive.
         bundle: String,
+        /// Optional reason to record on the archive node.
+        #[arg(long)]
+        reason: Option<String>,
+        /// Keep generated worktrees on disk.
+        #[arg(long = "keep-worktrees")]
+        keep_worktrees: bool,
+        /// Pass --force to git worktree remove.
+        #[arg(long)]
+        force: bool,
     },
-    /// Restore an archived bundle to open or closed state.
+    /// Restore an archived bundle to the open state.
     Restore {
         /// Bundle id to restore.
         bundle: String,
@@ -625,47 +603,6 @@ pub enum BundleCommand {
         /// Delete matching feature branches from origin.
         #[arg(long = "remote-branches", requires = "branches")]
         remote_branches: bool,
-    },
-    /// Create a compatibility bundle from the union of repos in source bundles.
-    Compat {
-        /// Source bundle ids to make compatible.
-        #[arg(required = true)]
-        sources: Vec<String>,
-        /// Title for the compatibility bundle. Defaults to a title from the source ids.
-        #[arg(long)]
-        title: Option<String>,
-        /// Use a specific project template instead of source bundle repo metadata.
-        #[arg(long)]
-        project: Option<String>,
-        /// Include every project repo when --project is used.
-        #[arg(long)]
-        all_repos: bool,
-        /// Only update the bundle; do not create branches or worktrees.
-        #[arg(long)]
-        no_worktree: bool,
-        /// Use each original repo checkout directly instead of creating a Knit worktree.
-        #[arg(long)]
-        in_place: bool,
-        /// Replace an existing bundle with the same slug.
-        #[arg(long)]
-        force: bool,
-    },
-    /// Create a new bundle from selected commits in another bundle.
-    Split {
-        /// Source bundle id to split from.
-        source: String,
-        /// Source bundle selectors to cherry-pick into the new bundle.
-        #[arg(required = true)]
-        targets: Vec<String>,
-        /// Title for the new bundle. Defaults to "<source title> split".
-        #[arg(long)]
-        title: Option<String>,
-        /// Limit the new bundle and cherry-picks to one or more repo ids or paths.
-        #[arg(short = 'r', long = "repo", value_name = "REPO")]
-        repos: Vec<String>,
-        /// Replace an existing bundle with the same slug.
-        #[arg(long)]
-        force: bool,
     },
     /// Print the resolved bundle file path.
     Path,

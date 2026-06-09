@@ -475,7 +475,7 @@ fn project_remove_deletes_template_and_clears_active_project() {
 }
 
 #[test]
-fn bundle_split_cherrypicks_source_commits_into_a_new_bundle() {
+fn cherrypick_moves_source_commits_into_destination_bundle() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -499,18 +499,22 @@ fn bundle_split_cherrypicks_source_commits_into_a_new_bundle() {
     let source_sha = git(&source_checkout, ["rev-parse", "HEAD"]);
     knit(&workspace, ["--bundle", "source-feature", "sync"]);
 
-    let split = knit(
+    knit(
+        &workspace,
+        ["bundle", "picked feature", "--repo", "backend"],
+    );
+    let picked = knit(
         &workspace,
         [
-            "bundle",
-            "split",
+            "--bundle",
+            "picked-feature",
+            "cherrypick",
+            "--from",
             "source-feature",
-            "--title",
-            "picked feature",
             source_sha.trim(),
         ],
     );
-    assert!(split.contains("picking"));
+    assert!(picked.contains("picking"));
 
     let picked_checkout = workspace.join(".knit/worktrees/picked-feature/backend");
     assert!(fs::read_to_string(picked_checkout.join("app.txt"))
@@ -528,65 +532,6 @@ fn bundle_split_cherrypicks_source_commits_into_a_new_bundle() {
         .unwrap()
         .iter()
         .any(|node| node["type"].as_str() == Some("git.observed")));
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn bundle_split_preflights_project_repos_before_creating_bundle() {
-    let root = unique_temp_dir();
-    let backend = root.join("backend");
-    let frontend = root.join("frontend");
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    init_repo(&backend, "backend");
-    init_repo(&frontend, "frontend");
-    knit(&workspace, ["init", "arbient"]);
-    knit(
-        &workspace,
-        ["project", "add", "backend", backend.to_str().unwrap()],
-    );
-
-    knit(
-        &workspace,
-        ["bundle", "source feature", "--repo", "backend"],
-    );
-    knit(
-        &workspace,
-        [
-            "--bundle",
-            "source-feature",
-            "bundle",
-            "add",
-            frontend.to_str().unwrap(),
-        ],
-    );
-    let frontend_checkout = workspace.join(".knit/worktrees/source-feature/frontend");
-    append_line(&frontend_checkout.join("app.txt"), "frontend source change");
-    git(&frontend_checkout, ["add", "app.txt"]);
-    git(
-        &frontend_checkout,
-        ["commit", "-m", "Frontend source change"],
-    );
-    let frontend_sha = git(&frontend_checkout, ["rev-parse", "HEAD"]);
-    knit(&workspace, ["--bundle", "source-feature", "sync"]);
-
-    let split = knit_fails(
-        &workspace,
-        [
-            "bundle",
-            "split",
-            "source-feature",
-            "--title",
-            "bad split",
-            frontend_sha.trim(),
-        ],
-    );
-    assert!(split.contains("Project arbient is missing repo(s) needed for this split: frontend"));
-    assert!(!workspace
-        .join(".knit/bundles/bad-split.bundle.json")
-        .exists());
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -963,64 +908,6 @@ fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
 }
 
 #[test]
-fn reset_hard_restores_tracked_changes_in_project_source_repos() {
-    let root = unique_temp_dir();
-    let backend = root.join("backend");
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    init_repo(&backend, "backend");
-
-    knit(&workspace, ["init", "demo"]);
-    knit(
-        &workspace,
-        ["project", "add", "backend", backend.to_str().unwrap()],
-    );
-
-    // Dirty the canonical source checkout the way an external tool would.
-    fs::write(backend.join("app.txt"), "tampered\n").unwrap();
-    fs::write(backend.join("untracked.txt"), "new\n").unwrap();
-
-    let output = knit(&workspace, ["reset", "--hard", "--all"]);
-    assert!(output.contains("resetting source checkouts for project demo"));
-
-    // Tracked change is discarded; the untracked file survives, mirroring `git reset --hard`.
-    assert_eq!(
-        fs::read_to_string(backend.join("app.txt")).unwrap(),
-        "backend\n"
-    );
-    assert!(backend.join("untracked.txt").exists());
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn reset_hard_resets_bundle_worktree_when_resolved_from_worktree() {
-    let root = unique_temp_dir();
-    let backend = root.join("backend");
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    init_repo(&backend, "backend");
-
-    knit(&workspace, ["bundle", "feature"]);
-    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
-
-    let checkout = workspace.join(".knit/worktrees/feature/backend");
-    fs::write(checkout.join("app.txt"), "tampered\n").unwrap();
-
-    // Resolved from the worktree cwd, reset targets the bundle checkout, not project sources.
-    let output = knit(&checkout, ["reset", "--hard"]);
-    assert!(!output.contains("resetting source checkouts"));
-    assert_eq!(
-        fs::read_to_string(checkout.join("app.txt")).unwrap(),
-        "backend\n"
-    );
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
 fn run_executes_named_project_commands_in_bundle_worktrees() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -1144,7 +1031,7 @@ fn merge_bundle_into_branch_rolls_back_on_conflict_by_default() {
 }
 
 #[test]
-fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
+fn merge_manual_conflict_can_continue_and_merge_can_target_bundle() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -1221,15 +1108,15 @@ fn merge_manual_conflict_can_continue_and_compat_bundle_can_target_bundle() {
         "resolved staging\n"
     );
 
+    knit(&workspace, ["bundle", "x y compat"]);
     knit(
         &workspace,
         [
+            "--bundle",
+            "x-y-compat",
             "bundle",
-            "compat",
-            "feature-x",
-            "feature-y",
-            "--title",
-            "x y compat",
+            "add",
+            backend.to_str().unwrap(),
         ],
     );
     assert!(workspace
@@ -1353,23 +1240,31 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     assert!(knit(&workspace, ["schema", "print", "bundle"]).contains("ChangeGroup"));
 
-    knit(&workspace, ["bundle", "close", "--reason", "done"]);
-    let closed_bundle_path = workspace.join(".knit/bundles/life-cycle.bundle.json");
-    let closed_bundle: Value =
-        serde_json::from_str(&fs::read_to_string(&closed_bundle_path).unwrap()).unwrap();
-    assert_eq!(closed_bundle["state"].as_str(), Some("closed"));
-
-    knit(&workspace, ["clean", "--closed", "--worktrees"]);
+    let archive = knit(
+        &workspace,
+        ["bundle", "archive", "life-cycle", "--reason", "done"],
+    );
+    assert!(archive.contains("Archived bundle"));
+    let archived_bundle_path = workspace.join(".knit/bundles/life-cycle.bundle.json");
+    let archived_bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&archived_bundle_path).unwrap()).unwrap();
+    assert_eq!(archived_bundle["state"].as_str(), Some("archived"));
+    assert!(archived_bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"].as_str() == Some("feature.archived")));
+    // Archive tears down generated worktrees but keeps the feature branch.
     assert!(!workspace
         .join(".knit/worktrees/life-cycle/backend")
         .exists());
+    assert!(git(&backend, ["branch", "--list", "knit/life-cycle"]).contains("knit/life-cycle"));
 
-    knit(&workspace, ["bundle", "archive", "life-cycle"]);
     assert!(!knit(&workspace, ["bundle", "list"]).contains("life-cycle"));
     assert!(knit(&workspace, ["bundle", "list", "--archived"]).contains("archived"));
     assert!(knit_fails(&workspace, ["switch", "life-cycle"]).contains("archived"));
     knit(&workspace, ["bundle", "restore", "life-cycle"]);
-    assert!(knit(&workspace, ["bundle", "list"]).contains("closed"));
+    assert!(knit(&workspace, ["bundle", "list"]).contains("open"));
 
     let mut config: Value =
         serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
@@ -1381,10 +1276,10 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
     )
     .unwrap();
     let mut bundle: Value =
-        serde_json::from_str(&fs::read_to_string(&closed_bundle_path).unwrap()).unwrap();
+        serde_json::from_str(&fs::read_to_string(&archived_bundle_path).unwrap()).unwrap();
     bundle.as_object_mut().unwrap().remove("state");
     fs::write(
-        &closed_bundle_path,
+        &archived_bundle_path,
         serde_json::to_string_pretty(&bundle).unwrap(),
     )
     .unwrap();
@@ -1393,9 +1288,10 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
     assert!(fs::read_to_string(workspace.join(".knit/config.json"))
         .unwrap()
         .contains("\"advice\": true"));
-    assert!(fs::read_to_string(&closed_bundle_path)
+    // Migration re-infers the archived state from the feature.archived node.
+    assert!(fs::read_to_string(&archived_bundle_path)
         .unwrap()
-        .contains("\"state\": \"closed\""));
+        .contains("\"state\": \"archived\""));
 
     assert!(knit(&workspace, ["doctor"]).contains("Knit doctor: ok"));
     fs::write(workspace.join(".knit/locks/stale.lock"), "").unwrap();
@@ -1408,7 +1304,7 @@ fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
         .contains("\"advice\": false"));
 
     knit(&workspace, ["bundle", "delete", "life-cycle", "--force"]);
-    assert!(!closed_bundle_path.exists());
+    assert!(!archived_bundle_path.exists());
     assert!(workspace
         .join(".knit/deleted/bundles/life-cycle.bundle.json")
         .exists());
@@ -3480,42 +3376,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
 }
 
 #[test]
-fn checkpoint_records_non_git_ledger_note() {
-    let root = unique_temp_dir();
-    let workspace = root.join("workspace");
-    fs::create_dir_all(&workspace).unwrap();
-
-    knit(&workspace, ["bundle", "venue capacity"]);
-    let output = knit(
-        &workspace,
-        ["checkpoint", "frontend wired, backend pending"],
-    );
-    assert!(output.contains("Recorded checkpoint"));
-
-    let log = knit(&workspace, ["log", "-1"]);
-    assert!(log.contains("checkpoint"));
-    assert!(log.contains("frontend wired, backend pending"));
-
-    let show = knit(&workspace, ["show", "HEAD"]);
-    assert!(show.contains("checkpoint"));
-    assert!(show.contains("frontend wired, backend pending"));
-
-    let valid = knit(&workspace, ["bundle", "validate"]);
-    assert!(valid.contains("Bundle valid"));
-
-    let bundle = read_bundle(&workspace);
-    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
-    assert_eq!(latest["type"].as_str(), Some("checkpoint"));
-    assert_eq!(
-        bundle["headNodeId"].as_str(),
-        Some(latest["id"].as_str().unwrap())
-    );
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-#[test]
-fn close_records_feature_closed_node_without_git_state() {
+fn archive_records_ledger_node_and_preserves_branches() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -3525,43 +3386,48 @@ fn close_records_feature_closed_node_without_git_state() {
     knit(&workspace, ["bundle", "venue capacity"]);
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
-    let head_before_close = git(&feature, ["rev-parse", "HEAD"]);
+    let head_before_archive = git(&feature, ["rev-parse", "HEAD"]);
 
-    let close = knit(&workspace, ["bundle", "close", "--reason", "merged"]);
-    assert!(close.contains("Closed bundle"));
-    assert!(close.contains("Preserved"));
-    assert!(close.contains("worktrees and local feature branches"));
-    assert!(close.contains("knit bundle delete venue-capacity --force --worktrees --branches"));
+    // A dirty generated worktree blocks archive unless --force discards it.
+    append_line(&feature.join("app.txt"), "uncommitted work");
+    let dirty = knit_fails(&workspace, ["bundle", "archive", "venue-capacity"]);
+    assert!(dirty.contains("--force"));
+    git(&feature, ["checkout", "--", "app.txt"]);
 
-    let status = knit(&workspace, ["status"]);
-    assert!(status.contains("State: closed"));
-    assert!(status.contains("knit/venue-capacity"));
-    assert!(status.contains(".knit/worktrees/venue-capacity/backend"));
-    assert!(status.contains("ledger marker only"));
-
-    let log = knit(&workspace, ["log", "-1"]);
-    assert!(log.contains("closed"));
-    assert!(log.contains("merged"));
-
-    let show = knit(&workspace, ["show", "HEAD"]);
-    assert!(show.contains("feature.closed"));
-    assert!(show.contains("merged"));
-
-    let valid = knit(&workspace, ["bundle", "validate"]);
-    assert!(valid.contains("Bundle valid"));
-    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), head_before_close);
+    let archive = knit(
+        &workspace,
+        [
+            "bundle",
+            "archive",
+            "venue-capacity",
+            "--reason",
+            "merged",
+            "--keep-worktrees",
+        ],
+    );
+    assert!(archive.contains("Archived bundle"));
+    assert!(archive.contains("Preserved"));
+    assert!(feature.exists());
 
     let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
     let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
-    assert_eq!(latest["type"].as_str(), Some("feature.closed"));
+    assert_eq!(latest["type"].as_str(), Some("feature.archived"));
     assert_eq!(latest["message"].as_str(), Some("merged"));
     assert_eq!(
         bundle["headNodeId"].as_str(),
         Some(latest["id"].as_str().unwrap())
     );
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), head_before_archive);
+    assert!(git(&backend, ["branch", "--list", "knit/venue-capacity"])
+        .contains("knit/venue-capacity"));
 
-    let second_close = knit_fails(&workspace, ["bundle", "close"]);
-    assert!(second_close.contains("already closed"));
+    // Worktrees kept by --keep-worktrees are cleaned up by `clean --archived`.
+    knit(&workspace, ["clean", "--archived", "--worktrees"]);
+    assert!(!feature.exists());
+
+    let second_archive = knit_fails(&workspace, ["bundle", "archive", "venue-capacity"]);
+    assert!(second_archive.contains("already archived"));
 
     fs::remove_dir_all(root).unwrap();
 }

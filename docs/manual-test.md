@@ -132,7 +132,7 @@ git -C ../frontend branch staging
 
 knit merge venue-capacity --into staging --fetch
 knit merge status
-knit bundle compat venue-capacity backend-only --title "venue backend compat"
+knit bundle "venue backend compat" --repo backend
 knit merge venue-capacity --into venue-backend-compat
 ```
 
@@ -146,15 +146,14 @@ knit doctor
 knit migrate --check
 ```
 
-To discard a throwaway bundle and its generated local state:
+To finish a bundle or discard one with its generated local state:
 
 ```sh
-knit bundle close --reason "merged"
-knit status
+knit bundle archive venue-backend-compat --reason "merged"
 knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
 ```
 
-Expected result: after `close`, `knit status` still shows the closed bundle's generated worktrees and local feature branches. After `bundle delete --worktrees --branches`, the bundle JSON moves to `.knit/deleted/bundles/`, generated worktrees under `.knit/worktrees/<bundle>/` are removed, and local `knit/<bundle>` branches are deleted from the source repos. Remote branches are preserved.
+Expected result: after `archive`, the bundle records a `feature.archived` node, its generated worktrees are removed, and its local feature branches survive. After `bundle delete --worktrees --branches`, the bundle JSON moves to `.knit/deleted/bundles/`, generated worktrees under `.knit/worktrees/<bundle>/` are removed, and local `knit/<bundle>` branches are deleted from the source repos. Remote branches are preserved.
 
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
