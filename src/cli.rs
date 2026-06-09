@@ -60,7 +60,9 @@ pub enum Commands {
     },
     /// Clone a KnitHub project export into a local Knit workspace.
     Clone {
-        /// Project id or slug on the KnitHub remote.
+        /// Project to clone: `owner/slug`, a bare slug, or a project id. Use the
+        /// `owner/slug` form (owner is a username or org slug) when a slug is not
+        /// unique across owners.
         project: String,
         /// Directory to create. Defaults to the project slug.
         target: Option<PathBuf>,
