@@ -25,7 +25,7 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -64,11 +64,19 @@ pub fn clone_project_from_remote(
         )
     })?;
 
-    let repo_paths = clone_export_repositories(&target_root, &export.repositories)?;
+    let (repo_paths, failed_repos) =
+        clone_export_repositories_collecting(&target_root, &export.repositories);
+    if repo_paths.is_empty() {
+        bail!(
+            "Failed to clone any repository for project `{}`:\n{}",
+            export.project.slug,
+            format_repo_failures(&failed_repos)
+        );
+    }
     let project = local_project_from_export(&export, &repo_paths)?;
     write_json(&project_path(&target_root, &project.id), &project)?;
 
-    let bundles = localized_export_bundles(&export, &project)?;
+    let (bundles, skipped_bundles) = localized_export_bundles(&export, &project)?;
     for bundle in &bundles {
         write_json(&bundle_path(&target_root, &bundle.id), bundle)?;
     }
@@ -124,6 +132,24 @@ pub fn clone_project_from_remote(
     );
     if history_count > 0 {
         println!("{} {} event(s)", out::heading("History:"), history_count);
+    }
+    if !failed_repos.is_empty() {
+        println!(
+            "{} {} repo(s) could not be cloned and were left out of the workspace:",
+            out::heading("Skipped:"),
+            failed_repos.len()
+        );
+        for (local_id, error) in &failed_repos {
+            println!("  {}: {}", out::repo(local_id), out::muted(error));
+        }
+    }
+    if !skipped_bundles.is_empty() {
+        println!(
+            "{} {} bundle(s) referencing skipped repo(s): {}",
+            out::heading("Skipped bundles:"),
+            skipped_bundles.len(),
+            skipped_bundles.join(", ")
+        );
     }
     Ok(())
 }
@@ -248,6 +274,34 @@ pub(super) fn clone_export_repositories(
     Ok(paths)
 }
 
+/// Clone every exported repository, skipping (and recording) any that fail so an
+/// inaccessible repo, such as a private GitHub repo the token cannot read, does
+/// not abort the whole clone. Mirrors the per-repo resilience used by incremental
+/// remote pull. Returns the cloned paths and the (local id, error) failures.
+fn clone_export_repositories_collecting(
+    target_root: &Path,
+    repositories: &[RemoteExportRepository],
+) -> (BTreeMap<String, PathBuf>, Vec<(String, String)>) {
+    let mut paths = BTreeMap::new();
+    let mut failed = Vec::new();
+    for repository in repositories {
+        let local_id = export_repo_local_id(repository);
+        match clone_export_repositories(target_root, std::slice::from_ref(repository)) {
+            Ok(cloned) => paths.extend(cloned),
+            Err(error) => failed.push((local_id, format!("{error:#}"))),
+        }
+    }
+    (paths, failed)
+}
+
+fn format_repo_failures(failed: &[(String, String)]) -> String {
+    failed
+        .iter()
+        .map(|(local_id, error)| format!("  {local_id}: {error}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 fn checkout_export_base_branch(
     repo_path: &Path,
     repository: &RemoteExportRepository,
@@ -291,9 +345,11 @@ fn local_project_from_export(
 
     for repository in &export.repositories {
         let local_id = export_repo_local_id(repository);
-        let repo_path = repo_paths
-            .get(&local_id)
-            .with_context(|| format!("{local_id}: repository was not cloned"))?;
+        // Repos that failed to clone are absent from repo_paths; leave them out
+        // of the local project rather than recording an entry with no checkout.
+        let Some(repo_path) = repo_paths.get(&local_id) else {
+            continue;
+        };
         project
             .repos
             .push(project_repo_entry_from_export(repository, repo_path));
@@ -325,25 +381,38 @@ pub(super) fn project_repo_entry_from_export(
     }
 }
 
+/// Localize every exportable bundle onto the local project, skipping any bundle
+/// that references a repo missing from the project (because its clone failed).
+/// Returns the localized bundles and the slugs of the skipped ones.
 fn localized_export_bundles(
     export: &RemoteProjectExport,
     project: &KnitProject,
-) -> Result<Vec<ChangeGroup>> {
-    export
+) -> Result<(Vec<ChangeGroup>, Vec<String>)> {
+    let available: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
+    let mut localized = Vec::new();
+    let mut skipped = Vec::new();
+
+    for bundle in export
         .bundles
         .iter()
         .filter(|bundle| bundle.lifecycle_state != "deleted")
-        .filter_map(|bundle| {
-            bundle
-                .current_artifact
-                .as_ref()
-                .map(|artifact| (bundle, artifact))
-        })
-        .map(|(bundle, artifact)| {
-            let payload = decode_bundle_payload(&artifact.payload, &bundle.slug)?;
-            localize_bundle(payload, project)
-        })
-        .collect()
+    {
+        let Some(artifact) = bundle.current_artifact.as_ref() else {
+            continue;
+        };
+        let payload = decode_bundle_payload(&artifact.payload, &bundle.slug)?;
+        if payload
+            .repos
+            .iter()
+            .any(|repo| !available.contains(repo.id.as_str()))
+        {
+            skipped.push(bundle.slug.clone());
+            continue;
+        }
+        localized.push(localize_bundle(payload, project)?);
+    }
+
+    Ok((localized, skipped))
 }
 
 fn select_active_bundle(
@@ -397,4 +466,91 @@ fn metadata_string(metadata: &Value, key: &str) -> Option<String> {
 
 fn metadata_bool(metadata: &Value, key: &str) -> Option<bool> {
     metadata.get(key).and_then(Value::as_bool)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "knit-clone-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn init_source_repo(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        let run = |args: &[&str]| {
+            let status = Command::new("git")
+                .args(args)
+                .current_dir(path)
+                .status()
+                .unwrap();
+            assert!(status.success(), "git {args:?} failed");
+        };
+        run(&["init", "-q"]);
+        run(&["config", "user.email", "test@example.com"]);
+        run(&["config", "user.name", "Test"]);
+        run(&["commit", "--allow-empty", "-q", "-m", "init"]);
+    }
+
+    fn export_repo(name: &str, remote_url: &str) -> RemoteExportRepository {
+        RemoteExportRepository {
+            local_id: Some(name.to_string()),
+            name: name.to_string(),
+            default_branch: None,
+            remote_url: Some(remote_url.to_string()),
+            metadata: Value::Null,
+        }
+    }
+
+    #[test]
+    fn clone_collecting_skips_failed_repos_and_keeps_the_good_ones() {
+        let root = temp_dir("collect");
+        let source = root.join("source.git");
+        init_source_repo(&source);
+        let target = root.join("workspace");
+        fs::create_dir_all(&target).unwrap();
+
+        // `bad` points at a path that cannot be cloned; `good` is a real repo.
+        let repos = [
+            export_repo("bad", &root.join("does-not-exist").to_string_lossy()),
+            export_repo("good", &source.to_string_lossy()),
+        ];
+
+        let (paths, failed) = clone_export_repositories_collecting(&target, &repos);
+
+        assert!(paths.contains_key("good"), "good repo should be cloned");
+        assert!(target.join("good").join(".git").exists());
+        assert!(!paths.contains_key("bad"), "bad repo should be skipped");
+        assert!(!target.join("bad").exists());
+
+        assert_eq!(failed.len(), 1);
+        assert_eq!(failed[0].0, "bad");
+        assert!(
+            failed[0].1.contains("bad") || failed[0].1.contains("clone"),
+            "failure should name the repo or the clone step: {}",
+            failed[0].1
+        );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn format_repo_failures_lists_each_repo() {
+        let failures = vec![
+            ("backend".to_string(), "Repository not found".to_string()),
+            ("frontend".to_string(), "permission denied".to_string()),
+        ];
+        let text = format_repo_failures(&failures);
+        assert!(text.contains("backend: Repository not found"));
+        assert!(text.contains("frontend: permission denied"));
+    }
 }
