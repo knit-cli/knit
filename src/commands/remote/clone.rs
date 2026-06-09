@@ -162,9 +162,11 @@ fn resolve_remote_for_clone(
 
 fn resolve_clone_target(target: Option<&Path>, project_identifier: &str) -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
+    // Default the directory to the project slug, dropping any `owner/` prefix.
+    let (_owner, slug) = super::client::split_project_identifier(project_identifier);
     let target = target
         .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(slugify(project_identifier)));
+        .unwrap_or_else(|| PathBuf::from(slug));
     if target.is_absolute() {
         Ok(target)
     } else {
