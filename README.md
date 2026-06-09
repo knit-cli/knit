@@ -158,10 +158,11 @@ knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-o
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run --list
-knit publish create [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
-knit publish sync [repo-id-or-path...]
-knit publish status [--live] [repo-id-or-path...]
-knit publish github <create|sync|status> ...   # back-compat alias
+knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish sync [--provider <id>|--github] [repo-id-or-path...]
+knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
+knit request ...                               # alias for `knit publish`
+knit publish github <create|sync|status> ...   # deprecated alias (hidden); prefer `knit publish create --github`
 knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
@@ -496,7 +497,7 @@ knit publish sync
 knit publish status
 ```
 
-`knit publish github …` is kept as a back-compat alias for `knit publish create/sync/status`.
+`knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`. The old `knit publish github …` form is a deprecated, hidden alias that now maps to `knit publish create --github`; prefer the flag.
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
 

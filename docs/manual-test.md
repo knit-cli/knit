@@ -159,7 +159,7 @@ Expected result: after `close`, `knit status` still shows the closed bundle's ge
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
 ```sh
-knit publish github create --base main --no-sync
+knit publish create --base main --no-sync
 knit land
 knit land status
 ```
