@@ -67,7 +67,7 @@ pub fn split_bundle(
 
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd)
-        .context("No Knit workspace found. Run `knit bundle start \"feature title\"` first.")?;
+        .context("No Knit workspace found. Run `knit bundle \"feature title\"` first.")?;
     let source = load_source_bundle(&root, source_bundle_id)?;
     let selected = selected_source_commits(&source, targets, repo_selectors, None)?;
     if selected.is_empty() {

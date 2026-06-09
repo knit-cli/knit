@@ -1,4 +1,4 @@
-//! Live reshaping of an existing bundle: `knit bundle include/exclude/apply-view`.
+//! Live reshaping of an existing bundle: `knit bundle add/remove/apply-view`.
 //!
 //! `include` materializes project repos into the bundle (branch + worktree).
 //! `exclude` removes repos, tearing down their generated worktree (and optionally
