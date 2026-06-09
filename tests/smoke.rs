@@ -4386,13 +4386,33 @@ fn write_bundle_publications_for_repos(
     .unwrap();
 }
 
+/// A single empty global-config home shared by the whole test process. Every
+/// `knit` invocation defaults `KNIT_HOME` here so tests never read the running
+/// user's real `~/.config/knit/config.json` (whose global remotes would
+/// otherwise merge into test workspaces and break assertions). Tests that need
+/// global config set their own `KNIT_HOME`, which still overrides this default.
+fn isolated_knit_home() -> String {
+    static KNIT_HOME: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+    KNIT_HOME
+        .get_or_init(|| {
+            let dir = unique_temp_dir().join("global-knit-home");
+            fs::create_dir_all(&dir).unwrap();
+            dir
+        })
+        .to_string_lossy()
+        .to_string()
+}
+
 fn knit<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command.args(args).current_dir(cwd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home());
     run(command)
 }
 
@@ -4402,7 +4422,11 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command.args(args).current_dir(cwd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home());
+    // Test-provided env wins, so a test can still point KNIT_HOME at its own dir.
     for (key, value) in env {
         command.env(key, value);
     }
@@ -4415,7 +4439,10 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command.args(args).current_dir(cwd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home());
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
@@ -4431,7 +4458,10 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
-    command.args(args).current_dir(cwd);
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home());
     for (key, value) in env {
         command.env(key, value);
     }
@@ -4469,6 +4499,7 @@ where
     command
         .args(args)
         .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home())
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
@@ -4502,6 +4533,7 @@ where
     command
         .args(args)
         .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home())
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
