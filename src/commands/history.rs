@@ -711,7 +711,7 @@ fn resolve_project(project: Option<&str>) -> Result<(std::path::PathBuf, String)
     let project_id = project
         .map(slugify)
         .or(config.active_project)
-        .context("No active project selected. Pass --project or run `knit init <name>`.")?;
+        .context("No active project selected. Pass --project or run `knit project init <name>`.")?;
     Ok((root, project_id))
 }
 

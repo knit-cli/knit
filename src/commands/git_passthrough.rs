@@ -173,7 +173,7 @@ fn repo_matches(active: &ActiveBundle, repo: &RepoEntry, selector: &str) -> bool
 fn repo_cwd(active: &ActiveBundle, repo: &RepoEntry) -> Result<PathBuf> {
     checkout_dir(active, repo).with_context(|| {
         format!(
-            "{} has no active checkout. Run `knit bundle worktree` to materialize it.",
+            "{} has no active checkout. Run `knit worktree` to materialize it.",
             repo.id
         )
     })

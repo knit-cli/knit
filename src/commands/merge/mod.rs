@@ -333,7 +333,7 @@ fn merge_run_path(root: &Path, run_id: &str) -> PathBuf {
 fn current_knit_root() -> Result<PathBuf> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     find_knit_root(&cwd)
-        .context("No Knit workspace found. Run `knit bundle \"feature title\"` first.")
+        .context("No Knit workspace found. Run `knit bundle start \"feature title\"` first.")
 }
 
 fn checkout_path_for(root: &Path, repo: &RepoEntry) -> Option<PathBuf> {

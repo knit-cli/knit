@@ -521,7 +521,7 @@ fn publish_repo_remote(
     let base_branch = &job.base_branch;
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit bundle worktree`.",
+            "{}: no feature branch recorded. Run `knit worktree`.",
             repo.id
         )
     })?;
@@ -756,7 +756,7 @@ fn fetch_pr_summary_for_sync(
 ) -> Result<SyncFetchResult> {
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit bundle worktree`.",
+            "{}: no feature branch recorded. Run `knit worktree`.",
             repo.id
         )
     })?;
@@ -1266,7 +1266,6 @@ mod tests {
                         sha: "def456".to_string(),
                     },
                 ],
-                author: None,
             }],
             nodes: Vec::new(),
             publications: vec![pr_publication(
@@ -1317,7 +1316,6 @@ mod tests {
                     repo_id: "backend".to_string(),
                     sha: "abc123".to_string(),
                 }],
-                author: None,
             }],
             nodes: Vec::new(),
             publications: Vec::new(),

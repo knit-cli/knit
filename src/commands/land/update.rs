@@ -121,7 +121,7 @@ fn update_target(active: &ActiveBundle, repo_index: usize) -> Result<LandUpdateT
     };
     let feature_branch = repo.feature_branch.clone().with_context(|| {
         format!(
-            "{}: no feature branch recorded. Run `knit bundle worktree`.",
+            "{}: no feature branch recorded. Run `knit worktree`.",
             repo.id
         )
     })?;

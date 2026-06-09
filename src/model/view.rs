@@ -20,7 +20,7 @@ pub struct KnitProjectViews {
     pub project_id: String,
     pub created_at: String,
     pub updated_at: String,
-    /// Name of the view new bundles should apply, if any.
+    /// Name of the view bare `knit bundle start` should apply, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_view: Option<String>,
     #[serde(default)]

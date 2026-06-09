@@ -46,7 +46,7 @@ pub(super) fn resolve_project_id(
     let project_id = name
         .map(slugify)
         .or_else(|| config.active_project.clone())
-        .context("No project selected. Pass a project name or run `knit init <name>`.")?;
+        .context("No project selected. Pass a project name or run `knit project init <name>`.")?;
     if !project_path(root, &project_id).exists() {
         bail!("No local Knit project named `{project_id}`.");
     }

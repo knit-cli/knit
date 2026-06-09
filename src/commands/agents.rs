@@ -119,7 +119,7 @@ Bundle-scoped Knit commands resolve this bundle automatically from this cwd:
 ```sh
 knit status
 knit add
-knit commit --all -m "Describe the feature change"
+knit commit --stage -m "Describe the feature change"
 knit push --set-upstream
 ```
 
@@ -127,7 +127,7 @@ Before editing a path that may have cross-repo coupling, ask Knit which prior bu
 
 ```sh
 knit related --repo <repo-id> path/inside/repo
-knit related --repo <repo-id> path/inside/repo --pull
+knit history related --repo <repo-id> path/inside/repo --pull
 ```
 
 Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
@@ -311,7 +311,7 @@ Make this folder the actual cwd/workdir for repo-local tool calls. Because this 
 ```sh
 knit status
 knit add
-knit commit --all -m "Describe the feature change"
+knit commit --stage -m "Describe the feature change"
 knit push --set-upstream
 ```
 
@@ -320,7 +320,7 @@ Before editing a path that may have cross-repo coupling, ask Knit which prior bu
 ```sh
 knit related path/inside/repo
 knit related --repo <repo-id> path/inside/repo
-knit related --repo <repo-id> path/inside/repo --pull
+knit history related --repo <repo-id> path/inside/repo --pull
 ```
 
 Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
@@ -499,7 +499,7 @@ knit project show {project_id}
 Start most new `{project_id}` work with:
 
 ```sh
-knit bundle "feature title" --project {project_id}
+knit bundle start "feature title" --project {project_id}
 ```
 
 That command adds these default repos from the project data:
@@ -510,7 +510,7 @@ For narrower or unusual work, inspect the project first and then choose repo ids
 
 ```sh
 knit project show {project_id}
-knit bundle "feature title" --project {project_id} --repo <repo-id>
+knit bundle start "feature title" --project {project_id} --repo <repo-id>
 ```
 
 Before changing a file or subsystem, use project history to find Knit-managed work that previously touched it and see any cross-repo companion commits:
@@ -518,7 +518,7 @@ Before changing a file or subsystem, use project history to find Knit-managed wo
 ```sh
 knit related --repo <repo-id> path/inside/repo
 knit related <repo-id>/path/inside/repo
-knit related --repo <repo-id> path/inside/repo --pull
+knit history related --repo <repo-id> path/inside/repo --pull
 ```
 
 Use `--pull` when you want to refresh the local history ledger from KnitHub first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.

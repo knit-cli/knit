@@ -1090,14 +1090,14 @@ fn suggested_prune_apply_command(
 ) -> String {
     if worktrees && force && branches && force_branches && remote_branches && remote_bundles
     {
-        let base = "knit bundle prune --apply --all";
+        let base = "knit prune --apply --all";
         return if untracked {
             format!("{base} --untracked")
         } else {
             base.to_string()
         };
     }
-    let mut command = vec!["knit", "bundle", "prune", "--apply"];
+    let mut command = vec!["knit", "prune", "--apply"];
     if untracked {
         command.push("--untracked");
     }
@@ -1192,6 +1192,6 @@ mod prune_tests {
     #[test]
     fn suggested_command_includes_force_when_needed() {
         let cmd = suggested_prune_apply_command(false, true, true, false, false, false, false);
-        assert_eq!(cmd, "knit bundle prune --apply --worktrees --force");
+        assert_eq!(cmd, "knit prune --apply --worktrees --force");
     }
 }

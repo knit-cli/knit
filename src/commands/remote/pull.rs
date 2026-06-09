@@ -122,7 +122,7 @@ pub fn prepare_remote_pull(
     let project_id = config
         .active_project
         .clone()
-        .context("No active project selected for remote pull. Run `knit init <name>`.")?;
+        .context("No active project selected for remote pull. Run `knit project init <name>`.")?;
     let mut project = load_project_if_present(&root, &project_id)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
     let export = fetch_project_export(remote, &token, &project_id)?;
@@ -378,7 +378,7 @@ pub fn fetch_bundles_from_remote(
     let project_id = config
         .active_project
         .clone()
-        .context("Bundle fetch requires active_project. Set with `knit init <name>`.")?;
+        .context("Bundle fetch requires active_project. Set with `knit project init <name>`.")?;
 
     let export = fetch_project_export(remote, &token, &project_id)?;
     crate::history::append_history_events(root, &project_id, &export.history_events)?;

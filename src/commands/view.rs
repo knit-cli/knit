@@ -317,7 +317,7 @@ pub(crate) fn resolve_project(project: Option<&str>) -> Result<(PathBuf, String)
         Some(name) => slugify(name),
         None => load_config(&root)?
             .active_project
-            .context("No active Knit project. Pass --project or run `knit init <name>`.")?,
+            .context("No active Knit project. Pass --project or run `knit project init <name>`.")?,
     };
     if !project_path(&root, &project_id).exists() {
         bail!("Project {} does not exist.", out::repo(&project_id));

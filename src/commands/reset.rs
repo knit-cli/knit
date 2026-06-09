@@ -94,7 +94,7 @@ fn reset_bundle_checkouts(
             Some(cwd) => cwd,
             None => {
                 failures.push(format!(
-                    "{}: no active checkout. Run `knit bundle worktree` to materialize it.",
+                    "{}: no active checkout. Run `knit worktree` to materialize it.",
                     repo.id
                 ));
                 continue;

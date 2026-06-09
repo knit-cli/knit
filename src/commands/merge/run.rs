@@ -354,7 +354,7 @@ fn prepare_merge_step(
                 })?;
             let checkout = checkout_path_for(root, target_repo).with_context(|| {
                 format!(
-                    "{}: target bundle checkout is not materialized. Run `knit bundle worktree --bundle {}`.",
+                    "{}: target bundle checkout is not materialized. Run `knit worktree --bundle {}`.",
                     target_repo.id, bundle.id
                 )
             })?;
@@ -528,7 +528,7 @@ fn resolve_source_plan(root: &Path, source: &str) -> Result<SourcePlan> {
             .map(|repo| {
                 let feature_branch = repo.feature_branch.clone().with_context(|| {
                     format!(
-                        "{}: source bundle has no feature branch. Run `knit bundle worktree --bundle {}`.",
+                        "{}: source bundle has no feature branch. Run `knit worktree --bundle {}`.",
                         repo.id, bundle.id
                     )
                 })?;

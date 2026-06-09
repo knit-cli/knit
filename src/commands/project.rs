@@ -78,12 +78,12 @@ pub fn add_project_repo(
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd)
-        .context("No Knit project found. Run `knit init <name>` first.")?;
+        .context("No Knit project found. Run `knit project init <name>` first.")?;
     let config = load_config(&root)?;
     let project_id = config
         .active_project
         .as_deref()
-        .context("No active Knit project. Run `knit init <name>` first.")?;
+        .context("No active Knit project. Run `knit project init <name>` first.")?;
     let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
     let path = project_path(&root, project_id);
     let mut project: KnitProject = read_json(&path)?;
@@ -121,7 +121,7 @@ pub fn refresh_project_agents(name: Option<&str>) -> Result<()> {
     let project_id = name
         .map(slugify)
         .or(config.active_project)
-        .context("No project selected. Pass a project name or run `knit init <name>`.")?;
+        .context("No project selected. Pass a project name or run `knit project init <name>`.")?;
     let project: KnitProject = read_json(&project_path(&root, &project_id))?;
     let agents_path = write_project_agents_md(&root, &project)?;
     println!(
@@ -174,7 +174,7 @@ pub fn show_project(name: Option<&str>) -> Result<()> {
     let project_id = name
         .map(slugify)
         .or(config.active_project)
-        .context("No project selected. Pass a project name or run `knit init <name>`.")?;
+        .context("No project selected. Pass a project name or run `knit project init <name>`.")?;
     let project: KnitProject = read_json(&project_path(&root, &project_id))?;
     let text = serde_json::to_string_pretty(&project).context("failed to serialize project")?;
     println!("{text}");
@@ -332,7 +332,7 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
     let path = project_path(&root, &project_id);
     if !path.exists() {
         bail!(
-            "Project `{}` does not exist locally. Run `knit init {project_id}` first.",
+            "Project `{}` does not exist locally. Run `knit project init {project_id}` first.",
             out::repo(&project_id)
         );
     }
@@ -400,7 +400,7 @@ pub fn load_project_by_id(root: &Path, project_id: &str) -> Result<KnitProject> 
 fn active_project_id(root: &Path) -> Result<String> {
     load_config(root)?
         .active_project
-        .context("No active Knit project. Run `knit init <name>` first.")
+        .context("No active Knit project. Run `knit project init <name>` first.")
 }
 
 fn parse_env(values: &[String]) -> Result<BTreeMap<String, String>> {

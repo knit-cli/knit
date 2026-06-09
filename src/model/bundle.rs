@@ -107,19 +107,6 @@ pub struct CommitGroup {
     pub message: String,
     pub created_at: String,
     pub commits: Vec<CommitRef>,
-    /// Git author of the commit, captured at commit time. Optional so older
-    /// artifacts (and consumers) stay compatible. Used downstream to attribute
-    /// ledger activity to the person who did the work.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub author: Option<CommitAuthor>,
-}
-
-/// Identity of whoever authored a recorded commit, as Git records it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct CommitAuthor {
-    pub name: String,
-    pub email: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

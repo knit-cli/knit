@@ -32,11 +32,11 @@ git -C docs add app.txt
 git -C docs commit -m "Initial docs"
 
 cd workspace
-knit init venues
+knit project init venues
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
-knit bundle "venue capacity"
+knit bundle start "venue capacity"
 
 printf "capacity\n" >> .knit/worktrees/venue-capacity/backend/app.txt
 printf "capacity\n" >> .knit/worktrees/venue-capacity/frontend/app.txt
@@ -59,7 +59,7 @@ Expected result:
 
 - `.knit/projects/venues.project.json` exists with `backend` and `frontend` included by default and `docs` observed.
 - `.knit/bundles/venue-capacity.bundle.json` exists.
-- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit bundle`.
+- The bundle has `feature.created`, `repo.added`, and `worktree.materialized` nodes after `knit bundle start`.
 - `.knit/worktrees/venue-capacity/backend` and `.knit/worktrees/venue-capacity/frontend` exist, while `docs` is not tracked until explicitly added.
 - `knit add` reports staged changes before the commit.
 - `knit commit` creates one commit in each staged checkout.
@@ -88,7 +88,7 @@ To test project history and related-work lookup:
 knit history refresh
 knit history list --repo frontend -n 5
 knit related --repo frontend app.txt --limit 5 --commit-limit 20
-knit related frontend/app.txt --limit 5 --commit-limit 20
+knit history related frontend/app.txt --limit 5 --commit-limit 20
 ```
 
 Expected result: `knit history refresh` records any missing project history events from local bundles. `knit history list` shows frontend commit events with timestamps, bundle ids, and Git SHAs. `knit related` asks Git which commits touched `app.txt`, matches those SHAs against Knit history, and prints the matching bundle scope plus any related same-scope or same-bundle repo commits. If a touched Git commit was never recorded by Knit, the command reports that no Knit history event matched it.
@@ -108,7 +108,7 @@ Expected result: `knit status` reports `rewound commits: 1` for `frontend`, `kni
 To test parallel bundles over the same repo:
 
 ```sh
-knit bundle "backend only" --repo backend
+knit bundle start "backend only" --repo backend
 knit bundle list
 
 knit status
@@ -149,7 +149,7 @@ knit migrate --check
 To discard a throwaway bundle and its generated local state:
 
 ```sh
-knit bundle close --reason "merged"
+knit close --reason "merged"
 knit status
 knit bundle delete documentation-quick-wins --force --worktrees --branches --force-branches
 ```

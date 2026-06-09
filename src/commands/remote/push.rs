@@ -277,7 +277,7 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
         .map(slugify)
         .or_else(|| active.bundle.project_id.clone())
         .or_else(|| config.active_project.clone())
-        .context("No project selected. Pass --project or run `knit init <name>`.")?;
+        .context("No project selected. Pass --project or run `knit project init <name>`.")?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&active.root, &project_id)?;

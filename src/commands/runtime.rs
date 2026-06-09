@@ -47,7 +47,7 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
 
     let stack_repo = resolve_stack_repo(active, runtime)?;
     let stack_checkout = checkout_dir(active, stack_repo)
-        .with_context(|| format!("{} has no checkout. Run `knit bundle worktree` first.", stack_repo.id))?;
+        .with_context(|| format!("{} has no checkout. Run `knit worktree` first.", stack_repo.id))?;
 
     let database = runtime.database.clone().unwrap_or_default();
     let resolved_database = resolve_database(&database, &active.bundle.id)?;
