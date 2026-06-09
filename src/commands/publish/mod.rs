@@ -17,6 +17,39 @@ use std::path::Path;
 mod pr_body;
 use pr_body::{initial_pr_body, render_knit_pr_block, upsert_knit_pr_block};
 
+/// Narrow resolved repo indexes to those hosted on `provider` (e.g. "github",
+/// "gitlab", "forgejo"/"codeberg"). With no provider the indexes pass through
+/// unchanged, preserving the default "publish to wherever each repo is hosted"
+/// behavior. The provider string is canonicalized through the forge registry,
+/// so "codeberg" and "gitea" both match the Forgejo adapter.
+fn filter_indexes_by_provider(
+    repos: &[RepoEntry],
+    indexes: Vec<usize>,
+    provider: Option<&str>,
+) -> Result<Vec<usize>> {
+    let Some(requested) = provider else {
+        return Ok(indexes);
+    };
+    let want = providers::by_id(requested)
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "unknown provider `{requested}`. Known providers: github, gitlab, forgejo."
+            )
+        })?
+        .id()
+        .to_string();
+    let mut filtered = Vec::new();
+    for index in indexes {
+        if providers::for_repo(&repos[index])?.id() == want.as_str() {
+            filtered.push(index);
+        }
+    }
+    if filtered.is_empty() {
+        bail!("No repos in the selected set are hosted on `{want}`.");
+    }
+    Ok(filtered)
+}
+
 pub fn create_publications(
     selectors: &[String],
     all: bool,
@@ -26,6 +59,7 @@ pub fn create_publications(
     set_upstream: bool,
     remote: &[String],
     no_remote: bool,
+    provider: Option<&str>,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
@@ -33,6 +67,7 @@ pub fn create_publications(
     }
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
+    let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
     let base_overrides = BaseOverrides::parse(bases)?;
     base_overrides.validate_tracked_repos(&active.bundle)?;
     let bundle_snapshot = active.bundle.clone();
@@ -134,6 +169,7 @@ pub fn create_publications_from_artifact(
     bases: &[String],
     sync: bool,
     push: bool,
+    provider: Option<&str>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let mut bundle: ChangeGroup = crate::store::read_json(artifact_path)
@@ -146,6 +182,7 @@ pub fn create_publications_from_artifact(
     }
 
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
+    let indexes = filter_indexes_by_provider(&bundle.repos, indexes, provider)?;
     let base_overrides = BaseOverrides::parse(bases)?;
     base_overrides.validate_tracked_repos(&bundle)?;
     let bundle_snapshot = bundle.clone();
@@ -228,13 +265,14 @@ pub fn create_publications_from_artifact(
     Ok(())
 }
 
-pub fn sync_publications(selectors: &[String], all: bool) -> Result<()> {
+pub fn sync_publications(selectors: &[String], all: bool, provider: Option<&str>) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
+    let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
     let failures = sync_publications_for_indexes(&mut active, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
@@ -248,6 +286,7 @@ pub fn sync_publications_from_artifact(
     out_path: Option<&Path>,
     selectors: &[String],
     all: bool,
+    provider: Option<&str>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let mut bundle: ChangeGroup = crate::store::read_json(artifact_path)
@@ -256,6 +295,7 @@ pub fn sync_publications_from_artifact(
         bail!("Bundle artifact has no repos.");
     }
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
+    let indexes = filter_indexes_by_provider(&bundle.repos, indexes, provider)?;
     let failures = sync_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
@@ -264,13 +304,19 @@ pub fn sync_publications_from_artifact(
     Ok(())
 }
 
-pub fn show_publication_status(selectors: &[String], all: bool, live: bool) -> Result<()> {
+pub fn show_publication_status(
+    selectors: &[String],
+    all: bool,
+    live: bool,
+    provider: Option<&str>,
+) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
     println!("Bundle: {}\n", out::heading(&active.bundle.id));
 
     if live {

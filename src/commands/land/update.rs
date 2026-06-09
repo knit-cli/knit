@@ -112,7 +112,7 @@ fn update_target(active: &ActiveBundle, repo_index: usize) -> Result<LandUpdateT
     let repo = &active.bundle.repos[repo_index];
     let publication = publication_for_repo(&active.bundle, &repo.id).with_context(|| {
         format!(
-            "{}: no GitHub PR publication recorded. Run `knit publish github create` first.",
+            "{}: no PR publication recorded. Run `knit publish create` first.",
             repo.id
         )
     })?;

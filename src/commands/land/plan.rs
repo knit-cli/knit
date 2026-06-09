@@ -74,7 +74,7 @@ pub(super) fn build_default_plan(
 
     if steps.is_empty() {
         bail!(
-            "No GitHub PR publications or project landing deployments are available for this bundle. Run `knit publish github create` first or configure project landing deployments."
+            "No PR publications or project landing deployments are available for this bundle. Run `knit publish create` first or configure project landing deployments."
         );
     }
 
