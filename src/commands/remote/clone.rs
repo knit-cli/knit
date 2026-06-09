@@ -134,15 +134,20 @@ fn resolve_remote_for_clone(
     token: Option<&str>,
 ) -> Result<(KnitRemote, Option<String>, String)> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let configured = find_knit_root(&cwd)
-        .and_then(|root| crate::store::load_effective_config(&root).ok())
-        .and_then(|config| config.remotes.get(remote_name).cloned());
+    // Inside a workspace, the effective config already merges global remotes in.
+    // Outside one, fall back to the user-global config so `knit clone` works from
+    // any directory, not just an existing Knit workspace.
+    let configured = match find_knit_root(&cwd) {
+        Some(root) => crate::store::load_effective_config(&root).ok(),
+        None => crate::store::load_global_config().ok(),
+    }
+    .and_then(|config| config.remotes.get(remote_name).cloned());
     let remote_url = url
         .map(ToString::to_string)
         .or_else(|| std::env::var("KNITHUB_URL").ok())
         .or_else(|| configured.as_ref().map(|remote| remote.url.clone()))
         .with_context(|| {
-            format!("No KnitHub URL configured. Pass --url, set KNITHUB_URL, or run `knit remote add {remote_name} <url>` from an existing workspace.")
+            format!("No KnitHub URL configured. Pass --url, set KNITHUB_URL, or run `knit remote add {remote_name} <url>`.")
         })?;
     let stored_token = token
         .map(ToString::to_string)

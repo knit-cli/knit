@@ -1473,6 +1473,51 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
 }
 
 #[test]
+fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
+    let root = unique_temp_dir();
+    // A plain directory with no `.knit` workspace anywhere above it.
+    let outside = root.join("outside");
+    let knit_home = root.join("knit-home");
+    fs::create_dir_all(&outside).unwrap();
+    let env = [("KNIT_HOME", knit_home.to_str().unwrap())];
+
+    // Configure a global remote, then clone from a non-workspace directory. An
+    // unroutable URL makes the request fail fast once resolution succeeds.
+    knit_with_env(
+        &outside,
+        [
+            "remote",
+            "add",
+            "--global",
+            "knithub",
+            "http://127.0.0.1:9",
+            "--token",
+            "global-token",
+        ],
+        &env,
+    );
+
+    let output = knit_fails_with_env(&outside, ["clone", "acme/widgets"], &env);
+
+    // The fix: clone must consult the global config outside a workspace, so it
+    // never reports a missing URL or token; it should reach the network step.
+    assert!(
+        !output.contains("No KnitHub URL configured"),
+        "global URL should be used outside a workspace: {output}"
+    );
+    assert!(
+        !output.contains("No KnitHub token configured"),
+        "global token should be used outside a workspace: {output}"
+    );
+    assert!(
+        output.contains("curl"),
+        "clone should fail at the request step, not resolution: {output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn config_can_target_multiple_knithub_sync_remotes() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
@@ -4371,6 +4416,25 @@ where
 {
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
     command.args(args).current_dir(cwd);
+    let output = command.output().unwrap();
+    assert!(!output.status.success());
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+fn knit_fails_with_env<I, S>(cwd: &Path, args: I, env: &[(&str, &str)]) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command.args(args).current_dir(cwd);
+    for (key, value) in env {
+        command.env(key, value);
+    }
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
