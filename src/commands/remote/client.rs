@@ -153,13 +153,25 @@ pub(super) fn fetch_project_export(
     token: &str,
     project_identifier: &str,
 ) -> Result<RemoteProjectExport> {
-    request_json(
-        remote,
-        token,
-        "GET",
-        &format!("/projects/{}/export", slugify(project_identifier)),
-        None,
-    )
+    let (owner, slug) = split_project_identifier(project_identifier);
+    let path = match owner {
+        Some(owner) => format!("/projects/{slug}/export?owner={owner}"),
+        None => format!("/projects/{slug}/export"),
+    };
+    request_json(remote, token, "GET", &path, None)
+}
+
+/// Split an `owner/slug` clone reference into its parts. A bare identifier (no
+/// `/`) resolves by slug alone, preserving the historical behavior used by
+/// local project ids. Each segment is slugified so it is URL-safe and matches
+/// how KnitHub stores usernames, org slugs, and project slugs.
+pub(super) fn split_project_identifier(identifier: &str) -> (Option<String>, String) {
+    match identifier.split_once('/') {
+        Some((owner, slug)) if !owner.trim().is_empty() && !slug.trim().is_empty() => {
+            (Some(slugify(owner)), slugify(slug))
+        }
+        _ => (None, slugify(identifier)),
+    }
 }
 
 pub(super) fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Result<ChangeGroup> {
@@ -464,5 +476,48 @@ fn api_base_url(url: &str) -> String {
         url
     } else {
         format!("{url}/api/v1")
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::split_project_identifier;
+
+    #[test]
+    fn splits_owner_and_slug() {
+        assert_eq!(
+            split_project_identifier("marc/knit-tools"),
+            (Some("marc".to_string()), "knit-tools".to_string())
+        );
+    }
+
+    #[test]
+    fn bare_slug_has_no_owner() {
+        assert_eq!(
+            split_project_identifier("knit-tools"),
+            (None, "knit-tools".to_string())
+        );
+    }
+
+    #[test]
+    fn slugifies_each_segment() {
+        assert_eq!(
+            split_project_identifier("Marc Merino/Knit Tools"),
+            (Some("marc-merino".to_string()), "knit-tools".to_string())
+        );
+    }
+
+    #[test]
+    fn empty_side_falls_back_to_bare_slug() {
+        // A leading or trailing slash is not a valid owner/slug pair; treat the
+        // whole thing as a bare identifier and slugify it.
+        assert_eq!(
+            split_project_identifier("/knit-tools"),
+            (None, "knit-tools".to_string())
+        );
+        assert_eq!(
+            split_project_identifier("marc/"),
+            (None, "marc".to_string())
+        );
     }
 }
