@@ -1266,6 +1266,7 @@ mod tests {
                         sha: "def456".to_string(),
                     },
                 ],
+                author: None,
             }],
             nodes: Vec::new(),
             publications: vec![pr_publication(
@@ -1316,6 +1317,7 @@ mod tests {
                     repo_id: "backend".to_string(),
                     sha: "abc123".to_string(),
                 }],
+                author: None,
             }],
             nodes: Vec::new(),
             publications: Vec::new(),
