@@ -29,7 +29,6 @@ pub mod status;
 pub mod sync;
 pub mod track;
 pub mod view;
-pub mod workitem;
 pub mod worktree;
 
 pub use bundle::{
@@ -83,5 +82,4 @@ pub use view::{
     edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
     view_include, view_unset,
 };
-pub use workitem::start_work_item;
 pub use worktree::create_worktrees;

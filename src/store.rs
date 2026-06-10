@@ -227,11 +227,6 @@ pub fn save_views(root: &Path, views: &crate::model::KnitProjectViews) -> Result
     write_json(&views_path(root, &views.project_id), views)
 }
 
-pub fn work_item_path(root: &Path, work_item_id: &str) -> PathBuf {
-    root.join(".knit/work-items")
-        .join(format!("{work_item_id}.work-item.json"))
-}
-
 pub fn bundle_exists(root: &Path, bundle_id: &str) -> bool {
     bundle_path(root, bundle_id).exists()
 }
