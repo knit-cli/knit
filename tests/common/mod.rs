@@ -82,7 +82,7 @@ pub fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );

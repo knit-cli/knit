@@ -83,26 +83,3 @@ pub struct KnitRemote {
     pub token: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnitContexts {
-    pub schema_version: String,
-    #[serde(default)]
-    pub contexts: Vec<KnitContextEntry>,
-}
-
-impl KnitContexts {
-    pub fn new() -> Self {
-        Self {
-            schema_version: SCHEMA_VERSION.to_string(),
-            contexts: Vec::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct KnitContextEntry {
-    pub path: String,
-    pub active_bundle: String,
-}

@@ -131,7 +131,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -439,7 +439,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -498,7 +498,7 @@ fn land_update_merges_base_and_records_explicit_node() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -582,7 +582,7 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -648,7 +648,7 @@ fn land_apply_refuses_draft_publications() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -689,7 +689,7 @@ fn land_apply_stops_when_required_checks_fail() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -728,7 +728,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
