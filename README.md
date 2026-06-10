@@ -43,11 +43,26 @@ knit project add frontend ../frontend
 A **bundle** is the cross-repo analogue of a git branch. Starting one creates a `knit/<bundle>` branch and a generated worktree for each project repo:
 
 ```sh
-knit bundle "my feature"
+knit bundle "my feature" --cd --agents
 ```
 
 This creates `.knit/bundles/my-feature.bundle.json` and checkouts under
-`.knit/worktrees/my-feature/<repo>/`.
+`.knit/worktrees/my-feature/<repo>/`. `--cd` drops your shell straight into the
+bundle's worktree root, and `--agents` writes an `AGENTS.md` tutorial for the
+workspace (each generated worktree gets its own `AGENTS.md` guidance by
+default). From that directory you can simply run `claude`, `opencode`, or any
+other coding agent — it wakes up inside an isolated checkout whose context
+resolves automatically, with guidance already on disk.
+
+If your tool opens the *source* folder instead — Cursor, Codex, or any
+agent rooted at the workspace — that works too: the agent can create a bundle
+and commit into it from there with `knit --bundle my-feature …`. Opening the
+bundle worktree is still the recommended setup, because cwd-based resolution
+removes a whole class of wrong-bundle mistakes.
+
+Because every bundle gets its own branches and worktrees, this is also the
+parallelism model: start several bundles from the same repos and run one agent
+per bundle — they never collide.
 
 ### 5. Make changes in the worktrees
 
@@ -122,6 +137,52 @@ knit bundle archive my-feature --reason done
 ```
 
 That is the full loop: project → bundle → cross-repo edit → cross-repo commit → publish/land (or merge) → archive.
+
+### 9. Find related cross-repo work
+
+Before touching a file, ask what feature work already touched it — across all
+repos, not just the one you are in:
+
+```sh
+knit related --repo backend src/api/billing.rs
+```
+
+`knit related` works by joining two histories. First it asks Git which commits
+touched the path. Then it looks those SHAs up in Knit's project history ledger
+(`.knit/history/`, built from bundle ledgers) to recover each commit's bundle
+and commit group — and with them the **companion commits in other repos** that
+shipped as part of the same logical change. Git stays the source of truth for
+file contents; Knit supplies the cross-repo context Git cannot see:
+
+```txt
+Bundle: move-work-item-consumption-into-sej Move work item consumption into sej
+Scope: commit group kg_20260610_9ab2a5
+Touched path:
+  sej     d2d5df2  Move work item consumption from knit into sej
+Related in same scope:
+  knit    5d698c3  Move work item consumption from knit into sej
+```
+
+The file you queried lived in one repo; the answer tells you which commit in a
+*different* repo must be read alongside it. Pass `--pull` to refresh the
+history ledger from a KnitHub remote first.
+
+### 10. Host it on KnitHub (optional)
+
+Knit is local-first, but bundles, project history, and saved views can be
+hosted on [knithub.dev](https://knithub.dev) so they survive machines and show
+up in dashboards:
+
+```sh
+knit remote add knithub https://knithub.dev --token <your-token> --global
+knit sync push                # bundles + history + views for the resolved project
+```
+
+Once a sync remote is configured, publish and land keep the hosted artifacts in
+sync automatically, hosted dashboards show bundles and project history, and
+`knit clone <owner>/<project>` can rebuild a working workspace on another
+machine. `knit related --pull` and `knit sync pull` read the same hosted
+history back.
 
 ## Concepts
 
