@@ -25,20 +25,35 @@ jobs:
       - name: cargo build
         run: cargo build --all-targets
       - name: cargo test
-        run: cargo test
+        run: cargo test --no-fail-fast
 
-  # Windows support is in progress (see docs/windows.md). This job is a
-  # compile + cheap-unit-test smoke check only. It deliberately excludes
-  # tests/smoke.rs, which spawns git/process workflows that are not yet
-  # validated on Windows. Keep this job fast.
+  # macOS is the primary development platform, but CI coverage matters for
+  # contributors and because APFS is case-insensitive by default — closer to
+  # Windows than Linux for path-identity behavior.
+  macos:
+    name: macOS (build + test)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --all-targets
+      - name: cargo test
+        run: cargo test --no-fail-fast
+
+  # Windows support status lives in docs/windows.md. The fixtures are
+  # cross-platform: fake forge CLIs are sh scripts launched through .cmd shims
+  # (Git for Windows provides sh on the runners), and the GitHub API transport
+  # is exercised against a local HTTP stub.
   windows:
-    name: Windows (check + cheap tests)
+    name: Windows (build + test)
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: cargo check
-        run: cargo check --all-targets
-      - name: cargo test (pure-unit targets only)
-        run: cargo test --test ids --test status --test model
+      - name: cargo build
+        run: cargo build --all-targets
+      - name: cargo test
+        run: cargo test --no-fail-fast

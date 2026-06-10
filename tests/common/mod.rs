@@ -95,12 +95,32 @@ pub fn unique_temp_dir() -> PathBuf {
         .unwrap()
         .as_nanos();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
+    let base = std::env::temp_dir();
+    // Windows temp dirs can come back as 8.3 short names (e.g. RUNNER~1);
+    // canonicalize so recorded paths match the long-form paths git prints.
+    let base = dunce_canonicalize_or(base);
+    let path = base.join(format!(
         "knit-smoke-{}-{nanos}-{counter}",
         std::process::id()
     ));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn dunce_canonicalize_or(path: PathBuf) -> PathBuf {
+    // std::fs::canonicalize would add a \\?\ verbatim prefix on Windows;
+    // plain component comparison is what the tests need, so fall back to the
+    // original path when canonicalization fails.
+    match path.canonicalize() {
+        Ok(canonical) => {
+            let display = canonical.to_string_lossy();
+            match display.strip_prefix("\\\\?\\") {
+                Some(stripped) => PathBuf::from(stripped),
+                None => canonical,
+            }
+        }
+        Err(_) => path,
+    }
 }
 
 pub fn init_repo(path: &Path, label: &str) {
@@ -109,6 +129,9 @@ pub fn init_repo(path: &Path, label: &str) {
     git(path, ["checkout", "-b", "main"]);
     git(path, ["config", "user.email", "knit@example.test"]);
     git(path, ["config", "user.name", "Knit Smoke"]);
+    // Tests write and assert LF content; Git for Windows defaults to
+    // autocrlf=true, which would rewrite checkouts to CRLF.
+    git(path, ["config", "core.autocrlf", "false"]);
     fs::write(path.join("app.txt"), format!("{label}\n")).unwrap();
     git(path, ["add", "app.txt"]);
     git(path, ["commit", "-m", &format!("Initial {label}")]);
@@ -130,9 +153,17 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
     );
 
     let local = root.join(label);
+    // autocrlf must be set at clone time: setting it after checkout leaves a
+    // CRLF-smudged working tree that git then reports as modified.
     git(
         root,
-        ["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+        [
+            "clone",
+            "--config",
+            "core.autocrlf=false",
+            remote.to_str().unwrap(),
+            local.to_str().unwrap(),
+        ],
     );
     configure_git_user(&local);
 
@@ -141,6 +172,8 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
         root,
         [
             "clone",
+            "--config",
+            "core.autocrlf=false",
             remote.to_str().unwrap(),
             collaborator.to_str().unwrap(),
         ],
@@ -162,15 +195,11 @@ pub fn append_line(path: &Path, line: &str) {
     fs::write(path, text).unwrap();
 }
 
-#[cfg(unix)]
 pub fn install_parallel_push_hook(repo: &Path, gate: &Path, id: &str, peer: &str) {
     install_parallel_gate_hook(repo, "pre-push", gate, id, peer);
 }
 
-#[cfg(unix)]
 pub fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str, peer: &str) {
-    use std::os::unix::fs::PermissionsExt;
-
     fs::create_dir_all(gate).unwrap();
     let hook_path = git(repo, ["rev-parse", "--git-path", &format!("hooks/{hook}")]);
     let hook_path = PathBuf::from(hook_path.trim());
@@ -205,12 +234,9 @@ done
         ),
     )
     .unwrap();
-    let mut permissions = fs::metadata(&hook_path).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&hook_path, permissions).unwrap();
+    make_executable(&hook_path);
 }
 
-#[cfg(unix)]
 pub fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
 }
@@ -373,7 +399,10 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let old_path = std::env::var_os("PATH").unwrap_or_default();
-    let path = format!("{}:{}", fake_bin.display(), old_path.to_string_lossy());
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&old_path)),
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
     command
         .args(args)
@@ -407,7 +436,10 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let old_path = std::env::var_os("PATH").unwrap_or_default();
-    let path = format!("{}:{}", fake_bin.display(), old_path.to_string_lossy());
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&old_path)),
+    )
+    .unwrap();
     let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
     command
         .args(args)
@@ -460,10 +492,7 @@ pub fn run(mut command: Command) -> String {
     String::from_utf8_lossy(&output.stdout).to_string()
 }
 
-#[cfg(unix)]
 pub fn write_fake_gh(fake_bin: &Path, fake_gh_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
-
     fs::create_dir_all(fake_bin).unwrap();
     fs::create_dir_all(fake_gh_dir).unwrap();
     let script = fake_bin.join("gh");
@@ -744,155 +773,151 @@ esac
 "#,
     )
     .unwrap();
-    let mut permissions = fs::metadata(&script).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).unwrap();
+    make_executable(&script);
+    write_windows_shim(&script);
 }
 
-#[cfg(not(unix))]
-pub fn write_fake_gh(_fake_bin: &Path, _fake_gh_dir: &Path) {
-    panic!("fake gh smoke test requires a unix-like shell");
+/// Mark a fake script executable on Unix. On Windows execute bits do not
+/// exist; the `.cmd` shim from `write_windows_shim` makes it spawnable.
+fn make_executable(script: &Path) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mut permissions = fs::metadata(script).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(script, permissions).unwrap();
+    }
+    #[cfg(not(unix))]
+    let _ = script;
 }
 
-#[cfg(unix)]
-pub fn write_fake_curl(fake_bin: &Path, fake_gh_dir: &Path) {
-    use std::os::unix::fs::PermissionsExt;
+/// On Windows, `Command::new("gh")` cannot spawn a shebang script. Write a
+/// sibling `gh.cmd` that runs the sh script through Git for Windows' `sh`,
+/// which is present wherever git is.
+fn write_windows_shim(script: &Path) {
+    #[cfg(windows)]
+    {
+        let shim = script.with_extension("cmd");
+        fs::write(shim, "@sh \"%~dp0{}\" %*\r\n".replace("{}", &script.file_name().unwrap().to_string_lossy())).unwrap();
+    }
+    #[cfg(not(windows))]
+    let _ = script;
+}
 
-    fs::create_dir_all(fake_bin).unwrap();
+/// Serve a fake GitHub REST API on a local port, mirroring the routes the
+/// native `KNIT_GITHUB_API_TRANSPORT` transport hits. State is shared with the
+/// fake `gh` script through marker files in `fake_gh_dir` (`merged-backend`),
+/// and requests are captured as `api-backend-*.json` / `api.authorization`.
+pub fn spawn_fake_github_api(fake_gh_dir: &Path) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
     fs::create_dir_all(fake_gh_dir).unwrap();
-    let script = fake_bin.join("curl");
-    fs::write(
-        &script,
-        r#"#!/bin/sh
-set -eu
-
-api_pr_json() {
-  number="$1"
-  state="open"
-  merged="false"
-  if [ -f "$GH_FAKE_DIR/merged-backend" ]; then
-    state="closed"
-    merged="true"
-  fi
-  printf '{"number":%s,"html_url":"https://github.com/acme/backend/pull/%s","state":"%s","title":"backend PR","body":"Existing body","draft":false,"head":{"ref":"knit/artifact-publish","sha":"backend-head"},"base":{"ref":"main"},"merged":%s,"mergeable":true,"mergeable_state":"clean"}\n' "$number" "$number" "$state" "$merged"
+    let dir = fake_gh_dir.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_github_request(&mut stream, &dir);
+            });
+        }
+    });
+    base_url
 }
 
-method="GET"
-url=""
-netrc=""
-ipv4=0
-data=""
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --request)
-      method="$2"
-      shift 2
-      ;;
-    --netrc-file)
-      netrc="$2"
-      shift 2
-      ;;
-    --ipv4)
-      ipv4=1
-      shift
-      ;;
-    --data-binary)
-      data="$2"
-      shift 2
-      ;;
-    --header|--connect-timeout|--max-time)
-      shift 2
-      ;;
-    --silent|--show-error|--fail-with-body|--location)
-      shift
-      ;;
-    http*)
-      url="$1"
-      shift
-      ;;
-    *)
-      shift
-      ;;
-  esac
-done
-
-printf '%s\n' "$ipv4" > "$GH_FAKE_DIR/curl.ipv4"
-if [ -n "$netrc" ]; then
-  cat "$netrc" > "$GH_FAKE_DIR/curl.netrc"
-fi
-
-endpoint="${url#https://api.github.com/}"
-endpoint_path="${endpoint%%\?*}"
-
-case "$endpoint_path" in
-  repos/acme/backend/pulls)
-    if [ "$method" = "GET" ]; then
-      printf '[]\n'
-    elif [ "$method" = "POST" ]; then
-      if [ "$data" = "@-" ]; then
-        cat > "$GH_FAKE_DIR/curl-backend-create.json"
-      fi
-      api_pr_json 101
-    else
-      echo "unexpected curl method for pull collection: $method" >&2
-      exit 1
-    fi
-    ;;
-  repos/acme/backend/pulls/*/merge)
-    if [ "$method" = "PUT" ]; then
-      if [ "$data" = "@-" ]; then
-        cat > "$GH_FAKE_DIR/curl-backend-merge.json"
-      fi
-      touch "$GH_FAKE_DIR/merged-backend"
-      printf '{"merged":true,"message":"Pull Request successfully merged","sha":"merge-sha"}\n'
-    else
-      echo "unexpected curl method for merge: $method" >&2
-      exit 1
-    fi
-    ;;
-  repos/acme/backend/pulls/*)
-    if [ "$method" = "GET" ]; then
-      api_pr_json "${endpoint_path##*/}"
-    elif [ "$method" = "PATCH" ]; then
-      if [ "$data" = "@-" ]; then
-        cat > "$GH_FAKE_DIR/curl-backend-edit.json"
-      fi
-      api_pr_json "${endpoint_path##*/}"
-    else
-      echo "unexpected curl method for pull item: $method" >&2
-      exit 1
-    fi
-    ;;
-  repos/acme/backend/commits/*/check-runs)
-    if [ "$method" = "GET" ]; then
-      printf '{"total_count":0,"check_runs":[]}\n'
-    else
-      echo "unexpected curl method for check runs: $method" >&2
-      exit 1
-    fi
-    ;;
-  repos/acme/backend/commits/*/status)
-    if [ "$method" = "GET" ]; then
-      printf '{"state":"success","statuses":[]}\n'
-    else
-      echo "unexpected curl method for statuses: $method" >&2
-      exit 1
-    fi
-    ;;
-  *)
-    echo "unexpected curl endpoint: $endpoint" >&2
-    exit 1
-    ;;
-esac
-"#,
+fn fake_github_pr_json(dir: &Path, number: &str) -> String {
+    let merged = dir.join("merged-backend").exists();
+    let (state, merged_flag) = if merged {
+        ("closed", "true")
+    } else {
+        ("open", "false")
+    };
+    format!(
+        "{{\"number\":{number},\"html_url\":\"https://github.com/acme/backend/pull/{number}\",\"state\":\"{state}\",\"title\":\"backend PR\",\"body\":\"Existing body\",\"draft\":false,\"head\":{{\"ref\":\"knit/artifact-publish\",\"sha\":\"backend-head\"}},\"base\":{{\"ref\":\"main\"}},\"merged\":{merged_flag},\"mergeable\":true,\"mergeable_state\":\"clean\"}}"
     )
-    .unwrap();
-    let mut permissions = fs::metadata(&script).unwrap().permissions();
-    permissions.set_mode(0o755);
-    fs::set_permissions(&script, permissions).unwrap();
 }
 
-#[cfg(not(unix))]
-pub fn write_fake_curl(_fake_bin: &Path, _fake_gh_dir: &Path) {
-    panic!("fake curl smoke test requires a unix-like shell");
+fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+
+    let mut content_length = 0usize;
+    let mut authorization = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                "authorization" => authorization = value.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let body = String::from_utf8_lossy(&body).to_string();
+    if !authorization.is_empty() {
+        let _ = fs::write(dir.join("api.authorization"), &authorization);
+    }
+
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string();
+    let segments: Vec<&str> = path.split('/').collect();
+    let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["repos", "acme", "backend", "pulls"]) => (200, "[]".to_string()),
+        ("POST", ["repos", "acme", "backend", "pulls"]) => {
+            fs::write(dir.join("api-backend-create.json"), &body).unwrap();
+            (201, fake_github_pr_json(dir, "101"))
+        }
+        ("PUT", ["repos", "acme", "backend", "pulls", _, "merge"]) => {
+            fs::write(dir.join("api-backend-merge.json"), &body).unwrap();
+            fs::write(dir.join("merged-backend"), "").unwrap();
+            (
+                200,
+                "{\"merged\":true,\"message\":\"Pull Request successfully merged\",\"sha\":\"merge-sha\"}".to_string(),
+            )
+        }
+        ("GET", ["repos", "acme", "backend", "pulls", number]) => {
+            (200, fake_github_pr_json(dir, number))
+        }
+        ("PATCH", ["repos", "acme", "backend", "pulls", number]) => {
+            fs::write(dir.join("api-backend-edit.json"), &body).unwrap();
+            (200, fake_github_pr_json(dir, number))
+        }
+        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => (
+            200,
+            "{\"total_count\":0,\"check_runs\":[]}".to_string(),
+        ),
+        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => (
+            200,
+            "{\"state\":\"success\",\"statuses\":[]}".to_string(),
+        ),
+        _ => (
+            404,
+            format!("{{\"message\":\"unexpected endpoint {method} /{path}\"}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
 }

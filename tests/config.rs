@@ -182,7 +182,7 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
         "global token should be used outside a workspace: {output}"
     );
     assert!(
-        output.contains("curl"),
+        output.contains("KnitHub request failed"),
         "clone should fail at the request step, not resolution: {output}"
     );
 
