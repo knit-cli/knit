@@ -136,20 +136,16 @@ knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
 knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
 knit bundle list [--all] [--archived] [--deleted]
-knit bundle close [--reason <reason>]
-knit bundle archive <bundle>
+knit bundle archive <bundle> [--reason <reason>] [--keep-worktrees] [--force]
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
 knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
-knit bundle compat <source-bundle>... [--title <title>] [--project <name>] [--all-repos] [--no-worktree] [--in-place] [--force]
-knit bundle split <source-bundle> <selector>... [--title <title>] [--repo <repo>]... [--force]
 knit bundle path
 knit bundle print
 knit bundle validate
 knit switch <bundle> [--workspace|--here]
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
-knit checkpoint "<note>"
-knit clean [--plans] [--worktrees] [--closed] [--merge-worktrees] [--all] [--force]
+knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
@@ -194,12 +190,11 @@ knit log [-<count>]
 knit log [-n [count]]
 knit revert <sha|node|HEAD|HEAD~N> [--plan]
 knit revert <sha|node|HEAD|HEAD~N> --apply
-knit reset [--soft|--mixed|--hard] [<commit>] [--repo <repo>] [--all]
 knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
 
-A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and creation flags go straight on it, e.g. `knit bundle "<title>" --project <name> --repo <repo>`. A project is initialized once with `knit init <name>` (like `git init`). Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, `reset`, …) live at the top level; bundle/repo management lives under `knit bundle`.
+A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and creation flags go straight on it, e.g. `knit bundle "<title>" --project <name> --repo <repo>`. A project is initialized once with `knit init <name>` (like `git init`). Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, …) live at the top level; bundle/repo management lives under `knit bundle`.
 
 ## Projects And Bundles
 
@@ -308,22 +303,22 @@ Do not use bare `knit switch <bundle>` from the workspace root to recover contex
 
 When more than one open bundle exists, Knit refuses source-root status and mutating commands that would use the shared workspace fallback. Use `knit --bundle <bundle> ...` from the source workspace or run the command from the intended worktree.
 
-Compatibility bundles are ordinary bundles created from the union of repos in other bundles. They do not have a special target branch; use them as integration branches when two feature bundles need to be made compatible before either one lands:
+When two feature bundles need to be made compatible before either one lands, start an ordinary bundle with the union of their repos and merge both in:
 
 ```sh
-knit bundle compat feature-x feature-y --title "x y compat"
+knit bundle "x y compat" --repo backend --repo frontend
 knit merge feature-x --into x-y-compat
 knit merge feature-y --into x-y-compat --manual
 ```
 
-When a bundle has grown messy or a previously used PR head branch is no longer a good publishing unit, split selected recorded commits into a fresh bundle instead of continuing to pile onto the old one:
+When a bundle has grown messy or a previously used PR head branch is no longer a good publishing unit, start a fresh bundle and cherry-pick the commits worth keeping instead of continuing to pile onto the old one:
 
 ```sh
-knit bundle split feature-x HEAD~1 --title "feature x clean follow-up"
-knit bundle split feature-x abc123 def456 --repo backend --repo frontend --title "feature x api"
+knit bundle "feature x clean follow-up" --repo backend
+knit cherrypick --from feature-x HEAD~1
 ```
 
-`knit bundle split` creates a normal new bundle, materializes the selected repos, cherry-picks the requested source bundle commits, and records the resulting destination commits as observed git movement. If you already have a destination bundle, use `knit cherrypick --from <source-bundle> <selector>...` directly.
+`knit cherrypick` records the resulting destination commits as observed git movement.
 
 `knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
 
@@ -348,22 +343,15 @@ knit bundle validate
 
 Gloss should read this bundle and inspect the referenced repos, branches, and SHAs directly.
 
-`knit checkpoint "<note>"` appends a non-git ledger node to the resolved bundle. It is useful when the feature has meaningful state that is not ready for a git commit yet:
+`knit bundle archive <bundle>` marks a bundle done. It appends a `feature.archived` node (with an optional `--reason`), removes the bundle's generated worktrees, and preserves local feature branches and the JSON artifact:
 
 ```sh
-knit checkpoint "frontend wired, backend pending"
+knit bundle archive feature-x --reason "merged"
+knit bundle archive feature-x --keep-worktrees   # ledger/state change only
+knit bundle restore feature-x                    # reopen; `knit worktree` rematerializes checkouts
 ```
 
-Checkpoints show up in `knit log` and `knit show HEAD`. They do not create commits, move branches, or change repo state.
-
-`knit close` appends a `feature.closed` node to the bundle without deleting worktrees, branches, commits, or source repos:
-
-```sh
-knit close
-knit bundle close --reason "merged"
-```
-
-The close node shows up in `knit log` and `knit show HEAD`. It is a ledger marker only. If that bundle is still the resolved context, `knit status` still shows its generated worktrees and local feature branches because they still exist.
+Archiving refuses to discard dirty generated worktrees unless `--force` is passed.
 
 `knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
 
@@ -403,9 +391,8 @@ With `--remote-bundles`, prune also detects **remote orphans**: bundle records t
 So the common cleanup distinction is:
 
 ```sh
-knit bundle close --reason "merged"                                           # keep local checkouts/branches
-knit clean --closed --worktrees                                        # remove generated worktrees, keep branches
-knit bundle delete documentation-quick-wins --force --worktrees --branches
+knit bundle archive documentation-quick-wins --reason "merged"              # remove worktrees, keep branches
+knit bundle delete documentation-quick-wins --force --worktrees --branches  # discard everything local
 ```
 
 `knit clean` removes only Knit-generated local state after an explicit target flag. It never deletes source repos or git branches:
@@ -413,12 +400,12 @@ knit bundle delete documentation-quick-wins --force --worktrees --branches
 ```sh
 knit clean --plans
 knit clean --worktrees
-knit clean --closed --worktrees
+knit clean --archived --worktrees
 knit clean --merge-worktrees
 knit clean --all
 ```
 
-`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. `--closed --worktrees` applies that cleanup to closed and archived bundles. `--merge-worktrees` removes clean branch-target merge worktrees for succeeded or aborted merge runs. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
+`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. `--archived --worktrees` applies that cleanup to archived bundles (for example ones archived with `--keep-worktrees`). `--merge-worktrees` removes clean branch-target merge worktrees for succeeded or aborted merge runs. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 
@@ -571,7 +558,7 @@ Use `--fetch` to refresh branch targets from `origin/<target>` before merging. U
 When the target is another bundle, successful merges update that bundle's feature branches and append a `git.observed` node to the target bundle. This makes compatibility workflows explicit without inventing project-level branch targets:
 
 ```sh
-knit bundle compat feature-x feature-y --title "x y compat"
+knit bundle "x y compat" --repo backend --repo frontend
 knit merge feature-x --into x-y-compat
 knit merge feature-y --into x-y-compat --manual
 knit merge x-y-compat --into staging
@@ -619,14 +606,7 @@ knit git --repo backend diff --stat
 
 Repo selectors can be repo ids, original repo paths, or worktree paths. Quote `'*'` when you want Knit to receive the literal all-repos selector instead of your shell expanding it. If a git argument is ambiguous with a repo id, use `--repo`.
 
-`knit reset` runs `git reset` across tracked checkouts, mirroring git's own modes: `--soft` moves the branch pointer only, `--mixed` (the default) resets the index but keeps the working tree, and `--hard` resets the index and working tree. The optional `<commit>` defaults to `HEAD`. Scope is context-aware: when a bundle is resolved explicitly (`--bundle`), via `KNIT_BUNDLE`, a worktree cwd, or folder context, reset targets that bundle's checkouts; run from the workspace root it instead resets the active project's source repo checkouts, which is the fast way to discard changes a tool made directly on the source branches without a bundle. Like git, `--hard` does not remove untracked files; follow up with `knit git --all clean -fd` if you also need to drop new untracked files.
-
-```sh
-knit reset --hard --all          # discard tracked changes in every source repo (from workspace root)
-knit reset --hard --repo knit    # just one repo
-knit --bundle feature-a reset --hard --all
-knit reset --soft HEAD~1         # undo the last commit, keep the changes
-```
+Knit has no `reset` of its own: the bundle ledger is append-only, so undo goes through `knit revert`. To discard uncommitted changes in checkouts, run git directly through the passthrough, e.g. `knit git --all reset --hard` or `knit git --all clean -fd`.
 
 Knit colors interactive terminal output for scanability. It disables color automatically when output is piped, when `NO_COLOR` is set, or when `TERM=dumb`. Use `KNIT_COLOR=always` or `KNIT_COLOR=never` to force a mode.
 
@@ -652,10 +632,9 @@ The bundle is a feature ledger. It stores current state in `repos` and `commitGr
 Typical node types:
 
 - `feature.created`
-- `feature.closed`
+- `feature.archived`
 - `repo.added`
 - `worktree.materialized`
-- `checkpoint`
 - `commit.group`
 - `git.observed`
 - `revert.group`

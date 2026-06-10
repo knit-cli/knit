@@ -15,12 +15,12 @@ use std::path::{Path, PathBuf};
 pub fn clean_generated(
     plans: bool,
     worktrees: bool,
-    closed: bool,
+    archived: bool,
     merge_worktrees: bool,
     all: bool,
     force: bool,
 ) -> Result<()> {
-    if all && (plans || worktrees || closed || merge_worktrees) {
+    if all && (plans || worktrees || archived || merge_worktrees) {
         bail!("Use either --all or specific clean targets, not both.");
     }
     let clean_plans = all || plans;
@@ -35,8 +35,8 @@ pub fn clean_generated(
         clean_revert_plans(&active)?;
     }
     if clean_worktrees {
-        if closed {
-            clean_closed_bundle_worktrees(force)?;
+        if archived {
+            clean_archived_bundle_worktrees(force)?;
         } else {
             let mut active = load_active_bundle_for_update()?;
             clean_worktrees_for_bundle(&mut active, force)?;
@@ -230,7 +230,7 @@ fn remove_empty_dirs(path: PathBuf) {
     let _ = fs::remove_dir(path);
 }
 
-fn clean_closed_bundle_worktrees(force: bool) -> Result<()> {
+fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let dir = root.join(".knit/bundles");
@@ -256,10 +256,7 @@ fn clean_closed_bundle_worktrees(force: bool) -> Result<()> {
         cleaned += 1;
     }
     if cleaned == 0 {
-        println!(
-            "{}",
-            out::muted("No closed or archived bundle worktrees to clean.")
-        );
+        println!("{}", out::muted("No archived bundle worktrees to clean."));
     }
     Ok(())
 }

@@ -217,21 +217,54 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
     Ok(())
 }
 
-pub fn archive_bundle(bundle_id: &str) -> Result<()> {
+pub fn archive_bundle(
+    bundle_id: &str,
+    reason: Option<&str>,
+    keep_worktrees: bool,
+    force: bool,
+) -> Result<()> {
+    let reason = match reason {
+        Some(reason) => {
+            let reason = reason.trim();
+            if reason.is_empty() {
+                bail!("Archive reason must not be empty when --reason is passed.");
+            }
+            Some(reason.to_string())
+        }
+        None => None,
+    };
     let root = current_root()?;
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
-    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    let bundle = load_existing_bundle(&path, &bundle_id)?;
+    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
+        bail!("Bundle `{bundle_id}` is already archived.");
+    }
+    let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
+    if !keep_worktrees {
+        crate::commands::clean::clean_worktrees_for_bundle(&mut active, force)?;
+    }
     let now = now_iso();
-    bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
-    bundle.archived_at = Some(now.clone());
-    bundle.updated_at = now;
-    write_json(&path, &bundle)?;
+    let node = crate::ids::node_id("archive");
+    active.bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
+    active.bundle.archived_at = Some(now.clone());
+    active
+        .bundle
+        .nodes
+        .push(BundleNode::feature_archived(node.clone(), now, reason));
+    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+    active.bundle.updated_at = now_iso();
+    write_json(&path, &active.bundle)?;
     clear_active_if_matches(&root, &bundle_id)?;
     println!(
         "{} {}",
         out::heading("Archived bundle:"),
         out::node(&bundle_id)
+    );
+    println!("{} {}", out::heading("Node:"), out::node(&node));
+    println!(
+        "{} local feature branches and the bundle artifact",
+        out::heading("Preserved:")
     );
     Ok(())
 }
@@ -244,12 +277,7 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     if bundle_state(&bundle) != BUNDLE_STATE_ARCHIVED {
         bail!("Bundle `{bundle_id}` is not archived.");
     }
-    let restored_state = if has_closed_node(&bundle) {
-        BUNDLE_STATE_CLOSED
-    } else {
-        BUNDLE_STATE_OPEN
-    };
-    bundle.state = Some(restored_state.to_string());
+    bundle.state = Some(BUNDLE_STATE_OPEN.to_string());
     bundle.archived_at = None;
     bundle.updated_at = now_iso();
     write_json(&path, &bundle)?;
@@ -257,7 +285,11 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
         "{} {} ({})",
         out::heading("Restored bundle:"),
         out::node(&bundle_id),
-        restored_state
+        BUNDLE_STATE_OPEN
+    );
+    crate::advice::print(
+        &root,
+        format!("run `knit --bundle {bundle_id} worktree` to rematerialize its checkouts."),
     );
     Ok(())
 }
@@ -580,7 +612,10 @@ pub fn bundle_state(bundle: &ChangeGroup) -> &'static str {
         Some(BUNDLE_STATE_CLOSED) => return BUNDLE_STATE_CLOSED,
         _ => {}
     }
-    if has_closed_node(bundle) {
+    // An explicit `open` state outranks node inference so restoring an archived
+    // bundle that carries a legacy `feature.closed` node actually reopens it.
+    let explicitly_open = bundle.state.as_deref() == Some(BUNDLE_STATE_OPEN);
+    if !explicitly_open && has_closed_node(bundle) {
         BUNDLE_STATE_CLOSED
     } else if has_landed_node(bundle) {
         // "feature.landed" is a ledger marker; if any recorded publication is still open we
