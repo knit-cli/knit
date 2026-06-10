@@ -446,10 +446,13 @@ Push the bundle's feature branches after committing:
 knit --bundle feature-a push --set-upstream
 ```
 
-Push the bundle to one or more KnitHub remotes so it appears in hosted dashboards:
+Push the bundle to one or more KnitHub remotes so it appears in hosted dashboards. `knit push --remote` pushes feature branches and the bundle artifact together; `knit sync push` is the artifact-only door and is the one verb family for moving bundles, history, and views to KnitHub:
 
 ```sh
 knit --bundle feature-a push --remote local --remote knithub
+knit --bundle feature-a sync push --remote local --remote knithub
+knit --bundle feature-a sync push --bundles
+knit --bundle feature-a sync pull --history
 ```
 
 Publish review objects (PRs/MRs) against their intended base branch. `create`
@@ -483,7 +486,6 @@ Inspect or edit the plan, then execute it explicitly:
 knit land check
 knit land apply
 knit land status
-knit land sync
 ```
 
 `knit land check` is a read-only preflight: it shows each recorded PR's live state, mergeability, checks, review decision, and a landing verdict, so you can tell whether `knit land apply` will succeed before running it. When it reports a `conflict`, run `knit land update` to merge the base in and resolve, then land again. `knit publish status --live` shows the same live columns.
@@ -494,7 +496,7 @@ Land from a bundle artifact JSON (merge-only, no local workspace):
 knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 ```
 
-Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured KnitHub remotes; use `knit land sync` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
+Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured KnitHub remotes; use `knit sync push --bundles` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
 Use `knit merge` for local integration into staging branches or other bundles:
 
@@ -521,7 +523,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
 - `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
-- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit view push`/`knit view pull` sync them to KnitHub.
+- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit sync push --views`/`knit sync pull --views` sync them to KnitHub.
 - `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
@@ -546,15 +548,16 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it.
 - `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
-- `knit land sync` pushes the current landed bundle artifact to configured KnitHub remotes.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
 - `knit config set sync-remotes local,knithub` makes push-sync upload bundle artifacts to multiple KnitHub remotes.
 - `knit show HEAD` explains the latest bundle ledger entry.
-- `knit sync` records Git commits made outside Knit.
+- `knit sync` records Git commits made outside Knit (local reconcile, no network).
+- `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...` is the one verb family for moving artifacts to KnitHub; with no target flag it pushes bundle, history, and views.
+- `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...` pulls those same artifacts from KnitHub.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
-- `knit push --remote local --remote knithub` pushes the resolved bundle to both configured KnitHub remotes so it is visible in hosted dashboards.
+- `knit push --remote local --remote knithub` pushes the resolved bundle's branches and artifact to both configured KnitHub remotes so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit clean --archived --worktrees` removes generated worktrees left behind by bundles archived with `--keep-worktrees`.
 

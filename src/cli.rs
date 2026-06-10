@@ -307,8 +307,15 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Record git commits that happened outside Knit.
-    Sync,
+    /// Reconcile local Knit state, or sync artifacts with KnitHub.
+    ///
+    /// Bare `knit sync` records git commits made outside Knit into the bundle
+    /// ledger (a local-only reconcile). The `push`/`pull` subcommands are the one
+    /// way to move bundle, history, and view artifacts to and from KnitHub.
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
+    },
     /// Show and sync project-wide commit history.
     History {
         #[command(subcommand)]
@@ -405,6 +412,46 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
+pub enum SyncCommand {
+    /// Push artifacts to KnitHub. With no target flags, pushes bundle, history,
+    /// and views for the resolved project/bundle.
+    Push {
+        #[command(flatten)]
+        targets: SyncTargetArgs,
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
+        /// sync remotes, then a remote named `knithub`.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Vec<String>,
+    },
+    /// Pull artifacts from KnitHub. With no target flags, pulls bundle, history,
+    /// and views for the resolved project/bundle.
+    Pull {
+        #[command(flatten)]
+        targets: SyncTargetArgs,
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
+        /// sync remotes, then a remote named `knithub`.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Vec<String>,
+    },
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub struct SyncTargetArgs {
+    /// Sync the bundle artifact for the resolved bundle.
+    #[arg(long)]
+    pub bundles: bool,
+    /// Sync project commit history events.
+    #[arg(long)]
+    pub history: bool,
+    /// Sync your saved views for the project.
+    #[arg(long)]
+    pub views: bool,
+    /// Sync every artifact family. This is also the default with no target flags.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Subcommand)]
 pub enum HistoryCommand {
     /// Show local project history.
     List {
@@ -426,33 +473,6 @@ pub enum HistoryCommand {
         /// Project id. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,
-    },
-    /// Push local project history events to KnitHub.
-    Push {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull project history events from KnitHub.
-    Pull {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull then push project history events with KnitHub.
-    Sync {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
     },
 }
 
@@ -600,15 +620,6 @@ pub enum BundleCommand {
     Print,
     /// Validate the resolved bundle structure.
     Validate,
-    /// Push the resolved bundle JSON artifact to a KnitHub remote.
-    Push {
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-        /// Project id or slug to attach the bundle to. Defaults to the bundle project or active project.
-        #[arg(long)]
-        project: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -796,24 +807,6 @@ pub enum ViewCommand {
         /// Project name. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,
-    },
-    /// Push your views to a KnitHub remote.
-    Push {
-        /// Project name. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull your views from a KnitHub remote.
-    Pull {
-        /// Project name. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
     },
 }
 
@@ -1033,12 +1026,6 @@ pub enum LandCommand {
         /// Skip the KnitHub bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
-    },
-    /// Push the current landed bundle artifact to a KnitHub remote.
-    Sync {
-        /// Named KnitHub remote. Repeat to push to multiple remotes. Defaults to sync-remotes or `knithub`.
-        #[arg(long, value_name = "REMOTE")]
-        remote: Vec<String>,
     },
     /// Show the latest landing run or default plan status.
     Status {
