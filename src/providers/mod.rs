@@ -394,25 +394,23 @@ where
     }
 }
 
-/// Spawn a forge CLI by name. On Windows, `Command::new` resolves `.exe` but
-/// not `.cmd`/`.bat` shims (common for npm- or scoop-installed CLIs), so when
-/// the bare name is not found we retry the shim extensions before giving up.
+/// Spawn a forge CLI by name. On Windows, `Command::new` resolves `.exe` only,
+/// missing `.cmd`/`.bat` shims (common for npm- or scoop-installed CLIs) — and
+/// probing extensions globally would let a real `gh.exe` late in PATH shadow a
+/// `gh.cmd` early in PATH. Resolve PATH ourselves so directory order wins
+/// first and extension order (`exe`, `cmd`, `bat`) second, matching how
+/// cmd.exe itself resolves commands.
 fn forge_cli_command(bin: &str) -> Command {
     #[cfg(windows)]
     {
-        use std::process::Stdio;
-        for candidate in [format!("{bin}.exe"), bin.to_string()] {
-            let mut probe = Command::new(&candidate);
-            probe.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-            if probe.status().is_ok() {
-                return Command::new(candidate);
-            }
-        }
-        for shim in [format!("{bin}.cmd"), format!("{bin}.bat")] {
-            let mut probe = Command::new(&shim);
-            probe.arg("--version").stdout(Stdio::null()).stderr(Stdio::null());
-            if probe.status().is_ok() {
-                return Command::new(shim);
+        if let Some(paths) = std::env::var_os("PATH") {
+            for dir in std::env::split_paths(&paths) {
+                for extension in ["exe", "cmd", "bat"] {
+                    let candidate = dir.join(format!("{bin}.{extension}"));
+                    if candidate.is_file() {
+                        return Command::new(candidate);
+                    }
+                }
             }
         }
     }

@@ -6,10 +6,6 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
 use std::ffi::OsString;
-use std::fs;
-use std::io::Write;
-use std::process::{Command, Stdio};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
@@ -151,7 +147,7 @@ impl Forge for GitHub {
         match_head: Option<&str>,
     ) -> Result<()> {
         if let Some(repo_full_name) = &target.repo_full_name {
-            if use_curl_ipv4_api(target) {
+            if use_native_github_api(target) {
                 return merge_with_api(
                     target,
                     repo_full_name,
@@ -218,7 +214,7 @@ impl Forge for GitHub {
         required_only: bool,
     ) -> Result<Vec<CheckRun>> {
         if let Some(repo_full_name) = &target.repo_full_name {
-            if use_curl_ipv4_api(target) {
+            if use_native_github_api(target) {
                 return check_runs_with_api(target, repo_full_name, selector, required_only);
             }
         }
@@ -364,8 +360,8 @@ fn create_with_api(
     draft: bool,
 ) -> Result<String> {
     let payload = create_pull_request_payload(base, head, title, body, draft)?;
-    if use_curl_ipv4_api(target) {
-        let output = curl_github_api_output(
+    if use_native_github_api(target) {
+        let output = native_github_api_output(
             "POST",
             &pull_request_api_endpoint(repo_full_name),
             Some(&payload),
@@ -507,8 +503,8 @@ fn github_api_output(
     endpoint: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    if use_curl_ipv4_api(target) {
-        return curl_github_api_output(method, endpoint, body);
+    if use_native_github_api(target) {
+        return native_github_api_output(method, endpoint, body);
     }
 
     let mut args = vec![OsString::from("api")];
@@ -524,119 +520,91 @@ fn github_api_output(
     cli_output(CLI, &target.cwd, args, body)
 }
 
-fn use_curl_ipv4_api(target: &PrTarget) -> bool {
+fn use_native_github_api(target: &PrTarget) -> bool {
     target.repo_full_name.is_some()
         && std::env::var("KNIT_GITHUB_API_TRANSPORT")
             .map(|value| {
                 matches!(
                     value.trim().to_ascii_lowercase().as_str(),
-                    "curl" | "curl-ipv4" | "ipv4"
+                    // "curl"/"curl-ipv4"/"ipv4" are the historical values from
+                    // when this transport shelled out to `curl --ipv4`; they
+                    // keep selecting the same (now native) IPv4-first transport.
+                    "curl" | "curl-ipv4" | "ipv4" | "native" | "api"
                 )
             })
             .unwrap_or(false)
 }
 
-fn curl_github_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
-    let token = github_api_token()
-        .context("KNIT_GITHUB_API_TRANSPORT=curl requires GH_TOKEN or GITHUB_TOKEN")?;
-    let netrc_path = write_github_netrc(&token)?;
-    let url = format!(
-        "https://api.github.com/{}",
-        endpoint.trim_start_matches('/')
-    );
-
-    let mut args = vec![
-        "--silent".to_string(),
-        "--show-error".to_string(),
-        "--fail-with-body".to_string(),
-        "--location".to_string(),
-        "--ipv4".to_string(),
-        "--connect-timeout".to_string(),
-        "5".to_string(),
-        "--max-time".to_string(),
-        "20".to_string(),
-        "--request".to_string(),
-        method.to_string(),
-        "--netrc-file".to_string(),
-        netrc_path.to_string_lossy().to_string(),
-        "--header".to_string(),
-        "Accept: application/vnd.github+json".to_string(),
-        "--header".to_string(),
-        "X-GitHub-Api-Version: 2022-11-28".to_string(),
-        "--header".to_string(),
-        "User-Agent: knit".to_string(),
-    ];
-
-    if body.is_some() {
-        args.extend([
-            "--header".to_string(),
-            "Content-Type: application/json".to_string(),
-            "--data-binary".to_string(),
-            "@-".to_string(),
-        ]);
-    }
-    args.push(url);
-
-    let result = run_curl_github_api(&args, body, method, endpoint);
-    let _ = fs::remove_file(&netrc_path);
-    result
+fn github_api_base() -> String {
+    std::env::var("KNIT_GITHUB_API_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "https://api.github.com".to_string())
 }
 
-fn run_curl_github_api(
-    args: &[String],
-    body: Option<&str>,
-    method: &str,
-    endpoint: &str,
-) -> Result<String> {
-    let mut command = Command::new("curl");
-    command
-        .args(args)
-        .stdin(if body.is_some() {
-            Stdio::piped()
-        } else {
-            Stdio::null()
-        })
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
+/// Resolve hostnames preferring IPv4 addresses. This transport exists for
+/// non-interactive runtimes where default IPv6 routing can hang simple GitHub
+/// I/O, so v6 addresses are only used when no v4 address resolves.
+fn ipv4_first_resolver(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let all: Vec<std::net::SocketAddr> = netloc.to_socket_addrs()?.collect();
+    let v4: Vec<std::net::SocketAddr> = all
+        .iter()
+        .copied()
+        .filter(std::net::SocketAddr::is_ipv4)
+        .collect();
+    Ok(if v4.is_empty() { all } else { v4 })
+}
 
-    let mut child = command
-        .spawn()
-        .context("failed to run `curl` for GitHub API transport")?;
-
-    if let Some(input) = body {
-        let mut child_stdin = child
-            .stdin
-            .take()
-            .context("failed to open stdin for `curl`")?;
-        child_stdin
-            .write_all(input.as_bytes())
-            .context("failed to write GitHub API payload to `curl`")?;
-        drop(child_stdin);
-    }
-
-    let output = child
-        .wait_with_output()
-        .context("failed to wait for `curl` GitHub API call")?;
-    if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string());
-    }
-
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let detail = [stderr.trim(), stdout.trim()]
-        .into_iter()
-        .filter(|part| !part.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n");
+fn native_github_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
+    let token = github_api_token()
+        .context("KNIT_GITHUB_API_TRANSPORT requires GH_TOKEN or GITHUB_TOKEN")?;
+    let url = format!("{}/{}", github_api_base(), endpoint.trim_start_matches('/'));
     let operation = format!("{method} /{}", endpoint.trim_start_matches('/'));
-    if looks_like_curl_auth_failure(&detail) {
-        bail!(
-            "curl GitHub API request failed during {operation}: {detail}\nHint: GitHub rejected GH_TOKEN/GITHUB_TOKEN. Replace the saved GitHub credential with an active token that can access this repository, then retry."
-        );
+
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(5))
+        .timeout(std::time::Duration::from_secs(20))
+        .resolver(
+            ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>,
+        )
+        .build();
+    let mut request = agent
+        .request(method, &url)
+        .set("Accept", "application/vnd.github+json")
+        .set("X-GitHub-Api-Version", "2022-11-28")
+        .set("User-Agent", "knit")
+        .set("Authorization", &format!("Bearer {token}"));
+    if body.is_some() {
+        request = request.set("Content-Type", "application/json");
     }
-    bail!("curl GitHub API request failed during {operation}: {detail}");
+    let result = match body {
+        Some(input) => request.send_string(input),
+        None => request.call(),
+    };
+
+    match result {
+        Ok(response) => {
+            let text = response
+                .into_string()
+                .with_context(|| format!("failed to read GitHub API response for {operation}"))?;
+            Ok(text.trim_end().to_string())
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let detail = response.into_string().unwrap_or_default();
+            let detail = detail.trim();
+            if status == 401 || looks_like_github_auth_failure(detail) {
+                bail!(
+                    "GitHub API request failed during {operation}: HTTP {status}: {detail}\nHint: GitHub rejected GH_TOKEN/GITHUB_TOKEN. Replace the saved GitHub credential with an active token that can access this repository, then retry."
+                );
+            }
+            bail!("GitHub API request failed during {operation}: HTTP {status}: {detail}");
+        }
+        Err(ureq::Error::Transport(transport)) => {
+            bail!("GitHub API request failed during {operation}: {transport}")
+        }
+    }
 }
 
 fn github_api_token() -> Option<String> {
@@ -648,39 +616,9 @@ fn github_api_token() -> Option<String> {
     })
 }
 
-fn looks_like_curl_auth_failure(detail: &str) -> bool {
+fn looks_like_github_auth_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
-    lower.contains("401") || lower.contains("bad credentials") || lower.contains("unauthorized")
-}
-
-fn write_github_netrc(token: &str) -> Result<std::path::PathBuf> {
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let path = std::env::temp_dir().join(format!(
-        "knit-github-api-{}-{suffix}.netrc",
-        std::process::id()
-    ));
-    fs::write(
-        &path,
-        format!("machine api.github.com\n  login x-access-token\n  password {token}\n"),
-    )
-    .context("failed to write temporary GitHub API credentials")?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mut permissions = fs::metadata(&path)
-            .context("failed to stat temporary GitHub API credentials")?
-            .permissions();
-        permissions.set_mode(0o600);
-        fs::set_permissions(&path, permissions)
-            .context("failed to protect temporary GitHub API credentials")?;
-    }
-    // On Windows the temp dir already carries a per-user ACL, which is the
-    // platform's equivalent protection for this short-lived credentials file;
-    // there is no mode-bits analogue to set here.
-    Ok(path)
+    lower.contains("bad credentials") || lower.contains("unauthorized")
 }
 
 fn pull_request_api_endpoint(repo_full_name: &str) -> String {
@@ -950,12 +888,22 @@ mod tests {
     }
 
     #[test]
-    fn curl_auth_failure_detects_bad_credentials() {
-        assert!(looks_like_curl_auth_failure(
-            "curl: (22) The requested URL returned error: 401\n{\"message\":\"Bad credentials\"}"
+    fn github_auth_failure_detects_bad_credentials() {
+        assert!(looks_like_github_auth_failure(
+            "{\"message\":\"Bad credentials\"}"
         ));
-        assert!(!looks_like_curl_auth_failure(
-            "curl: (22) The requested URL returned error: 404"
+        assert!(!looks_like_github_auth_failure(
+            "{\"message\":\"Not Found\"}"
         ));
+    }
+
+    #[test]
+    fn ipv4_first_resolver_prefers_v4_addresses() {
+        let addrs = ipv4_first_resolver("localhost:80").unwrap();
+        assert!(!addrs.is_empty());
+        // When any IPv4 address resolves, only IPv4 addresses are returned.
+        if addrs.iter().any(std::net::SocketAddr::is_ipv4) {
+            assert!(addrs.iter().all(std::net::SocketAddr::is_ipv4));
+        }
     }
 }
