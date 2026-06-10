@@ -66,11 +66,6 @@ pub fn pull_history_from_remote(project: Option<&str>, remote_name: &str) -> Res
     Ok(())
 }
 
-pub fn sync_history_with_remote(project: Option<&str>, remote_name: &str) -> Result<()> {
-    pull_history_from_remote(project, remote_name)?;
-    push_history_to_remote(project, remote_name)
-}
-
 pub(super) fn push_project_history_events(
     remote: &KnitRemote,
     token: &str,

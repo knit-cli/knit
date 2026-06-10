@@ -60,8 +60,6 @@ knit view unset <name> <repo>... [--project <name>]
 knit view default [name] [--clear] [--project <name>]
 knit view rm <name> [--project <name>]
 knit view edit [--project <name>]
-knit view push [--project <name>] [--remote <name>]
-knit view pull [--project <name>] [--remote <name>]
 knit bundle                          # show the resolved bundle
 knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
 knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
@@ -98,7 +96,6 @@ knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>] [--remote <remote>]... [--no-remote]
 knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
-knit land sync [--remote <remote>]...
 knit land status [--run <path>]
 knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--fetch] [--push] [--set-upstream] [--manual]
 knit merge status [--run <id-or-path>]
@@ -113,10 +110,11 @@ knit config set sync-remotes <name>[,<name>...]
 knit schema print <bundle|project|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
-knit sync
+knit sync                                      # record git commits made outside Knit (local reconcile)
+knit sync push [--bundles] [--history] [--views] [--all] [--remote <name>]...
+knit sync pull [--bundles] [--history] [--views] [--all] [--remote <name>]...
 knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--project <project>]
 knit history refresh [--project <project>]
-knit history push|pull|sync [--project <project>] [--remote <name>]
 knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -178,7 +176,7 @@ knit bundle remove frontend --delete-branch    # also delete the local feature b
 knit bundle apply-view backend       # reshape the bundle to match a saved view
 ```
 
-`knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Views sync to KnitHub as the user's own config with `knit view push` / `knit view pull`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
+`knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Views sync to KnitHub as the user's own config with `knit sync push --views` / `knit sync pull --views`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 
@@ -425,6 +423,25 @@ Hosted services that run Knit from bundle artifacts can set `KNIT_GITHUB_API_TRA
 
 When KnitHub sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and KnitHub stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`.
 
+### Syncing artifacts with KnitHub
+
+`knit sync` with no subcommand is a local-only reconcile: it records git commits made outside Knit as `git.observed` nodes and never touches the network. Its `push`/`pull` subcommands are the one verb family for moving Knit artifacts (bundles, project history, and saved views) between the workspace and KnitHub remotes:
+
+```sh
+knit sync push                 # push bundle + history + views for the resolved project/bundle
+knit sync push --bundles       # push only the bundle artifact (e.g. after landing)
+knit sync push --history       # push only project history events
+knit sync push --views         # push only your saved views
+knit sync pull                 # pull bundle + history + views
+knit sync pull --history       # pull only project history events
+knit sync push --remote local --remote knithub   # fan out to several remotes
+```
+
+With no target flag (`--bundles`/`--history`/`--views`/`--all`), `knit sync push`/`pull` move every relevant artifact family. Remotes default to the configured sync remotes (`knit config set sync-remotes ...`, then `sync-remote`), falling back to a remote named `knithub`; override with one or more `--remote <name>`.
+
+The git-shaped verbs keep their git semantics but route through the same internal sync module: `knit push --remote <name>` still pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` still pull recorded bundle state. Landing's automatic artifact sync (when `push-sync` is enabled) goes through the same module too. There is one implementation behind several differently shaped doors.
+
+
 Remotes can be workspace-local or user-global. Workspace `.knit/config.json` remotes override global remotes of the same name; otherwise commands fall back to the user-level config at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. This lets every workspace share the same hosted KnitHub remote unless a workspace deliberately points that name somewhere else:
 
 ```sh
@@ -474,7 +491,7 @@ Bare `knit land` is safe: it creates or shows the default plan and stops. It nev
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to configured KnitHub remotes when push-sync is enabled. Use repeated `--remote <name>` to force remotes, `--no-remote` to skip this sync, or `knit land sync` to push the landed artifact later.
+`knit land apply` preflights referenced PRs, refuses draft/closed/missing PRs, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. Already-merged PRs are treated as satisfied and skipped (whether or not a prior run exists), and an open PR that conflicts with its base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the PR merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. If a step fails, the run stops and records the exact step status, stdout/stderr for `run` and command `deploy` steps, and failure detail. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated. A fully successful run appends a `feature.landed` node to the bundle with the plan id, run id, provider, repo ids, and publication URLs, then syncs the updated bundle artifact to configured KnitHub remotes when push-sync is enabled. Use repeated `--remote <name>` to force remotes, `--no-remote` to skip this sync, or `knit sync push --bundles` to push the landed artifact later.
 
 `knit merge` is for local branch integration that is not a PR landing. It can merge a bundle or git ref into a target branch, or into another bundle's feature branches:
 
@@ -502,7 +519,7 @@ knit merge x-y-compat --into feature-y
 
 Knit also keeps a project-wide history ledger under `.knit/history/<project>.history.jsonl` and syncs it with KnitHub when history APIs are available. This ledger is metadata only: it records bundle ids, repo ids, branch names, Knit node ids, timestamps, and Git commit SHAs. Git remains the source of truth for file contents, diffs, and file-level history.
 
-Use `knit history list` to inspect the local project history, `knit history refresh` to rebuild it from local bundle artifacts, and `knit history push`, `knit history pull`, or `knit history sync` to exchange history events with a KnitHub remote.
+Use `knit history list` to inspect the local project history and `knit history refresh` to rebuild it from local bundle artifacts. Exchange history events with a KnitHub remote through the shared sync verbs: `knit sync push --history` and `knit sync pull --history`.
 
 Use `knit related` before editing a file or area with possible cross-repo coupling. The command asks Git which commits touched the path, joins those SHAs to Knit history, then expands matching events to their bundle, commit group, and companion repo commits:
 
