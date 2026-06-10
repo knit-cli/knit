@@ -19,8 +19,8 @@ pub mod tracking;
 use anyhow::Result;
 
 pub use cli::{
-    BundleCommand, Cli, Commands, ConfigCommand, GithubPublishCommand, HistoryCommand, LandCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand, ViewCommand,
+    BundleCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand, ProjectCommand,
+    ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand, ViewCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -265,11 +265,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::push_bundle_to_remote(&remote, project.as_deref())
             }
         },
-        Commands::Switch {
-            bundle,
-            workspace,
-            here,
-        } => commands::switch_bundle(&bundle, workspace, here),
+        Commands::Switch { bundle, workspace } => commands::switch_bundle(&bundle, workspace),
         Commands::Clean {
             plans,
             worktrees,
@@ -393,70 +389,6 @@ pub fn run(cli: Cli) -> Result<()> {
             } => {
                 let provider = effective_publish_provider(provider, github);
                 commands::show_publication_status(&repos, all, live, provider.as_deref())
-            }
-            PublishCommand::Github { command } => {
-                eprintln!(
-                    "{}",
-                    crate::output::warn(
-                        "`knit publish github` is deprecated; use `knit publish create --github`."
-                    )
-                );
-                let provider = Some("github");
-                match command {
-                    GithubPublishCommand::Create {
-                        repos,
-                        from_artifact,
-                        out,
-                        no_push,
-                        bases,
-                        all,
-                        draft,
-                        sync,
-                        no_sync,
-                        set_upstream,
-                    } => match from_artifact {
-                        Some(path) => commands::create_publications_from_artifact(
-                            &path,
-                            out.as_deref(),
-                            &repos,
-                            all,
-                            draft,
-                            &bases,
-                            sync || !no_sync,
-                            !no_push,
-                            provider,
-                        ),
-                        None => commands::create_publications(
-                            &repos,
-                            all,
-                            draft,
-                            &bases,
-                            sync || !no_sync,
-                            set_upstream,
-                            &[],
-                            false,
-                            provider,
-                        ),
-                    },
-                    GithubPublishCommand::Sync {
-                        repos,
-                        from_artifact,
-                        out,
-                        all,
-                    } => match from_artifact {
-                        Some(path) => commands::sync_publications_from_artifact(
-                            &path,
-                            out.as_deref(),
-                            &repos,
-                            all,
-                            provider,
-                        ),
-                        None => commands::sync_publications(&repos, all, provider),
-                    },
-                    GithubPublishCommand::Status { repos, all, live } => {
-                        commands::show_publication_status(&repos, all, live, provider)
-                    }
-                }
             }
         },
         Commands::Land { command } => match command {

@@ -15,8 +15,7 @@ use crate::model::{
 use crate::output as out;
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
-    load_config, read_json, save_config, set_folder_active_bundle, set_workspace_active_bundle,
-    write_json, ActiveBundle,
+    load_config, read_json, save_config, set_workspace_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -170,10 +169,7 @@ pub fn list_open_bundle_ids(root: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
-pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()> {
-    if workspace && here {
-        bail!("Use either --workspace or --here, not both.");
-    }
+pub fn switch_bundle(bundle_id: &str, workspace: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let bundle_id = crate::ids::slugify(bundle_id);
@@ -185,34 +181,18 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool, here: bool) -> Result<()>
         bail!("Bundle `{bundle_id}` is archived. Run `knit bundle restore {bundle_id}` first.");
     }
 
-    if here {
-        set_folder_active_bundle(&root, &cwd, &bundle_id)?;
-        println!(
-            "{} {} {}",
-            out::heading("Folder bundle:"),
-            out::node(&bundle_id),
-            out::path(crate::store::relative_path_for_storage(&root, &cwd))
-        );
-    } else if workspace {
-        set_workspace_active_bundle(&root, &bundle_id)?;
-        println!(
-            "{} {}",
-            out::heading("Active bundle:"),
-            out::node(&bundle_id)
-        );
-    } else if cwd == root {
+    if !workspace {
         bail!(
-            "Refusing to switch the shared workspace fallback without --workspace. Use `knit switch {bundle_id} --workspace`, `knit switch {bundle_id} --here`, run from the target worktree, or pass `--bundle {bundle_id}` to a single command."
-        );
-    } else {
-        set_folder_active_bundle(&root, &cwd, &bundle_id)?;
-        println!(
-            "{} {} {}",
-            out::heading("Folder bundle:"),
-            out::node(&bundle_id),
-            out::path(crate::store::relative_path_for_storage(&root, &cwd))
+            "Refusing to switch the shared workspace fallback without --workspace. Use `knit switch {bundle_id} --workspace`, run from the target worktree, or pass `--bundle {bundle_id}` to a single command."
         );
     }
+
+    set_workspace_active_bundle(&root, &bundle_id)?;
+    println!(
+        "{} {}",
+        out::heading("Active bundle:"),
+        out::node(&bundle_id)
+    );
 
     Ok(())
 }
