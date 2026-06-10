@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "knit")]
+#[command(version)]
 #[command(about = "Git for cross-repo feature work")]
 pub struct Cli {
     /// Resolve commands against this bundle instead of cwd or workspace context.
@@ -127,16 +128,13 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<BundleCommand>,
     },
-    /// Switch the fallback bundle for this workspace or folder.
+    /// Switch the fallback bundle for this workspace.
     Switch {
         /// Bundle id to make active.
         bundle: String,
         /// Set the workspace fallback bundle.
-        #[arg(long, conflicts_with = "here")]
-        workspace: bool,
-        /// Set the fallback bundle for the current folder.
         #[arg(long)]
-        here: bool,
+        workspace: bool,
     },
     /// Remove Knit-generated local state.
     Clean {
@@ -307,8 +305,15 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Record git commits that happened outside Knit.
-    Sync,
+    /// Reconcile local Knit state, or sync artifacts with KnitHub.
+    ///
+    /// Bare `knit sync` records git commits made outside Knit into the bundle
+    /// ledger (a local-only reconcile). The `push`/`pull` subcommands are the one
+    /// way to move bundle, history, and view artifacts to and from KnitHub.
+    Sync {
+        #[command(subcommand)]
+        command: Option<SyncCommand>,
+    },
     /// Show and sync project-wide commit history.
     History {
         #[command(subcommand)]
@@ -405,6 +410,46 @@ pub enum Commands {
 }
 
 #[derive(Subcommand)]
+pub enum SyncCommand {
+    /// Push artifacts to KnitHub. With no target flags, pushes bundle, history,
+    /// and views for the resolved project/bundle.
+    Push {
+        #[command(flatten)]
+        targets: SyncTargetArgs,
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
+        /// sync remotes, then a remote named `knithub`.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Vec<String>,
+    },
+    /// Pull artifacts from KnitHub. With no target flags, pulls bundle, history,
+    /// and views for the resolved project/bundle.
+    Pull {
+        #[command(flatten)]
+        targets: SyncTargetArgs,
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
+        /// sync remotes, then a remote named `knithub`.
+        #[arg(long, value_name = "REMOTE")]
+        remote: Vec<String>,
+    },
+}
+
+#[derive(clap::Args, Clone, Debug)]
+pub struct SyncTargetArgs {
+    /// Sync the bundle artifact for the resolved bundle.
+    #[arg(long)]
+    pub bundles: bool,
+    /// Sync project commit history events.
+    #[arg(long)]
+    pub history: bool,
+    /// Sync your saved views for the project.
+    #[arg(long)]
+    pub views: bool,
+    /// Sync every artifact family. This is also the default with no target flags.
+    #[arg(long)]
+    pub all: bool,
+}
+
+#[derive(Subcommand)]
 pub enum HistoryCommand {
     /// Show local project history.
     List {
@@ -426,33 +471,6 @@ pub enum HistoryCommand {
         /// Project id. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,
-    },
-    /// Push local project history events to KnitHub.
-    Push {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull project history events from KnitHub.
-    Pull {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull then push project history events with KnitHub.
-    Sync {
-        /// Project id. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
     },
 }
 
@@ -600,15 +618,6 @@ pub enum BundleCommand {
     Print,
     /// Validate the resolved bundle structure.
     Validate,
-    /// Push the resolved bundle JSON artifact to a KnitHub remote.
-    Push {
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-        /// Project id or slug to attach the bundle to. Defaults to the bundle project or active project.
-        #[arg(long)]
-        project: Option<String>,
-    },
 }
 
 #[derive(Subcommand)]
@@ -797,24 +806,6 @@ pub enum ViewCommand {
         #[arg(long)]
         project: Option<String>,
     },
-    /// Push your views to a KnitHub remote.
-    Push {
-        /// Project name. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
-    /// Pull your views from a KnitHub remote.
-    Pull {
-        /// Project name. Defaults to the active project.
-        #[arg(long)]
-        project: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -893,7 +884,7 @@ pub enum ConfigCommand {
 pub enum SchemaCommand {
     /// Print a bundled JSON Schema.
     Print {
-        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config.
+        /// Schema name: bundle, project, merge-run, land-plan, land-run, config.
         name: String,
     },
 }
@@ -981,12 +972,6 @@ pub enum PublishCommand {
         #[arg(long, conflicts_with = "provider")]
         github: bool,
     },
-    /// Deprecated: prefer `knit publish create` (auto-detects each repo's host) or `knit publish create --github`.
-    #[command(hide = true)]
-    Github {
-        #[command(subcommand)]
-        command: GithubPublishCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1034,12 +1019,6 @@ pub enum LandCommand {
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
     },
-    /// Push the current landed bundle artifact to a KnitHub remote.
-    Sync {
-        /// Named KnitHub remote. Repeat to push to multiple remotes. Defaults to sync-remotes or `knithub`.
-        #[arg(long, value_name = "REMOTE")]
-        remote: Vec<String>,
-    },
     /// Show the latest landing run or default plan status.
     Status {
         /// Run file to inspect. Defaults to the latest run.
@@ -1064,69 +1043,5 @@ pub enum LandCommand {
         /// Record already-resolved local branch movements as a land update without running git merge.
         #[arg(long)]
         continue_merge: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum GithubPublishCommand {
-    /// Push feature branches and create missing GitHub PRs.
-    Create {
-        /// Optional repo ids or paths to limit PR creation.
-        repos: Vec<String>,
-        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
-        /// When set, Knit will not require a local worktree checkout.
-        #[arg(long)]
-        from_artifact: Option<PathBuf>,
-        /// Write the updated bundle JSON artifact to this path.
-        /// When omitted, the updated artifact is printed to stdout.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Skip pushing feature branches (GitHub-only). Feature branches must already exist on the remote.
-        #[arg(long)]
-        no_push: bool,
-        /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
-        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
-        bases: Vec<String>,
-        /// Create PRs for every tracked repo instead of only repos with recorded bundle work.
-        #[arg(long)]
-        all: bool,
-        /// Create draft PRs.
-        #[arg(long)]
-        draft: bool,
-        /// Explicitly sync cross-links after creation. This is the default.
-        #[arg(long, conflicts_with = "no_sync")]
-        sync: bool,
-        /// Skip the second phase that updates every PR body with cross-links.
-        #[arg(long)]
-        no_sync: bool,
-        /// Set each feature branch's upstream to origin/<branch> while pushing.
-        #[arg(long)]
-        set_upstream: bool,
-    },
-    /// Refresh recorded PR metadata and rewrite Knit cross-link blocks.
-    Sync {
-        /// Optional repo ids or paths to limit PR sync.
-        repos: Vec<String>,
-        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
-        #[arg(long)]
-        from_artifact: Option<PathBuf>,
-        /// Write the updated bundle JSON artifact to this path.
-        /// When omitted, the updated artifact is printed to stdout.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Sync every tracked repo instead of only repos with recorded bundle work or publications.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Show recorded PRs for the resolved bundle.
-    Status {
-        /// Optional repo ids or paths to limit PR status.
-        repos: Vec<String>,
-        /// Show every tracked repo. This is the default when no repos are passed.
-        #[arg(long)]
-        all: bool,
-        /// Fetch live mergeability, checks, and review state from the host.
-        #[arg(long)]
-        live: bool,
     },
 }

@@ -72,7 +72,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. Each adapter (`github.rs`/`gitlab.rs`/`forgejo.rs`) maps its CLI's JSON onto the canonical types. GitLab and Codeberg/Forgejo are detected from the remote host; every other remote defaults to GitHub. Provider modules expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
-- `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, folder context, then workspace fallback config.
+- `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, then workspace fallback config.
 - `checkout.rs` owns checkout path resolution, checkout mode labels, and in-place branch safety checks.
 - Pure helper behavior should live in small modules and have integration tests under `tests/`.
 
@@ -105,8 +105,23 @@ History events are pointers, not patches. They record the project, bundle, repo,
 
 This split enables related-work queries without duplicating Git. `knit related` first asks Git which commits touched a path, then joins those SHAs to Knit history to recover the bundle and cross-repo commit context. If a commit was made wholly outside Knit and never recorded into a bundle, Git can still report it for the path, but Knit history has no bundle context for it.
 
+## KnitHub Artifact Sync
+
+Three kinds of Knit artifact move between the workspace and KnitHub remotes: bundle artifacts, project history events, and per-user saved views. Historically these were reached through eight overlapping doors: `knit push --remote`, `knit bundle push`, `knit fetch --bundles`, `knit pull --bundles`, `knit history push/pull/sync`, `knit view push/pull`, `knit land sync`, and the automatic push-sync-on-land driven by the `push-sync`/`sync-remote`/`sync-remotes` config keys. Several verbs did the same thing under different names, and the command surface gave no single place to learn "how do I move artifacts to KnitHub".
+
+This is consolidated into one verb family. `knit sync` keeps its original meaning exactly — a local-only reconcile that records git commits made outside Knit — and gains two subcommands that are the one explicit way to move artifacts:
+
+- `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...`
+- `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...`
+
+With no target flag, both move every relevant artifact family. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then a remote named `knithub`.
+
+The absorbed verbs are deleted, not aliased or hidden: `knit bundle push`, `knit history push/pull/sync` (only `history list` and `history refresh` remain), `knit view push/pull`, and `knit land sync` no longer exist. The philosophy is one way per outcome — delete, do not hide.
+
+The git-parity verbs keep their git shapes because they are about branches first: `knit push --remote <name>` pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` pull recorded bundle state. They are not duplicate implementations — they route through the same `commands/remote/` helpers that the `knit sync` subcommands and landing's automatic sync use. `commands/remote/facade.rs` is the thin selector that the `knit sync` subcommands call: it owns choosing artifact families and remotes, then delegates transport to the per-artifact helpers in `commands/remote/{push,pull,history}.rs`. One implementation, several differently shaped doors into it. The `push-sync`/`sync-remote`/`sync-remotes` config keys are unchanged and still drive automatic artifact sync after a successful land.
+
 ## Project And Context State
 
 Projects are optional templates for repeated repo sets. They live under `.knit/projects/<project>.project.json`, record stable repo ids, default base branches, checkout mode, and whether a repo is included by default or only observed.
 
-Bundle context is intentionally local. `.knit/config.json` stores the workspace fallback bundle and active project, `.knit/contexts.json` stores folder-level bundle fallbacks, and generated worktree paths always identify their owning bundle. Mutating bundle commands use per-bundle locks under `.knit/locks/`; project mutation uses a project-specific lock.
+Bundle context is intentionally local. `.knit/config.json` stores the workspace fallback bundle and active project, and generated worktree paths always identify their owning bundle. Mutating bundle commands use per-bundle locks under `.knit/locks/`; project mutation uses a project-specific lock.

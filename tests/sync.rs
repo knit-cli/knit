@@ -1,0 +1,418 @@
+mod common;
+
+use common::*;
+use std::fs;
+
+#[test]
+fn pull_updates_original_base_checkout_and_bundle_base_sha() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature_head_before = git(
+        &workspace.join(".knit/worktrees/venue-capacity/backend"),
+        ["rev-parse", "HEAD"],
+    );
+
+    append_line(&collaborator.join("app.txt"), "remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let pull = knit(&workspace, ["pull", "backend"]);
+    assert!(pull.contains("backend"));
+    assert!(pull.contains(&remote_sha[..7]));
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), remote_sha);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["baseSha"].as_str(),
+        Some(remote_sha.trim())
+    );
+    assert_eq!(
+        git(
+            &workspace.join(".knit/worktrees/venue-capacity/backend"),
+            ["rev-parse", "HEAD"],
+        ),
+        feature_head_before
+    );
+
+    append_line(&collaborator.join("app.txt"), "second remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Second remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    append_line(&backend.join("app.txt"), "local dirty base checkout");
+
+    let dirty_pull = knit_fails(&workspace, ["pull", "backend"]);
+    assert!(dirty_pull.contains("Refusing to pull with uncommitted changes"));
+    assert!(dirty_pull.contains("backend"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_main_fast_forwards_project_repos_and_reports() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, backend_collab) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collab) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    // Advance backend's origin main; leave frontend with a local dirty edit.
+    append_line(&backend_collab.join("app.txt"), "remote main update");
+    git(&backend_collab, ["add", "app.txt"]);
+    git(&backend_collab, ["commit", "-m", "Remote main update"]);
+    git(&backend_collab, ["push", "origin", "main"]);
+    let backend_sha = git(&backend_collab, ["rev-parse", "HEAD"]);
+    append_line(&frontend.join("app.txt"), "local uncommitted edit");
+
+    let report = knit(&workspace, ["pull", "--main"]);
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("backend"));
+    assert!(report.contains(&backend_sha[..7]));
+    assert!(report.contains("frontend"));
+    assert!(report.contains("skipped"));
+
+    // Backend's source checkout fast-forwarded; the dirty repo was left alone.
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), backend_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Two open bundles: the old workspace-fallback guard refused a bare pull at
+    // the root. The new aggregate pull reports instead.
+    knit(&workspace, ["bundle", "feature one"]);
+    knit(&workspace, ["bundle", "feature two"]);
+
+    let report = knit(&workspace, ["pull"]);
+    assert!(!report.contains("Refusing"));
+    assert!(report.contains("Main repos:"));
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("Pulled:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_bundles_without_remote_reports_each_bundle_skipped() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "feature one"]);
+    knit(&workspace, ["bundle", "feature two"]);
+
+    let report = knit(&workspace, ["pull", "--bundles"]);
+    assert!(report.contains("Bundles:"));
+    assert!(report.contains("feature-one"));
+    assert!(report.contains("feature-two"));
+    assert!(report.contains("no KnitHub remote configured"));
+    // --bundles alone does not touch project main repos.
+    assert!(!report.contains("Main repos:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fetch_updates_remote_refs_without_moving_checkout_or_bundle_base() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let initial_head = git(&backend, ["rev-parse", "HEAD"]);
+    let initial_bundle = read_bundle(&workspace);
+    let initial_base_sha = initial_bundle["repos"][0]["baseSha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    append_line(&collaborator.join("app.txt"), "remote base fetch");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base fetch"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let fetch = knit(&workspace, ["fetch", "backend"]);
+    assert!(fetch.contains("backend"));
+    assert!(fetch.contains("origin/main"));
+    assert!(fetch.contains(&remote_sha[..7]));
+    assert_eq!(git(&backend, ["rev-parse", "origin/main"]), remote_sha);
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), initial_head);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["baseSha"].as_str(),
+        Some(initial_base_sha.as_str())
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn push_sends_feature_branch_and_can_set_upstream() {
+    let root = unique_temp_dir();
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+
+    append_line(&feature.join("app.txt"), "feature push");
+    knit(&workspace, ["commit", "--all", "-m", "Feature push"]);
+    let first_sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let push = knit(&workspace, ["push", "backend"]);
+    assert!(push.contains("backend"));
+    assert!(push.contains("origin/knit/venue-capacity"));
+    assert!(push.contains(&first_sha[..7]));
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        first_sha
+    );
+
+    append_line(&feature.join("app.txt"), "feature push with upstream");
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Feature push with upstream"],
+    );
+    let second_sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let push_upstream = knit(&workspace, ["push", "--set-upstream", "backend"]);
+    assert!(push_upstream.contains("backend"));
+    assert!(push_upstream.contains(&second_sha[..7]));
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        second_sha
+    );
+    assert_eq!(
+        git(
+            &feature,
+            ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
+        )
+        .trim(),
+        "origin/knit/venue-capacity"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn push_sends_selected_feature_branches_in_parallel() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+
+    append_line(&backend_feature.join("app.txt"), "parallel backend push");
+    append_line(&frontend_feature.join("app.txt"), "parallel frontend push");
+    knit(&workspace, ["commit", "--all", "-m", "Parallel push"]);
+    let backend_sha = git(&backend_feature, ["rev-parse", "HEAD"]);
+    let frontend_sha = git(&frontend_feature, ["rev-parse", "HEAD"]);
+
+    let gate = root.join("push-gate");
+    install_parallel_push_hook(&backend_feature, &gate, "backend", "frontend");
+    install_parallel_push_hook(&frontend_feature, &gate, "frontend", "backend");
+
+    let push = knit(&workspace, ["push", "backend", "frontend"]);
+    assert!(push.contains("backend"));
+    assert!(push.contains("frontend"));
+    assert_eq!(
+        git(
+            &backend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        backend_sha
+    );
+    assert_eq!(
+        git(
+            &frontend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"],
+        ),
+        frontend_sha
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn commit_stages_and_commits_repos_in_parallel() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+
+    append_line(&backend_feature.join("app.txt"), "parallel backend commit");
+    append_line(&frontend_feature.join("app.txt"), "parallel frontend commit");
+
+    let gate = root.join("commit-gate");
+    install_parallel_gate_hook(&backend_feature, "pre-commit", &gate, "backend", "frontend");
+    install_parallel_gate_hook(&frontend_feature, "pre-commit", &gate, "frontend", "backend");
+
+    let commit = knit(
+        &workspace,
+        ["commit", "--all", "-m", "Parallel commit"],
+    );
+    assert!(commit.contains("backend"));
+    assert!(commit.contains("frontend"));
+    assert!(commit.contains("Recorded commit group"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_feature_checkout_records_observed_git_movement() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    git(&feature, ["push", "-u", "origin", "knit/venue-capacity"]);
+
+    git(
+        &collaborator,
+        ["fetch", "origin", "knit/venue-capacity:knit/venue-capacity"],
+    );
+    git(&collaborator, ["checkout", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "remote feature update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote feature update"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let remote_feature_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let pull = knit(&workspace, ["pull", "--feature", "backend"]);
+    assert!(pull.contains("backend"));
+    assert!(pull.contains(&remote_feature_sha[..7]));
+    assert!(pull.contains("observed 1 unrecorded commit(s)"));
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), remote_feature_sha);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["repos"][0]["headSha"].as_str(),
+        Some(remote_feature_sha.trim())
+    );
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("git.observed"));
+    assert_eq!(latest["repoChanges"][0]["repoId"].as_str(), Some("backend"));
+    assert_eq!(
+        latest["repoChanges"][0]["movement"].as_str(),
+        Some("advanced")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        ["bundle", "add", "--in-place", backend.to_str().unwrap()],
+    );
+
+    assert!(!workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "knit/venue-capacity"
+    );
+
+    let bundle = read_bundle(&workspace);
+    let repo = &bundle["repos"][0];
+    assert_eq!(repo["checkoutMode"].as_str(), Some("inPlace"));
+    assert_eq!(repo["worktreePath"].as_str(), repo["path"].as_str());
+
+    append_line(&backend.join("app.txt"), "in-place feature");
+    let status = knit(&workspace, ["status"]);
+    assert!(status.contains("in-place"));
+    assert!(status.contains("modified"));
+    let diff = knit(&workspace, ["diff", "--stat", "backend"]);
+    assert!(diff.contains("backend"));
+    assert!(diff.contains("app.txt"));
+
+    knit(&workspace, ["commit", "--all", "-m", "In-place feature"]);
+    assert!(git(&backend, ["log", "-1", "--pretty=%B"]).contains("In-place feature"));
+
+    git(&backend, ["checkout", "main"]);
+    let wrong_branch_status = knit(&workspace, ["status"]);
+    assert!(wrong_branch_status.contains("wrong branch"));
+    let stage_failure = knit_fails(&workspace, ["add"]);
+    assert!(stage_failure.contains("expected `knit/venue-capacity`"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
