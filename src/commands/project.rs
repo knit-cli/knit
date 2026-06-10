@@ -26,7 +26,6 @@ pub fn init_project(name: &str, agents: bool) -> Result<()> {
     let project_dir = knit_dir.join("projects");
     fs::create_dir_all(&project_dir).context("failed to create .knit/projects")?;
     fs::create_dir_all(knit_dir.join("bundles")).context("failed to create .knit/bundles")?;
-    fs::create_dir_all(knit_dir.join("work-items")).context("failed to create .knit/work-items")?;
     fs::create_dir_all(knit_dir.join("worktrees")).context("failed to create .knit/worktrees")?;
 
     let path = project_path(&root, &project_id);

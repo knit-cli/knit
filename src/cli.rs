@@ -103,17 +103,6 @@ pub enum Commands {
         /// Apply a saved view (named bundle shape). Conflicts with --repo/--all-repos.
         #[arg(long, value_name = "NAME")]
         view: Option<String>,
-        /// Consume a work item: create (or reuse) its bundle from the item's
-        /// project and repo hints, claim it, and write the agent prompt.
-        #[arg(
-            long,
-            value_name = "WORK_ITEM",
-            conflicts_with_all = [
-                "title", "project", "repos", "all_repos", "view", "include",
-                "exclude", "no_worktree", "in_place", "force", "agents", "cd"
-            ]
-        )]
-        workitem: Option<String>,
         /// Add a project repo on top of the resolved set. Repeatable.
         #[arg(long = "include", value_name = "REPO")]
         include: Vec<String>,
