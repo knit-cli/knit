@@ -450,6 +450,8 @@ Target flags drive the aggregate, best-effort report directly and may be combine
 
 Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and never abort on the first problem: a dirty tree or non-fast-forward is reported (`skipped`/`failed`) while the rest proceed.
 
+A bundle's local artifact is refreshed from its KnitHub copy only when the remote ledger is a strict fast-forward of the local one (the local node-id sequence is a prefix of the remote's). Identical or locally-ahead ledgers are left untouched (`skipped`), and a diverged ledger keeps the local artifact and reports a per-bundle warning rather than overwriting your work. This applies to both `knit pull --bundles` and `knit fetch --bundles`; `knit clone` is unaffected because it writes into a fresh workspace with no local artifacts.
+
 ```sh
 knit pull                 # at the base: project main repos + every open bundle, reported
 knit pull --main          # update all project repos' current branch (fast-forward only)
