@@ -129,6 +129,9 @@ pub fn init_repo(path: &Path, label: &str) {
     git(path, ["checkout", "-b", "main"]);
     git(path, ["config", "user.email", "knit@example.test"]);
     git(path, ["config", "user.name", "Knit Smoke"]);
+    // Tests write and assert LF content; Git for Windows defaults to
+    // autocrlf=true, which would rewrite checkouts to CRLF.
+    git(path, ["config", "core.autocrlf", "false"]);
     fs::write(path.join("app.txt"), format!("{label}\n")).unwrap();
     git(path, ["add", "app.txt"]);
     git(path, ["commit", "-m", &format!("Initial {label}")]);
@@ -173,6 +176,7 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
 pub fn configure_git_user(path: &Path) {
     git(path, ["config", "user.email", "knit@example.test"]);
     git(path, ["config", "user.name", "Knit Smoke"]);
+    git(path, ["config", "core.autocrlf", "false"]);
 }
 
 pub fn append_line(path: &Path, line: &str) {
