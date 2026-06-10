@@ -27,6 +27,21 @@ jobs:
       - name: cargo test
         run: cargo test --no-fail-fast
 
+  # macOS is the primary development platform, but CI coverage matters for
+  # contributors and because APFS is case-insensitive by default — closer to
+  # Windows than Linux for path-identity behavior.
+  macos:
+    name: macOS (build + test)
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --all-targets
+      - name: cargo test
+        run: cargo test --no-fail-fast
+
   # Windows support status lives in docs/windows.md. The fixtures are
   # cross-platform: fake forge CLIs are sh scripts launched through .cmd shims
   # (Git for Windows provides sh on the runners), and the GitHub API transport
