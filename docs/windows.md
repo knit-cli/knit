@@ -1,6 +1,6 @@
 # Windows support
 
-**Status: core blockers fixed in code, still untested on a real Windows machine.** Knit has been developed and run only on
+**Status: the full test suite builds and passes on windows-latest in CI** (build + all integration suites, including the sh-script fixtures via .cmd shims and the native GitHub API transport against a local stub). No interactive/manual validation on a real Windows workstation yet. Knit was originally developed and run only on
 macOS and Linux. This document is the first pass at a portability audit. It
 records the hazards found in `src/`, what is expected to work on Windows, what
 the known blockers are, and the open design questions that must be answered
