@@ -278,7 +278,15 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
         let mut bundle: ChangeGroup = serde_json::from_str(&before)
             .with_context(|| format!("failed to parse {}", path.display()))?;
         if bundle.state.is_none() {
-            if let Some(close_node) = bundle
+            if let Some(archive_node) = bundle
+                .nodes
+                .iter()
+                .rev()
+                .find(|node| node.node_type == "feature.archived")
+            {
+                bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
+                bundle.archived_at = Some(archive_node.created_at.clone());
+            } else if let Some(close_node) = bundle
                 .nodes
                 .iter()
                 .rev()

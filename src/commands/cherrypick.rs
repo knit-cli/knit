@@ -1,12 +1,10 @@
 use crate::checkout::{checkout_dir, ensure_mutable_checkouts};
 use crate::git::{git_output, git_output_optional, rev_parse};
-use crate::ids::{short_sha, slugify};
+use crate::ids::short_sha;
 use crate::model::{BundleNode, ChangeGroup, CommitRef, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
-use crate::store::{
-    bundle_path, find_knit_root, read_json, save_active_bundle, set_bundle_override, ActiveBundle,
-};
+use crate::store::{bundle_path, read_json, save_active_bundle, ActiveBundle};
 use crate::tracking::{sync_note, sync_observed_changes_for_repo_ids};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
@@ -49,87 +47,6 @@ pub fn cherrypick_from_bundle(
             );
         }
         save_active_bundle(&active)?;
-    }
-
-    Ok(())
-}
-
-pub fn split_bundle(
-    source_bundle_id: &str,
-    title: Option<&str>,
-    targets: &[String],
-    repo_selectors: &[String],
-    force: bool,
-) -> Result<()> {
-    if targets.is_empty() {
-        bail!("Pass at least one source bundle selector to split.");
-    }
-
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd)
-        .context("No Knit workspace found. Run `knit bundle \"feature title\"` first.")?;
-    let source = load_source_bundle(&root, source_bundle_id)?;
-    let selected = selected_source_commits(&source, targets, repo_selectors, None)?;
-    if selected.is_empty() {
-        bail!("No source commits matched the requested selectors.");
-    }
-
-    let repo_ids = selected_repo_ids(&selected);
-    let title = title
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("{} split", source.title));
-    let bundle_id = slugify(&title);
-    preflight_split_destination(&root, &source, &repo_ids)?;
-
-    crate::commands::init::start_bundle(
-        &title,
-        source.project_id.as_deref(),
-        &repo_ids,
-        false,
-        None,
-        &[],
-        &[],
-        true,
-        false,
-        force,
-        false,
-        None,
-    )?;
-    set_bundle_override(Some(bundle_id));
-    cherrypick_from_bundle(source_bundle_id, targets, &repo_ids, false)
-}
-
-fn preflight_split_destination(
-    root: &Path,
-    source: &ChangeGroup,
-    repo_ids: &[String],
-) -> Result<()> {
-    let Some(project_id) = source.project_id.as_deref() else {
-        bail!(
-            "Source bundle {} is not associated with a project. Start a destination bundle with the needed repos, then run `knit cherrypick --from {}`.",
-            out::repo(&source.id),
-            source.id
-        );
-    };
-
-    let project = crate::commands::project::load_project_by_id(root, project_id)?;
-    let project_repo_ids = project
-        .repos
-        .iter()
-        .map(|repo| repo.id.as_str())
-        .collect::<BTreeSet<_>>();
-    let missing = repo_ids
-        .iter()
-        .filter(|repo_id| !project_repo_ids.contains(repo_id.as_str()))
-        .cloned()
-        .collect::<Vec<_>>();
-    if !missing.is_empty() {
-        bail!(
-            "Project {} is missing repo(s) needed for this split: {}. Add them to the project or start a destination bundle manually and run `knit cherrypick --from {}`.",
-            out::repo(project_id),
-            missing.join(", "),
-            source.id
-        );
     }
 
     Ok(())
@@ -331,15 +248,6 @@ fn commits_for_node(source: &ChangeGroup, node: &BundleNode) -> Result<Vec<Commi
     Ok(commits)
 }
 
-fn selected_repo_ids(selected: &[SourceCommit]) -> Vec<String> {
-    selected
-        .iter()
-        .map(|commit| commit.repo_id.clone())
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect()
-}
-
 fn print_plan(selected: &[SourceCommit], dry_run: bool) {
     if dry_run {
         println!("{}", out::heading("Cherry-pick plan"));
@@ -372,7 +280,7 @@ fn apply_cherrypicks(active: &ActiveBundle, selected: &[SourceCommit]) -> Result
     for (repo_id, commits) in grouped {
         let repo = repo_by_id.get(&repo_id).with_context(|| {
             format!(
-                "{} is not tracked in the destination bundle. Add it first or use `knit bundle split`.",
+                "{} is not tracked in the destination bundle. Add it first with `knit bundle include`.",
                 out::repo(&repo_id)
             )
         })?;

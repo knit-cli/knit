@@ -3,10 +3,8 @@
 //! the shared locking and git helpers; the work lives in submodules:
 //!
 //! - [`run`] plans and applies the merge run (continue/abort/rollback)
-//! - [`compat`] builds a compatibility bundle from source bundles
 //! - [`report`] `merge status`/`show` and pushing a recorded run
 
-mod compat;
 mod report;
 mod run;
 
@@ -193,64 +191,6 @@ pub fn merge_command(
         fetch,
         push,
         set_upstream,
-    )
-}
-
-pub fn create_compat_bundle(
-    sources: &[String],
-    title: Option<&str>,
-    project: Option<&str>,
-    all_repos: bool,
-    materialize: bool,
-    in_place: bool,
-    force: bool,
-) -> Result<()> {
-    if sources.is_empty() {
-        bail!("Pass at least one source bundle for a compatibility bundle.");
-    }
-
-    let root = current_knit_root()?;
-    let source_bundles = sources
-        .iter()
-        .map(|source| load_bundle(&root, &slugify(source)))
-        .collect::<Result<Vec<_>>>()?;
-    let title = title
-        .map(ToString::to_string)
-        .unwrap_or_else(|| format!("compat {}", sources.join(" ")));
-
-    if let Some(project_id) = project {
-        let repo_ids = if all_repos {
-            Vec::new()
-        } else {
-            compat::union_source_repo_ids(&source_bundles)
-        };
-        return crate::commands::init::start_bundle(
-            &title,
-            Some(project_id),
-            &repo_ids,
-            all_repos,
-            None,
-            &[],
-            &[],
-            materialize,
-            in_place,
-            force,
-            false,
-            None,
-        );
-    }
-
-    if all_repos {
-        bail!("--all-repos is only valid with --project.");
-    }
-
-    compat::create_compat_bundle_from_sources(
-        &root,
-        &title,
-        &source_bundles,
-        materialize,
-        in_place,
-        force,
     )
 }
 
