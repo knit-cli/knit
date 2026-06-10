@@ -1,4 +1,4 @@
-//! KnitHub HTTP client: request transport over `curl`, remote/token/config
+//! KnitHub HTTP client: native HTTP request transport, remote/token/config
 //! resolution, project-export fetching, and localizing remote bundles onto the
 //! local project's repos.
 
@@ -14,9 +14,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::OsString;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -410,60 +408,36 @@ pub(super) fn request(
     payload: Option<&Value>,
 ) -> Result<HttpResponse> {
     let url = format!("{}{}", api_base_url(&remote.url), path);
-    let body = match payload {
-        Some(value) => serde_json::to_string(value).context("failed to serialize request body")?,
-        None => String::new(),
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(120))
+        .build();
+    let request = agent
+        .request(method, &url)
+        .set("content-type", "application/json")
+        .set("authorization", &format!("Bearer {token}"));
+    let result = match payload {
+        Some(value) => {
+            let body =
+                serde_json::to_string(value).context("failed to serialize request body")?;
+            request.send_string(&body)
+        }
+        None => request.call(),
     };
-    let mut command = Command::new("curl");
-    command
-        .arg("-sS")
-        .arg("-X")
-        .arg(method)
-        .arg("-H")
-        .arg("content-type: application/json")
-        .arg("-H")
-        .arg(format!("authorization: Bearer {token}"));
-    if payload.is_some() {
-        command.arg("--data-binary").arg("@-").stdin(Stdio::piped());
-    }
-    let mut child = command
-        .arg("--write-out")
-        .arg("\nKNIT_HTTP_STATUS:%{http_code}")
-        .arg(&url)
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("failed to start curl; install curl or use an environment that provides it")?;
-
-    if payload.is_some() {
-        child
-            .stdin
-            .as_mut()
-            .context("failed to open curl stdin")?
-            .write_all(body.as_bytes())
-            .context("failed to write request body to curl")?;
-    }
-
-    let output = child.wait_with_output().context("failed to run curl")?;
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    let (body, status) = stdout
-        .rsplit_once("\nKNIT_HTTP_STATUS:")
-        .context("curl did not return an HTTP status")?;
-    if !output.status.success() && status.trim().is_empty() {
-        bail!("curl failed: {}", stderr.trim());
-    }
-    let status = status
-        .trim()
-        .parse::<u16>()
-        .context("failed to parse HTTP status from curl")?;
-    if status == 000 {
-        bail!("curl failed: {}", stderr.trim());
-    }
-    Ok(HttpResponse {
-        status,
-        body: body.to_string(),
-    })
+    let response = match result {
+        Ok(response) => response,
+        // Non-2xx responses still carry the API's error envelope; surface them
+        // as an HttpResponse so callers keep their status-based error paths.
+        Err(ureq::Error::Status(_, response)) => response,
+        Err(ureq::Error::Transport(transport)) => {
+            bail!("KnitHub request failed for {url}: {transport}")
+        }
+    };
+    let status = response.status();
+    let body = response
+        .into_string()
+        .context("failed to read KnitHub response body")?;
+    Ok(HttpResponse { status, body })
 }
 
 pub(super) fn normalize_base_url(url: &str) -> String {

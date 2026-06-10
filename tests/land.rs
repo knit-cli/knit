@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
-fn artifact_land_apply_can_use_curl_ipv4_transport() {
+fn artifact_land_apply_can_use_native_ipv4_transport() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
     let workspace = root.join("workspace");
@@ -23,7 +23,7 @@ fn artifact_land_apply_can_use_curl_ipv4_transport() {
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
     write_fake_gh(&fake_bin, &fake_gh_dir);
-    write_fake_curl(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
 
     let artifact = workspace.join(".knit/bundles/artifact-publish.bundle.json");
     let mut artifact_payload: Value =
@@ -65,20 +65,21 @@ fn artifact_land_apply_can_use_curl_ipv4_transport() {
         &[
             ("GH_TOKEN", "gho_fake_token"),
             ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
         ],
     );
     assert!(landed.contains("checks backend"), "{landed}");
     assert!(landed.contains("merged backend"), "{landed}");
     assert!(!fake_gh_dir.join("merge-order.txt").exists());
     assert_eq!(
-        fs::read_to_string(fake_gh_dir.join("curl.ipv4"))
+        fs::read_to_string(fake_gh_dir.join("api.authorization"))
             .unwrap()
             .trim(),
-        "1"
+        "Bearer gho_fake_token"
     );
 
     let payload: Value = serde_json::from_str(
-        &fs::read_to_string(fake_gh_dir.join("curl-backend-merge.json")).unwrap(),
+        &fs::read_to_string(fake_gh_dir.join("api-backend-merge.json")).unwrap(),
     )
     .unwrap();
     assert_eq!(payload["merge_method"].as_str(), Some("merge"));

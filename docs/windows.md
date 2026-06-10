@@ -28,7 +28,7 @@ points, not pins.
 |------|----------|----------|-------|
 | External `git` lookup | `src/git.rs:146,179,199`, `src/commands/git_passthrough.rs:42`, `src/commands/runtime.rs:458`, `src/commands/remote/clone.rs:491` | Medium | `Command::new("git")`. Rust resolves `git.exe` on `PATH`, so this works if Git for Windows is installed. Not a blocker, but Git is now a hard external dependency on Windows too. |
 | External forge CLIs | `src/providers/github.rs:14` (`gh`), `src/providers/gitlab.rs:9` (`glab`), `src/providers/forgejo.rs:9` (`tea`) | Fixed | `forge_cli_command` in `src/providers/mod.rs` probes `.exe`, bare name, then `.cmd`/`.bat` shims on Windows before spawning. `.ps1`-only installs remain unsupported. |
-| `curl` HTTP client | `src/providers/github.rs:591`, `src/commands/remote/client.rs:417` | Medium | KnitHub/API calls shell out to `Command::new("curl")`. `curl.exe` ships with Windows 10 1803+, so this generally resolves, but it is an undeclared runtime dependency and behavior of the bundled curl differs from the GNU build. Worth flagging; a native HTTP client would be the durable fix. |
+| HTTP client | `src/providers/github.rs`, `src/commands/remote/client.rs` | Fixed | KnitHub and GitHub artifact-mode API calls use a built-in HTTP client (ureq, rustls). No external `curl` dependency; the GitHub transport resolves IPv4-first, and the temporary netrc credentials file is gone — tokens travel in an `Authorization` header. |
 | Interactive shell spawn | `src/commands/init.rs:168-195` | Low | `start_shell_in` already branches: `default_shell()` returns `cmd` on Windows, `/bin/sh` otherwise, and honors `$SHELL`. `cmd` does not understand the `KNIT_*` env it is handed in any special way, but the spawn itself is portable. No `sh -c` wrapper is used. |
 | Project/deploy command spawn | `src/commands/run.rs:204`, `src/commands/land/execute.rs:358,435` | Medium | Project commands and land deploy steps are spawned as `Command::new(command[0]).args(command[1..])` — a direct exec, **not** `sh -c`. This is portable in principle, but project/land JSON authored on Unix often assumes a POSIX shell (e.g. `["sh","-c","..."]`, `&&`, globbing). Such commands will not run on Windows. This is a data/portability concern, not a code bug. Documented, intentionally not refactored. |
 | Path comparison semantics | `src/paths.rs:14` (`same_path`) | Medium | Used for repo dedup in `src/commands/track.rs:117,272`. Now case-folds path components on Windows so `C:\repo` and `c:\repo` dedupe correctly; stays exact/case-sensitive on Unix. Best-effort textual compare, not canonicalization. (Fixed in this branch.) |
@@ -49,7 +49,7 @@ points, not pins.
 - `cargo check` / compilation of the whole crate (CI-verified per push).
 - Advisory locking under `.knit/locks/`.
 - Color/TTY handling on modern Windows consoles.
-- Spawning `git.exe` / `curl.exe` / `gh.exe` when those tools are installed as
+- Spawning `git.exe` / `gh.exe` when those tools are installed as
   real `.exe`s on `PATH`.
 
 ## Known blockers (must fix before claiming support)
