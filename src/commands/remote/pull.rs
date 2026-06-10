@@ -12,7 +12,10 @@ use super::clone::{
 };
 use super::{RemoteBundle, RemoteExportRepository, RemoteProjectExport, RemoteViews};
 use crate::commands::worktree::materialize_repos;
-use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitProjectViews, KnitRemote};
+use crate::model::{
+    ledger_relation, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews, KnitRemote,
+    LedgerRelation,
+};
 use crate::output as out;
 use crate::store::{
     bundle_path, load_active_bundle, project_path, read_json, save_active_bundle, write_json,
@@ -253,6 +256,20 @@ pub fn pull_bundle_remote_state(
         return Ok(RemoteBundleOutcome::Skipped("no remote artifact".to_string()));
     };
     let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
+    match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
+        LedgerRelation::Equal => return Ok(RemoteBundleOutcome::Skipped("up to date".to_string())),
+        LedgerRelation::LocalAhead => {
+            return Ok(RemoteBundleOutcome::Skipped(
+                "local is ahead of remote".to_string(),
+            ))
+        }
+        LedgerRelation::Diverged => {
+            return Ok(RemoteBundleOutcome::Skipped(format!(
+                "bundle {bundle_id}: local and remote artifacts have diverged; keeping local"
+            )))
+        }
+        LedgerRelation::RemoteAhead => {}
+    }
     let localized = localize_bundle(remote_payload, &context.project)?;
     prepare_feature_branches(&localized)?;
     ensure_remote_bundle_fast_forward(&local, &localized)?;
@@ -402,10 +419,31 @@ pub fn fetch_bundles_from_remote(
 
         let mut bundle = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)
             .with_context(|| format!("failed to decode bundle `{}`", remote_bundle.slug))?;
+
+        let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
+        // An existing local artifact is only refreshed when the remote ledger is
+        // strictly ahead (a fast-forward). Equal/local-ahead artifacts are left
+        // untouched; diverged ledgers keep local and warn.
+        if bundle_path.exists() {
+            let local: ChangeGroup = read_json(&bundle_path)
+                .with_context(|| format!("failed to read local bundle `{}`", bundle.id))?;
+            match ledger_relation(&local.node_id_sequence(), &bundle.node_id_sequence()) {
+                LedgerRelation::Equal | LedgerRelation::LocalAhead => continue,
+                LedgerRelation::Diverged => {
+                    println!(
+                        "{} bundle {}: local and remote artifacts have diverged; keeping local",
+                        out::warn("warning:"),
+                        out::node(&bundle.id)
+                    );
+                    continue;
+                }
+                LedgerRelation::RemoteAhead => {}
+            }
+        }
+
         bundle = localize_bundle(bundle, &local_project)
             .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
 
-        let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
         crate::store::write_json(&bundle_path, &bundle)
             .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
         fetched_count += 1;
