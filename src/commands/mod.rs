@@ -13,7 +13,6 @@ pub mod init;
 pub mod land;
 pub mod log;
 pub mod merge;
-pub mod org;
 pub mod project;
 pub mod publish;
 pub mod pull;
@@ -55,11 +54,10 @@ pub use land::{
 };
 pub use log::{show_log, show_target};
 pub use merge::merge_command;
-pub use org::{add_org_repo, init_org, list_orgs, show_org};
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects, pull_project_config,
-    refresh_project_agents, remove_project, remove_project_run_command, set_project_org,
-    set_project_run_command, show_project,
+    refresh_project_agents, remove_project, remove_project_run_command, set_project_run_command,
+    show_project,
 };
 pub use publish::{
     create_publications, create_publications_from_artifact, show_publication_status,
@@ -85,8 +83,5 @@ pub use view::{
     edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
     view_include, view_unset,
 };
-pub use workitem::{
-    add_work_item, approve_work_item, export_work_items, list_work_items, show_work_item,
-    start_work_item, update_work_item,
-};
+pub use workitem::start_work_item;
 pub use worktree::create_worktrees;
