@@ -1,6 +1,5 @@
 use crate::model::{
-    ChangeGroup, KnitConfig, KnitContexts, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED,
-    BUNDLE_STATE_DELETED,
+    ChangeGroup, KnitConfig, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
 };
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -36,7 +35,6 @@ pub enum BundleResolutionSource {
     Explicit,
     Env,
     Worktree,
-    Context,
     Config,
 }
 
@@ -46,7 +44,6 @@ impl BundleResolutionSource {
             Self::Explicit => "explicit",
             Self::Env => "env",
             Self::Worktree => "cwd",
-            Self::Context => "folder",
             Self::Config => "workspace",
         }
     }
@@ -254,25 +251,6 @@ pub fn set_workspace_active_bundle(root: &Path, bundle_id: &str) -> Result<()> {
     save_config(root, &config)
 }
 
-pub fn set_folder_active_bundle(root: &Path, path: &Path, bundle_id: &str) -> Result<()> {
-    let contexts_path = root.join(".knit/contexts.json");
-    let mut contexts = load_contexts(root)?;
-    let stored_path = relative_path_for_storage(root, path);
-    if let Some(entry) = contexts
-        .contexts
-        .iter_mut()
-        .find(|entry| entry.path == stored_path)
-    {
-        entry.active_bundle = bundle_id.to_string();
-    } else {
-        contexts.contexts.push(crate::model::KnitContextEntry {
-            path: stored_path,
-            active_bundle: bundle_id.to_string(),
-        });
-    }
-    write_json(&contexts_path, &contexts)
-}
-
 pub fn acquire_named_lock(root: &Path, name: &str) -> Result<KnitLock> {
     let dir = root.join(".knit/locks");
     fs::create_dir_all(&dir)
@@ -341,11 +319,6 @@ fn resolve_bundle_id(
     if let Some(bundle_id) = infer_worktree_bundle(root, cwd) {
         ensure_bundle_exists(root, &bundle_id)?;
         return Ok((bundle_id, BundleResolutionSource::Worktree));
-    }
-
-    if let Some(bundle_id) = resolve_context_bundle(root, cwd)? {
-        ensure_bundle_exists(root, &bundle_id)?;
-        return Ok((bundle_id, BundleResolutionSource::Context));
     }
 
     if let Some(bundle_id) = &config.active_bundle {
@@ -434,42 +407,6 @@ fn ensure_bundle_exists(root: &Path, bundle_id: &str) -> Result<()> {
         Ok(())
     } else {
         bail!("No Knit bundle named `{bundle_id}` found.")
-    }
-}
-
-fn resolve_context_bundle(root: &Path, cwd: &Path) -> Result<Option<String>> {
-    let contexts = load_contexts(root)?;
-    let mut best: Option<(usize, String)> = None;
-    for entry in contexts.contexts {
-        let path = resolve_stored_path(root, &entry.path);
-        if cwd.starts_with(&path) {
-            let score = path.components().count();
-            if best
-                .as_ref()
-                .is_none_or(|(best_score, _)| score > *best_score)
-            {
-                best = Some((score, entry.active_bundle));
-            }
-        }
-    }
-    Ok(best.map(|(_, bundle_id)| bundle_id))
-}
-
-fn load_contexts(root: &Path) -> Result<KnitContexts> {
-    let path = root.join(".knit/contexts.json");
-    if path.exists() {
-        read_json(&path)
-    } else {
-        Ok(KnitContexts::new())
-    }
-}
-
-fn resolve_stored_path(root: &Path, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        root.join(path)
     }
 }
 

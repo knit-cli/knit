@@ -104,7 +104,7 @@ fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
 }
 
 #[test]
-fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
+fn bundle_context_supports_parallel_worktrees_and_workspace_switches() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -144,16 +144,14 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
     );
 
     assert!(knit_fails(&workspace, ["switch", "fix-a"]).contains("without --workspace"));
+    assert!(knit_fails(&subdir, ["switch", "fix-a"]).contains("without --workspace"));
     knit(&workspace, ["switch", "fix-a", "--workspace"]);
     assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
     assert!(knit(&workspace, ["--bundle", "fix-a", "status"]).contains("Bundle: fix-a (explicit)"));
 
-    knit(&subdir, ["switch", "fix-b"]);
-    assert!(knit(&subdir, ["status"]).contains("Bundle: fix-b (folder)"));
-    assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
-
-    knit(&fix_a, ["switch", "fix-b", "--here"]);
-    assert!(knit(&fix_a, ["status"]).contains("Bundle: fix-a (cwd)"));
+    // Generated worktrees still resolve their owning bundle from the path,
+    // independent of the shared workspace fallback.
+    assert!(knit(&fix_b, ["status"]).contains("Bundle: fix-b (cwd)"));
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -9,7 +9,6 @@ Knit stores local state under the directory where `knit init`, or `knit bundle` 
 ```txt
 .knit/
   config.json
-  contexts.json
   bundles/
     <slug>.bundle.json
   projects/
@@ -36,7 +35,7 @@ Knit stores local state under the directory where `knit init`, or `knit bundle` 
       <repo-name>/
 ```
 
-The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths and optional folder contexts let multiple agents work in parallel bundles without fighting over one global active bundle.
+The bundle file is the source of truth for a feature. `config.json` tracks workspace fallback state, while generated worktree paths let multiple agents work in parallel bundles without fighting over one global active bundle.
 
 User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. Workspace `.knit/config.json` overrides global values of the same name.
 
@@ -78,7 +77,7 @@ knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--br
 knit bundle path
 knit bundle print
 knit bundle validate
-knit switch <bundle> [--workspace|--here]
+knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status
@@ -93,7 +92,6 @@ knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=bra
 knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
-knit publish github <create|sync|status> ...   # deprecated alias (hidden); prefer `knit publish create --github`
 knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
@@ -112,7 +110,7 @@ knit config set advice true|false
 knit config set push-sync true|false
 knit config set sync-remote <name>
 knit config set sync-remotes <name>[,<name>...]
-knit schema print <bundle|project|contexts|merge-run|land-plan|land-run|config>
+knit schema print <bundle|project|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
 knit sync
@@ -419,7 +417,7 @@ knit publish sync
 knit publish status
 ```
 
-`knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`. The old `knit publish github …` form is a deprecated, hidden alias that now maps to `knit publish create --github`; prefer the flag.
+`knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
 

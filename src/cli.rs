@@ -128,16 +128,13 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<BundleCommand>,
     },
-    /// Switch the fallback bundle for this workspace or folder.
+    /// Switch the fallback bundle for this workspace.
     Switch {
         /// Bundle id to make active.
         bundle: String,
         /// Set the workspace fallback bundle.
-        #[arg(long, conflicts_with = "here")]
-        workspace: bool,
-        /// Set the fallback bundle for the current folder.
         #[arg(long)]
-        here: bool,
+        workspace: bool,
     },
     /// Remove Knit-generated local state.
     Clean {
@@ -894,7 +891,7 @@ pub enum ConfigCommand {
 pub enum SchemaCommand {
     /// Print a bundled JSON Schema.
     Print {
-        /// Schema name: bundle, project, contexts, merge-run, land-plan, land-run, config.
+        /// Schema name: bundle, project, merge-run, land-plan, land-run, config.
         name: String,
     },
 }
@@ -982,12 +979,6 @@ pub enum PublishCommand {
         #[arg(long, conflicts_with = "provider")]
         github: bool,
     },
-    /// Deprecated: prefer `knit publish create` (auto-detects each repo's host) or `knit publish create --github`.
-    #[command(hide = true)]
-    Github {
-        #[command(subcommand)]
-        command: GithubPublishCommand,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1065,69 +1056,5 @@ pub enum LandCommand {
         /// Record already-resolved local branch movements as a land update without running git merge.
         #[arg(long)]
         continue_merge: bool,
-    },
-}
-
-#[derive(Subcommand)]
-pub enum GithubPublishCommand {
-    /// Push feature branches and create missing GitHub PRs.
-    Create {
-        /// Optional repo ids or paths to limit PR creation.
-        repos: Vec<String>,
-        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
-        /// When set, Knit will not require a local worktree checkout.
-        #[arg(long)]
-        from_artifact: Option<PathBuf>,
-        /// Write the updated bundle JSON artifact to this path.
-        /// When omitted, the updated artifact is printed to stdout.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Skip pushing feature branches (GitHub-only). Feature branches must already exist on the remote.
-        #[arg(long)]
-        no_push: bool,
-        /// Override PR base branch. Use once for all repos or repeat as REPO=BRANCH.
-        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
-        bases: Vec<String>,
-        /// Create PRs for every tracked repo instead of only repos with recorded bundle work.
-        #[arg(long)]
-        all: bool,
-        /// Create draft PRs.
-        #[arg(long)]
-        draft: bool,
-        /// Explicitly sync cross-links after creation. This is the default.
-        #[arg(long, conflicts_with = "no_sync")]
-        sync: bool,
-        /// Skip the second phase that updates every PR body with cross-links.
-        #[arg(long)]
-        no_sync: bool,
-        /// Set each feature branch's upstream to origin/<branch> while pushing.
-        #[arg(long)]
-        set_upstream: bool,
-    },
-    /// Refresh recorded PR metadata and rewrite Knit cross-link blocks.
-    Sync {
-        /// Optional repo ids or paths to limit PR sync.
-        repos: Vec<String>,
-        /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
-        #[arg(long)]
-        from_artifact: Option<PathBuf>,
-        /// Write the updated bundle JSON artifact to this path.
-        /// When omitted, the updated artifact is printed to stdout.
-        #[arg(long)]
-        out: Option<PathBuf>,
-        /// Sync every tracked repo instead of only repos with recorded bundle work or publications.
-        #[arg(long)]
-        all: bool,
-    },
-    /// Show recorded PRs for the resolved bundle.
-    Status {
-        /// Optional repo ids or paths to limit PR status.
-        repos: Vec<String>,
-        /// Show every tracked repo. This is the default when no repos are passed.
-        #[arg(long)]
-        all: bool,
-        /// Fetch live mergeability, checks, and review state from the host.
-        #[arg(long)]
-        live: bool,
     },
 }

@@ -35,7 +35,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 
     let create = knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--draft"],
+        ["publish", "create", "--github", "--draft"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -82,7 +82,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
         frontend_body.contains("`frontend`: https://github.com/acme/frontend/pull/202 (this PR)")
     );
 
-    let status = knit(&workspace, ["publish", "github", "status"]);
+    let status = knit(&workspace, ["publish", "status", "--github"]);
     assert!(status.contains("#101"));
     assert!(status.contains("#202"));
     assert!(status.contains("not landed"));
@@ -137,8 +137,8 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -222,8 +222,8 @@ fn artifact_pr_create_can_use_curl_ipv4_transport() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -303,8 +303,8 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -356,8 +356,8 @@ fn pr_create_can_override_base_branch() {
         &workspace,
         [
             "publish",
-            "github",
             "create",
+            "--github",
             "--no-sync",
             "--base",
             "release",
@@ -384,7 +384,7 @@ fn pr_create_can_override_base_branch() {
 
     let rerun = knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
