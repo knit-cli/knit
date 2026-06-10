@@ -95,12 +95,32 @@ pub fn unique_temp_dir() -> PathBuf {
         .unwrap()
         .as_nanos();
     let counter = TEMP_COUNTER.fetch_add(1, Ordering::Relaxed);
-    let path = std::env::temp_dir().join(format!(
+    let base = std::env::temp_dir();
+    // Windows temp dirs can come back as 8.3 short names (e.g. RUNNER~1);
+    // canonicalize so recorded paths match the long-form paths git prints.
+    let base = dunce_canonicalize_or(base);
+    let path = base.join(format!(
         "knit-smoke-{}-{nanos}-{counter}",
         std::process::id()
     ));
     fs::create_dir_all(&path).unwrap();
     path
+}
+
+fn dunce_canonicalize_or(path: PathBuf) -> PathBuf {
+    // std::fs::canonicalize would add a \\?\ verbatim prefix on Windows;
+    // plain component comparison is what the tests need, so fall back to the
+    // original path when canonicalization fails.
+    match path.canonicalize() {
+        Ok(canonical) => {
+            let display = canonical.to_string_lossy();
+            match display.strip_prefix("\\\\?\\") {
+                Some(stripped) => PathBuf::from(stripped),
+                None => canonical,
+            }
+        }
+        Err(_) => path,
+    }
 }
 
 pub fn init_repo(path: &Path, label: &str) {

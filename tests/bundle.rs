@@ -232,7 +232,14 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
     knit(&workspace, ["bundle", "run feature"]);
     let worktree = workspace.join(".knit/worktrees/run-feature/backend");
     let named = knit(&workspace, ["run", "show-root"]);
-    assert!(named.contains(worktree.to_str().unwrap()));
+    // git prints forward-slash paths on every platform; normalize both sides
+    // (and case, for Windows) before comparing.
+    let named_normalized = named.replace('\\', "/").to_lowercase();
+    let worktree_normalized = worktree
+        .to_string_lossy()
+        .replace('\\', "/")
+        .to_lowercase();
+    assert!(named_normalized.contains(&worktree_normalized), "{named}");
 
     let raw = knit(
         &workspace,
