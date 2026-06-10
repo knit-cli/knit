@@ -131,7 +131,6 @@ knit view pull [--project <name>] [--remote <name>]
 knit bundle                          # show the resolved bundle
 knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
 knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
-knit bundle --workitem <id>          # consume a KnitHub-materialized work item: claim it, create/reuse its bundle, write the agent prompt
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
 knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
