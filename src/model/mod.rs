@@ -4,7 +4,6 @@
 //! - [`config`] workspace config + folder context map
 //! - [`project`] reusable project templates (repos, runtime, landing)
 //! - [`view`] per-user named views (bundle shapes) over a project
-//! - [`workitem`] actionable work items
 //! - [`bundle`] the bundle (`ChangeGroup`) and its contents
 //! - [`history`] project-wide metadata events pointing at Git commits
 
@@ -13,14 +12,12 @@ mod config;
 mod history;
 mod project;
 mod view;
-mod workitem;
 
 pub use bundle::*;
 pub use config::*;
 pub use history::*;
 pub use project::*;
 pub use view::*;
-pub use workitem::*;
 
 pub const SCHEMA_VERSION: &str = "0.1";
 pub const DEFAULT_LANDING_MERGE_METHOD: &str = "merge";

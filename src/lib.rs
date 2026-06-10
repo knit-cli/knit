@@ -150,7 +150,6 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             all_repos,
             view,
-            workitem,
             include,
             exclude,
             no_worktree,
@@ -160,9 +159,8 @@ pub fn run(cli: Cli) -> Result<()> {
             cd,
             command,
         } => match command {
-            None => match (workitem, title) {
-                (Some(workitem), _) => commands::start_work_item(&workitem),
-                (None, Some(title)) => commands::start_bundle(
+            None => match title {
+                Some(title) => commands::start_bundle(
                     &title,
                     project.as_deref(),
                     &repos,
@@ -176,7 +174,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     agents,
                     cd.as_deref(),
                 ),
-                (None, None) => commands::show_current_bundle(),
+                None => commands::show_current_bundle(),
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
             Some(BundleCommand::Add {
