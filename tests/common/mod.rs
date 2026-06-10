@@ -153,9 +153,17 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
     );
 
     let local = root.join(label);
+    // autocrlf must be set at clone time: setting it after checkout leaves a
+    // CRLF-smudged working tree that git then reports as modified.
     git(
         root,
-        ["clone", remote.to_str().unwrap(), local.to_str().unwrap()],
+        [
+            "clone",
+            "--config",
+            "core.autocrlf=false",
+            remote.to_str().unwrap(),
+            local.to_str().unwrap(),
+        ],
     );
     configure_git_user(&local);
 
@@ -164,6 +172,8 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
         root,
         [
             "clone",
+            "--config",
+            "core.autocrlf=false",
             remote.to_str().unwrap(),
             collaborator.to_str().unwrap(),
         ],
@@ -176,7 +186,6 @@ pub fn init_remote_repo(root: &Path, label: &str) -> (PathBuf, PathBuf, PathBuf)
 pub fn configure_git_user(path: &Path) {
     git(path, ["config", "user.email", "knit@example.test"]);
     git(path, ["config", "user.name", "Knit Smoke"]);
-    git(path, ["config", "core.autocrlf", "false"]);
 }
 
 pub fn append_line(path: &Path, line: &str) {
