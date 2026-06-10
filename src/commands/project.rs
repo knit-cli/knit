@@ -7,8 +7,8 @@ use crate::model::{
 };
 use crate::output as out;
 use crate::store::{
-    acquire_named_lock, find_knit_root, load_config, org_path, project_path, read_json,
-    save_config, write_json,
+    acquire_named_lock, find_knit_root, load_config, project_path, read_json, save_config,
+    write_json,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -26,7 +26,6 @@ pub fn init_project(name: &str, agents: bool) -> Result<()> {
     let project_dir = knit_dir.join("projects");
     fs::create_dir_all(&project_dir).context("failed to create .knit/projects")?;
     fs::create_dir_all(knit_dir.join("bundles")).context("failed to create .knit/bundles")?;
-    fs::create_dir_all(knit_dir.join("orgs")).context("failed to create .knit/orgs")?;
     fs::create_dir_all(knit_dir.join("work-items")).context("failed to create .knit/work-items")?;
     fs::create_dir_all(knit_dir.join("worktrees")).context("failed to create .knit/worktrees")?;
 
@@ -204,30 +203,6 @@ pub fn remove_project(name: &str, force: bool) -> Result<()> {
         "{} {}",
         out::heading("Removed project:"),
         out::repo(project_id)
-    );
-    Ok(())
-}
-
-pub fn set_project_org(org: &str) -> Result<()> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
-    let project_id = active_project_id(&root)?;
-    let org_id = slugify(org);
-    let org_artifact = org_path(&root, &org_id);
-    if !org_artifact.exists() {
-        bail!("Org {} does not exist.", out::repo(&org_id));
-    }
-    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
-    let path = project_path(&root, &project_id);
-    let mut project: KnitProject = read_json(&path)?;
-    project.org_id = Some(org_id.clone());
-    project.updated_at = now_iso();
-    write_json(&path, &project)?;
-    println!(
-        "{} {} -> {}",
-        out::heading("Project org:"),
-        out::repo(project_id),
-        out::repo(org_id)
     );
     Ok(())
 }

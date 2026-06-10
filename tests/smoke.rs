@@ -377,7 +377,7 @@ fn bundle_start_cd_accepts_repo_selector() {
 }
 
 #[test]
-fn work_item_start_links_bundle_and_writes_prompt() {
+fn bundle_workitem_flag_consumes_materialized_work_item() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -389,29 +389,31 @@ fn work_item_start_links_bundle_and_writes_prompt() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    knit(&workspace, ["org", "init", "acme"]);
-    knit(&workspace, ["project", "set-org", "acme"]);
-    knit(
-        &workspace,
-        [
-            "work-item",
-            "add",
-            "Dispatch approved work",
-            "--kind",
-            "feature",
-            "--description",
-            "Create the worktree and prompt.",
-            "--repo",
-            "backend",
-            "--accept",
-            "A bundle is linked",
-        ],
-    );
-    knit(
-        &workspace,
-        ["work-item", "approve", "dispatch-approved-work"],
-    );
-    knit(&workspace, ["work-item", "start", "dispatch-approved-work"]);
+
+    // KnitHub materializes work items into .knit/work-items/; the CLI only
+    // consumes them. Write the artifact the way the dispatch worker does.
+    fs::write(
+        workspace.join(".knit/work-items/dispatch-approved-work.work-item.json"),
+        serde_json::to_string_pretty(&serde_json::json!({
+            "schemaVersion": "0.1",
+            "kind": "KnitWorkItem",
+            "id": "dispatch-approved-work",
+            "itemKind": "feature",
+            "title": "Dispatch approved work",
+            "description": "Create the worktree and prompt.",
+            "acceptanceCriteria": ["A bundle is linked"],
+            "projectId": "arbient",
+            "repoHints": ["backend"],
+            "planningStatus": "approved",
+            "executionStatus": "idle",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "--workitem", "dispatch-approved-work"]);
 
     let item: Value = serde_json::from_str(
         &fs::read_to_string(
@@ -439,6 +441,22 @@ fn work_item_start_links_bundle_and_writes_prompt() {
     assert!(workspace
         .join(".knit/worktrees/dispatch-approved-work/WORK_ITEM.md")
         .exists());
+
+    // Re-consuming an already-claimed item reuses its bundle instead of
+    // creating a second one.
+    let rerun = knit(
+        &workspace,
+        ["bundle", "--workitem", "dispatch-approved-work"],
+    );
+    assert!(rerun.contains("dispatch-approved-work"));
+    let item: Value = serde_json::from_str(
+        &fs::read_to_string(
+            workspace.join(".knit/work-items/dispatch-approved-work.work-item.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(item["bundleIds"].as_array().unwrap().len(), 1);
 
     fs::remove_dir_all(root).unwrap();
 }
