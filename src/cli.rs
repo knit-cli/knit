@@ -4,6 +4,7 @@ use std::path::PathBuf;
 
 #[derive(Parser)]
 #[command(name = "knit")]
+#[command(version)]
 #[command(about = "Git for cross-repo feature work")]
 pub struct Cli {
     /// Resolve commands against this bundle instead of cwd or workspace context.
