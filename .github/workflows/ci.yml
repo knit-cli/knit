@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# Cancel superseded runs on the same ref to keep the queue short.
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # Primary supported platform: full build + test suite.
+  linux:
+    name: Linux (build + test)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build
+        run: cargo build --all-targets
+      - name: cargo test
+        run: cargo test
+
+  # Windows support is in progress (see docs/windows.md). This job is a
+  # compile + cheap-unit-test smoke check only. It deliberately excludes
+  # tests/smoke.rs, which spawns git/process workflows that are not yet
+  # validated on Windows. Keep this job fast.
+  windows:
+    name: Windows (check + cheap tests)
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo check
+        run: cargo check --all-targets
+      - name: cargo test (pure-unit targets only)
+        run: cargo test --test ids --test status --test model
