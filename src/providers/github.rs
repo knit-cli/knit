@@ -677,6 +677,9 @@ fn write_github_netrc(token: &str) -> Result<std::path::PathBuf> {
         fs::set_permissions(&path, permissions)
             .context("failed to protect temporary GitHub API credentials")?;
     }
+    // On Windows the temp dir already carries a per-user ACL, which is the
+    // platform's equivalent protection for this short-lived credentials file;
+    // there is no mode-bits analogue to set here.
     Ok(path)
 }
 
