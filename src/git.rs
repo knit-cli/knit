@@ -5,13 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 pub fn git_root(path: &Path) -> Result<PathBuf> {
-    let path = path
-        .canonicalize()
+    let path = crate::paths::canonicalize(path)
         .with_context(|| format!("failed to resolve {}", path.display()))?;
     let output = git_output(&path, ["rev-parse", "--show-toplevel"])?;
-    Ok(PathBuf::from(output.trim())
-        .canonicalize()
-        .with_context(|| format!("failed to resolve git root {}", output.trim()))?)
+    Ok(
+        crate::paths::canonicalize(PathBuf::from(output.trim()))
+            .with_context(|| format!("failed to resolve git root {}", output.trim()))?,
+    )
 }
 
 pub fn current_branch(repo: &Path) -> Result<Option<String>> {

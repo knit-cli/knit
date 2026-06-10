@@ -180,5 +180,5 @@ fn repo_cwd(active: &ActiveBundle, repo: &RepoEntry) -> Result<PathBuf> {
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {
-    path.canonicalize().ok()
+    crate::paths::canonicalize(path).ok()
 }
