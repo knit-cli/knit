@@ -186,7 +186,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert!(workspace.join(".knit/land-runs").exists());
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
     assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
-    let sync_error = knit_fails(&workspace, ["land", "sync"]);
+    let sync_error = knit_fails(&workspace, ["sync", "push", "--bundles"]);
     assert!(sync_error.contains("No KnitHub remote configured"));
 
     let revert_plan = knit_with_fake_gh(&workspace, ["revert", "HEAD"], &fake_bin, &fake_gh_dir);

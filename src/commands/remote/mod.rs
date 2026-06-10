@@ -9,13 +9,15 @@
 
 mod client;
 mod clone;
+mod facade;
 mod history;
 mod pull;
 mod push;
 
 pub use client::configured_sync_remote_names;
 pub use clone::clone_project_from_remote;
-pub use history::{pull_history_from_remote, push_history_to_remote, sync_history_with_remote};
+pub use facade::{sync_pull, sync_push, SyncTargets};
+pub use history::pull_history_from_remote;
 pub use pull::{
     delete_bundle_from_remote, delete_remote_bundle_by_id, fetch_bundles_from_remote,
     list_remote_bundles, prepare_remote_pull, pull_bundle_remote_state, pull_remote_state,
@@ -24,7 +26,7 @@ pub use pull::{
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_bundle_to_remote,
     push_project_to_remote, push_views_to_remote, remove_remote, set_remote_token, show_remote,
-    sync_bundle_to_remote, sync_bundle_to_remote_if_enabled,
+    sync_bundle_to_remote_if_enabled,
 };
 
 use crate::model::{HistoryEvent, KnitProject, ProjectView};
