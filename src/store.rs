@@ -196,10 +196,6 @@ pub fn project_path(root: &Path, project_id: &str) -> PathBuf {
         .join(format!("{project_id}.project.json"))
 }
 
-pub fn org_path(root: &Path, org_id: &str) -> PathBuf {
-    root.join(".knit/orgs").join(format!("{org_id}.org.json"))
-}
-
 pub fn views_path(root: &Path, project_id: &str) -> PathBuf {
     root.join(".knit/views")
         .join(format!("{project_id}.views.json"))
