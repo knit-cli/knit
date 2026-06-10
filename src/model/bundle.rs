@@ -67,6 +67,48 @@ impl ChangeGroup {
     }
 }
 
+/// How a local bundle artifact's append-only ledger relates to a remote copy of
+/// the same bundle, decided purely from their node-id sequences. The ledger is
+/// append-only, so a fast-forward is exactly the case where one sequence is a
+/// (non-strict) prefix of the other.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LedgerRelation {
+    /// Both ledgers record the same node-id sequence; nothing to refresh.
+    Equal,
+    /// The local ledger is a strict prefix of the remote: the remote is strictly
+    /// ahead and the local artifact can be fast-forwarded to it.
+    RemoteAhead,
+    /// The remote ledger is a strict prefix of the local: local has work the
+    /// remote has not seen. Keep local; a later push reconciles the remote.
+    LocalAhead,
+    /// Neither sequence is a prefix of the other: the ledgers have diverged.
+    Diverged,
+}
+
+/// Decide how a local bundle ledger relates to a remote one, comparing their
+/// append-only node-id sequences position by position. Pure and total: it makes
+/// no I/O and treats two empty ledgers as `Equal`.
+pub fn ledger_relation(local_node_ids: &[String], remote_node_ids: &[String]) -> LedgerRelation {
+    let common = local_node_ids.len().min(remote_node_ids.len());
+    if local_node_ids[..common] != remote_node_ids[..common] {
+        return LedgerRelation::Diverged;
+    }
+    use std::cmp::Ordering;
+    match local_node_ids.len().cmp(&remote_node_ids.len()) {
+        Ordering::Equal => LedgerRelation::Equal,
+        Ordering::Less => LedgerRelation::RemoteAhead,
+        Ordering::Greater => LedgerRelation::LocalAhead,
+    }
+}
+
+impl ChangeGroup {
+    /// The ordered node-id sequence of this bundle's append-only ledger, used to
+    /// compare local and remote copies for fast-forward refresh.
+    pub fn node_id_sequence(&self) -> Vec<String> {
+        self.nodes.iter().map(|node| node.id.clone()).collect()
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PublicationEntry {
