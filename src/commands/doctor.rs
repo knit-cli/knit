@@ -1,6 +1,6 @@
 use crate::commands::bundle::bundle_state;
 use crate::model::{
-    ChangeGroup, KnitConfig, KnitContexts, KnitProject, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED,
+    ChangeGroup, KnitConfig, KnitProject, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED,
     BUNDLE_STATE_OPEN,
 };
 use crate::output as out;
@@ -31,11 +31,6 @@ pub fn doctor_workspace() -> Result<()> {
     }
     inspect_json_dir::<ChangeGroup>(&root.join(".knit/bundles"), "bundle", &mut issues);
     inspect_json_dir::<KnitProject>(&root.join(".knit/projects"), "project", &mut issues);
-    inspect_optional_json::<KnitContexts>(
-        &root.join(".knit/contexts.json"),
-        "contexts",
-        &mut issues,
-    );
     inspect_operational_json_dir(&root.join(".knit/merge-runs"), "merge run", &mut issues);
     inspect_operational_json_dir(&root.join(".knit/land-runs"), "land run", &mut issues);
     inspect_locks(&root, &mut issues);
@@ -59,9 +54,10 @@ pub fn migrate_workspace(check: bool) -> Result<()> {
     migrate_one::<KnitConfig>(&root.join(".knit/config.json"), check, &mut changed)?;
     migrate_bundles(&root.join(".knit/bundles"), check, &mut changed)?;
     migrate_dir::<KnitProject>(&root.join(".knit/projects"), check, &mut changed)?;
-    migrate_optional::<KnitContexts>(&root.join(".knit/contexts.json"), check, &mut changed)?;
+    let mut removed = Vec::new();
+    migrate_remove_legacy(&root.join(".knit/contexts.json"), check, &mut removed)?;
 
-    if changed.is_empty() {
+    if changed.is_empty() && removed.is_empty() {
         println!("{}", out::ok("No migrations needed."));
         return Ok(());
     }
@@ -76,8 +72,22 @@ pub fn migrate_workspace(check: bool) -> Result<()> {
             out::path(path.display())
         );
     }
+    for path in &removed {
+        println!(
+            "{} {}",
+            if check {
+                out::warn("would remove")
+            } else {
+                out::movement("removed")
+            },
+            out::path(path.display())
+        );
+    }
     if check {
-        bail!("{} file(s) need migration", changed.len());
+        bail!(
+            "{} file(s) need migration",
+            changed.len() + removed.len()
+        );
     }
     Ok(())
 }
@@ -138,17 +148,6 @@ where
             continue;
         }
         if let Err(error) = read_json::<T>(&path) {
-            issues.push(format!("{label} {}: {error:#}", path.display()));
-        }
-    }
-}
-
-fn inspect_optional_json<T>(path: &Path, label: &str, issues: &mut Vec<String>)
-where
-    T: serde::de::DeserializeOwned,
-{
-    if path.exists() {
-        if let Err(error) = read_json::<T>(path) {
             issues.push(format!("{label} {}: {error:#}", path.display()));
         }
     }
@@ -324,12 +323,14 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
     Ok(())
 }
 
-fn migrate_optional<T>(path: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Result<()>
-where
-    T: serde::de::DeserializeOwned + serde::Serialize,
-{
+/// Remove a legacy Knit file that is no longer read or written.
+fn migrate_remove_legacy(path: &Path, check: bool, removed: &mut Vec<PathBuf>) -> Result<()> {
     if path.exists() {
-        migrate_one::<T>(path, check, changed)?;
+        removed.push(path.to_path_buf());
+        if !check {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
     }
     Ok(())
 }
