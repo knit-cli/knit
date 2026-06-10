@@ -72,7 +72,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. Each adapter (`github.rs`/`gitlab.rs`/`forgejo.rs`) maps its CLI's JSON onto the canonical types. GitLab and Codeberg/Forgejo are detected from the remote host; every other remote defaults to GitHub. Provider modules expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
-- `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, folder context, then workspace fallback config.
+- `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, then workspace fallback config.
 - `checkout.rs` owns checkout path resolution, checkout mode labels, and in-place branch safety checks.
 - Pure helper behavior should live in small modules and have integration tests under `tests/`.
 
@@ -109,4 +109,4 @@ This split enables related-work queries without duplicating Git. `knit related` 
 
 Projects are optional templates for repeated repo sets. They live under `.knit/projects/<project>.project.json`, record stable repo ids, default base branches, checkout mode, and whether a repo is included by default or only observed.
 
-Bundle context is intentionally local. `.knit/config.json` stores the workspace fallback bundle and active project, `.knit/contexts.json` stores folder-level bundle fallbacks, and generated worktree paths always identify their owning bundle. Mutating bundle commands use per-bundle locks under `.knit/locks/`; project mutation uses a project-specific lock.
+Bundle context is intentionally local. `.knit/config.json` stores the workspace fallback bundle and active project, and generated worktree paths always identify their owning bundle. Mutating bundle commands use per-bundle locks under `.knit/locks/`; project mutation uses a project-specific lock.

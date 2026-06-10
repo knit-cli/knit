@@ -743,7 +743,7 @@ fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
 }
 
 #[test]
-fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
+fn bundle_context_supports_parallel_worktrees_and_workspace_switches() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -783,16 +783,14 @@ fn bundle_context_supports_parallel_worktrees_and_folder_switches() {
     );
 
     assert!(knit_fails(&workspace, ["switch", "fix-a"]).contains("without --workspace"));
+    assert!(knit_fails(&subdir, ["switch", "fix-a"]).contains("without --workspace"));
     knit(&workspace, ["switch", "fix-a", "--workspace"]);
     assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
     assert!(knit(&workspace, ["--bundle", "fix-a", "status"]).contains("Bundle: fix-a (explicit)"));
 
-    knit(&subdir, ["switch", "fix-b"]);
-    assert!(knit(&subdir, ["status"]).contains("Bundle: fix-b (folder)"));
-    assert!(knit_fails(&workspace, ["status"]).contains("multiple open bundles"));
-
-    knit(&fix_a, ["switch", "fix-b", "--here"]);
-    assert!(knit(&fix_a, ["status"]).contains("Bundle: fix-a (cwd)"));
+    // Generated worktrees still resolve their owning bundle from the path,
+    // independent of the shared workspace fallback.
+    assert!(knit(&fix_b, ["status"]).contains("Bundle: fix-b (cwd)"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2144,7 +2142,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 
     let create = knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--draft"],
+        ["publish", "create", "--github", "--draft"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -2191,7 +2189,7 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
         frontend_body.contains("`frontend`: https://github.com/acme/frontend/pull/202 (this PR)")
     );
 
-    let status = knit(&workspace, ["publish", "github", "status"]);
+    let status = knit(&workspace, ["publish", "status", "--github"]);
     assert!(status.contains("#101"));
     assert!(status.contains("#202"));
     assert!(status.contains("not landed"));
@@ -2246,8 +2244,8 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -2331,8 +2329,8 @@ fn artifact_pr_create_can_use_curl_ipv4_transport() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -2412,8 +2410,8 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
         &root,
         vec![
             "publish".to_string(),
-            "github".to_string(),
             "create".to_string(),
+            "--github".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
@@ -2559,8 +2557,8 @@ fn pr_create_can_override_base_branch() {
         &workspace,
         [
             "publish",
-            "github",
             "create",
+            "--github",
             "--no-sync",
             "--base",
             "release",
@@ -2587,7 +2585,7 @@ fn pr_create_can_override_base_branch() {
 
     let rerun = knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -2629,7 +2627,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -2805,7 +2803,7 @@ fn publish_two_repo_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -2975,7 +2973,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -3034,7 +3032,7 @@ fn land_update_merges_base_and_records_explicit_node() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -3118,7 +3116,7 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -3184,7 +3182,7 @@ fn land_apply_refuses_draft_publications() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -3225,7 +3223,7 @@ fn land_apply_stops_when_required_checks_fail() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -3264,7 +3262,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
     write_fake_gh(&fake_bin, &fake_gh_dir);
     knit_with_fake_gh(
         &workspace,
-        ["publish", "github", "create", "--no-sync"],
+        ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );

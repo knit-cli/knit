@@ -536,7 +536,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle prune --apply --worktrees --branches` is the short form for deleting dead bundle artifacts and their generated local state.
 - `knit bundle prune --apply --all` removes dead bundle artifacts, generated and orphaned worktrees, local feature branches, matching `origin` branches, and matching KnitHub remote bundle records.
 - Remote bundle cleanup uses the configured KnitHub sync remote and requires a token with `bundle:delete`.
-- `knit switch <bundle>` changes the workspace or folder fallback bundle (`--workspace`/`--here` to target one explicitly).
+- `knit switch <bundle> --workspace` changes the shared workspace fallback bundle (the `--workspace` flag is required so the change is deliberate).
 - `knit project remove <project> --force` removes a reusable project template artifact.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
 - `knit run --repo <repo> -- <command>` runs a one-off command inside a tracked checkout.
@@ -558,7 +558,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit clean --archived --worktrees` removes generated worktrees left behind by bundles archived with `--keep-worktrees`.
 
-Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then folder context, then workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
+Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then the workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
 
 ## Knit And Gloss
 
