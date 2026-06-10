@@ -68,5 +68,5 @@ pub fn repo_matches(active: &ActiveBundle, repo: &RepoEntry, selector: &str) -> 
 }
 
 fn canonical(path: &Path) -> Option<PathBuf> {
-    path.canonicalize().ok()
+    crate::paths::canonicalize(path).ok()
 }

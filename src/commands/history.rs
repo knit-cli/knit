@@ -295,7 +295,7 @@ fn repo_from_cwd<'a>(
     project: &'a KnitProject,
     cwd: &Path,
 ) -> Option<&'a ProjectRepoEntry> {
-    let cwd = cwd.canonicalize().ok()?;
+    let cwd = crate::paths::canonicalize(cwd).ok()?;
     for repo in &project.repos {
         let repo_path = absolute_path(root, &repo.path);
         if cwd.starts_with(&repo_path) {
@@ -315,7 +315,7 @@ fn repo_from_cwd<'a>(
 
 fn checkout_for_related_repo(root: &Path, repo: &ProjectRepoEntry, cwd: &Path) -> PathBuf {
     let source = absolute_path(root, &repo.path);
-    let Ok(cwd) = cwd.canonicalize() else {
+    let Ok(cwd) = crate::paths::canonicalize(cwd) else {
         return source;
     };
     if cwd.starts_with(&source) {
@@ -362,7 +362,7 @@ fn repo_relative_path(
                 )
             })?
     } else {
-        let cwd = cwd.canonicalize().unwrap_or_else(|_| cwd.to_path_buf());
+        let cwd = crate::paths::canonicalize(cwd).unwrap_or_else(|_| cwd.to_path_buf());
         if cwd.starts_with(checkout) {
             let cwd_relative = cwd.strip_prefix(checkout).unwrap_or(Path::new(""));
             cwd_relative.join(path)
@@ -392,11 +392,9 @@ fn repo_prefix_path(repo: &ProjectRepoEntry, path: &Path) -> Option<PathBuf> {
 }
 
 fn strip_path_prefix(path: &Path, prefix: &Path) -> Option<PathBuf> {
-    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let prefix = prefix
-        .canonicalize()
-        .unwrap_or_else(|_| prefix.to_path_buf());
-    path.strip_prefix(prefix).ok().map(Path::to_path_buf)
+    let path = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let prefix = crate::paths::canonicalize(prefix).unwrap_or_else(|_| prefix.to_path_buf());
+    crate::paths::strip_path_prefix(&path, &prefix)
 }
 
 fn path_to_git_pathspec(path: &Path) -> String {

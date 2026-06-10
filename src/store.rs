@@ -123,10 +123,18 @@ pub fn global_config_path() -> Result<PathBuf> {
     if let Some(config_home) = env::var_os("XDG_CONFIG_HOME") {
         return Ok(PathBuf::from(config_home).join("knit/config.json"));
     }
-    let home = env::var_os("HOME").context(
-        "No home directory found. Set KNIT_HOME or HOME before using global Knit config.",
-    )?;
-    Ok(PathBuf::from(home).join(".config/knit/config.json"))
+    if let Some(home) = env::var_os("HOME") {
+        return Ok(PathBuf::from(home).join(".config/knit/config.json"));
+    }
+    if cfg!(windows) {
+        if let Some(appdata) = env::var_os("APPDATA") {
+            return Ok(PathBuf::from(appdata).join("knit/config.json"));
+        }
+        if let Some(profile) = env::var_os("USERPROFILE") {
+            return Ok(PathBuf::from(profile).join(".config/knit/config.json"));
+        }
+    }
+    bail!("No home directory found. Set KNIT_HOME, HOME, or APPDATA before using global Knit config.")
 }
 
 pub fn load_global_config() -> Result<KnitConfig> {
@@ -230,7 +238,7 @@ pub fn bundle_exists(root: &Path, bundle_id: &str) -> bool {
 
 pub fn infer_worktree_bundle(root: &Path, cwd: &Path) -> Option<String> {
     let worktrees = root.join(".knit/worktrees");
-    let relative = cwd.strip_prefix(worktrees).ok()?;
+    let relative = crate::paths::strip_path_prefix(cwd, &worktrees)?;
     let mut components = relative.components();
     match components.next()? {
         Component::Normal(bundle) => Some(bundle.to_string_lossy().to_string()),
@@ -238,11 +246,20 @@ pub fn infer_worktree_bundle(root: &Path, cwd: &Path) -> Option<String> {
     }
 }
 
+/// Paths inside JSON artifacts always use forward slashes so bundles written
+/// on Windows stay readable on Unix and vice versa. `PathBuf::from` accepts
+/// `/`-separated relative paths on every platform when resolving them back.
 pub fn relative_path_for_storage(root: &Path, path: &Path) -> String {
-    path.strip_prefix(root)
+    let stored = path
+        .strip_prefix(root)
         .unwrap_or(path)
         .to_string_lossy()
-        .to_string()
+        .to_string();
+    if cfg!(windows) {
+        stored.replace('\\', "/")
+    } else {
+        stored
+    }
 }
 
 pub fn set_workspace_active_bundle(root: &Path, bundle_id: &str) -> Result<()> {

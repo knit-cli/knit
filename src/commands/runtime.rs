@@ -717,12 +717,8 @@ fn is_worktree_checkout(path: &Path) -> bool {
 }
 
 fn relative_path(base: &Path, target: &Path) -> Result<String> {
-    let base = base
-        .canonicalize()
-        .unwrap_or_else(|_| base.to_path_buf());
-    let target = target
-        .canonicalize()
-        .unwrap_or_else(|_| target.to_path_buf());
+    let base = crate::paths::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let target = crate::paths::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     target
         .strip_prefix(&base)
         .map(|path| path.display().to_string())

@@ -38,3 +38,41 @@ pub fn same_path(left: &str, right: &str) -> bool {
         left == right
     }
 }
+
+/// `fs::canonicalize` without Windows `\\?\` verbatim prefixes, which break
+/// `strip_prefix` comparisons against non-canonicalized paths.
+pub fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<std::path::PathBuf> {
+    dunce::canonicalize(path)
+}
+
+/// `Path::strip_prefix` that matches the platform's path identity rules: exact
+/// on Unix, component-wise case-insensitive on Windows (where `C:\Repo` and
+/// `c:\repo` are the same directory).
+pub fn strip_path_prefix(path: &Path, prefix: &Path) -> Option<std::path::PathBuf> {
+    #[cfg(not(windows))]
+    {
+        path.strip_prefix(prefix).ok().map(|p| p.to_path_buf())
+    }
+    #[cfg(windows)]
+    {
+        let mut path_components = path.components();
+        for prefix_component in prefix.components() {
+            let path_component = path_components.next()?;
+            let same = match (prefix_component, path_component) {
+                (
+                    std::path::Component::Normal(left),
+                    std::path::Component::Normal(right),
+                ) => left.to_string_lossy().to_lowercase()
+                    == right.to_string_lossy().to_lowercase(),
+                (left, right) => {
+                    left.as_os_str().to_string_lossy().to_lowercase()
+                        == right.as_os_str().to_string_lossy().to_lowercase()
+                }
+            };
+            if !same {
+                return None;
+            }
+        }
+        Some(path_components.as_path().to_path_buf())
+    }
+}

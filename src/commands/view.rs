@@ -182,7 +182,8 @@ pub fn edit_views(project: Option<&str>) -> Result<()> {
         let views = KnitProjectViews::new(project_id.clone(), now_iso());
         save_views(&root, &views)?;
     }
-    let editor = std::env::var("EDITOR").unwrap_or_else(|_| "vi".to_string());
+    let editor = std::env::var("EDITOR")
+        .unwrap_or_else(|_| if cfg!(windows) { "notepad" } else { "vi" }.to_string());
     let status = Command::new(&editor)
         .arg(&path)
         .status()
