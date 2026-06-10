@@ -60,18 +60,6 @@ pub fn refresh_history(project: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-pub fn push_history(project: Option<&str>, remote: &str) -> Result<()> {
-    crate::commands::remote::push_history_to_remote(project, remote)
-}
-
-pub fn pull_history(project: Option<&str>, remote: &str) -> Result<()> {
-    crate::commands::remote::pull_history_from_remote(project, remote)
-}
-
-pub fn sync_history(project: Option<&str>, remote: &str) -> Result<()> {
-    crate::commands::remote::sync_history_with_remote(project, remote)
-}
-
 pub fn show_related_history(
     project: Option<&str>,
     repo: Option<&str>,

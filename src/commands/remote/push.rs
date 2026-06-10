@@ -402,19 +402,6 @@ pub fn sync_bundle_to_remote_if_enabled(
     sync_bundle_to_remote_names(&config, &remote_names)
 }
 
-/// Push the resolved bundle artifact to KnitHub, failing if no remote is
-/// configured or if the sync cannot complete.
-pub fn sync_bundle_to_remote(remote_overrides: &[String]) -> Result<()> {
-    let (_, config) = effective_workspace_config()?;
-    let remote_names = resolve_sync_remote_names(&config, remote_overrides);
-    if remote_names.is_empty() {
-        bail!(
-            "No KnitHub remote configured. Run `knit remote add --global knithub <url>`, `knit remote add knithub <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
-        );
-    }
-    sync_bundle_to_remote_names(&config, &remote_names)
-}
-
 fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> Result<()> {
     let multiple = remote_names.len() > 1;
     let mut failures = Vec::new();

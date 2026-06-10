@@ -381,18 +381,6 @@ pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bo
     Ok(())
 }
 
-pub fn sync_landed_bundle(remote: &[String]) -> Result<()> {
-    let active = load_active_bundle()?;
-    if crate::commands::bundle::bundle_state(&active.bundle) != "landed" {
-        bail!(
-            "Bundle {} is not landed yet. Run `knit land apply` first.",
-            active.bundle.id
-        );
-    }
-    drop(active);
-    crate::commands::remote::sync_bundle_to_remote(remote)
-}
-
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
     let active = load_active_bundle()?;
     if let Some(path) = resolve_land_run_path(&active, run_path)? {
