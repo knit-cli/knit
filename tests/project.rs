@@ -176,6 +176,23 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
 }
 
 #[test]
+fn view_save_accepts_comma_separated_exclude_list() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(
+        &workspace,
+        ["view", "save", "backend", "--exclude", "frontend,docs"],
+    );
+
+    let repos = knit(&workspace, ["view", "show", "backend", "--repos"]);
+    assert_eq!(repos.lines().collect::<Vec<_>>(), vec!["backend"], "{repos}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn view_flag_conflicts_with_repo_selection() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
