@@ -75,6 +75,7 @@
       "type": "object",
       "properties": {
         "provider": { "enum": ["github"] },
+        "onFailure": { "enum": ["resume", "rollback"], "default": "resume" },
         "merge": {
           "type": "object",
           "properties": {

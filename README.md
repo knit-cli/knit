@@ -118,7 +118,7 @@ knit land               # creates/shows the landing plan (does not merge)
 knit land apply         # merges each PR into its base, then runs any deploy steps
 ```
 
-`knit land` is safe on its own: it only creates or shows the plan. Nothing merges until `knit land apply`.
+`knit land` is safe on its own: it only creates or shows the plan. Nothing merges until `knit land apply`. If a landing fails halfway, `knit land resume` continues it, and `knit land rollback --apply` opens revert PRs for the steps that already merged (or set `onFailure: "rollback"` in the landing template to do that automatically).
 
 **Local-only, no code host** — integrate the bundle's feature branches into a target branch directly:
 

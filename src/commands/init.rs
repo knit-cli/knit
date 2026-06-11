@@ -589,6 +589,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it.
 - `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
+- `knit land resume` continues a failed run; `knit land rollback [--apply]` previews/creates revert PRs for the merge steps a failed run already completed. A landing template or plan can set `onFailure: "rollback"` to do this automatically.
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
