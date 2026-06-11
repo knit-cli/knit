@@ -316,7 +316,7 @@ fn lock_holder_pid(path: &Path) -> Option<u32> {
 }
 
 /// True only when the lock file records a holder pid and that process is
-/// verifiably gone. Locks without a pid (older Knit versions) and platforms
+/// verifiably gone. Locks without a pid (older Knit versions) and cases
 /// where liveness cannot be checked stay treated as held — never reclaim a
 /// lock that might still be active.
 fn lock_holder_is_dead(path: &Path) -> bool {
@@ -326,14 +326,48 @@ fn lock_holder_is_dead(path: &Path) -> bool {
     if pid == std::process::id() {
         return false;
     }
-    if cfg!(unix) {
-        std::process::Command::new("kill")
-            .args(["-0", &pid.to_string()])
-            .output()
-            .map(|output| !output.status.success())
-            .unwrap_or(false)
-    } else {
-        false
+    !process_is_running(pid)
+}
+
+#[cfg(unix)]
+fn process_is_running(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .output()
+        .map(|output| output.status.success())
+        .unwrap_or(true)
+}
+
+#[cfg(windows)]
+fn process_is_running(pid: u32) -> bool {
+    use std::ffi::c_void;
+
+    const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+    const STILL_ACTIVE: u32 = 259;
+    const ERROR_INVALID_PARAMETER: u32 = 87;
+
+    extern "system" {
+        fn OpenProcess(
+            dwDesiredAccess: u32,
+            bInheritHandle: i32,
+            dwProcessId: u32,
+        ) -> *mut c_void;
+        fn GetExitCodeProcess(hProcess: *mut c_void, lpExitCode: *mut u32) -> i32;
+        fn CloseHandle(hObject: *mut c_void) -> i32;
+        fn GetLastError() -> u32;
+    }
+
+    unsafe {
+        let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if handle.is_null() {
+            // Only treat "invalid parameter" as a definite "process gone"; other
+            // failures (e.g. access denied) mean we cannot verify liveness.
+            return GetLastError() != ERROR_INVALID_PARAMETER;
+        }
+        let mut exit_code = 0u32;
+        let ok = GetExitCodeProcess(handle, &mut exit_code);
+        CloseHandle(handle);
+        ok != 0 && exit_code == STILL_ACTIVE
     }
 }
 
