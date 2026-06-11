@@ -925,11 +925,16 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
 /// export containing a single bundle record. Enough for creation-time slug
 /// collision checks against the sync remote.
 pub fn spawn_fake_knithub_export(bundle_slug: &str, lifecycle_state: &str) -> String {
+    spawn_fake_knithub_with_body(format!(
+        "{{\"data\":{{\"project\":{{\"slug\":\"arbient\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
+    ))
+}
+
+/// Spawn a fake KnitHub API that answers every request with the given JSON
+/// body, e.g. a full project export including bundle artifact payloads.
+pub fn spawn_fake_knithub_with_body(body: String) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
-    let body = format!(
-        "{{\"data\":{{\"project\":{{\"slug\":\"arbient\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
-    );
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };

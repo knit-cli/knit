@@ -283,6 +283,7 @@ pub fn run(cli: Cli) -> Result<()> {
             bundles,
             remote,
             no_remote,
+            merge,
         } => commands::pull(
             &repos,
             all,
@@ -293,6 +294,7 @@ pub fn run(cli: Cli) -> Result<()> {
             bundles,
             remote.as_deref(),
             no_remote,
+            merge,
         ),
         Commands::Push {
             repos,
