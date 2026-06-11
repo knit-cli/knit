@@ -1,5 +1,5 @@
 use knit::ids::{expand_repo_selectors, short_sha, slugify, unique_repo_id};
-use knit::model::{ChangeGroup, RepoEntry, CHECKOUT_MODE_WORKTREE};
+use knit::model::{ChangeGroup, CheckoutMode, RepoEntry};
 
 fn empty_bundle() -> ChangeGroup {
     ChangeGroup::new(
@@ -41,7 +41,7 @@ fn makes_unique_repo_ids() {
         path: "/tmp/backend".to_string(),
         remote: None,
         base_branch: "main".to_string(),
-        checkout_mode: CHECKOUT_MODE_WORKTREE.to_string(),
+        checkout_mode: CheckoutMode::Worktree,
         base_sha: None,
         feature_branch: None,
         worktree_path: None,

@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::git::{is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
-use crate::model::{BundleNode, ChangeGroup, RepoChange, RepoEntry};
+use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry};
 use crate::store::ActiveBundle;
 use crate::time::now_iso;
 use anyhow::{Context, Result};
@@ -84,31 +84,29 @@ pub fn ledger_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Optio
 }
 
 pub fn status_note(change: &RepoChange) -> String {
-    match change.movement.as_str() {
-        "advanced" => format!("unrecorded commits: {}", change.commits.len()),
-        "rewound" => format!("rewound commits: {}", change.dropped_commits.len()),
-        "diverged" => format!(
+    match change.movement {
+        Movement::Advanced => format!("unrecorded commits: {}", change.commits.len()),
+        Movement::Rewound => format!("rewound commits: {}", change.dropped_commits.len()),
+        Movement::Diverged => format!(
             "diverged (+{} -{})",
             change.commits.len(),
             change.dropped_commits.len()
         ),
-        _ => "changed".to_string(),
     }
 }
 
 pub fn sync_note(change: &RepoChange) -> String {
-    match change.movement.as_str() {
-        "advanced" => format!("observed {} unrecorded commit(s)", change.commits.len()),
-        "rewound" => format!(
+    match change.movement {
+        Movement::Advanced => format!("observed {} unrecorded commit(s)", change.commits.len()),
+        Movement::Rewound => format!(
             "observed rewind removing {} commit(s)",
             change.dropped_commits.len()
         ),
-        "diverged" => format!(
+        Movement::Diverged => format!(
             "observed divergence (+{} -{} commit(s))",
             change.commits.len(),
             change.dropped_commits.len()
         ),
-        _ => "observed git movement".to_string(),
     }
 }
 
@@ -168,7 +166,7 @@ fn build_repo_change(
     let Some(before) = before_sha.clone() else {
         return Ok(RepoChange {
             repo_id,
-            movement: "advanced".to_string(),
+            movement: Movement::Advanced,
             before_sha,
             after_sha: after_sha.clone(),
             commits: vec![after_sha],
@@ -179,7 +177,7 @@ fn build_repo_change(
     if is_ancestor(worktree_dir, &before, &after_sha) {
         return Ok(RepoChange {
             repo_id,
-            movement: "advanced".to_string(),
+            movement: Movement::Advanced,
             before_sha,
             after_sha: after_sha.clone(),
             commits: rev_list(worktree_dir, &before, &after_sha)
@@ -191,7 +189,7 @@ fn build_repo_change(
     if is_ancestor(worktree_dir, &after_sha, &before) {
         return Ok(RepoChange {
             repo_id,
-            movement: "rewound".to_string(),
+            movement: Movement::Rewound,
             before_sha,
             after_sha: after_sha.clone(),
             commits: Vec::new(),
@@ -213,7 +211,7 @@ fn build_repo_change(
 
     Ok(RepoChange {
         repo_id,
-        movement: "diverged".to_string(),
+        movement: Movement::Diverged,
         before_sha,
         after_sha,
         commits,

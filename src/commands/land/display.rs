@@ -1,6 +1,7 @@
 //! Human-readable rendering of land plans, run status, and per-repo PR/check state.
 
-use super::{LandPlan, LandRun, LandStep, DEPLOY_MODE_COMMAND, DEPLOY_MODE_PUSH, STEP_DEPLOY};
+use super::{LandPlan, LandRun, LandStep, LandStepKind};
+use crate::model::DeployMode;
 use crate::checkout::checkout_dir;
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
@@ -26,7 +27,7 @@ pub(super) fn print_plan(plan: &LandPlan, path: &Path) {
         println!(
             "{} {} {}",
             out::node(&step.id),
-            out::heading(&step.step_type),
+            out::heading(step.step_type.as_str()),
             planned_step_target(step)
         );
         if !step.needs.is_empty() {
@@ -42,7 +43,7 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
         "{} {} {}",
         out::heading("Land run"),
         out::node(&run.id),
-        out::status(&run.status)
+        out::status(run.status.as_str())
     );
     println!(
         "{} {}",
@@ -87,17 +88,17 @@ pub(super) fn print_planned_step(active: &ActiveBundle, step: &LandStep) {
 }
 
 fn planned_step_target(step: &LandStep) -> String {
-    match step.step_type.as_str() {
-        STEP_DEPLOY => {
+    match step.step_type {
+        LandStepKind::Deploy => {
             let repo = step
                 .repo_id
                 .as_deref()
                 .map(out::repo)
                 .unwrap_or_else(|| out::muted("workspace"));
-            let mode = step.deployment_mode.as_deref().unwrap_or(if step.command.is_empty() {
-                DEPLOY_MODE_PUSH
+            let mode = step.deployment_mode.unwrap_or(if step.command.is_empty() {
+                DeployMode::Push
             } else {
-                DEPLOY_MODE_COMMAND
+                DeployMode::Command
             });
             format!("{repo} {mode}")
         }
