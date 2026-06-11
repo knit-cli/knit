@@ -93,29 +93,30 @@ pub struct ProjectRunCommand {
     pub env: BTreeMap<String, String>,
 }
 
+/// A project's bundle runtime. Knit owns the namespace (compose project name,
+/// host ports, database identity) and injects it as `KNIT_*` environment
+/// variables; the stack repo owns a compose file written against those
+/// variables. Knit knows nothing about service topology, build args, or app
+/// environment — that is the compose file's business.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntime {
     #[serde(default = "default_runtime_kind")]
     pub kind: String,
+    /// Repo whose checkout hosts the runtime compose file.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_repo: Option<String>,
     #[serde(default = "default_project_config_file")]
     pub project_config_file: String,
+    /// Compose file inside the stack repo, written against the `KNIT_*`
+    /// environment contract.
     #[serde(default = "default_compose_file")]
     pub compose_file: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_compose_file: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub worktree_dockerfile: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub frontend_repo: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub gloss_web_ui_repo: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<ProjectRuntimeDatabase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<ProjectRuntimePorts>,
+    /// Path opened on the allocated frontend port after `knit run status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_path: Option<String>,
 }
@@ -125,7 +126,7 @@ fn default_runtime_kind() -> String {
 }
 
 fn default_compose_file() -> String {
-    "docker-compose.yml".to_string()
+    "docker-compose.knit.yml".to_string()
 }
 
 fn default_project_config_file() -> String {
@@ -147,6 +148,10 @@ pub struct ProjectRuntimeDatabase {
     pub name_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_base: Option<u16>,
+    /// Optional command run in the stack checkout to start the shared dev
+    /// database when it is unreachable (e.g. `docker compose up -d db`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_command: Option<Vec<String>>,
 }
 
 fn default_database_host() -> String {
@@ -161,6 +166,8 @@ fn default_database_name() -> String {
     "knithub_dev".to_string()
 }
 
+/// Host port allocation pools for bundle runtimes. Container-side ports are
+/// the compose file's business; Knit only hands out free host ports.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntimePorts {
@@ -170,10 +177,6 @@ pub struct ProjectRuntimePorts {
     pub frontend_base: u16,
     #[serde(default = "default_port_step")]
     pub step: u16,
-    #[serde(default = "default_backend_container_port")]
-    pub backend_container: u16,
-    #[serde(default = "default_frontend_container_port")]
-    pub frontend_container: u16,
 }
 
 fn default_backend_port_base() -> u16 {
@@ -188,14 +191,6 @@ fn default_port_step() -> u16 {
     10
 }
 
-fn default_backend_container_port() -> u16 {
-    4000
-}
-
-fn default_frontend_container_port() -> u16 {
-    5173
-}
-
 impl Default for ProjectRuntimeDatabase {
     fn default() -> Self {
         Self {
@@ -205,6 +200,7 @@ impl Default for ProjectRuntimeDatabase {
             name: default_database_name(),
             name_template: None,
             port_base: None,
+            start_command: None,
         }
     }
 }
@@ -215,8 +211,6 @@ impl Default for ProjectRuntimePorts {
             backend_base: default_backend_port_base(),
             frontend_base: default_frontend_port_base(),
             step: default_port_step(),
-            backend_container: default_backend_container_port(),
-            frontend_container: default_frontend_container_port(),
         }
     }
 }
