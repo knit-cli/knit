@@ -1,7 +1,9 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::git::{commit_author, git_output, rev_parse};
 use crate::ids::{revert_group_id, revert_plan_id, short_sha};
-use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, RepoChange, SCHEMA_VERSION};
+use crate::model::{
+    BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange, SCHEMA_VERSION,
+};
 use crate::output as out;
 use crate::providers::{self, pr_number_from_url, publication_for_repo, PrTarget, PullRequest};
 use crate::selectors::resolve_log_node;
@@ -18,9 +20,31 @@ use std::fs;
 use std::path::PathBuf;
 
 const REVERT_PLAN_KIND: &str = "KnitRevertPlan";
-const OP_REVERT: &str = "revert";
-const OP_CHERRY_PICK: &str = "cherryPick";
-const OP_PR_REVERT: &str = "prRevert";
+/// One operation in a revert plan. Serialized camelCase to match recorded
+/// plans (`revert`, `cherryPick`, `prRevert`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+enum RevertOpKind {
+    Revert,
+    CherryPick,
+    PrRevert,
+}
+
+impl RevertOpKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            RevertOpKind::Revert => "revert",
+            RevertOpKind::CherryPick => "cherryPick",
+            RevertOpKind::PrRevert => "prRevert",
+        }
+    }
+}
+
+impl std::fmt::Display for RevertOpKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,7 +76,7 @@ struct RepoRevertPlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RevertOperation {
-    kind: String,
+    kind: RevertOpKind,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -180,7 +204,7 @@ fn apply_local_revert(active: &mut ActiveBundle, plan: &RevertPlan, path: PathBu
         });
         repo_changes.push(RepoChange {
             repo_id: repo_plan.repo_id.clone(),
-            movement: "advanced".to_string(),
+            movement: Movement::Advanced,
             before_sha: Some(before_sha),
             after_sha: sha.clone(),
             commits: vec![sha.clone()],
@@ -376,7 +400,7 @@ fn plans_for_commits(active: &ActiveBundle, commits: &[CommitRef]) -> Result<Vec
                 .into_iter()
                 .rev()
                 .map(|sha| RevertOperation {
-                    kind: OP_REVERT.to_string(),
+                    kind: RevertOpKind::Revert,
                     sha: Some(sha),
                     selector: None,
                 })
@@ -394,26 +418,26 @@ fn plans_for_observed(active: &ActiveBundle, node: &BundleNode) -> Result<Vec<Re
             match change.movement.as_str() {
                 "advanced" => {
                     operations.extend(change.commits.iter().rev().map(|sha| RevertOperation {
-                        kind: OP_REVERT.to_string(),
+                        kind: RevertOpKind::Revert,
                         sha: Some(sha.clone()),
                         selector: None,
                     }));
                 }
                 "rewound" => {
                     operations.extend(change.dropped_commits.iter().map(|sha| RevertOperation {
-                        kind: OP_CHERRY_PICK.to_string(),
+                        kind: RevertOpKind::CherryPick,
                         sha: Some(sha.clone()),
                         selector: None,
                     }));
                 }
                 "diverged" => {
                     operations.extend(change.commits.iter().rev().map(|sha| RevertOperation {
-                        kind: OP_REVERT.to_string(),
+                        kind: RevertOpKind::Revert,
                         sha: Some(sha.clone()),
                         selector: None,
                     }));
                     operations.extend(change.dropped_commits.iter().map(|sha| RevertOperation {
-                        kind: OP_CHERRY_PICK.to_string(),
+                        kind: RevertOpKind::CherryPick,
                         sha: Some(sha.clone()),
                         selector: None,
                     }));
@@ -521,7 +545,7 @@ fn pr_revert_repo_plan(
         worktree_path,
         expected_head_sha: None,
         operations: vec![RevertOperation {
-            kind: OP_PR_REVERT.to_string(),
+            kind: RevertOpKind::PrRevert,
             sha: None,
             selector: Some(selector.to_string()),
         }],
@@ -533,7 +557,7 @@ fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result<()> {
         if repo_plan
             .operations
             .iter()
-            .any(|operation| operation.kind == OP_PR_REVERT)
+            .any(|operation| operation.kind == RevertOpKind::PrRevert)
         {
             preflight_provider_revert(active, plan, repo_plan)?;
             continue;
@@ -575,7 +599,7 @@ fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result<()> {
 }
 
 fn verify_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
-    if !matches!(operation.kind.as_str(), OP_REVERT | OP_CHERRY_PICK) {
+    if !matches!(operation.kind, RevertOpKind::Revert | RevertOpKind::CherryPick) {
         bail!("{repo_id}: unknown revert operation `{}`.", operation.kind);
     }
     let sha = operation_sha(operation)?;
@@ -605,7 +629,7 @@ fn preflight_provider_revert(
     if repo_plan
         .operations
         .iter()
-        .any(|operation| operation.kind != OP_PR_REVERT)
+        .any(|operation| operation.kind != RevertOpKind::PrRevert)
     {
         bail!(
             "{}: provider PR revert operations cannot be mixed with local git operations.",
@@ -634,8 +658,8 @@ fn preflight_provider_revert(
 
 fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
     let sha = operation_sha(operation)?;
-    match operation.kind.as_str() {
-        OP_REVERT => git_output(
+    match operation.kind {
+        RevertOpKind::Revert => git_output(
             worktree,
             [
                 OsString::from("revert"),
@@ -649,7 +673,7 @@ fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperatio
                 short_sha(sha)
             )
         })?,
-        OP_CHERRY_PICK => git_output(
+        RevertOpKind::CherryPick => git_output(
             worktree,
             [
                 OsString::from("cherry-pick"),
@@ -663,7 +687,9 @@ fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperatio
                 short_sha(sha)
             )
         })?,
-        kind => bail!("{repo_id}: unknown revert operation `{kind}`."),
+        RevertOpKind::PrRevert => {
+            bail!("{repo_id}: provider PR reverts are not applied as local git operations.")
+        }
     };
 
     Ok(())
@@ -677,7 +703,7 @@ fn operation_sha(operation: &RevertOperation) -> Result<&str> {
 }
 
 fn operation_selector(operation: &RevertOperation) -> Result<&str> {
-    if operation.kind != OP_PR_REVERT {
+    if operation.kind != RevertOpKind::PrRevert {
         bail!("{} operation is not a provider PR revert", operation.kind);
     }
     operation
@@ -690,7 +716,7 @@ fn plan_uses_provider_revert(plan: &RevertPlan) -> bool {
     plan.repos.iter().any(|repo| {
         repo.operations
             .iter()
-            .any(|operation| operation.kind == OP_PR_REVERT)
+            .any(|operation| operation.kind == RevertOpKind::PrRevert)
     })
 }
 
@@ -811,8 +837,8 @@ fn print_plan(plan: &RevertPlan, path: &PathBuf) {
             println!("{}", out::repo(&repo.repo_id));
         }
         for operation in &repo.operations {
-            match operation.kind.as_str() {
-                OP_PR_REVERT => println!(
+            match operation.kind {
+                RevertOpKind::PrRevert => println!(
                     "  {} {}",
                     out::movement(operation.kind.as_str()),
                     operation

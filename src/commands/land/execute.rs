@@ -4,15 +4,13 @@
 
 use super::{
     display_path_for_storage, ensure_open_and_ready, non_empty, repo_context, required_repo_id,
-    resolve_stored_path, resolve_subdir, run_step, safe_timestamp, state_is_merged,
-    validate_deploy_checkout_update, validate_deployment_mode, LandCheckout, LandPlan, LandRun,
-    LandRunStep, LandStep, PublicationUpdate, StepOutcome, DEPLOY_MODE_COMMAND, DEPLOY_MODE_PUSH,
-    LAND_RUN_KIND, STATUS_FAILED, STATUS_PENDING, STATUS_RUNNING, STATUS_SUCCEEDED, STEP_DEPLOY,
-    STEP_MERGE_PR, STEP_RUN, STEP_WAIT_CHECKS,
+    resolve_stored_path, resolve_subdir, run_step, safe_timestamp, state_is_merged, LandCheckout,
+    LandPlan, LandRun, LandRunStep, LandStatus, LandStep, LandStepKind, PublicationUpdate,
+    StepOutcome, LAND_RUN_KIND,
 };
 use crate::git::{git_output, is_git_worktree};
 use crate::ids::{node_id, slugify};
-use crate::model::{BundleNode, PublicationEntry, DEFAULT_LANDING_MERGE_METHOD, SCHEMA_VERSION};
+use crate::model::{BundleNode, DeployCheckoutUpdate, DeployMode, PublicationEntry, SCHEMA_VERSION};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, PrTarget, PullRequest};
 use crate::store::{save_active_bundle, write_json, ActiveBundle};
@@ -46,11 +44,11 @@ pub(super) fn execute_run(
                 .iter()
                 .position(|run_step| run_step.id == step.id)
                 .expect("run contains every plan step");
-            if run.steps[run_index].status == STATUS_SUCCEEDED {
+            if run.steps[run_index].status == LandStatus::Succeeded {
                 continue;
             }
             ensure_needs_succeeded(run, step)?;
-            run.steps[run_index].status = STATUS_RUNNING.to_string();
+            run.steps[run_index].status = LandStatus::Running;
             run.steps[run_index].started_at = Some(now_iso());
             run.steps[run_index].finished_at = None;
             run.steps[run_index].detail = None;
@@ -64,7 +62,7 @@ pub(super) fn execute_run(
             continue;
         }
 
-        run.status = STATUS_RUNNING.to_string();
+        run.status = LandStatus::Running;
         run.updated_at = now_iso();
         write_json(run_path, run)?;
 
@@ -131,9 +129,9 @@ pub(super) fn execute_run(
                 .expect("run contains every plan step");
             let run_step = &mut run.steps[run_index];
             run_step.status = if outcome.success {
-                STATUS_SUCCEEDED.to_string()
+                LandStatus::Succeeded
             } else {
-                STATUS_FAILED.to_string()
+                LandStatus::Failed
             };
             run_step.finished_at = Some(now_iso());
             run_step.detail = Some(outcome.detail.clone());
@@ -173,9 +171,9 @@ pub(super) fn execute_run(
 
         run.updated_at = now_iso();
         run.status = if any_failed {
-            STATUS_FAILED.to_string()
+            LandStatus::Failed
         } else {
-            STATUS_RUNNING.to_string()
+            LandStatus::Running
         };
         write_json(run_path, run)?;
         if bundle_dirty {
@@ -198,7 +196,7 @@ pub(super) fn execute_run(
         }
     }
 
-    run.status = STATUS_SUCCEEDED.to_string();
+    run.status = LandStatus::Succeeded;
     run.updated_at = now_iso();
     write_json(run_path, run)?;
     append_landed_node(active, plan, run)?;
@@ -240,12 +238,11 @@ pub(super) fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec
 }
 
 fn execute_step(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Result<StepOutcome> {
-    match step.step_type.as_str() {
-        STEP_MERGE_PR => execute_merge_pr(active, plan, step),
-        STEP_WAIT_CHECKS => execute_wait_checks(active, step),
-        STEP_RUN => execute_run_command(active, step),
-        STEP_DEPLOY => execute_deployment(active, step),
-        step_type => bail!("unknown land step type `{step_type}`"),
+    match step.step_type {
+        LandStepKind::MergePr => execute_merge_pr(active, plan, step),
+        LandStepKind::WaitChecks => execute_wait_checks(active, step),
+        LandStepKind::Run => execute_run_command(active, step),
+        LandStepKind::Deploy => execute_deployment(active, step),
     }
 }
 
@@ -283,14 +280,11 @@ fn execute_merge_pr(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> 
         detail.push(format!("checks {}", summary.status));
     }
 
-    let method = step
-        .method
-        .as_deref()
-        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
+    let method = step.method.unwrap_or_default();
     forge.merge(
         &target,
         &publication.url,
-        method,
+        method.as_str(),
         step.delete_branch.unwrap_or(false),
         pr.head_ref_oid.as_deref(),
     )?;
@@ -395,18 +389,14 @@ fn execute_run_command(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
 }
 
 fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutcome> {
-    let mode = step
-        .deployment_mode
-        .as_deref()
-        .unwrap_or(if step.command.is_empty() {
-            DEPLOY_MODE_PUSH
-        } else {
-            DEPLOY_MODE_COMMAND
-        });
-    validate_deployment_mode(mode)?;
+    let mode = step.deployment_mode.unwrap_or(if step.command.is_empty() {
+        DeployMode::Push
+    } else {
+        DeployMode::Command
+    });
     let repo_id = required_repo_id(step)?;
 
-    if mode == DEPLOY_MODE_PUSH {
+    if mode == DeployMode::Push {
         if !step.command.is_empty() {
             bail!(
                 "deploy step `{}` uses push mode and must not provide command",
@@ -523,8 +513,7 @@ fn prepare_deployment_checkout(
     }
 
     let remote = checkout.remote.as_deref().unwrap_or("origin");
-    let update = checkout.update.as_deref().unwrap_or("fetch");
-    validate_deploy_checkout_update(update)?;
+    let update = checkout.update.unwrap_or_default();
     let path = active
         .root
         .join(".knit/land-worktrees")
@@ -537,7 +526,7 @@ fn prepare_deployment_checkout(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    let target_ref = if update == "none" {
+    let target_ref = if update == DeployCheckoutUpdate::None {
         format!("{remote}/{}", checkout.branch)
     } else {
         fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
@@ -606,7 +595,7 @@ pub(super) fn ensure_needs_succeeded(run: &LandRun, step: &LandStep) -> Result<(
         let Some(run_step) = run_step(run, need) else {
             bail!("run is missing dependency step `{need}`");
         };
-        if run_step.status != STATUS_SUCCEEDED {
+        if run_step.status != LandStatus::Succeeded {
             bail!(
                 "step `{}` is waiting for `{need}`, which is {}",
                 step.id,
@@ -671,7 +660,7 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
         bundle_id: active.bundle.id.clone(),
         provider: plan.provider.clone(),
         plan_path: display_path_for_storage(&active.root, plan_path),
-        status: STATUS_RUNNING.to_string(),
+        status: LandStatus::Running,
         created_at: now.clone(),
         updated_at: now,
         steps: plan
@@ -679,8 +668,8 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
             .iter()
             .map(|step| LandRunStep {
                 id: step.id.clone(),
-                step_type: step.step_type.clone(),
-                status: STATUS_PENDING.to_string(),
+                step_type: step.step_type,
+                status: LandStatus::Pending,
                 repo_id: step.repo_id.clone(),
                 publication_url: step_publication(active, step).map(|publication| publication.url),
                 started_at: None,

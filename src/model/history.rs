@@ -32,7 +32,7 @@ pub struct HistoryEvent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub after_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub movement: Option<String>,
+    pub movement: Option<super::Movement>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub node_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
