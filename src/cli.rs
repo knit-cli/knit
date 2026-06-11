@@ -1011,6 +1011,15 @@ pub enum LandCommand {
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
     },
+    /// Create revert PRs for the merge steps a failed landing run completed.
+    Rollback {
+        /// Run file to roll back. Defaults to the latest run.
+        #[arg(long)]
+        run: Option<PathBuf>,
+        /// Create the revert PRs. Without this flag the rollback is only previewed.
+        #[arg(long)]
+        apply: bool,
+    },
     /// Resume a failed or incomplete landing run.
     Resume {
         /// Run file to resume. Defaults to the latest run.

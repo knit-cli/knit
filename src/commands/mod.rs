@@ -47,7 +47,7 @@ pub use history::{refresh_history, show_history, show_related_history};
 pub use init::{init_bundle, start_bundle};
 pub use land::{
     apply_land_from_artifact, apply_land_plan, check_landing, generate_land_plan, land_default,
-    resume_land_run, show_land_status, update_land_branches,
+    resume_land_run, rollback_land_run, show_land_status, update_land_branches,
 };
 pub use log::{show_log, show_target};
 pub use merge::merge_command;

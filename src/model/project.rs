@@ -268,6 +268,11 @@ impl Default for ProjectRuntimePorts {
 pub struct ProjectLandingPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// What `knit land apply` does when a step fails: `resume` (default) stops
+    /// and waits for `knit land resume`; `rollback` creates revert PRs for the
+    /// merge steps that already landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_failure: Option<super::LandOnFailure>,
     #[serde(default)]
     pub merge: ProjectLandingMergePlan,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

@@ -401,6 +401,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
                 None => commands::apply_land_plan(plan.as_deref(), &remote, no_remote),
             },
+            Some(LandCommand::Rollback { run, apply }) => {
+                commands::rollback_land_run(run.as_deref(), apply)
+            }
             Some(LandCommand::Resume {
                 run,
                 remote,
