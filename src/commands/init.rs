@@ -3,7 +3,7 @@ use crate::commands::agents::{
     print_bundle_worktree_agents_summary, print_worktree_agents_summary, upsert_managed_section,
     write_bundle_worktree_agents_md, write_worktree_agents_md,
 };
-use crate::ids::slugify;
+use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
 use crate::output as out;
 use crate::store::{
@@ -276,10 +276,13 @@ pub(crate) fn resolve_view_repos(
     exclude: &[String],
 ) -> Result<Vec<ProjectRepoEntry>> {
     use std::collections::BTreeSet;
+    let repo_ids = expand_repo_selectors(repo_ids);
+    let include = expand_repo_selectors(include);
+    let exclude = expand_repo_selectors(exclude);
     let mut selected: BTreeSet<String> = BTreeSet::new();
 
     if !repo_ids.is_empty() {
-        for repo_id in repo_ids {
+        for repo_id in &repo_ids {
             selected.insert(project_repo(project, repo_id)?.id.clone());
         }
     } else if all_repos {
@@ -304,10 +307,10 @@ pub(crate) fn resolve_view_repos(
 
     // Ad-hoc flags apply on top in every mode, so `--all-repos --exclude sej`
     // and `--view backend --include gloss` both work.
-    for repo_id in include {
+    for repo_id in &include {
         selected.insert(project_repo(project, repo_id)?.id.clone());
     }
-    for repo_id in exclude {
+    for repo_id in &exclude {
         selected.remove(&project_repo(project, repo_id)?.id);
     }
 
