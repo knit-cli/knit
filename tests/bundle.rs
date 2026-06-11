@@ -259,3 +259,31 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn bundle_creation_refuses_slug_taken_on_sync_remote() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    let base_url = spawn_fake_knithub_export("payment-flow", "open");
+    knit(&workspace, ["remote", "add", "knithub", &base_url]);
+    let env = [("KNITHUB_TOKEN", "test-token")];
+
+    let refused = knit_fails_with_env(&workspace, ["bundle", "payment flow"], &env);
+    assert!(refused.contains("already exists on the KnitHub sync remote"));
+    assert!(!workspace
+        .join(".knit/bundles/payment-flow.bundle.json")
+        .exists());
+
+    // A different title passes the check, and --force overrides it.
+    let created = knit_with_env(&workspace, ["bundle", "other feature"], &env);
+    assert!(created.contains("Active bundle:"));
+    let forced = knit_with_env(&workspace, ["bundle", "payment flow", "--force"], &env);
+    assert!(forced.contains("Active bundle:"));
+    assert!(workspace
+        .join(".knit/bundles/payment-flow.bundle.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}

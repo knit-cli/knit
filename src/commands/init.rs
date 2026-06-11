@@ -73,6 +73,10 @@ pub fn start_bundle(
         );
     }
 
+    if !force {
+        ensure_no_remote_slug_collision(&root, project, &bundle_id)?;
+    }
+
     fs::create_dir_all(&bundle_dir).context("failed to create .knit/bundles")?;
     fs::create_dir_all(&worktree_dir).context("failed to create .knit/worktrees")?;
     fs::create_dir_all(knit_dir.join("projects")).context("failed to create .knit/projects")?;
@@ -191,6 +195,40 @@ fn default_shell() -> std::ffi::OsString {
         std::ffi::OsString::from("cmd")
     } else {
         std::ffi::OsString::from("/bin/sh")
+    }
+}
+
+/// Refuse to create a bundle whose slug already exists on the KnitHub sync
+/// remote for this project: two users independently picking the same title
+/// would otherwise share one remote record and one `knit/<slug>` branch
+/// namespace across every repo. Best-effort by design — no workspace config,
+/// no sync remote, no token, or an unreachable remote all skip the check so
+/// creation keeps working offline. `--force` skips it explicitly.
+fn ensure_no_remote_slug_collision(
+    root: &Path,
+    project: Option<&str>,
+    bundle_id: &str,
+) -> Result<()> {
+    if !root.join(".knit/config.json").exists() {
+        return Ok(());
+    }
+    let Ok(config) = crate::store::load_effective_config(root) else {
+        return Ok(());
+    };
+    let Some(project_id) = project
+        .map(slugify)
+        .or_else(|| config.active_project.clone())
+    else {
+        return Ok(());
+    };
+    match crate::commands::remote::remote_bundle_lifecycle(&config, &project_id, bundle_id) {
+        Ok(Some(state)) => bail!(
+            "Bundle `{bundle_id}` already exists on the KnitHub sync remote for project `{project_id}` ({state}). Join the existing bundle with `knit fetch` and `knit --bundle {bundle_id} worktree`, pick another title, or pass --force to create a local bundle with the same id anyway."
+        ),
+        // Offline, missing remote/token, or a server error must never block
+        // local bundle creation; the push-time ledger gate still protects the
+        // remote record itself.
+        Ok(None) | Err(_) => Ok(()),
     }
 }
 
