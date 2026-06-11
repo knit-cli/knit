@@ -366,7 +366,7 @@ knit run status
 knit run down
 ```
 
-`knit run up` generates `.knit/runtime-runs/{bundle}/docker-compose.yml`, picks free host ports, and starts the bundle stack. Use `knit run status` for the live URLs; do not guess ports from an older run.
+`knit run up` lifts the stack repo's compose shape into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, run as compose project `knit-run-{bundle}`. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs; do not guess ports from an older run.
 
 "#
         ,
@@ -387,7 +387,10 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
     };
 
     let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
-    let frontend_repo = runtime.frontend_repo.as_deref().unwrap_or("knithub-frontend");
+    let compose_file = runtime
+        .compose_file
+        .clone()
+        .unwrap_or_else(|| "docker-compose.knit.yml or docker-compose.yml".to_string());
     let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
@@ -421,7 +424,7 @@ knit project pull --repo {stack_repo}
 knit project agents
 ```
 
-From a bundle worktree that includes `{stack_repo}` and `{frontend_repo}`:
+From a bundle worktree that includes `{stack_repo}`:
 
 ```sh
 knit run up
@@ -431,22 +434,28 @@ knit run down
 
 Runtime behavior:
 
-- Generates `.knit/runtime-runs/<bundle>/docker-compose.yml` and `state.json`
+- Runs `{compose_file}` from the `{stack_repo}` checkout as isolated compose project `knit-run-<bundle>`; run state is recorded in `.knit/runtime-runs/<bundle>/state.json` after a successful start (`knit run down` cleans up by project label even without it)
+- A plain compose file is lifted automatically: the shape the repos run on `main`, with paths into tracked repos remapped to bundle worktrees and published host ports reallocated; a compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_<service>`, `KNIT_DB_*`); `runtime.mode` in the project config forces a mode
 - Builds the stack from bundle worktrees, not the source checkout on `main`
-- Allocates host ports starting at backend `{backend_base}`, frontend `{frontend_base}` (step `{step}`)
-- Database: {database_detail}
-- Opens `{profile_path}` on the allocated frontend port after `knit run status`
+- Allocates free host ports (contract mode pools: {port_pools}, step `{step}`)
+- A project command configured as `up`, `down`, or `status` takes precedence over these runtime verbs
+- Database (contract mode): {database_detail}
+- Opens `{profile_path}` on the frontend port after `knit run status`
 
-Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode starts a dedicated Postgres container per runtime with its own empty database.
+Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode activates the compose file's `bundle-db` profile so a dedicated database container starts per runtime with its own empty database.
 
 "#
         ,
         config_file = config_file,
         stack_repo = stack_repo,
-        frontend_repo = frontend_repo,
+        compose_file = compose_file,
         profile_path = profile_path,
-        backend_base = ports.backend_base,
-        frontend_base = ports.frontend_base,
+        port_pools = ports
+            .service_bases()
+            .iter()
+            .map(|(service, base)| format!("{service} `{base}`"))
+            .collect::<Vec<_>>()
+            .join(", "),
         step = ports.step,
         database_detail = database_detail,
     )
