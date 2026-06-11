@@ -32,7 +32,12 @@ pub fn list_views(project: Option<&str>) -> Result<()> {
         } else {
             " "
         };
-        println!("{} {} {}", marker, out::repo(name), out::muted(summary(view)));
+        println!(
+            "{} {} {}",
+            marker,
+            out::repo(name),
+            out::muted(summary(view))
+        );
     }
     Ok(())
 }

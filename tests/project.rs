@@ -73,7 +73,7 @@ fn project_default_repos_start_bundle_without_track() {
     init_repo(&frontend, "frontend");
     init_repo(&scraper, "scraper");
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -92,8 +92,8 @@ fn project_default_repos_start_bundle_without_track() {
             "--observe",
         ],
     );
-    assert!(knit(&workspace, ["project", "list"]).contains("arbient"));
-    assert!(knit(&workspace, ["project", "show"]).contains("\"id\": \"arbient\""));
+    assert!(knit(&workspace, ["project", "list"]).contains("demo"));
+    assert!(knit(&workspace, ["project", "show"]).contains("\"id\": \"demo\""));
 
     knit(&workspace, ["bundle", "project feature"]);
 
@@ -111,7 +111,7 @@ fn project_default_repos_start_bundle_without_track() {
         &fs::read_to_string(workspace.join(".knit/bundles/project-feature.bundle.json")).unwrap(),
     )
     .unwrap();
-    assert_eq!(bundle["projectId"].as_str(), Some("arbient"));
+    assert_eq!(bundle["projectId"].as_str(), Some("demo"));
     assert_eq!(bundle["repos"].as_array().unwrap().len(), 2);
     assert_eq!(bundle["repos"][0]["id"].as_str(), Some("backend"));
     assert_eq!(bundle["repos"][1]["id"].as_str(), Some("frontend"));
@@ -187,7 +187,11 @@ fn view_save_accepts_comma_separated_exclude_list() {
     );
 
     let repos = knit(&workspace, ["view", "show", "backend", "--repos"]);
-    assert_eq!(repos.lines().collect::<Vec<_>>(), vec!["backend"], "{repos}");
+    assert_eq!(
+        repos.lines().collect::<Vec<_>>(),
+        vec!["backend"],
+        "{repos}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -204,9 +208,7 @@ fn view_flag_conflicts_with_repo_selection() {
 
     let error = knit_fails(
         &workspace,
-        [
-            "bundle", "x", "--view", "backend", "--repo", "backend",
-        ],
+        ["bundle", "x", "--view", "backend", "--repo", "backend"],
     );
     assert!(error.contains("not together with --repo"), "{error}");
 
@@ -269,7 +271,7 @@ fn bundle_start_cd_opens_project_worktree_root() {
 
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -319,7 +321,7 @@ fn bundle_start_cd_accepts_repo_selector() {
 
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -356,25 +358,25 @@ fn project_remove_deletes_template_and_clears_active_project() {
     fs::create_dir_all(&workspace).unwrap();
 
     init_repo(&backend, "backend");
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
 
-    let project_path = workspace.join(".knit/projects/arbient.project.json");
+    let project_path = workspace.join(".knit/projects/demo.project.json");
     assert!(project_path.exists());
-    let refused = knit_fails(&workspace, ["project", "remove", "arbient"]);
+    let refused = knit_fails(&workspace, ["project", "remove", "demo"]);
     assert!(refused.contains("requires --force"));
 
-    let removed = knit(&workspace, ["project", "remove", "arbient", "--force"]);
+    let removed = knit(&workspace, ["project", "remove", "demo", "--force"]);
     assert!(removed.contains("Removed project"));
     assert!(!project_path.exists());
     let config: Value =
         serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
             .unwrap();
     assert!(config.get("activeProject").is_none());
-    assert!(!knit(&workspace, ["project", "list"]).contains("arbient"));
+    assert!(!knit(&workspace, ["project", "list"]).contains("demo"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -387,7 +389,7 @@ fn cherrypick_moves_source_commits_into_destination_bundle() {
     fs::create_dir_all(&workspace).unwrap();
 
     init_repo(&backend, "backend");
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -452,29 +454,27 @@ fn project_agents_are_generated_from_project_json() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
     fs::write(
         workspace.join("AGENTS.md"),
-        "custom guidance\n\n## Arbient Knit Project\n\nThat command should add all four Arbient repos by default:\n\n- `backend`\n\n<!-- BEGIN GLOSS AGENTS -->\nkeep this\n<!-- END GLOSS AGENTS -->\n",
+        "custom guidance\n\n## Demo Knit Project\n\nThat command should add all four Demo repos by default:\n\n- `backend`\n\n<!-- BEGIN GLOSS AGENTS -->\nkeep this\n<!-- END GLOSS AGENTS -->\n",
     )
     .unwrap();
 
-    let refresh = knit(&workspace, ["init", "arbient", "--agents"]);
+    let refresh = knit(&workspace, ["init", "demo", "--agents"]);
     assert!(refresh.contains("Project AGENTS.md"));
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(agents.contains("custom guidance"));
-    assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: arbient -->"));
+    assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: demo -->"));
     assert!(agents.contains("That command adds these default repos from the project data:"));
     assert!(agents.contains("- `backend`"));
-    assert!(!agents.contains("all four Arbient repos"));
+    assert!(!agents.contains("all four Demo repos"));
     assert!(agents.contains("<!-- BEGIN GLOSS AGENTS -->"));
-    assert!(
-        agents.contains("<!-- END KNIT PROJECT AGENTS: arbient -->\n<!-- BEGIN GLOSS AGENTS -->")
-    );
+    assert!(agents.contains("<!-- END KNIT PROJECT AGENTS: demo -->\n<!-- BEGIN GLOSS AGENTS -->"));
 
     knit(
         &workspace,
@@ -489,14 +489,14 @@ fn project_agents_are_generated_from_project_json() {
     let updated = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert_eq!(
         updated
-            .matches("<!-- BEGIN KNIT PROJECT AGENTS: arbient -->")
+            .matches("<!-- BEGIN KNIT PROJECT AGENTS: demo -->")
             .count(),
         1
     );
     assert!(updated.contains("- `backend`"));
     assert!(updated.contains("- `frontend`"));
 
-    let project_path = workspace.join(".knit/projects/arbient.project.json");
+    let project_path = workspace.join(".knit/projects/demo.project.json");
     let mut project: Value =
         serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
     project["landing"] = json!({
@@ -526,7 +526,7 @@ fn project_agents_are_generated_from_project_json() {
     )
     .unwrap();
 
-    knit(&workspace, ["project", "agents", "arbient"]);
+    knit(&workspace, ["project", "agents", "demo"]);
     let landing_agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(landing_agents.contains("This project defines a default landing template"));
     assert!(landing_agents
@@ -554,7 +554,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -614,4 +614,3 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

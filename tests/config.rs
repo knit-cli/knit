@@ -117,7 +117,7 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
         Some("https://api.knithub.dev")
     );
 
-    knit_with_env(&workspace, ["init", "arbient"], &env);
+    knit_with_env(&workspace, ["init", "demo"], &env);
     let inherited = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
     assert!(inherited.contains("https://api.knithub.dev"));
     assert!(inherited.contains("Scope: global"));
@@ -246,7 +246,6 @@ fn config_can_target_multiple_knithub_sync_remotes() {
 
     fs::remove_dir_all(root).unwrap();
 }
-
 
 #[test]
 fn workspace_scoped_tokens_warn_about_shared_config() {

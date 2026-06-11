@@ -228,10 +228,7 @@ fn merge_fetch_push_status_and_target_locks_work() {
         "feature merge push\n",
     )
     .unwrap();
-    knit(
-        &workspace,
-        ["commit", "--all", "-m", "Feature merge push"],
-    );
+    knit(&workspace, ["commit", "--all", "-m", "Feature merge push"]);
 
     fs::create_dir_all(workspace.join(".knit/locks")).unwrap();
     fs::write(workspace.join(".knit/locks/merge-staging-backend.lock"), "").unwrap();
@@ -271,4 +268,3 @@ fn merge_fetch_push_status_and_target_locks_work() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

@@ -48,8 +48,9 @@ fn archive_records_ledger_node_and_preserves_branches() {
         Some(latest["id"].as_str().unwrap())
     );
     assert_eq!(git(&feature, ["rev-parse", "HEAD"]), head_before_archive);
-    assert!(git(&backend, ["branch", "--list", "knit/venue-capacity"])
-        .contains("knit/venue-capacity"));
+    assert!(
+        git(&backend, ["branch", "--list", "knit/venue-capacity"]).contains("knit/venue-capacity")
+    );
 
     // Worktrees kept by --keep-worktrees are cleaned up by `clean --archived`.
     knit(&workspace, ["clean", "--archived", "--worktrees"]);
@@ -370,7 +371,10 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     let dirty_feature = workspace.join(".knit/worktrees/dirty-cleanup/frontend");
     append_line(&dirty_feature.join("app.txt"), "dirty local edit");
 
-    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--worktrees"]);
+    let preview = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--worktrees"],
+    );
     assert!(preview.contains("partial-landed"));
     assert!(preview.contains("recorded PRs are merged"));
     assert!(preview.contains("abandoned-cleanup"));
@@ -449,7 +453,10 @@ fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
 
     // --untracked promotes the untracked-only bundle to a real candidate while
     // still protecting the tracked-change bundle.
-    let untracked_preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--untracked"]);
+    let untracked_preview = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--untracked"],
+    );
     assert!(untracked_preview.contains("Dead bundle candidates"));
     assert!(untracked_preview.contains("stray-cleanup"));
     assert!(untracked_preview.contains("discards untracked files"));
@@ -505,7 +512,10 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     fs::create_dir_all(&dirty_orphan).unwrap();
     fs::write(dirty_orphan.join("note.txt"), "untracked work\n").unwrap();
 
-    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh", "--worktrees"]);
+    let preview = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--worktrees"],
+    );
     assert!(preview.contains("Orphan worktree candidates"));
     assert!(preview.contains("empty-orphan"));
     assert!(preview.contains("Blocked orphan worktrees"));
@@ -611,7 +621,6 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
 
     fs::remove_dir_all(root).unwrap();
 }
-
 
 #[test]
 fn bundle_prune_keeps_bundles_with_unpublished_commits() {

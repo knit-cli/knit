@@ -151,7 +151,10 @@ fn three_repo_feature_flow_creates_reviewable_bundle_nodes() {
     assert!(shorthand_log.contains("observed git changes"));
     assert!(!shorthand_log.contains("Add venue capacity integration"));
 
-    knit(&workspace, ["bundle", "remove", "--keep-worktree", "scraper"]);
+    knit(
+        &workspace,
+        ["bundle", "remove", "--keep-worktree", "scraper"],
+    );
 
     let bundle = read_bundle(&workspace);
     assert_eq!(bundle["kind"], "ChangeGroup");
@@ -391,4 +394,3 @@ fn revert_plans_and_applies_commit_groups_and_observed_git() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

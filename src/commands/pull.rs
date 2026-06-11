@@ -391,8 +391,9 @@ fn aggregate_pull(
             .map(|(id, path)| {
                 let gate = &gate;
                 scope.spawn(move || {
-                    let outcome =
-                        gate.lock_all(std::slice::from_ref(path), || pull_path(path, rebase, force));
+                    let outcome = gate.lock_all(std::slice::from_ref(path), || {
+                        pull_path(path, rebase, force)
+                    });
                     (id.clone(), outcome)
                 })
             })
@@ -447,7 +448,11 @@ fn pull_path(cwd: &Path, rebase: bool, force: bool) -> Outcome {
         Err(error) => return Outcome::Failed(condense(&error)),
     };
     let mut args = vec![OsString::from("pull")];
-    args.push(OsString::from(if rebase { "--rebase" } else { "--ff-only" }));
+    args.push(OsString::from(if rebase {
+        "--rebase"
+    } else {
+        "--ff-only"
+    }));
     if let Err(error) = git_output(cwd, args) {
         return Outcome::Failed(condense(&error));
     }
@@ -473,7 +478,9 @@ fn pull_one_bundle(
     };
     match pull_bundle_remote_state(root, context, bundle_id, merge) {
         Ok(RemoteBundleOutcome::Pulled(hash)) => Outcome::Synced(hash),
-        Ok(RemoteBundleOutcome::Merged(hash)) => Outcome::Synced(format!("{hash} (merged ledgers)")),
+        Ok(RemoteBundleOutcome::Merged(hash)) => {
+            Outcome::Synced(format!("{hash} (merged ledgers)"))
+        }
         Ok(RemoteBundleOutcome::Skipped(reason)) => Outcome::Skipped(reason),
         Err(error) => Outcome::Failed(condense(&error)),
     }

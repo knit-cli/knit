@@ -17,7 +17,7 @@ pub fn setup_three_repo_project(workspace: &Path, root: &Path) {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
     init_repo(&docs, "docs");
-    knit(workspace, ["init", "arbient"]);
+    knit(workspace, ["init", "demo"]);
     knit(
         workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -416,7 +416,12 @@ where
     run(command)
 }
 
-pub fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+pub fn knit_fails_with_fake_gh<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -813,7 +818,11 @@ fn write_windows_shim(script: &Path) {
     #[cfg(windows)]
     {
         let shim = script.with_extension("cmd");
-        fs::write(shim, "@sh \"%~dp0{}\" %*\r\n".replace("{}", &script.file_name().unwrap().to_string_lossy())).unwrap();
+        fs::write(
+            shim,
+            "@sh \"%~dp0{}\" %*\r\n".replace("{}", &script.file_name().unwrap().to_string_lossy()),
+        )
+        .unwrap();
     }
     #[cfg(not(windows))]
     let _ = script;
@@ -916,14 +925,12 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fs::write(dir.join("api-backend-edit.json"), &body).unwrap();
             (200, fake_github_pr_json(dir, number))
         }
-        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => (
-            200,
-            "{\"total_count\":0,\"check_runs\":[]}".to_string(),
-        ),
-        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => (
-            200,
-            "{\"state\":\"success\",\"statuses\":[]}".to_string(),
-        ),
+        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => {
+            (200, "{\"total_count\":0,\"check_runs\":[]}".to_string())
+        }
+        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => {
+            (200, "{\"state\":\"success\",\"statuses\":[]}".to_string())
+        }
         _ => (
             404,
             format!("{{\"message\":\"unexpected endpoint {method} /{path}\"}}"),
@@ -941,7 +948,7 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
 /// collision checks against the sync remote.
 pub fn spawn_fake_knithub_export(bundle_slug: &str, lifecycle_state: &str) -> String {
     spawn_fake_knithub_with_body(format!(
-        "{{\"data\":{{\"project\":{{\"slug\":\"arbient\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
+        "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
     ))
 }
 

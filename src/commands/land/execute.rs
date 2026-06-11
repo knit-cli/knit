@@ -10,7 +10,9 @@ use super::{
 };
 use crate::git::{git_output, is_git_worktree};
 use crate::ids::{node_id, slugify};
-use crate::model::{BundleNode, DeployCheckoutUpdate, DeployMode, PublicationEntry, SCHEMA_VERSION};
+use crate::model::{
+    BundleNode, DeployCheckoutUpdate, DeployMode, PublicationEntry, SCHEMA_VERSION,
+};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, PrTarget, PullRequest};
 use crate::store::{save_active_bundle, write_json, ActiveBundle};
@@ -186,7 +188,11 @@ pub(super) fn execute_run(
                 .filter(|(_, o)| !o.success)
                 .map(|(id, _)| id.as_str())
                 .collect();
-            let label = if failed_ids.len() == 1 { "step" } else { "steps" };
+            let label = if failed_ids.len() == 1 {
+                "step"
+            } else {
+                "steps"
+            };
             bail!(
                 "Land run {} stopped at {} {}. Fix the issue and run `knit land resume`.",
                 run.id,
@@ -246,7 +252,11 @@ fn execute_step(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Resu
     }
 }
 
-fn execute_merge_pr(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Result<StepOutcome> {
+fn execute_merge_pr(
+    active: &ActiveBundle,
+    plan: &LandPlan,
+    step: &LandStep,
+) -> Result<StepOutcome> {
     let repo_id = required_repo_id(step)?;
     let (_, repo, cwd) = repo_context(active, repo_id)?;
     let forge = providers::for_repo(&repo)?;
@@ -288,10 +298,12 @@ fn execute_merge_pr(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> 
         step.delete_branch.unwrap_or(false),
         pr.head_ref_oid.as_deref(),
     )?;
-    let refreshed = forge.view(&target, &publication.url).unwrap_or_else(|_| PullRequest {
-        state: Some("MERGED".to_string()),
-        ..pr.clone()
-    });
+    let refreshed = forge
+        .view(&target, &publication.url)
+        .unwrap_or_else(|_| PullRequest {
+            state: Some("MERGED".to_string()),
+            ..pr.clone()
+        });
     detail.push(format!("merged with {method}"));
     let _ = plan;
 
@@ -465,7 +477,11 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
     })
 }
 
-fn deployment_cwd(active: &ActiveBundle, repo_id: &str, step: &LandStep) -> Result<(PathBuf, String)> {
+fn deployment_cwd(
+    active: &ActiveBundle,
+    repo_id: &str,
+    step: &LandStep,
+) -> Result<(PathBuf, String)> {
     let (base, detail) = if let Some(checkout) = &step.checkout {
         let path = prepare_deployment_checkout(active, repo_id, checkout)?;
         let remote = checkout.remote.as_deref().unwrap_or("origin");

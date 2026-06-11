@@ -28,11 +28,14 @@ fn setup_workspace(root: &Path, with_runtime_block: bool) -> std::path::PathBuf 
     fs::create_dir_all(&workspace).unwrap();
     init_repo(&stack, "stack");
 
-    knit(&workspace, ["init", "arbient"]);
-    knit(&workspace, ["project", "add", "stack", stack.to_str().unwrap()]);
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "stack", stack.to_str().unwrap()],
+    );
     knit(&workspace, ["bundle", "venue capacity"]);
     if with_runtime_block {
-        write_project_runtime(&workspace, "arbient");
+        write_project_runtime(&workspace, "demo");
     }
     workspace
 }
@@ -92,7 +95,17 @@ fn project_command_named_up_shadows_the_runtime_verb() {
     .unwrap();
     knit(
         &workspace,
-        ["project", "command", "set", "up", "--repo", "stack", "--", "echo", "project-up-ran"],
+        [
+            "project",
+            "command",
+            "set",
+            "up",
+            "--repo",
+            "stack",
+            "--",
+            "echo",
+            "project-up-ran",
+        ],
     );
 
     let (fake_bin, log_dir) = write_fake_docker(&root);
@@ -156,7 +169,10 @@ fn run_up_contract_mode_injects_environment_into_repo_compose_file() {
             ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
         ],
     );
-    assert!(output.contains("Runtime up:"), "unexpected output: {output}");
+    assert!(
+        output.contains("Runtime up:"),
+        "unexpected output: {output}"
+    );
 
     let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
     assert!(calls.contains("-p knit-run-venue-capacity"));
@@ -173,7 +189,7 @@ fn run_up_contract_mode_injects_environment_into_repo_compose_file() {
     assert!(env.contains("KNIT_PORT_BACKEND="));
     assert!(env.contains("KNIT_PORT_FRONTEND="));
     assert!(env.contains("KNIT_DB_MODE=bundle"));
-    assert!(env.contains("KNIT_DB_NAME=knithub_venue-capacity"));
+    assert!(env.contains("KNIT_DB_NAME=app_venue-capacity"));
     assert!(env.contains("KNIT_DB_HOST=db"));
     assert!(env.contains("KNIT_DB_HOST_PORT=5437"));
 
@@ -239,7 +255,10 @@ fn run_up_transform_mode_lifts_main_shape_with_zero_config() {
             ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
         ],
     );
-    assert!(output.contains("Runtime up:"), "unexpected output: {output}");
+    assert!(
+        output.contains("Runtime up:"),
+        "unexpected output: {output}"
+    );
 
     let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
     assert!(calls.contains("-p knit-run-venue-capacity"));

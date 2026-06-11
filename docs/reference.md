@@ -221,20 +221,20 @@ Projects can define a default landing template. `knit land plan` expands it into
   "landing": {
     "provider": "github",
     "merge": {
-      "repoOrder": ["arbient-odds-store", "scrapers", "betsnitch", "arbient-engine", "betsnitch-frontend"],
+      "repoOrder": ["schema-store", "scrapers", "backend", "engine", "frontend"],
       "method": "merge",
       "requiredChecksOnly": true
     },
     "deployments": [
       {
-        "id": "deploy-betsnitch",
-        "repoId": "betsnitch",
+        "id": "deploy-backend",
+        "repoId": "backend",
         "checkout": { "branch": "main", "remote": "origin", "update": "pull" },
         "command": ["fly", "deploy"]
       },
       {
         "id": "deploy-frontend",
-        "repoId": "betsnitch-frontend",
+        "repoId": "frontend",
         "mode": "push"
       }
     ]

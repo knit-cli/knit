@@ -187,11 +187,11 @@ fn default_database_host() -> String {
 }
 
 fn default_database_port() -> u16 {
-    5436
+    5432
 }
 
 fn default_database_name() -> String {
-    "knithub_dev".to_string()
+    "app_dev".to_string()
 }
 
 /// Host port allocation pools for bundle runtimes. Container-side ports are
