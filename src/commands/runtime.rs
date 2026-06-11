@@ -1,4 +1,5 @@
 use crate::checkout::checkout_dir;
+use crate::git::rev_parse;
 use crate::model::{
     KnitProject, ProjectRuntime, ProjectRuntimeDatabase, ProjectRuntimePorts, RepoEntry,
     DATABASE_MODE_BUNDLE, DATABASE_MODE_SHARED,
@@ -455,15 +456,7 @@ fn generate_main_compose(
 }
 
 fn checkout_git_revision(path: &Path) -> String {
-    let output = Command::new("git")
-        .args(["-C", path.to_str().unwrap_or_default(), "rev-parse", "HEAD"])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => "unknown".to_string(),
-    }
+    rev_parse(path, "HEAD").unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn allocate_ports(
