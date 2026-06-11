@@ -3,7 +3,7 @@ use crate::git::{current_branch, git_output_optional, git_root, infer_base_branc
 use crate::ids::slugify;
 use crate::model::{
     KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
-    CHECKOUT_MODE_WORKTREE,
+    CheckoutMode,
 };
 use crate::output as out;
 use crate::store::{
@@ -410,7 +410,7 @@ fn resolve_project_repo(
         path: repo_root.to_string_lossy().to_string(),
         remote,
         base_branch,
-        checkout_mode: CHECKOUT_MODE_WORKTREE.to_string(),
+        checkout_mode: CheckoutMode::Worktree,
         include_by_default: !observe,
     })
 }

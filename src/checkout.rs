@@ -1,11 +1,11 @@
 use crate::git::current_branch;
-use crate::model::{RepoEntry, CHECKOUT_MODE_IN_PLACE};
+use crate::model::{CheckoutMode, RepoEntry};
 use crate::store::ActiveBundle;
 use anyhow::{bail, Result};
 use std::path::{Path, PathBuf};
 
 pub fn is_in_place(repo: &RepoEntry) -> bool {
-    repo.checkout_mode == CHECKOUT_MODE_IN_PLACE
+    repo.checkout_mode == CheckoutMode::InPlace
 }
 
 pub fn checkout_mode_label(repo: &RepoEntry) -> &'static str {

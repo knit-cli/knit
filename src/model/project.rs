@@ -1,12 +1,35 @@
 //! Reusable project templates: repos, run commands, runtime, and landing plan.
 
-use super::{default_checkout_mode, SCHEMA_VERSION};
+use super::{CheckoutMode, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
 pub const PROJECT_CONFIG_FILE: &str = "knit.project.json";
-pub const DATABASE_MODE_SHARED: &str = "shared";
-pub const DATABASE_MODE_BUNDLE: &str = "bundle";
+
+/// How a bundle runtime gets its database: attached to an existing shared dev
+/// database, or a dedicated per-bundle container.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DatabaseMode {
+    #[default]
+    Shared,
+    Bundle,
+}
+
+impl DatabaseMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DatabaseMode::Shared => "shared",
+            DatabaseMode::Bundle => "bundle",
+        }
+    }
+}
+
+impl std::fmt::Display for DatabaseMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -52,8 +75,8 @@ pub struct ProjectRepoEntry {
     pub path: String,
     pub remote: Option<String>,
     pub base_branch: String,
-    #[serde(default = "default_checkout_mode")]
-    pub checkout_mode: String,
+    #[serde(default)]
+    pub checkout_mode: CheckoutMode,
     #[serde(default = "default_include_by_default")]
     pub include_by_default: bool,
 }
@@ -112,8 +135,8 @@ fn default_project_config_file() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntimeDatabase {
-    #[serde(default = "default_database_mode")]
-    pub mode: String,
+    #[serde(default)]
+    pub mode: DatabaseMode,
     #[serde(default = "default_database_host")]
     pub host: String,
     #[serde(default = "default_database_port")]
@@ -124,10 +147,6 @@ pub struct ProjectRuntimeDatabase {
     pub name_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_base: Option<u16>,
-}
-
-fn default_database_mode() -> String {
-    DATABASE_MODE_SHARED.to_string()
 }
 
 fn default_database_host() -> String {
@@ -180,7 +199,7 @@ fn default_frontend_container_port() -> u16 {
 impl Default for ProjectRuntimeDatabase {
     fn default() -> Self {
         Self {
-            mode: default_database_mode(),
+            mode: DatabaseMode::default(),
             host: default_database_host(),
             port: default_database_port(),
             name: default_database_name(),
@@ -223,7 +242,7 @@ pub struct ProjectLandingMergePlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub include_unlisted: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub method: Option<String>,
+    pub method: Option<super::MergeMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub wait_for_checks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -243,7 +262,7 @@ pub struct ProjectLandingDeployment {
     #[serde(default, alias = "repo", skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mode: Option<String>,
+    pub mode: Option<super::DeployMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -263,7 +282,7 @@ pub struct ProjectLandingCheckout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub update: Option<String>,
+    pub update: Option<super::DeployCheckoutUpdate>,
 }
 
 fn default_include_by_default() -> bool {

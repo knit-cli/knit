@@ -764,7 +764,7 @@ mod tests {
             commit: Some(commit.to_string()),
             before_sha: None,
             after_sha: Some(commit.to_string()),
-            movement: Some("advanced".to_string()),
+            movement: Some(crate::model::Movement::Advanced),
             node_id: Some(node_id.to_string()),
             node_type: Some("commit.group".to_string()),
             commit_group_id: commit_group_id.map(ToString::to_string),

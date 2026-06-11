@@ -1,7 +1,8 @@
 use crate::checkout::checkout_dir;
+use crate::git::rev_parse;
 use crate::model::{
     KnitProject, ProjectRuntime, ProjectRuntimeDatabase, ProjectRuntimePorts, RepoEntry,
-    DATABASE_MODE_BUNDLE, DATABASE_MODE_SHARED,
+    DatabaseMode,
 };
 use crate::output as out;
 use crate::store::{load_active_bundle, project_path, read_json, write_json, ActiveBundle};
@@ -51,7 +52,7 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
 
     let database = runtime.database.clone().unwrap_or_default();
     let resolved_database = resolve_database(&database, &active.bundle.id)?;
-    if resolved_database.mode == DATABASE_MODE_SHARED {
+    if resolved_database.mode == DatabaseMode::Shared {
         ensure_shared_database_reachable(&database, &active.root)?;
     }
 
@@ -77,7 +78,7 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         backend_port: ports.backend,
         frontend_port: ports.frontend,
         database_port: resolved_database.host_port.unwrap_or(database.port),
-        database_mode: resolved_database.mode.clone(),
+        database_mode: resolved_database.mode,
         database_name: resolved_database.name.clone(),
         compose_file: compose_path
             .strip_prefix(&active.root)
@@ -349,7 +350,7 @@ fn generate_worktree_compose(
     let frontend_context = workspace_root.join(frontend_src).display().to_string();
     let gloss_context = workspace_root.join(gloss_src).display().to_string();
     let db_service = bundle_database_service(project_name, database);
-    let backend_depends = if database.mode == DATABASE_MODE_BUNDLE {
+    let backend_depends = if database.mode == DatabaseMode::Bundle {
         "    depends_on:\n      db:\n        condition: service_healthy\n".to_string()
     } else {
         String::new()
@@ -455,15 +456,7 @@ fn generate_main_compose(
 }
 
 fn checkout_git_revision(path: &Path) -> String {
-    let output = Command::new("git")
-        .args(["-C", path.to_str().unwrap_or_default(), "rev-parse", "HEAD"])
-        .output();
-    match output {
-        Ok(output) if output.status.success() => {
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
-        }
-        _ => "unknown".to_string(),
-    }
+    rev_parse(path, "HEAD").unwrap_or_else(|_| "unknown".to_string())
 }
 
 fn allocate_ports(
@@ -587,7 +580,7 @@ fn try_start_shared_dev_database(workspace_root: &Path, port: u16) -> Result<()>
 }
 
 fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Result<ResolvedDatabase> {
-    if database.mode == DATABASE_MODE_BUNDLE {
+    if database.mode == DatabaseMode::Bundle {
         let template = database
             .name_template
             .as_deref()
@@ -595,7 +588,7 @@ fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Resul
         let name = template.replace("{bundleId}", bundle_id);
         let host_port = database.port_base.unwrap_or(5437);
         Ok(ResolvedDatabase {
-            mode: DATABASE_MODE_BUNDLE.to_string(),
+            mode: DatabaseMode::Bundle,
             host: "db".to_string(),
             port: 5432,
             name,
@@ -603,7 +596,7 @@ fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Resul
         })
     } else {
         Ok(ResolvedDatabase {
-            mode: DATABASE_MODE_SHARED.to_string(),
+            mode: DatabaseMode::Shared,
             host: database.host.clone(),
             port: database.port,
             name: database.name.clone(),
@@ -613,7 +606,7 @@ fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Resul
 }
 
 fn bundle_database_service(project_name: &str, database: &ResolvedDatabase) -> String {
-    if database.mode != DATABASE_MODE_BUNDLE {
+    if database.mode != DatabaseMode::Bundle {
         return String::new();
     }
 
@@ -654,7 +647,7 @@ fn runtime_service_status(running: bool) -> &'static str {
 }
 
 fn database_status_label(state: &RuntimeRunState, db_running: bool) -> &'static str {
-    if state.database_mode == DATABASE_MODE_BUNDLE {
+    if state.database_mode == DatabaseMode::Bundle {
         runtime_service_status(db_running)
     } else if TcpStream::connect(format!("127.0.0.1:{}", state.database_port)).is_ok() {
         "reachable"
@@ -739,8 +732,8 @@ struct RuntimeRunState {
     backend_port: u16,
     frontend_port: u16,
     database_port: u16,
-    #[serde(default = "default_database_mode_state")]
-    database_mode: String,
+    #[serde(default)]
+    database_mode: DatabaseMode,
     #[serde(default = "default_database_name_state")]
     database_name: String,
     compose_file: String,
@@ -748,16 +741,12 @@ struct RuntimeRunState {
     started_at: String,
 }
 
-fn default_database_mode_state() -> String {
-    DATABASE_MODE_SHARED.to_string()
-}
-
 fn default_database_name_state() -> String {
     "knithub_dev".to_string()
 }
 
 struct ResolvedDatabase {
-    mode: String,
+    mode: DatabaseMode,
     host: String,
     port: u16,
     name: String,

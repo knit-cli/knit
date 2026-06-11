@@ -20,11 +20,107 @@ pub use project::*;
 pub use view::*;
 
 pub const SCHEMA_VERSION: &str = "0.1";
-pub const DEFAULT_LANDING_MERGE_METHOD: &str = "merge";
-pub const CHECKOUT_MODE_WORKTREE: &str = "worktree";
-pub const CHECKOUT_MODE_IN_PLACE: &str = "inPlace";
 
-/// Default `checkoutMode` shared by project and bundle repo entries.
-fn default_checkout_mode() -> String {
-    CHECKOUT_MODE_WORKTREE.to_string()
+/// How a landed PR is merged into its base. Serialized lowercase to match
+/// project templates and editable land plans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum MergeMethod {
+    #[default]
+    Merge,
+    Squash,
+    Rebase,
+}
+
+impl MergeMethod {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            MergeMethod::Merge => "merge",
+            MergeMethod::Squash => "squash",
+            MergeMethod::Rebase => "rebase",
+        }
+    }
+}
+
+impl std::fmt::Display for MergeMethod {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// How a deploy step deploys: run a command, or push a branch. Shared by
+/// project landing templates and land plans.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DeployMode {
+    Command,
+    Push,
+}
+
+impl DeployMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeployMode::Command => "command",
+            DeployMode::Push => "push",
+        }
+    }
+}
+
+impl std::fmt::Display for DeployMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// How a deploy checkout is refreshed before deploying.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum DeployCheckoutUpdate {
+    #[default]
+    Fetch,
+    Pull,
+    None,
+}
+
+impl DeployCheckoutUpdate {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            DeployCheckoutUpdate::Fetch => "fetch",
+            DeployCheckoutUpdate::Pull => "pull",
+            DeployCheckoutUpdate::None => "none",
+        }
+    }
+}
+
+impl std::fmt::Display for DeployCheckoutUpdate {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// How a tracked repo is checked out for a bundle: a generated worktree under
+/// `.knit/worktrees/`, or in place in the source checkout. Serialized as
+/// `worktree` / `inPlace` to match existing artifacts.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum CheckoutMode {
+    #[default]
+    #[serde(rename = "worktree")]
+    Worktree,
+    #[serde(rename = "inPlace")]
+    InPlace,
+}
+
+impl CheckoutMode {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            CheckoutMode::Worktree => "worktree",
+            CheckoutMode::InPlace => "inPlace",
+        }
+    }
+}
+
+impl std::fmt::Display for CheckoutMode {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
 }
