@@ -1,4 +1,4 @@
-use knit::ids::{short_sha, slugify, unique_repo_id};
+use knit::ids::{expand_repo_selectors, short_sha, slugify, unique_repo_id};
 use knit::model::{ChangeGroup, RepoEntry, CHECKOUT_MODE_WORKTREE};
 
 fn empty_bundle() -> ChangeGroup {
@@ -7,6 +7,22 @@ fn empty_bundle() -> ChangeGroup {
         "venue capacity".to_string(),
         "2026-05-05T00:00:00.000Z".to_string(),
     )
+}
+
+#[test]
+fn expands_comma_separated_repo_selectors() {
+    assert_eq!(
+        expand_repo_selectors(&["frontend,docs".to_string()]),
+        vec!["frontend", "docs"]
+    );
+    assert_eq!(
+        expand_repo_selectors(&[
+            "backend".to_string(),
+            "frontend, docs".to_string(),
+        ]),
+        vec!["backend", "frontend", "docs"]
+    );
+    assert_eq!(expand_repo_selectors(&[" , ".to_string()]), Vec::<String>::new());
 }
 
 #[test]
