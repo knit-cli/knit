@@ -34,7 +34,7 @@ src/
     remove.rs
     revert.rs
     run.rs            configured/one-off commands inside checkouts
-    runtime.rs        bundle runtime stacks (`knit run up/status/down`)
+    runtime/          bundle runtime stacks (`knit run up/status/down`): mod.rs orchestrates, transform.rs lifts compose shapes
     schema.rs
     shape.rs          live reshaping: `knit bundle add/remove/apply-view`
     stage.rs
@@ -71,10 +71,10 @@ src/
 tests/
   common/       shared test harness (toy repos, isolated KNIT_HOME)
   bundle.rs  cleanup.rs  config.rs  feature_flow.rs  ids.rs  land.rs
-  merge.rs  model.rs  project.rs  publish.rs  status.rs  sync.rs
+  merge.rs  model.rs  project.rs  publish.rs  runtime.rs  status.rs  sync.rs
 ```
 
-Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model/` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each module in `commands/` coordinates one user-facing command with filesystem and git operations. A command starts as a single file and becomes a directory module only when it grows distinct phases (plan/execute/report), as `bundle/`, `land/`, `merge/`, `publish/`, and `remote/` have.
+Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model/` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each module in `commands/` coordinates one user-facing command with filesystem and git operations. A command starts as a single file and becomes a directory module only when it grows distinct phases (plan/execute/report), as `bundle/`, `land/`, `merge/`, `publish/`, `remote/`, and `runtime/` have.
 
 ## Boundaries
 
@@ -87,6 +87,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `commands/land/` owns landing plan/run orchestration. It reads publication metadata and project landing templates, writes `.knit/land-plans/` and `.knit/land-runs/`, manages deployment checkouts under `.knit/land-worktrees/`, and appends `feature.landed` only after every step succeeds.
 - `commands/merge/` owns local bundle/ref integration into target branches or other bundles. It writes `.knit/merge-runs/`, uses managed branch checkouts under `.knit/merge-worktrees/`, rolls back failed non-manual runs to their pre-run SHAs, and records target-bundle merges as `git.observed`.
 - `commands/remote/` owns all KnitHub artifact transport. `facade.rs` selects artifact families and remotes; the per-artifact helpers in `push.rs`/`pull.rs`/`history.rs` own transport. Every door (`knit sync push/pull`, `knit push --remote`, `knit fetch`/`pull --bundles`, post-land auto-sync) routes through it.
+- `commands/runtime/` owns disposable per-bundle stacks (`knit run up/status/down`). `mod.rs` picks the mode per compose file — explicit `runtime.mode`, the `docker-compose.knit.yml` filename, or `${KNIT_*}` references select contract mode; everything else is transformed — and owns port allocation and run state under `.knit/runtime-runs/<bundle>/` (recorded only after a successful start; `down`/`status` resolve containers by compose project label so they survive missing state and torn-down worktrees). `transform.rs` rewrites resolved compose JSON: paths into tracked repos to bundle worktrees, published host ports to free ports, textual port references in env/args. Docker is reached only through `docker compose` subprocesses, and a project command named `up`/`down`/`status` always wins over the runtime verbs. Transform heuristics must not grow: a stack the transform cannot lift commits a contract compose file instead.
 - `commands/doctor.rs` owns workspace validation and additive JSON migrations. `commands/schema.rs` prints bundled JSON Schemas for Knit artifacts.
 - `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. Each adapter (`github.rs`/`gitlab.rs`/`forgejo.rs`) maps its CLI's JSON onto the canonical types. GitLab and Codeberg/Forgejo are detected from the remote host; every other remote defaults to GitHub. Provider modules expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
