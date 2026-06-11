@@ -44,7 +44,7 @@ pub fn run_project_command(
 
             if name.is_some() {
                 bail!(
-                    "`knit run {runtime_command}` requires a `runtime` block in the Knit project. Pull it with `knit project pull --repo <stack-repo>` or add it to `.knit/projects/<project>.project.json`."
+                    "`knit run {runtime_command}` needs a bundle repo with a docker-compose file, or a `runtime` block in the Knit project (pull it with `knit project pull --repo <stack-repo>`)."
                 );
             }
         }

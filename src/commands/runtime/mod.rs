@@ -1,37 +1,33 @@
 //! `knit run up|status|down` — disposable per-bundle runtime instances.
 //!
-//! Knit's runtime primitive is environment injection, not stack generation.
-//! Knit knows the checkout topology (paths, revs), allocates a per-bundle
-//! namespace (compose project name, host ports, database identity), and
-//! exposes all of it as `KNIT_*` environment variables. The stack repo owns a
-//! compose file written against those variables; `knit run up` is sugar for
-//! `docker compose -f <stack>/<composeFile> -p knit-run-<bundle> up` with the
-//! contract injected. Service topology, build args, and app env live in the
-//! repo's compose file, versioned with the stack they describe.
+//! The goal: take the docker shape the repos already run on their main
+//! branches and lift a parallel instance of that same shape — different
+//! ports, isolated compose project, and the bundle's code substituted in.
 //!
-//! The environment contract:
+//! Two modes, picked per compose file:
 //!
-//! - `KNIT_ROOT` / `KNIT_BUNDLE` — workspace root and bundle id
-//! - `COMPOSE_PROJECT_NAME` — `knit-run-<bundle>` (also passed as `-p`)
-//! - `KNIT_CHECKOUT_<REPO>` — absolute path of each repo's resolved checkout
-//!   (bundle worktree when tracked, source path otherwise)
-//! - `KNIT_SRC_<REPO>` — the same path relative to `KNIT_ROOT`, for build
-//!   contexts rooted at the workspace
-//! - `KNIT_REV_<REPO>` — HEAD revision of that checkout
-//! - `KNIT_PORT_BACKEND` / `KNIT_PORT_FRONTEND` — allocated host ports
-//! - `KNIT_DB_MODE` / `KNIT_DB_HOST` / `KNIT_DB_PORT` / `KNIT_DB_NAME` /
-//!   `KNIT_DB_HOST_PORT` — resolved database identity
+//! - **Transform** (default): the stack repo's own compose file is resolved
+//!   with `docker compose config` and rewritten — paths into tracked repos
+//!   remapped to bundle worktrees, published host ports reallocated, port
+//!   references inside env values rewritten. No authoring required; see
+//!   [`transform`].
+//! - **Contract**: a compose file that references `KNIT_*` variables is run
+//!   as-is with the contract injected: `KNIT_ROOT`/`KNIT_BUNDLE`,
+//!   `KNIT_CHECKOUT_<REPO>`/`KNIT_SRC_<REPO>`/`KNIT_REV_<REPO>` per repo,
+//!   `KNIT_PORT_BACKEND`/`KNIT_PORT_FRONTEND`, and `KNIT_DB_*`. Repo ids are
+//!   uppercased with non-alphanumerics mapped to `_`. In `bundle` database
+//!   mode the `bundle-db` compose profile is activated.
 //!
-//! Repo ids are uppercased with non-alphanumerics mapped to `_`
-//! (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`). In `bundle` database
-//! mode Knit activates the `bundle-db` compose profile so the stack's
-//! profile-gated database service starts; in `shared` mode it stays off.
+//! Either way the stack runs as compose project `knit-run-<bundle>`, so
+//! networks and named volumes are isolated per bundle, and `down`/`status`
+//! resolve containers by label and survive worktree deletion.
+
+mod transform;
 
 use crate::checkout::checkout_dir;
 use crate::git::rev_parse;
 use crate::model::{
-    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, ProjectRuntimePorts,
-    RepoEntry,
+    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RepoEntry,
 };
 use crate::output as out;
 use crate::store::{load_active_bundle, project_path, read_json, write_json, ActiveBundle};
@@ -46,8 +42,17 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::Duration;
 
+use transform::ServicePort;
+
 const RUNTIME_KIND_DOCKER_COMPOSE: &str = "docker-compose";
 const BUNDLE_DB_PROFILE: &str = "bundle-db";
+const CONTRACT_COMPOSE_CANDIDATES: [&str; 1] = ["docker-compose.knit.yml"];
+const PLAIN_COMPOSE_CANDIDATES: [&str; 4] = [
+    "docker-compose.yml",
+    "docker-compose.yaml",
+    "compose.yaml",
+    "compose.yml",
+];
 
 pub fn try_handle(name: Option<&str>, raw_args: &[OsString]) -> Result<bool> {
     if !raw_args.is_empty() {
@@ -55,25 +60,99 @@ pub fn try_handle(name: Option<&str>, raw_args: &[OsString]) -> Result<bool> {
     }
 
     let active = load_active_bundle()?;
-    let project = load_project_for_bundle(&active)?;
-    let Some(runtime) = project.runtime.clone() else {
-        return Ok(false);
-    };
+    let project = load_project_for_bundle(&active).ok();
+    let runtime = project.as_ref().and_then(|p| p.runtime.clone());
 
     match name {
-        None | Some("up") => run_up(&active, &project, &runtime).map(|_| true),
-        Some("down") => run_down(&active).map(|_| true),
-        Some("status") => run_status(&active).map(|_| true),
+        None | Some("up") => {
+            let Some((runtime, stack_repo)) = resolve_runtime(&active, runtime)? else {
+                return Ok(false);
+            };
+            run_up(&active, project.as_ref(), &runtime, stack_repo).map(|_| true)
+        }
+        Some("down") => {
+            if runtime.is_none() && !has_state(&active) {
+                return Ok(false);
+            }
+            run_down(&active).map(|_| true)
+        }
+        Some("status") => {
+            if runtime.is_none() && !has_state(&active) {
+                return Ok(false);
+            }
+            run_status(&active).map(|_| true)
+        }
         Some(_) => Ok(false),
     }
 }
 
-fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime) -> Result<()> {
+/// Resolve the runtime config and stack repo for `up`. With no `runtime`
+/// block in the project, fall back to auto-detection: a single bundle repo
+/// with a compose file makes the runtime work with zero configuration.
+fn resolve_runtime(
+    active: &ActiveBundle,
+    runtime: Option<ProjectRuntime>,
+) -> Result<Option<(ProjectRuntime, &RepoEntry)>> {
+    if let Some(stack_repo_id) = runtime.as_ref().and_then(|r| r.stack_repo.clone()) {
+        let repo = active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| repo.id == stack_repo_id)
+            .with_context(|| {
+                format!("stack repo `{stack_repo_id}` is not tracked in this bundle")
+            })?;
+        return Ok(Some((runtime.unwrap(), repo)));
+    }
+
+    let mut detected = Vec::new();
+    for repo in &active.bundle.repos {
+        let Some(checkout) = checkout_dir(active, repo) else {
+            continue;
+        };
+        let has_compose = CONTRACT_COMPOSE_CANDIDATES
+            .iter()
+            .chain(PLAIN_COMPOSE_CANDIDATES.iter())
+            .any(|candidate| checkout.join(candidate).exists());
+        if has_compose {
+            detected.push(repo);
+        }
+    }
+
+    match detected.len() {
+        0 => Ok(None),
+        1 => Ok(Some((runtime.unwrap_or_default(), detected[0]))),
+        _ => bail!(
+            "Multiple bundle repos have compose files ({}). Set `runtime.stackRepo` in the project to pick one.",
+            detected
+                .iter()
+                .map(|repo| repo.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum RuntimeMode {
+    /// Lift the repo's existing compose shape into the bundle namespace.
+    #[default]
+    Transform,
+    /// Run a `KNIT_*`-aware compose file with the contract injected.
+    Contract,
+}
+
+fn run_up(
+    active: &ActiveBundle,
+    project: Option<&KnitProject>,
+    runtime: &ProjectRuntime,
+    stack_repo: &RepoEntry,
+) -> Result<()> {
     if runtime.kind != RUNTIME_KIND_DOCKER_COMPOSE {
         bail!("Unsupported runtime kind `{}`.", runtime.kind);
     }
 
-    let stack_repo = resolve_stack_repo(active, runtime)?;
     let stack_checkout = checkout_dir(active, stack_repo).with_context(|| {
         format!(
             "{} has no checkout. Run `knit bundle worktree` first.",
@@ -81,29 +160,176 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         )
     })?;
 
-    let compose_path = stack_checkout.join(&runtime.compose_file);
-    if !compose_path.exists() {
-        bail!(
-            "Runtime compose file not found: {}. The stack repo `{}` must provide `{}` written against Knit's runtime environment contract (KNIT_CHECKOUT_<repo>, KNIT_REV_<repo>, KNIT_PORT_*, KNIT_DB_*).",
-            compose_path.display(),
-            stack_repo.id,
-            runtime.compose_file
-        );
-    }
+    let compose_path = find_compose_file(&stack_checkout, runtime)?;
+    let mode = detect_mode(&compose_path)?;
 
+    match mode {
+        RuntimeMode::Contract => {
+            run_up_contract(active, project, runtime, stack_repo, &stack_checkout, &compose_path)
+        }
+        RuntimeMode::Transform => {
+            run_up_transform(active, runtime, stack_repo, &stack_checkout, &compose_path)
+        }
+    }
+}
+
+/// Pick the compose file: explicit `composeFile` config wins, then the
+/// contract file, then the repo's own compose file.
+fn find_compose_file(stack_checkout: &Path, runtime: &ProjectRuntime) -> Result<PathBuf> {
+    if let Some(configured) = &runtime.compose_file {
+        let path = stack_checkout.join(configured);
+        if !path.exists() {
+            bail!(
+                "Runtime compose file not found: {}. Configured as `composeFile` in the project runtime.",
+                path.display()
+            );
+        }
+        return Ok(path);
+    }
+    for candidate in CONTRACT_COMPOSE_CANDIDATES
+        .iter()
+        .chain(PLAIN_COMPOSE_CANDIDATES.iter())
+    {
+        let path = stack_checkout.join(candidate);
+        if path.exists() {
+            return Ok(path);
+        }
+    }
+    bail!(
+        "No compose file found in {}. Add a docker-compose.yml to the stack repo (lifted automatically) or a docker-compose.knit.yml written against the KNIT_* contract.",
+        stack_checkout.display()
+    );
+}
+
+/// A compose file that references `KNIT_` variables opts into the contract;
+/// anything else is lifted by transformation.
+fn detect_mode(compose_path: &Path) -> Result<RuntimeMode> {
+    let text = fs::read_to_string(compose_path)
+        .with_context(|| format!("failed to read {}", compose_path.display()))?;
+    if text.contains("KNIT_") {
+        Ok(RuntimeMode::Contract)
+    } else {
+        Ok(RuntimeMode::Transform)
+    }
+}
+
+/// Transform mode: resolve the repo's compose file in source-space, rewrite
+/// it into the bundle namespace, and run the generated file.
+fn run_up_transform(
+    active: &ActiveBundle,
+    runtime: &ProjectRuntime,
+    stack_repo: &RepoEntry,
+    stack_checkout: &Path,
+    compose_path: &Path,
+) -> Result<()> {
+    let source_dir = PathBuf::from(&stack_repo.path);
+    let mut config = transform::resolve_compose_config(compose_path, &source_dir)?;
+
+    let repo_map: Vec<(PathBuf, PathBuf)> = active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            let checkout = checkout_dir(active, repo)?;
+            let source = crate::paths::canonicalize(Path::new(&repo.path)).ok()?;
+            (source != checkout).then_some((source, checkout))
+        })
+        .collect();
+
+    let step = runtime.ports.clone().unwrap_or_default().step.max(1);
+    let mut taken = load_used_ports(&active.root)?;
+    let mut allocate = |old: u16| -> Result<u16> {
+        let mut candidate = old.saturating_add(step);
+        loop {
+            if !taken.contains(&candidate) && port_available(candidate) {
+                taken.insert(candidate);
+                return Ok(candidate);
+            }
+            candidate = candidate.saturating_add(step);
+            if candidate > 65000 {
+                bail!("Could not find a free runtime port for {old}.");
+            }
+        }
+    };
+
+    let ports = transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
+
+    let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
+    fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
+    // JSON is valid YAML, so the generated file can stay a compose file.
+    let generated = run_dir.join("docker-compose.yml");
+    fs::write(&generated, serde_json::to_string_pretty(&config)?)
+        .context("failed to write generated compose file")?;
+
+    let state = RuntimeRunState {
+        bundle_id: active.bundle.id.clone(),
+        stack_repo: stack_repo.id.clone(),
+        mode: RuntimeMode::Transform,
+        ports: ports.clone(),
+        database: None,
+        compose_file: generated
+            .strip_prefix(&active.root)
+            .unwrap_or(&generated)
+            .display()
+            .to_string(),
+        profiles: Vec::new(),
+        env: BTreeMap::new(),
+        profile_path: runtime.profile_path.clone(),
+        started_at: crate::time::now_iso(),
+    };
+    write_json(&run_dir.join("state.json"), &state)?;
+
+    let project_name = compose_project_name(&active.bundle.id);
+    print_up_summary(active, &generated, &ports, runtime.profile_path.as_deref());
+
+    let status = Command::new("docker")
+        .args(["compose", "-f"])
+        .arg(&generated)
+        .args(["-p", &project_name, "up", "--build", "-d"])
+        .current_dir(stack_checkout)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run docker compose")?;
+    if !status.success() {
+        bail!("docker compose exited with status {status}");
+    }
+    Ok(())
+}
+
+/// Contract mode: inject the `KNIT_*` environment into the repo-owned
+/// compose file and run it in place.
+fn run_up_contract(
+    active: &ActiveBundle,
+    project: Option<&KnitProject>,
+    runtime: &ProjectRuntime,
+    stack_repo: &RepoEntry,
+    stack_checkout: &Path,
+    compose_path: &Path,
+) -> Result<()> {
     let database = runtime.database.clone().unwrap_or_default();
     let resolved_database = resolve_database(&database, &active.bundle.id);
     if resolved_database.mode == DatabaseMode::Shared {
-        ensure_shared_database_reachable(&database, &stack_checkout)?;
+        ensure_shared_database_reachable(&database, stack_checkout)?;
     }
 
-    let ports = allocate_ports(&active.root, runtime.ports.clone())?;
+    let ports_config = runtime.ports.clone().unwrap_or_default();
+    let used = load_used_ports(&active.root)?;
+    let (backend_port, frontend_port) = allocate_port_pair(
+        &used,
+        ports_config.backend_base,
+        ports_config.frontend_base,
+        ports_config.step.max(1),
+    )?;
+
     let project_name = compose_project_name(&active.bundle.id);
     let env = runtime_env(
         active,
         project,
         &project_name,
-        &ports,
+        backend_port,
+        frontend_port,
         &resolved_database,
     );
     let profiles = if resolved_database.mode == DatabaseMode::Bundle {
@@ -112,19 +338,41 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         Vec::new()
     };
 
+    let mut ports = vec![
+        ServicePort {
+            service: "backend".to_string(),
+            host: backend_port,
+            container: None,
+        },
+        ServicePort {
+            service: "frontend".to_string(),
+            host: frontend_port,
+            container: None,
+        },
+    ];
+    if resolved_database.mode == DatabaseMode::Bundle {
+        ports.push(ServicePort {
+            service: "db".to_string(),
+            host: resolved_database.host_port,
+            container: Some(5432),
+        });
+    }
+
     let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
     fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
     let state = RuntimeRunState {
         bundle_id: active.bundle.id.clone(),
         stack_repo: stack_repo.id.clone(),
-        backend_port: ports.backend,
-        frontend_port: ports.frontend,
-        database_port: resolved_database.host_port,
-        database_mode: resolved_database.mode,
-        database_name: resolved_database.name.clone(),
+        mode: RuntimeMode::Contract,
+        ports: ports.clone(),
+        database: Some(StateDatabase {
+            mode: resolved_database.mode,
+            port: resolved_database.host_port,
+            name: resolved_database.name.clone(),
+        }),
         compose_file: compose_path
             .strip_prefix(&active.root)
-            .unwrap_or(&compose_path)
+            .unwrap_or(compose_path)
             .display()
             .to_string(),
         profiles: profiles.clone(),
@@ -134,6 +382,37 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
     };
     write_json(&run_dir.join("state.json"), &state)?;
 
+    print_up_summary(active, compose_path, &ports, runtime.profile_path.as_deref());
+
+    let mut command = Command::new("docker");
+    command
+        .args(["compose", "-f"])
+        .arg(compose_path)
+        .args(["-p", &project_name]);
+    for profile in &profiles {
+        command.args(["--profile", profile]);
+    }
+    let status = command
+        .args(["up", "--build", "-d"])
+        .envs(&env)
+        .current_dir(stack_checkout)
+        .stdin(Stdio::inherit())
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .context("failed to run docker compose")?;
+    if !status.success() {
+        bail!("docker compose exited with status {status}");
+    }
+    Ok(())
+}
+
+fn print_up_summary(
+    active: &ActiveBundle,
+    compose_path: &Path,
+    ports: &[ServicePort],
+    profile_path: Option<&str>,
+) {
     println!(
         "{} {}",
         out::heading("Runtime up:"),
@@ -144,44 +423,28 @@ fn run_up(active: &ActiveBundle, project: &KnitProject, runtime: &ProjectRuntime
         out::muted("Compose:"),
         out::path(compose_path.display())
     );
-    println!(
-        "{} backend http://localhost:{}  frontend http://localhost:{}",
-        out::muted("Ports:"),
-        ports.backend,
-        ports.frontend
-    );
-    if let Some(profile) = &runtime.profile_path {
+    for port in ports {
         println!(
-            "{} http://localhost:{}{}",
-            out::heading("Open:"),
-            ports.frontend,
-            profile
+            "{} {} localhost:{}",
+            out::muted("Port:"),
+            port.service,
+            port.host
         );
     }
-
-    let mut command = Command::new("docker");
-    command
-        .args(["compose", "-f"])
-        .arg(&compose_path)
-        .args(["-p", &project_name]);
-    for profile in &profiles {
-        command.args(["--profile", profile]);
+    if let (Some(profile), Some(frontend)) = (profile_path, frontend_port(ports)) {
+        println!("{} http://localhost:{}{}", out::heading("Open:"), frontend, profile);
     }
-    let status = command
-        .args(["up", "--build", "-d"])
-        .envs(&env)
-        .current_dir(&stack_checkout)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run docker compose")?;
+}
 
-    if !status.success() {
-        bail!("docker compose exited with status {status}");
-    }
-
-    Ok(())
+/// The port to attach UI URLs to: a service named `frontend`, else anything
+/// front-ish, else the first published port.
+fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
+    ports
+        .iter()
+        .find(|port| port.service == "frontend")
+        .or_else(|| ports.iter().find(|port| port.service.contains("front")))
+        .or_else(|| ports.first())
+        .map(|port| port.host)
 }
 
 fn run_down(active: &ActiveBundle) -> Result<()> {
@@ -226,32 +489,36 @@ fn run_status(active: &ActiveBundle) -> Result<()> {
             println!("{} {}", out::heading(format!("{service}:")), service_state);
         }
     }
-    println!(
-        "{} backend http://localhost:{}  frontend http://localhost:{}",
-        out::heading("Ports:"),
-        state.backend_port,
-        state.frontend_port
-    );
-    println!(
-        "{} {} localhost:{} ({})",
-        out::heading("Database:"),
-        database_status_label(&state, &services),
-        state.database_port,
-        state.database_name
-    );
-    if let Some(profile) = &state.profile_path {
+    for port in &state.ports {
+        println!(
+            "{} {} localhost:{}",
+            out::muted("Port:"),
+            port.service,
+            port.host
+        );
+    }
+    if let Some(database) = &state.database {
+        println!(
+            "{} {} localhost:{} ({})",
+            out::heading("Database:"),
+            database_status_label(database, &services),
+            database.port,
+            database.name
+        );
+    }
+    if let (Some(profile), Some(frontend)) = (&state.profile_path, frontend_port(&state.ports)) {
         if any_running {
             println!(
                 "{} http://localhost:{}{}",
                 out::heading("Profile:"),
-                state.frontend_port,
+                frontend,
                 profile
             );
         } else {
             println!(
                 "{} http://localhost:{}{} {}",
                 out::heading("Profile:"),
-                state.frontend_port,
+                frontend,
                 profile,
                 out::muted("(stack stopped)")
             );
@@ -274,17 +541,18 @@ fn run_status(active: &ActiveBundle) -> Result<()> {
 /// its source path.
 fn runtime_env(
     active: &ActiveBundle,
-    project: &KnitProject,
+    project: Option<&KnitProject>,
     project_name: &str,
-    ports: &AllocatedPorts,
+    backend_port: u16,
+    frontend_port: u16,
     database: &ResolvedDatabase,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("KNIT_ROOT".to_string(), active.root.display().to_string());
     env.insert("KNIT_BUNDLE".to_string(), active.bundle.id.clone());
     env.insert("COMPOSE_PROJECT_NAME".to_string(), project_name.to_string());
-    env.insert("KNIT_PORT_BACKEND".to_string(), ports.backend.to_string());
-    env.insert("KNIT_PORT_FRONTEND".to_string(), ports.frontend.to_string());
+    env.insert("KNIT_PORT_BACKEND".to_string(), backend_port.to_string());
+    env.insert("KNIT_PORT_FRONTEND".to_string(), frontend_port.to_string());
     env.insert("KNIT_DB_MODE".to_string(), database.mode.to_string());
     env.insert("KNIT_DB_HOST".to_string(), database.host.clone());
     env.insert("KNIT_DB_PORT".to_string(), database.port.to_string());
@@ -295,8 +563,10 @@ fn runtime_env(
     );
 
     let mut checkouts: BTreeMap<String, PathBuf> = BTreeMap::new();
-    for repo in &project.repos {
-        checkouts.insert(repo.id.clone(), PathBuf::from(&repo.path));
+    if let Some(project) = project {
+        for repo in &project.repos {
+            checkouts.insert(repo.id.clone(), PathBuf::from(&repo.path));
+        }
     }
     for repo in &active.bundle.repos {
         if let Some(checkout) = checkout_dir(active, repo) {
@@ -339,6 +609,12 @@ fn env_var_suffix(repo_id: &str) -> String {
 
 fn compose_project_name(bundle_id: &str) -> String {
     format!("knit-run-{bundle_id}")
+}
+
+fn has_state(active: &ActiveBundle) -> bool {
+    runtime_run_dir(&active.root, &active.bundle.id)
+        .join("state.json")
+        .exists()
 }
 
 fn load_runtime_state(active: &ActiveBundle) -> Result<RuntimeRunState> {
@@ -391,22 +667,26 @@ fn parse_compose_ps(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-fn allocate_ports(root: &Path, config: Option<ProjectRuntimePorts>) -> Result<AllocatedPorts> {
-    let config = config.unwrap_or_default();
-    let used = load_used_ports(root)?;
-    let mut backend = config.backend_base;
-    let mut frontend = config.frontend_base;
-
+/// Allocate a backend/frontend host-port pair for contract mode, stepping
+/// both bases together so paired stacks stay recognizable.
+fn allocate_port_pair(
+    used: &BTreeSet<u16>,
+    backend_base: u16,
+    frontend_base: u16,
+    step: u16,
+) -> Result<(u16, u16)> {
+    let mut backend = backend_base;
+    let mut frontend = frontend_base;
     loop {
         if !used.contains(&backend)
             && !used.contains(&frontend)
             && port_available(backend)
             && port_available(frontend)
         {
-            return Ok(AllocatedPorts { backend, frontend });
+            return Ok((backend, frontend));
         }
-        backend = backend.saturating_add(config.step);
-        frontend = frontend.saturating_add(config.step);
+        backend = backend.saturating_add(step);
+        frontend = frontend.saturating_add(step);
         if backend > 65000 || frontend > 65000 {
             bail!("Could not find free runtime ports.");
         }
@@ -428,11 +708,16 @@ fn load_used_ports(root: &Path) -> Result<BTreeSet<u16>> {
         if !state_path.exists() {
             continue;
         }
-        let state: RuntimeRunState = read_json(&state_path)?;
+        let Ok(state) = read_json::<RuntimeRunState>(&state_path) else {
+            continue;
+        };
         if running.contains(&compose_project_name(&bundle_id)) {
-            used.insert(state.backend_port);
-            used.insert(state.frontend_port);
-            used.insert(state.database_port);
+            for port in &state.ports {
+                used.insert(port.host);
+            }
+            if let Some(database) = &state.database {
+                used.insert(database.port);
+            }
         }
     }
 
@@ -519,8 +804,8 @@ fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Resol
     }
 }
 
-fn database_status_label(state: &RuntimeRunState, services: &[(String, String)]) -> &'static str {
-    if state.database_mode == DatabaseMode::Bundle {
+fn database_status_label(database: &StateDatabase, services: &[(String, String)]) -> &'static str {
+    if database.mode == DatabaseMode::Bundle {
         let running = services
             .iter()
             .any(|(service, service_state)| service == "db" && service_state == "running");
@@ -529,24 +814,11 @@ fn database_status_label(state: &RuntimeRunState, services: &[(String, String)])
         } else {
             "stopped"
         }
-    } else if TcpStream::connect(format!("127.0.0.1:{}", state.database_port)).is_ok() {
+    } else if TcpStream::connect(format!("127.0.0.1:{}", database.port)).is_ok() {
         "reachable"
     } else {
         "unreachable"
     }
-}
-
-fn resolve_stack_repo<'a>(
-    active: &'a ActiveBundle,
-    runtime: &ProjectRuntime,
-) -> Result<&'a RepoEntry> {
-    let stack_repo_id = runtime.stack_repo.as_deref().unwrap_or("knithub");
-    active
-        .bundle
-        .repos
-        .iter()
-        .find(|repo| repo.id == stack_repo_id)
-        .with_context(|| format!("stack repo `{stack_repo_id}` is not tracked in this bundle"))
 }
 
 fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
@@ -584,28 +856,33 @@ fn relative_path(base: &Path, target: &Path) -> Result<String> {
 struct RuntimeRunState {
     bundle_id: String,
     stack_repo: String,
-    backend_port: u16,
-    frontend_port: u16,
-    database_port: u16,
     #[serde(default)]
-    database_mode: DatabaseMode,
-    #[serde(default = "default_database_name_state")]
-    database_name: String,
-    /// Workspace-relative path of the stack repo's compose file.
+    mode: RuntimeMode,
+    #[serde(default)]
+    ports: Vec<ServicePort>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    database: Option<StateDatabase>,
+    /// Workspace-relative path of the compose file this run executed
+    /// (generated file in transform mode, repo file in contract mode).
     compose_file: String,
     /// Compose profiles activated by this run (e.g. `bundle-db`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     profiles: Vec<String>,
-    /// The injected environment contract, recorded so the same compose file
-    /// can be driven manually for debugging.
+    /// The injected environment contract (contract mode), recorded so the
+    /// same compose file can be driven manually for debugging.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
     profile_path: Option<String>,
     started_at: String,
 }
 
-fn default_database_name_state() -> String {
-    "knithub_dev".to_string()
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct StateDatabase {
+    #[serde(default)]
+    mode: DatabaseMode,
+    port: u16,
+    name: String,
 }
 
 struct ResolvedDatabase {
@@ -614,11 +891,6 @@ struct ResolvedDatabase {
     port: u16,
     name: String,
     host_port: u16,
-}
-
-struct AllocatedPorts {
-    backend: u16,
-    frontend: u16,
 }
 
 #[cfg(test)]
@@ -673,10 +945,6 @@ mod tests {
             include_by_default: false,
         });
 
-        let ports = AllocatedPorts {
-            backend: 4011,
-            frontend: 5184,
-        };
         let database = ResolvedDatabase {
             mode: DatabaseMode::Shared,
             host: "host.docker.internal".to_string(),
@@ -685,7 +953,7 @@ mod tests {
             host_port: 5436,
         };
 
-        let env = runtime_env(&active, &project, "knit-run-demo", &ports, &database);
+        let env = runtime_env(&active, Some(&project), "knit-run-demo", 4011, 5184, &database);
 
         assert_eq!(env.get("KNIT_BUNDLE").unwrap(), "demo");
         assert_eq!(env.get("COMPOSE_PROJECT_NAME").unwrap(), "knit-run-demo");
@@ -738,5 +1006,32 @@ mod tests {
         assert_eq!(resolved.host, "db");
         assert_eq!(resolved.port, 5432);
         assert_eq!(resolved.host_port, 5437);
+    }
+
+    #[test]
+    fn detect_mode_sniffs_contract_variables() {
+        let dir = std::env::temp_dir().join(format!(
+            "knit-runtime-mode-test-{}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let contract = dir.join("contract.yml");
+        std::fs::write(&contract, "services:\n  b:\n    ports: [\"${KNIT_PORT_BACKEND}:4000\"]\n")
+            .unwrap();
+        let plain = dir.join("plain.yml");
+        std::fs::write(&plain, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
+        assert_eq!(detect_mode(&contract).unwrap(), RuntimeMode::Contract);
+        assert_eq!(detect_mode(&plain).unwrap(), RuntimeMode::Transform);
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn frontend_port_prefers_frontend_service() {
+        let ports = vec![
+            ServicePort { service: "db".into(), host: 5446, container: Some(5432) },
+            ServicePort { service: "web-frontend".into(), host: 5184, container: Some(5173) },
+        ];
+        assert_eq!(frontend_port(&ports), Some(5184));
+        assert_eq!(frontend_port(&[]), None);
     }
 }

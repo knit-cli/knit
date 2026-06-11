@@ -38,7 +38,7 @@
       "properties": {
         "kind": { "type": "string" },
         "stackRepo": { "type": "string" },
-        "composeFile": { "type": "string", "default": "docker-compose.knit.yml" },
+        "composeFile": { "type": "string" },
         "profilePath": { "type": "string" },
         "projectConfigFile": { "type": "string" },
         "database": {

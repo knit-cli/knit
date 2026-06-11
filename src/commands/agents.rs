@@ -366,7 +366,7 @@ knit run status
 knit run down
 ```
 
-`knit run up` injects bundle context (`KNIT_*` environment: checkout paths, revs, ports, database) into the stack repo's runtime compose file, picks free host ports, and starts the stack as compose project `knit-run-{bundle}`. Run state is recorded in `.knit/runtime-runs/{bundle}/state.json`. Use `knit run status` for the live URLs; do not guess ports from an older run.
+`knit run up` lifts the stack repo's compose shape into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, run as compose project `knit-run-{bundle}`. Compose files referencing `KNIT_*` variables are instead run as-is with Knit's environment contract injected. Run state is recorded in `.knit/runtime-runs/{bundle}/state.json`. Use `knit run status` for the live URLs; do not guess ports from an older run.
 
 "#
         ,
@@ -387,7 +387,10 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
     };
 
     let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
-    let compose_file = &runtime.compose_file;
+    let compose_file = runtime
+        .compose_file
+        .clone()
+        .unwrap_or_else(|| "docker-compose.knit.yml or docker-compose.yml".to_string());
     let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
@@ -431,11 +434,12 @@ knit run down
 
 Runtime behavior:
 
-- Runs `{compose_file}` from the `{stack_repo}` checkout as compose project `knit-run-<bundle>`, injecting Knit's runtime environment contract (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_*`, `KNIT_DB_*`); run state is recorded in `.knit/runtime-runs/<bundle>/state.json`
+- Runs `{compose_file}` from the `{stack_repo}` checkout as isolated compose project `knit-run-<bundle>`; run state is recorded in `.knit/runtime-runs/<bundle>/state.json`
+- A plain compose file is lifted automatically: the shape the repos run on `main`, with paths into tracked repos remapped to bundle worktrees and published host ports reallocated; a compose file referencing `KNIT_*` variables is instead run as-is with Knit's environment contract injected (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_*`, `KNIT_DB_*`)
 - Builds the stack from bundle worktrees, not the source checkout on `main`
-- Allocates host ports starting at backend `{backend_base}`, frontend `{frontend_base}` (step `{step}`)
-- Database: {database_detail}
-- Opens `{profile_path}` on the allocated frontend port after `knit run status`
+- Allocates free host ports (contract mode: backend `{backend_base}`, frontend `{frontend_base}`, step `{step}`)
+- Database (contract mode): {database_detail}
+- Opens `{profile_path}` on the frontend port after `knit run status`
 
 Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode activates the compose file's `bundle-db` profile so a dedicated database container starts per runtime with its own empty database.
 
