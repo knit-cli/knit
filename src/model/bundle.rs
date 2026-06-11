@@ -1,14 +1,40 @@
 //! The bundle (`ChangeGroup`) and its contents: tracked repos, commit groups,
 //! ledger nodes, and recorded publications.
 
-use super::{default_checkout_mode, SCHEMA_VERSION};
+use super::{CheckoutMode, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
 
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
-pub const BUNDLE_STATE_OPEN: &str = "open";
-pub const BUNDLE_STATE_CLOSED: &str = "closed";
-pub const BUNDLE_STATE_ARCHIVED: &str = "archived";
-pub const BUNDLE_STATE_DELETED: &str = "deleted";
+
+/// Persisted lifecycle state of a bundle artifact. Serialized lowercase to
+/// match existing artifacts. The user-facing state can additionally present a
+/// derived `landed`; that lives in `commands::bundle::BundleStatus` and is
+/// never written to the artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum BundleState {
+    Open,
+    Closed,
+    Archived,
+    Deleted,
+}
+
+impl BundleState {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BundleState::Open => "open",
+            BundleState::Closed => "closed",
+            BundleState::Archived => "archived",
+            BundleState::Deleted => "deleted",
+        }
+    }
+}
+
+impl std::fmt::Display for BundleState {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -18,7 +44,7 @@ pub struct ChangeGroup {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub state: Option<String>,
+    pub state: Option<BundleState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -50,7 +76,7 @@ impl ChangeGroup {
             kind: CHANGE_GROUP_KIND.to_string(),
             id,
             title,
-            state: Some(BUNDLE_STATE_OPEN.to_string()),
+            state: Some(BundleState::Open),
             closed_at: None,
             archived_at: None,
             deleted_at: None,
@@ -132,8 +158,8 @@ pub struct RepoEntry {
     pub path: String,
     pub remote: Option<String>,
     pub base_branch: String,
-    #[serde(default = "default_checkout_mode")]
-    pub checkout_mode: String,
+    #[serde(default)]
+    pub checkout_mode: CheckoutMode,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_sha: Option<String>,
     pub feature_branch: Option<String>,
@@ -171,21 +197,44 @@ pub struct CommitRef {
     pub sha: String,
 }
 
+/// How a repo's recorded head moved in a ledger node. Serialized lowercase to
+/// match existing artifacts and history events.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Movement {
+    #[default]
+    Advanced,
+    Rewound,
+    Diverged,
+}
+
+impl Movement {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Movement::Advanced => "advanced",
+            Movement::Rewound => "rewound",
+            Movement::Diverged => "diverged",
+        }
+    }
+}
+
+impl std::fmt::Display for Movement {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoChange {
     pub repo_id: String,
-    #[serde(default = "default_movement")]
-    pub movement: String,
+    #[serde(default)]
+    pub movement: Movement,
     pub before_sha: Option<String>,
     pub after_sha: String,
     pub commits: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_commits: Vec<String>,
-}
-
-fn default_movement() -> String {
-    "advanced".to_string()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

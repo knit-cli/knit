@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::git::git_output;
 use crate::ids::short_sha;
-use crate::model::{BundleNode, CommitGroup, CommitRef, RepoChange};
+use crate::model::{BundleNode, CommitGroup, CommitRef, Movement, RepoChange};
 use crate::output as out;
 use crate::selectors::{is_loggable_node, resolve_log_node};
 use crate::store::{load_active_bundle, ActiveBundle};
@@ -116,8 +116,8 @@ fn print_node(node: &BundleNode) {
             };
             println!("{}  {}", out::node(&node.id), out::heading(heading));
             for change in &node.repo_changes {
-                match change.movement.as_str() {
-                    "advanced" => {
+                match change.movement {
+                    Movement::Advanced => {
                         if change.commits.is_empty() {
                             println!(
                                 "  {} {} {}",
@@ -136,7 +136,7 @@ fn print_node(node: &BundleNode) {
                             }
                         }
                     }
-                    "rewound" => {
+                    Movement::Rewound => {
                         println!(
                             "  {} {}  {} -> {}",
                             out::repo_field(&change.repo_id, 10),
@@ -158,7 +158,7 @@ fn print_node(node: &BundleNode) {
                             );
                         }
                     }
-                    "diverged" => {
+                    Movement::Diverged => {
                         println!(
                             "  {} {} {} -> {}",
                             out::repo_field(&change.repo_id, 10),
@@ -187,14 +187,6 @@ fn print_node(node: &BundleNode) {
                                 out::sha(short_sha(sha))
                             );
                         }
-                    }
-                    movement => {
-                        println!(
-                            "  {} {} {}",
-                            out::repo_field(&change.repo_id, 10),
-                            out::movement(movement),
-                            out::sha(short_sha(&change.after_sha))
-                        );
                     }
                 }
             }
@@ -355,8 +347,8 @@ fn show_observed_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
     for change in &node.repo_changes {
         print_change_summary(change);
 
-        match change.movement.as_str() {
-            "advanced" => {
+        match change.movement {
+            Movement::Advanced => {
                 if change.commits.is_empty() {
                     show_repo_commit(active, &change.repo_id, &change.after_sha)?;
                 } else {
@@ -365,12 +357,12 @@ fn show_observed_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
                     }
                 }
             }
-            "rewound" => {
+            Movement::Rewound => {
                 for sha in &change.dropped_commits {
                     show_repo_commit(active, &change.repo_id, sha)?;
                 }
             }
-            "diverged" => {
+            Movement::Diverged => {
                 for sha in &change.commits {
                     show_repo_commit(active, &change.repo_id, sha)?;
                 }
@@ -378,7 +370,6 @@ fn show_observed_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
                     show_repo_commit(active, &change.repo_id, sha)?;
                 }
             }
-            _ => {}
         }
     }
 
@@ -395,7 +386,7 @@ fn print_change_summary(change: &RepoChange) {
     println!(
         "{} {} {} -> {}",
         out::repo(&change.repo_id),
-        out::movement(&change.movement),
+        out::movement(change.movement.as_str()),
         before,
         out::sha(short_sha(&change.after_sha))
     );

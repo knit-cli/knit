@@ -567,7 +567,7 @@ fn bundle_payload(bundle: &ChangeGroup) -> Value {
         "title": bundle.title,
         "slug": bundle.id,
         "source": "pushed",
-        "lifecycle_state": bundle.state.as_deref().unwrap_or("open"),
+        "lifecycle_state": bundle.state.unwrap_or(crate::model::BundleState::Open).as_str(),
         "metadata": {
             "schemaVersion": bundle.schema_version,
             "kind": bundle.kind,

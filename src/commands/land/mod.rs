@@ -24,7 +24,7 @@ pub(crate) use check::{assess_landing_readiness, print_readiness_row};
 use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::ids::node_id;
-use crate::model::{BundleNode, RepoEntry, DEFAULT_LANDING_MERGE_METHOD};
+use crate::model::{BundleNode, DeployCheckoutUpdate, DeployMode, MergeMethod, RepoEntry};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, Forge, PrTarget, PullRequest};
 use crate::store::{
@@ -39,17 +39,64 @@ use std::path::{Path, PathBuf};
 
 const LAND_PLAN_KIND: &str = "KnitLandPlan";
 const LAND_RUN_KIND: &str = "KnitLandRun";
-const STEP_MERGE_PR: &str = "merge_pr";
-const STEP_WAIT_CHECKS: &str = "wait_checks";
-const STEP_RUN: &str = "run";
-const STEP_DEPLOY: &str = "deploy";
-const STATUS_PENDING: &str = "pending";
-const STATUS_RUNNING: &str = "running";
-const STATUS_SUCCEEDED: &str = "succeeded";
-const STATUS_FAILED: &str = "failed";
 const DEFAULT_LAND_PROVIDER: &str = "github";
-const DEPLOY_MODE_COMMAND: &str = "command";
-const DEPLOY_MODE_PUSH: &str = "push";
+
+/// Kind of a land plan step. Serialized snake_case to match the editable plan
+/// files (`merge_pr`, `wait_checks`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LandStepKind {
+    MergePr,
+    WaitChecks,
+    Run,
+    Deploy,
+}
+
+impl LandStepKind {
+    fn as_str(self) -> &'static str {
+        match self {
+            LandStepKind::MergePr => "merge_pr",
+            LandStepKind::WaitChecks => "wait_checks",
+            LandStepKind::Run => "run",
+            LandStepKind::Deploy => "deploy",
+        }
+    }
+}
+
+impl std::fmt::Display for LandStepKind {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// Status of a land run or one of its steps.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum LandStatus {
+    Pending,
+    Running,
+    Succeeded,
+    Failed,
+}
+
+impl LandStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            LandStatus::Pending => "pending",
+            LandStatus::Running => "running",
+            LandStatus::Succeeded => "succeeded",
+            LandStatus::Failed => "failed",
+        }
+    }
+}
+
+impl std::fmt::Display for LandStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+
 
 pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
@@ -108,7 +155,7 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
         forge.merge(
             &target,
             &publication.url,
-            DEFAULT_LANDING_MERGE_METHOD,
+            MergeMethod::default().as_str(),
             false,
             pr.head_ref_oid.as_deref(),
         )
@@ -169,13 +216,13 @@ struct LandPlan {
 struct LandStep {
     id: String,
     #[serde(rename = "type")]
-    step_type: String,
+    step_type: LandStepKind,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    method: Option<String>,
+    method: Option<crate::model::MergeMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     wait_for_checks: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -195,7 +242,7 @@ struct LandStep {
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    deployment_mode: Option<String>,
+    deployment_mode: Option<DeployMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     checkout: Option<LandCheckout>,
 }
@@ -207,7 +254,7 @@ struct LandCheckout {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     remote: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    update: Option<String>,
+    update: Option<DeployCheckoutUpdate>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -220,7 +267,7 @@ struct LandRun {
     bundle_id: String,
     provider: String,
     plan_path: String,
-    status: String,
+    status: LandStatus,
     created_at: String,
     updated_at: String,
     steps: Vec<LandRunStep>,
@@ -231,8 +278,8 @@ struct LandRun {
 struct LandRunStep {
     id: String,
     #[serde(rename = "type")]
-    step_type: String,
-    status: String,
+    step_type: LandStepKind,
+    status: LandStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     repo_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -303,7 +350,7 @@ pub fn land_default() -> Result<()> {
     if let Some(path) = resolve_land_run_path(&active, None)? {
         let run: LandRun = read_json(&path)?;
         display::print_run_status(&active, &run, &path);
-        if run.status == STATUS_SUCCEEDED {
+        if run.status == LandStatus::Succeeded {
             return Ok(());
         }
         advice::print(
@@ -360,7 +407,7 @@ pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bo
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
     let mut run: LandRun = read_json(&path)?;
-    if run.status == STATUS_SUCCEEDED {
+    if run.status == LandStatus::Succeeded {
         println!(
             "{} {} is already succeeded.",
             out::heading("Land run"),
@@ -373,7 +420,7 @@ pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bo
     validate::validate_plan_for_bundle(&active, &plan)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
     validate::preflight_publications(&active, &plan, Some(&run))?;
-    run.status = STATUS_RUNNING.to_string();
+    run.status = LandStatus::Running;
     run.updated_at = now_iso();
     write_json(&path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &path)?;
@@ -480,27 +527,6 @@ fn bundle_primary_provider(active: &ActiveBundle) -> String {
         .iter()
         .find_map(|repo| providers::for_repo(repo).ok().map(|forge| forge.id().to_string()))
         .unwrap_or_else(|| DEFAULT_LAND_PROVIDER.to_string())
-}
-
-fn validate_merge_method(method: &str) -> Result<()> {
-    if !matches!(method, "squash" | "merge" | "rebase") {
-        bail!("unknown merge method `{method}`; expected squash, merge, or rebase");
-    }
-    Ok(())
-}
-
-fn validate_deployment_mode(mode: &str) -> Result<()> {
-    if !matches!(mode, DEPLOY_MODE_COMMAND | DEPLOY_MODE_PUSH) {
-        bail!("unknown deployment mode `{mode}`; expected command or push");
-    }
-    Ok(())
-}
-
-fn validate_deploy_checkout_update(update: &str) -> Result<()> {
-    if !matches!(update, "fetch" | "pull" | "none") {
-        bail!("unknown deploy checkout update `{update}`; expected fetch, pull, or none");
-    }
-    Ok(())
 }
 
 fn ensure_open_and_ready(repo_id: &str, pr: &PullRequest) -> Result<()> {
@@ -628,7 +654,7 @@ mod tests {
     fn step(id: &str, needs: &[&str]) -> LandStep {
         LandStep {
             id: id.to_string(),
-            step_type: STEP_RUN.to_string(),
+            step_type: LandStepKind::Run,
             needs: needs.iter().map(|need| need.to_string()).collect(),
             repo_id: None,
             method: None,
@@ -674,12 +700,15 @@ mod tests {
     }
 
     #[test]
-    fn rejects_unknown_merge_methods() {
-        assert!(validate_merge_method("squash").is_ok());
-        assert!(validate_merge_method("octopus")
+    fn rejects_unknown_merge_methods_at_parse() {
+        assert_eq!(
+            serde_json::from_str::<crate::model::MergeMethod>("\"squash\"").unwrap(),
+            crate::model::MergeMethod::Squash
+        );
+        assert!(serde_json::from_str::<crate::model::MergeMethod>("\"octopus\"")
             .unwrap_err()
             .to_string()
-            .contains("unknown merge method"));
+            .contains("expected one of"));
     }
 
     #[test]
@@ -692,13 +721,13 @@ mod tests {
             bundle_id: "bundle".to_string(),
             provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
-            status: STATUS_RUNNING.to_string(),
+            status: LandStatus::Running,
             created_at: now_iso(),
             updated_at: now_iso(),
             steps: vec![LandRunStep {
                 id: "a".to_string(),
-                step_type: STEP_RUN.to_string(),
-                status: STATUS_FAILED.to_string(),
+                step_type: LandStepKind::Run,
+                status: LandStatus::Failed,
                 repo_id: None,
                 publication_url: None,
                 started_at: None,
@@ -831,7 +860,7 @@ mod tests {
             bundle_id: bundle_id.to_string(),
             provider: "github".to_string(),
             plan_path: "plan.json".to_string(),
-            status: STATUS_SUCCEEDED.to_string(),
+            status: LandStatus::Succeeded,
             created_at: now_iso(),
             updated_at: now_iso(),
             steps: Vec::new(),

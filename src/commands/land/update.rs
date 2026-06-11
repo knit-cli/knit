@@ -6,7 +6,7 @@ use super::bundle_primary_provider;
 use crate::checkout::checkout_dir;
 use crate::git::{current_branch, git_output, is_ancestor, rev_list, rev_parse};
 use crate::ids::{node_id, short_sha};
-use crate::model::{BundleNode, RepoChange};
+use crate::model::{BundleNode, Movement, RepoChange};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, PrTarget};
 use crate::repo_selectors::resolve_repo_indexes;
@@ -274,7 +274,7 @@ fn advanced_change(
     }
     Ok(RepoChange {
         repo_id,
-        movement: "advanced".to_string(),
+        movement: Movement::Advanced,
         before_sha: Some(before_sha.clone()),
         after_sha: after_sha.clone(),
         commits: rev_list(cwd, &before_sha, &after_sha).context("failed to list update commits")?,
