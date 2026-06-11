@@ -28,11 +28,11 @@ fn setup_workspace(root: &Path, with_runtime_block: bool) -> std::path::PathBuf 
     fs::create_dir_all(&workspace).unwrap();
     init_repo(&stack, "stack");
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(&workspace, ["project", "add", "stack", stack.to_str().unwrap()]);
     knit(&workspace, ["bundle", "venue capacity"]);
     if with_runtime_block {
-        write_project_runtime(&workspace, "arbient");
+        write_project_runtime(&workspace, "demo");
     }
     workspace
 }
@@ -173,7 +173,7 @@ fn run_up_contract_mode_injects_environment_into_repo_compose_file() {
     assert!(env.contains("KNIT_PORT_BACKEND="));
     assert!(env.contains("KNIT_PORT_FRONTEND="));
     assert!(env.contains("KNIT_DB_MODE=bundle"));
-    assert!(env.contains("KNIT_DB_NAME=knithub_venue-capacity"));
+    assert!(env.contains("KNIT_DB_NAME=app_venue-capacity"));
     assert!(env.contains("KNIT_DB_HOST=db"));
     assert!(env.contains("KNIT_DB_HOST_PORT=5437"));
 

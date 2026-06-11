@@ -476,8 +476,8 @@ mod tests {
     #[test]
     fn slugifies_each_segment() {
         assert_eq!(
-            split_project_identifier("Marc Merino/Knit Tools"),
-            (Some("marc-merino".to_string()), "knit-tools".to_string())
+            split_project_identifier("Ada Lovelace/Knit Tools"),
+            (Some("ada-lovelace".to_string()), "knit-tools".to_string())
         );
     }
 

@@ -364,7 +364,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -389,7 +389,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
         deploy_pwd.display(),
         deploy_branch.display()
     );
-    let project_path = workspace.join(".knit/projects/arbient.project.json");
+    let project_path = workspace.join(".knit/projects/demo.project.json");
     let mut project: Value =
         serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
     project["landing"] = json!({
@@ -448,7 +448,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
     let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
     let plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
-    assert_eq!(plan["sourceProjectId"].as_str(), Some("arbient"));
+    assert_eq!(plan["sourceProjectId"].as_str(), Some("demo"));
     let steps = plan["steps"].as_array().unwrap();
     assert_eq!(steps[0]["id"].as_str(), Some("merge-frontend"));
     assert_eq!(steps[1]["id"].as_str(), Some("merge-backend"));

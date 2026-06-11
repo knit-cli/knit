@@ -484,7 +484,7 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -545,7 +545,7 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
 
     let export = serde_json::json!({
         "data": {
-            "project": {"slug": "arbient"},
+            "project": {"slug": "demo"},
             "knitProject": null,
             "repositories": [],
             "bundles": [{

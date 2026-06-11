@@ -207,7 +207,7 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
     fs::create_dir_all(&workspace).unwrap();
 
     init_repo(&backend, "backend");
-    knit(&workspace, ["init", "arbient"]);
+    knit(&workspace, ["init", "demo"]);
     knit(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],

@@ -117,7 +117,7 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
         Some("https://api.knithub.dev")
     );
 
-    knit_with_env(&workspace, ["init", "arbient"], &env);
+    knit_with_env(&workspace, ["init", "demo"], &env);
     let inherited = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
     assert!(inherited.contains("https://api.knithub.dev"));
     assert!(inherited.contains("Scope: global"));

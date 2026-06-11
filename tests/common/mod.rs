@@ -17,7 +17,7 @@ pub fn setup_three_repo_project(workspace: &Path, root: &Path) {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
     init_repo(&docs, "docs");
-    knit(workspace, ["init", "arbient"]);
+    knit(workspace, ["init", "demo"]);
     knit(
         workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -941,7 +941,7 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
 /// collision checks against the sync remote.
 pub fn spawn_fake_knithub_export(bundle_slug: &str, lifecycle_state: &str) -> String {
     spawn_fake_knithub_with_body(format!(
-        "{{\"data\":{{\"project\":{{\"slug\":\"arbient\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
+        "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
     ))
 }
 

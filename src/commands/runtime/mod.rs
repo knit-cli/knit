@@ -824,7 +824,7 @@ fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> Resol
         let template = database
             .name_template
             .as_deref()
-            .unwrap_or("knithub_{bundleId}");
+            .unwrap_or("app_{bundleId}");
         let name = template.replace("{bundleId}", bundle_id);
         let host_port = database.port_base.unwrap_or(5437);
         ResolvedDatabase {
@@ -1047,7 +1047,7 @@ mod tests {
             ..Default::default()
         };
         let resolved = resolve_database(&database, "venue-capacity");
-        assert_eq!(resolved.name, "knithub_venue-capacity");
+        assert_eq!(resolved.name, "app_venue-capacity");
         assert_eq!(resolved.host, "db");
         assert_eq!(resolved.port, 5432);
         assert_eq!(resolved.host_port, 5437);

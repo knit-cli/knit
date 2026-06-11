@@ -821,7 +821,7 @@ mod tests {
     #[test]
     fn treats_checks_permission_errors_as_nonfatal() {
         let err = anyhow::anyhow!(
-            "gh pr checks https://github.com/marc-merino/betsnitch-frontend/pull/45 --json name,state,bucket --required --repo Marc-Merino/betsnitch-frontend failed in /tmp: GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)"
+            "gh pr checks https://github.com/acme/frontend/pull/45 --json name,state,bucket --required --repo acme/frontend failed in /tmp: GraphQL: Resource not accessible by personal access token (node.statusCheckRollup.nodes.0.commit.statusCheckRollup)"
         );
         assert!(is_checks_permission_error(&err));
     }
