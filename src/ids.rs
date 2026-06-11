@@ -2,6 +2,22 @@ use crate::model::ChangeGroup;
 use chrono::Utc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
+/// Expand CLI repo selector flags. Each value may be one id or a comma-separated
+/// list, for example `--exclude frontend,docs`.
+pub fn expand_repo_selectors(values: &[String]) -> Vec<String> {
+    let mut expanded = Vec::new();
+    for value in values {
+        for part in value.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            expanded.push(part.to_string());
+        }
+    }
+    expanded
+}
+
 pub fn slugify(input: &str) -> String {
     let mut slug = String::new();
     let mut last_was_dash = false;
