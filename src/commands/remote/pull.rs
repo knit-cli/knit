@@ -301,6 +301,29 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result
     Ok(())
 }
 
+/// Look up a bundle slug on the primary sync remote, returning the remote
+/// record's lifecycle state when a non-deleted bundle with that slug already
+/// exists. Used at bundle creation to catch two users independently picking
+/// the same title for different features. Callers treat any error (no remote,
+/// no token, offline) as "unknown" so creation keeps working offline.
+pub fn remote_bundle_lifecycle(
+    config: &KnitConfig,
+    project_id: &str,
+    bundle_id: &str,
+) -> Result<Option<String>> {
+    let Some(remote_name) = configured_sync_remote_names(config).into_iter().next() else {
+        return Ok(None);
+    };
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let export = fetch_project_export(remote, &token, project_id)?;
+    Ok(export
+        .bundles
+        .into_iter()
+        .find(|bundle| bundle.slug == bundle_id && bundle.lifecycle_state != "deleted")
+        .map(|bundle| bundle.lifecycle_state))
+}
+
 /// List the bundle records the sync remote holds for `project_id`, decoding each
 /// bundle's current artifact payload when it is a supported Knit bundle.
 pub fn list_remote_bundles(config: &KnitConfig, project_id: &str) -> Result<Vec<RemoteBundleRecord>> {
