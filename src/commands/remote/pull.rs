@@ -13,8 +13,8 @@ use super::clone::{
 use super::{RemoteBundle, RemoteExportRepository, RemoteProjectExport, RemoteViews};
 use crate::commands::worktree::materialize_repos;
 use crate::model::{
-    ledger_relation, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews, KnitRemote,
-    LedgerRelation,
+    ledger_relation, merge_ledgers, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews,
+    KnitRemote, LedgerRelation,
 };
 use crate::output as out;
 use crate::store::{
@@ -78,6 +78,9 @@ pub struct RemotePullContext {
 pub enum RemoteBundleOutcome {
     /// The artifact was applied; carries its hash.
     Pulled(String),
+    /// Diverged ledgers were union-merged into the local artifact; carries the
+    /// remote artifact hash that was merged in.
+    Merged(String),
     /// Nothing to apply; carries a human-readable reason.
     Skipped(String),
 }
@@ -232,10 +235,16 @@ fn reconcile_project_repositories(
 /// pull can process every open bundle. Callers must serialize git work that
 /// touches shared source repos; this function only mutates the named bundle's
 /// own artifact and checkouts.
+///
+/// With `merge` set, diverged ledgers are union-merged (`merge_ledgers`)
+/// instead of skipped: the saved artifact records both sides' nodes, and any
+/// feature checkout that cannot fast-forward onto origin is reported for
+/// manual git-level merging without failing the artifact merge.
 pub fn pull_bundle_remote_state(
     root: &Path,
     context: &RemotePullContext,
     bundle_id: &str,
+    merge: bool,
 ) -> Result<RemoteBundleOutcome> {
     let path = bundle_path(root, bundle_id);
     if !path.exists() {
@@ -263,10 +272,35 @@ pub fn pull_bundle_remote_state(
                 "local is ahead of remote".to_string(),
             ))
         }
-        LedgerRelation::Diverged => {
+        LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
-                "bundle {bundle_id}: local and remote artifacts have diverged; keeping local"
+                "bundle {bundle_id}: local and remote ledgers have diverged; run `knit pull --merge` to combine them"
             )))
+        }
+        LedgerRelation::Diverged => {
+            let localized = localize_bundle(remote_payload, &context.project)?;
+            prepare_feature_branches(&localized)?;
+            let merged = merge_ledgers(&local, &localized, now_iso());
+            let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
+            materialize_repos(&mut active, None)?;
+            // The artifact merge stands on its own: checkouts that cannot
+            // fast-forward have genuinely diverged git branches and need a
+            // manual merge in the worktree, after which `knit sync` and the
+            // next push reconcile the recorded heads.
+            if let Err(error) = fast_forward_feature_checkouts(&mut active) {
+                println!(
+                    "{} {error:#}",
+                    out::warn("feature checkouts did not fast-forward:")
+                );
+                println!(
+                    "{}",
+                    out::muted(
+                        "Merged ledger saved. Merge origin/<branch> in the affected worktrees, then commit and `knit push`."
+                    )
+                );
+            }
+            save_active_bundle(&active)?;
+            return Ok(RemoteBundleOutcome::Merged(artifact.artifact_hash.clone()));
         }
         LedgerRelation::RemoteAhead => {}
     }
@@ -280,15 +314,21 @@ pub fn pull_bundle_remote_state(
     Ok(RemoteBundleOutcome::Pulled(artifact.artifact_hash.clone()))
 }
 
-pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result<()> {
+pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool, merge: bool) -> Result<()> {
     let Some(context) = prepare_remote_pull(remote_name, skip_remote)? else {
         return Ok(());
     };
     let active = load_active_bundle()?;
-    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id)? {
+    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id, merge)? {
         RemoteBundleOutcome::Pulled(hash) => println!(
             "{} {} {}",
             out::movement("pulled"),
+            out::repo(&active.bundle.id),
+            out::muted(&hash)
+        ),
+        RemoteBundleOutcome::Merged(hash) => println!(
+            "{} {} {}",
+            out::movement("merged ledgers"),
             out::repo(&active.bundle.id),
             out::muted(&hash)
         ),
@@ -454,7 +494,7 @@ pub fn fetch_bundles_from_remote(
                 LedgerRelation::Equal | LedgerRelation::LocalAhead => continue,
                 LedgerRelation::Diverged => {
                     println!(
-                        "{} bundle {}: local and remote artifacts have diverged; keeping local",
+                        "{} bundle {}: local and remote ledgers have diverged; keeping local (run `knit pull --merge` to combine them)",
                         out::warn("warning:"),
                         out::node(&bundle.id)
                     );
