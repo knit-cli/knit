@@ -163,7 +163,7 @@ knit run status    # live service states, ports, and URLs
 knit run down      # stop and remove the bundle stack
 ```
 
-The stack repo is `runtime.stackRepo` when configured; with no `runtime` block at all, a single bundle repo containing a compose file is detected automatically, so `knit run up` works on any docker-compose project with zero configuration. The compose file is `runtime.composeFile` when set, else `docker-compose.knit.yml` when present, else the repo's own `docker-compose.yml`/`compose.yaml`. Either way the stack runs as compose project `knit-run-<bundle>`: networks and named volumes are isolated per bundle, and `down`/`status` resolve containers by project label, so they keep working even after the worktree is gone. Run state lands in `.knit/runtime-runs/<bundle>/state.json`.
+The stack repo is `runtime.stackRepo` when configured; with no `runtime` block at all, a single bundle repo containing a compose file is detected automatically, so `knit run up` works on any docker-compose project with zero configuration. The compose file is `runtime.composeFile` when set, else `docker-compose.knit.yml` when present, else the repo's own `docker-compose.yml`/`compose.yaml`. Either way the stack runs as compose project `knit-run-<bundle>`: networks and named volumes are isolated per bundle, and `down`/`status` resolve containers by project label, so they keep working even after the worktree is gone. Run state lands in `.knit/runtime-runs/<bundle>/state.json`, recorded only after a successful start; if `up` fails partway, `knit run down` still cleans up by project label. A project command configured with one of these three names takes precedence over the runtime verb.
 
 **Transform mode (default).** A plain compose file — the one developers already use on `main` — is lifted automatically. Knit resolves it with `docker compose config` against the source repo location, then rewrites the resolved shape:
 
@@ -172,7 +172,7 @@ The stack repo is `runtime.stackRepo` when configured; with no `runtime` block a
 - textual references to remapped host ports inside environment values and build args are rewritten (`http://localhost:5173` -> `http://localhost:5183`) — heuristic by design, since shifted host ports are otherwise invisible to app config
 - `container_name` and the top-level `name` are stripped so instances cannot collide
 
-**Contract mode.** A compose file that references `KNIT_*` variables opts out of transformation and is run as-is with the contract injected — full control for stacks with unusual builds:
+**Contract mode.** A compose file named `docker-compose.knit.yml` or containing `${KNIT_*}` variable references opts out of transformation and is run as-is with the contract injected — full control for stacks with unusual builds. `runtime.mode` (`transform`/`contract`) forces a mode when detection is wrong:
 
 | Variable | Value |
 | --- | --- |
@@ -181,10 +181,10 @@ The stack repo is `runtime.stackRepo` when configured; with no `runtime` block a
 | `KNIT_CHECKOUT_<REPO>` | absolute checkout path (bundle worktree when tracked, source path otherwise) |
 | `KNIT_SRC_<REPO>` | the same path relative to `KNIT_ROOT` |
 | `KNIT_REV_<REPO>` | HEAD revision of that checkout |
-| `KNIT_PORT_BACKEND` / `KNIT_PORT_FRONTEND` | allocated free host ports (from `ports.backendBase`/`frontendBase`, stepping by `ports.step`) |
+| `KNIT_PORT_<SERVICE>` | one allocated free host port per pool in `ports.services` (service name -> base port), stepping all pools together by `ports.step`; with no `services` map, a backend/frontend pair from `ports.backendBase`/`frontendBase` |
 | `KNIT_DB_MODE`, `KNIT_DB_HOST`, `KNIT_DB_PORT`, `KNIT_DB_NAME`, `KNIT_DB_HOST_PORT` | resolved database identity |
 
-Repo ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`).
+Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`).
 
 In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts. In transform mode the lifted shape brings its own database service, which gets a fresh project-scoped volume per bundle automatically.
 

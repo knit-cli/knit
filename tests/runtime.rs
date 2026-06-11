@@ -65,6 +65,59 @@ exit 0
 }
 
 #[test]
+fn bare_knit_run_does_not_start_the_runtime() {
+    let root = unique_temp_dir();
+    let workspace = setup_workspace(&root, true);
+
+    let output = knit_fails(&workspace, ["run"]);
+    assert!(
+        output.contains("Pass a project command name"),
+        "bare `knit run` should ask for a command, got: {output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn project_command_named_up_shadows_the_runtime_verb() {
+    let root = unique_temp_dir();
+    let workspace = setup_workspace(&root, true);
+
+    let stack_checkout = workspace.join(".knit/worktrees/venue-capacity/stack");
+    fs::write(
+        stack_checkout.join("docker-compose.knit.yml"),
+        "services:\n  backend:\n    image: scratch\n    ports:\n      - \"${KNIT_PORT_BACKEND}:4000\"\n",
+    )
+    .unwrap();
+    knit(
+        &workspace,
+        ["project", "command", "set", "up", "--repo", "stack", "--", "echo", "project-up-ran"],
+    );
+
+    let (fake_bin, log_dir) = write_fake_docker(&root);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let output = knit_with_env(
+        &workspace,
+        ["run", "up"],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.contains("project-up-ran"),
+        "configured project command should win, got: {output}"
+    );
+    assert!(
+        !log_dir.join("calls.log").exists(),
+        "runtime docker must not run when a project command shadows `up`"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn run_up_requires_a_compose_file() {
     let root = unique_temp_dir();
     let workspace = setup_workspace(&root, true);
