@@ -366,7 +366,7 @@ knit run status
 knit run down
 ```
 
-`knit run up` generates `.knit/runtime-runs/{bundle}/docker-compose.yml`, picks free host ports, and starts the bundle stack. Use `knit run status` for the live URLs; do not guess ports from an older run.
+`knit run up` injects bundle context (`KNIT_*` environment: checkout paths, revs, ports, database) into the stack repo's runtime compose file, picks free host ports, and starts the stack as compose project `knit-run-{bundle}`. Run state is recorded in `.knit/runtime-runs/{bundle}/state.json`. Use `knit run status` for the live URLs; do not guess ports from an older run.
 
 "#
         ,
@@ -387,7 +387,7 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
     };
 
     let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
-    let frontend_repo = runtime.frontend_repo.as_deref().unwrap_or("knithub-frontend");
+    let compose_file = &runtime.compose_file;
     let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
@@ -421,7 +421,7 @@ knit project pull --repo {stack_repo}
 knit project agents
 ```
 
-From a bundle worktree that includes `{stack_repo}` and `{frontend_repo}`:
+From a bundle worktree that includes `{stack_repo}`:
 
 ```sh
 knit run up
@@ -431,19 +431,19 @@ knit run down
 
 Runtime behavior:
 
-- Generates `.knit/runtime-runs/<bundle>/docker-compose.yml` and `state.json`
+- Runs `{compose_file}` from the `{stack_repo}` checkout as compose project `knit-run-<bundle>`, injecting Knit's runtime environment contract (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_*`, `KNIT_DB_*`); run state is recorded in `.knit/runtime-runs/<bundle>/state.json`
 - Builds the stack from bundle worktrees, not the source checkout on `main`
 - Allocates host ports starting at backend `{backend_base}`, frontend `{frontend_base}` (step `{step}`)
 - Database: {database_detail}
 - Opens `{profile_path}` on the allocated frontend port after `knit run status`
 
-Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode starts a dedicated Postgres container per runtime with its own empty database.
+Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode activates the compose file's `bundle-db` profile so a dedicated database container starts per runtime with its own empty database.
 
 "#
         ,
         config_file = config_file,
         stack_repo = stack_repo,
-        frontend_repo = frontend_repo,
+        compose_file = compose_file,
         profile_path = profile_path,
         backend_base = ports.backend_base,
         frontend_base = ports.frontend_base,

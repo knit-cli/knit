@@ -153,6 +153,32 @@ knit run api-test
 knit run --repo backend -- docker compose ps
 ```
 
+### Bundle runtimes
+
+Projects with a `runtime` block get three more `knit run` verbs that start a disposable stack instance per bundle:
+
+```sh
+knit run up        # build and start the bundle stack
+knit run status    # live service states, ports, and URLs
+knit run down      # stop and remove the bundle stack
+```
+
+Knit's runtime primitive is environment injection, not stack generation. Knit knows the checkout topology and allocates a per-bundle namespace; the stack repo owns a compose file (`composeFile`, default `docker-compose.knit.yml`) written against that contract. `knit run up` is sugar for `docker compose -f <stack>/<composeFile> -p knit-run-<bundle> up --build -d` with these variables injected:
+
+| Variable | Value |
+| --- | --- |
+| `KNIT_ROOT` / `KNIT_BUNDLE` | workspace root and bundle id |
+| `COMPOSE_PROJECT_NAME` | `knit-run-<bundle>` |
+| `KNIT_CHECKOUT_<REPO>` | absolute checkout path (bundle worktree when tracked, source path otherwise) |
+| `KNIT_SRC_<REPO>` | the same path relative to `KNIT_ROOT` |
+| `KNIT_REV_<REPO>` | HEAD revision of that checkout |
+| `KNIT_PORT_BACKEND` / `KNIT_PORT_FRONTEND` | allocated free host ports (from `ports.backendBase`/`frontendBase`, stepping by `ports.step`) |
+| `KNIT_DB_MODE`, `KNIT_DB_HOST`, `KNIT_DB_PORT`, `KNIT_DB_NAME`, `KNIT_DB_HOST_PORT` | resolved database identity |
+
+Repo ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`). Service topology, build args, and app environment are the compose file's business; container-side ports too.
+
+The `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts. Run state (ports, injected env, compose profiles) is recorded in `.knit/runtime-runs/<bundle>/state.json`; `knit run down` and `knit run status` resolve containers by compose project label, so they keep working even after the worktree is gone.
+
 ### Views
 
 A project's repo list is shared by everyone, with `--observe` marking repos kept out of default bundle starts. A **view** is per-user config layered on top of that shared project: a named "bundle shape" expressed as include/exclude deltas over the project's default repo set. Views are stored per user at `.knit/views/<project-id>.views.json` and never touch the shared project artifact, so a junior member can work against two repos while a staff member keeps several shapes for the same project.
