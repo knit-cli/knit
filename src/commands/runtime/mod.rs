@@ -41,7 +41,6 @@ use std::path::{Path, PathBuf};
 use up::{run_up_contract, run_up_transform};
 
 const RUNTIME_KIND_DOCKER_COMPOSE: &str = "docker-compose";
-const BUNDLE_DB_PROFILE: &str = "bundle-db";
 const CONTRACT_COMPOSE_CANDIDATES: [&str; 1] = ["docker-compose.knit.yml"];
 const PLAIN_COMPOSE_CANDIDATES: [&str; 4] = [
     "docker-compose.yml",

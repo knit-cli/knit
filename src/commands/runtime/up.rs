@@ -335,6 +335,15 @@ fn allocate_service_ports(
     bases: &BTreeMap<String, u16>,
     step: u16,
 ) -> Result<BTreeMap<String, u16>> {
+    allocate_service_ports_with(used, bases, step, port_available)
+}
+
+fn allocate_service_ports_with(
+    used: &BTreeSet<u16>,
+    bases: &BTreeMap<String, u16>,
+    step: u16,
+    mut available: impl FnMut(u16) -> bool,
+) -> Result<BTreeMap<String, u16>> {
     if bases.is_empty() {
         bail!("The project runtime defines no service port pools.");
     }
@@ -345,7 +354,7 @@ fn allocate_service_ports(
             let port = base.saturating_add(offset);
             if used.contains(&port)
                 || allocated.values().any(|taken| *taken == port)
-                || !port_available(port)
+                || !available(port)
             {
                 allocated.clear();
                 break;
@@ -416,7 +425,10 @@ fn running_compose_projects() -> BTreeSet<String> {
 }
 
 fn port_available(port: u16) -> bool {
-    TcpListener::bind(("0.0.0.0", port)).is_ok() && TcpListener::bind(("127.0.0.1", port)).is_ok()
+    if TcpListener::bind(("0.0.0.0", port)).is_err() {
+        return false;
+    }
+    TcpListener::bind(("127.0.0.1", port)).is_ok()
 }
 
 fn ensure_shared_database_reachable(
@@ -617,7 +629,7 @@ mod tests {
             ("frontend".to_string(), 5174u16),
         ]);
         let used = BTreeSet::from([4001u16, 5174u16]);
-        let allocated = allocate_service_ports(&used, &bases, 10).unwrap();
+        let allocated = allocate_service_ports_with(&used, &bases, 10, |_| true).unwrap();
         assert_eq!(allocated["backend"] - 4001, allocated["frontend"] - 5174);
         assert!(allocated["backend"] >= 4011);
     }
