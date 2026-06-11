@@ -259,3 +259,68 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn bundle_creation_refuses_slug_taken_on_sync_remote() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    let base_url = spawn_fake_knithub_export("payment-flow", "open");
+    knit(&workspace, ["remote", "add", "knithub", &base_url]);
+    let env = [("KNITHUB_TOKEN", "test-token")];
+
+    let refused = knit_fails_with_env(&workspace, ["bundle", "payment flow"], &env);
+    assert!(refused.contains("already exists on the KnitHub sync remote"));
+    assert!(!workspace
+        .join(".knit/bundles/payment-flow.bundle.json")
+        .exists());
+
+    // A different title passes the check, and --force overrides it.
+    let created = knit_with_env(&workspace, ["bundle", "other feature"], &env);
+    assert!(created.contains("Active bundle:"));
+    let forced = knit_with_env(&workspace, ["bundle", "payment flow", "--force"], &env);
+    assert!(forced.contains("Active bundle:"));
+    assert!(workspace
+        .join(".knit/bundles/payment-flow.bundle.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn stale_bundle_lock_from_dead_process_is_reclaimed() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+
+    // A crashed knit process left its lock behind: record a pid that is
+    // guaranteed dead by the time the next command runs.
+    let mut child = std::process::Command::new("true")
+        .spawn()
+        .expect("spawn true");
+    let dead_pid = child.id();
+    child.wait().unwrap();
+    let lock_dir = workspace.join(".knit/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock_path = lock_dir.join("venue-capacity.lock");
+    fs::write(&lock_path, dead_pid.to_string()).unwrap();
+
+    // The stale lock is reclaimed instead of demanding manual cleanup.
+    let sync = knit(&workspace, ["sync"]);
+    assert!(sync.contains("No unrecorded git commits"));
+
+    // A lock held by a live process still blocks, and names the holder.
+    fs::write(&lock_path, std::process::id().to_string()).unwrap();
+    let blocked = knit_fails(&workspace, ["sync"]);
+    assert!(blocked.contains("Another Knit process"));
+    assert!(blocked.contains(&format!("(pid {})", std::process::id())));
+    fs::remove_file(&lock_path).unwrap();
+
+    fs::remove_dir_all(root).unwrap();
+}

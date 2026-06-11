@@ -416,3 +416,172 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn worktree_materialization_tracks_collaborator_pushed_feature_branch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    // A collaborator already pushed this bundle's feature branch to origin.
+    git(&collaborator, ["checkout", "-b", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "collaborator feature work");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Collaborator feature work"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let collaborator_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    // The local clone has not fetched since that push, so materialization must
+    // discover the branch itself instead of forking a new one from base.
+    knit(&workspace, ["bundle", "venue capacity"]);
+    let add = knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    assert!(add.contains("origin/knit/venue-capacity"));
+
+    let worktree = workspace.join(".knit/worktrees/venue-capacity/backend");
+    assert_eq!(git(&worktree, ["rev-parse", "HEAD"]), collaborator_sha);
+    assert_eq!(
+        git(&worktree, ["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
+        "origin/knit/venue-capacity"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn in_place_materialization_tracks_collaborator_pushed_feature_branch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    git(&collaborator, ["checkout", "-b", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "collaborator feature work");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Collaborator feature work"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let collaborator_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        ["bundle", "add", "--in-place", backend.to_str().unwrap()],
+    );
+
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "knit/venue-capacity"
+    );
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), collaborator_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_merge_unions_diverged_bundle_ledgers() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "arbient"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "venue capacity", "--repo", "backend"]);
+
+    // This user records local work in the bundle ledger.
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "local ledger work");
+    knit(&workspace, ["commit", "--all", "-m", "Local ledger work"]);
+
+    // A collaborator pushed their own commit to the shared feature branch.
+    git(&collaborator, ["checkout", "-b", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "remote ledger work");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote ledger work"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let collaborator_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+    let collaborator_sha = collaborator_sha.trim();
+
+    // Build the remote artifact the collaborator would have pushed: the same
+    // ledger prefix, but with this user's commit node replaced by one only the
+    // remote records — diverged ledgers.
+    let mut remote_payload = read_bundle(&workspace);
+    let local_commit_node_id = remote_payload["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "commit.group")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let mut remote_nodes: Vec<serde_json::Value> = remote_payload["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["id"].as_str() != Some(local_commit_node_id.as_str()))
+        .cloned()
+        .collect();
+    remote_nodes.push(serde_json::json!({
+        "id": "kg_20990101_remote",
+        "type": "commit.group",
+        "createdAt": "2099-01-01T00:00:00.000Z",
+        "commitGroupId": "kg_20990101_remote",
+        "message": "Remote ledger work",
+        "commits": [{"repoId": "backend", "sha": collaborator_sha}],
+    }));
+    remote_payload["nodes"] = serde_json::Value::Array(remote_nodes);
+    remote_payload["commitGroups"] = serde_json::json!([{
+        "id": "kg_20990101_remote",
+        "message": "Remote ledger work",
+        "createdAt": "2099-01-01T00:00:00.000Z",
+        "commits": [{"repoId": "backend", "sha": collaborator_sha}],
+    }]);
+    remote_payload["headNodeId"] = serde_json::json!("kg_20990101_remote");
+    remote_payload["repos"][0]["headSha"] = serde_json::json!(collaborator_sha);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "arbient"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "venue-capacity",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "remotehash123", "payload": remote_payload},
+            }],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "knithub", &base_url]);
+    let env = [("KNITHUB_TOKEN", "test-token")];
+
+    // Without --merge, diverged ledgers are kept local and reported.
+    let plain = knit_with_env(&workspace, ["pull"], &env);
+    assert!(plain.contains("diverged"));
+    assert!(plain.contains("--merge"));
+
+    // With --merge, the union ledger is saved even though the git branches
+    // themselves still need a manual merge.
+    let merged_run = knit_with_env(&workspace, ["pull", "--merge"], &env);
+    assert!(merged_run.contains("merged ledgers"));
+
+    let bundle = read_bundle(&workspace);
+    let node_ids: Vec<&str> = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|node| node["id"].as_str().unwrap())
+        .collect();
+    assert!(node_ids.contains(&local_commit_node_id.as_str()));
+    assert!(node_ids.contains(&"kg_20990101_remote"));
+    assert_eq!(bundle["commitGroups"].as_array().unwrap().len(), 2);
+    assert_eq!(bundle["headNodeId"].as_str(), Some("kg_20990101_remote"));
+
+    fs::remove_dir_all(root).unwrap();
+}

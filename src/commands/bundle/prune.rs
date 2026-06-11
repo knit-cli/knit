@@ -1,13 +1,15 @@
 //! `knit prune` — find and delete dead-work bundles, orphan worktrees, and
 //! orphaned KnitHub remote bundle records.
 //!
-//! A bundle is "dead work" when it has no open PRs and no uncommitted tracked
-//! changes in any checkout. The same per-bundle signals drive the prune
-//! decision, the `--untracked` relaxation, and the `--report` view.
+//! A bundle is "dead work" when it has no open PRs, no uncommitted tracked
+//! changes in any checkout, and — for repos with no recorded review object —
+//! no commits on the feature branch (local or `origin/`) that base lacks.
+//! The same per-bundle signals drive the prune decision, the `--untracked`
+//! relaxation, and the `--report` view.
 
 use super::{bundle_json_paths, current_root, delete_bundle};
 use crate::checkout::is_in_place;
-use crate::git::{git_output, is_git_worktree};
+use crate::git::{git_output, is_git_worktree, ref_exists, resolve_base_ref};
 use crate::model::{ChangeGroup, KnitConfig, RepoEntry};
 use crate::output as out;
 use crate::providers::{self, Forge, PrTarget, PullRequest};
@@ -71,6 +73,7 @@ struct PruneAssessment {
     saw_publication: bool,
     saw_open_publication: bool,
     saw_merged_publication: bool,
+    saw_unpublished_commits: bool,
     pending: Pending,
 }
 
@@ -79,7 +82,7 @@ impl PruneAssessment {
     /// With `untracked` set, checkouts whose only uncommitted work is
     /// untracked files no longer hold the bundle back.
     fn candidate_reason(&self, untracked: bool) -> Option<String> {
-        if self.saw_open_publication || self.pending.tracked {
+        if self.saw_open_publication || self.pending.tracked || self.saw_unpublished_commits {
             return None;
         }
         if self.pending.untracked && !untracked {
@@ -101,7 +104,10 @@ impl PruneAssessment {
 
     /// True when the bundle would be dead work but for untracked files alone.
     fn blocked_by_untracked_only(&self) -> bool {
-        !self.saw_open_publication && !self.pending.tracked && self.pending.untracked
+        !self.saw_open_publication
+            && !self.saw_unpublished_commits
+            && !self.pending.tracked
+            && self.pending.untracked
     }
 
     /// The PR side of why the bundle is (or is not yet) dead work.
@@ -561,6 +567,7 @@ fn assess_bundle(
     let mut saw_publication = false;
     let mut saw_merged_publication = false;
     let mut saw_open_publication = false;
+    let mut saw_unpublished_commits = false;
     let mut pending = Pending::default();
 
     for (index, result) in repo_results {
@@ -579,6 +586,7 @@ fn assess_bundle(
         saw_publication |= signals.saw_publication;
         saw_open_publication |= signals.saw_open_publication;
         saw_merged_publication |= signals.saw_merged_publication;
+        saw_unpublished_commits |= signals.unpublished_commits;
     }
 
     if refresh {
@@ -591,6 +599,7 @@ fn assess_bundle(
         saw_publication,
         saw_open_publication,
         saw_merged_publication,
+        saw_unpublished_commits,
         pending,
     })
 }
@@ -602,6 +611,7 @@ struct RepoPruneSignals {
     saw_publication: bool,
     saw_open_publication: bool,
     saw_merged_publication: bool,
+    unpublished_commits: bool,
 }
 
 fn assess_repo_signals(
@@ -671,6 +681,26 @@ fn assess_repo_signals(
         }
     };
 
+    // Committed work without a review object is unpublished work, not dead
+    // work: a clean checkout says nothing about commits already recorded on
+    // the feature branch (locally or pushed by another user). Only a repo
+    // with no publication at all needs this guard — once a PR exists its
+    // state, not the branch shape, decides liveness.
+    let unpublished_commits = if saw_publication {
+        false
+    } else {
+        match feature_branch_unmerged_commits(repo) {
+            Ok(found) => found,
+            Err(err) => {
+                print_prune_warning(format!(
+                    "{bundle_id}/{}: could not inspect feature branch for unpublished commits ({err:#}); keeping the bundle to be safe",
+                    repo.id
+                ));
+                true
+            }
+        }
+    };
+
     Ok(RepoPruneSignals {
         publication_update,
         pending,
@@ -678,7 +708,33 @@ fn assess_repo_signals(
         saw_publication,
         saw_open_publication,
         saw_merged_publication,
+        unpublished_commits,
     })
+}
+
+/// True when the bundle's feature branch (the local branch or its `origin/`
+/// counterpart in the source repo) carries commits the base branch does not.
+fn feature_branch_unmerged_commits(repo: &RepoEntry) -> Result<bool> {
+    let Some(branch) = repo.feature_branch.as_deref() else {
+        return Ok(false);
+    };
+    let repo_root = Path::new(&repo.path);
+    if !repo_root.exists() {
+        return Ok(false);
+    }
+    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
+    for candidate in [branch.to_string(), format!("origin/{branch}")] {
+        if !ref_exists(repo_root, &candidate) {
+            continue;
+        }
+        let range = format!("{base_ref}..{candidate}");
+        let count = git_output(repo_root, ["rev-list", "--count", &range])
+            .with_context(|| format!("failed to count commits in {range}"))?;
+        if count.trim() != "0" {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 fn publication_flags_from_publication(
@@ -882,6 +938,8 @@ fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
             "kept — only untracked files (prunable with --untracked)".to_string()
         } else if assessment.saw_open_publication {
             "kept — open PR(s)".to_string()
+        } else if assessment.saw_unpublished_commits {
+            "kept — unpublished commits on the feature branch".to_string()
         } else if assessment.pending.tracked {
             "kept — uncommitted tracked changes".to_string()
         } else {
@@ -892,6 +950,9 @@ fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
             format!("{} repo(s)", assessment.repo_count),
             assessment.pr_basis().to_string(),
         ];
+        if assessment.saw_unpublished_commits {
+            detail.push("unpublished commits".to_string());
+        }
         if assessment.pending.tracked {
             detail.push("tracked changes".to_string());
         }
