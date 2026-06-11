@@ -1,6 +1,6 @@
 //! Render and upsert the managed "Knit Bundle" cross-link block in a PR body.
 
-use super::publish_scope_repo_ids;
+use super::scope::publish_scope_repo_ids;
 use crate::model::ChangeGroup;
 use crate::providers::publication_for_repo;
 
