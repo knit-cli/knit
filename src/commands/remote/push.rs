@@ -45,9 +45,29 @@ pub fn add_remote(name: &str, url: &str, token: Option<&str>, global: bool) -> R
         "{} {}{}",
         out::movement("configured"),
         scope,
-        out::repo(remote_name)
+        out::repo(&remote_name)
     );
+    if !global && token.is_some() {
+        warn_workspace_scoped_token(&remote_name);
+    }
     Ok(())
+}
+
+/// Workspace config can end up shared (committed, templated, copied between
+/// collaborators); tokens belong in per-user storage instead.
+fn warn_workspace_scoped_token(remote_name: &str) {
+    println!(
+        "{} token stored in workspace .knit/config.json. Prefer `--global` or the KNIT_REMOTE_{}_TOKEN environment variable so credentials never live in files a collaborator might receive.",
+        out::warn("warning:"),
+        remote_name
+            .chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    );
 }
 
 pub fn list_remotes(global: bool) -> Result<()> {
@@ -180,11 +200,14 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
 
     if clear {
         remote.token = None;
-        println!("{} {}", out::movement("cleared"), out::repo(remote_name));
+        println!("{} {}", out::movement("cleared"), out::repo(&remote_name));
     } else {
         let token = token.context("Pass a token value or use --clear.")?;
         remote.token = Some(token.to_string());
-        println!("{} {}", out::movement("stored"), out::repo(remote_name));
+        println!("{} {}", out::movement("stored"), out::repo(&remote_name));
+        if !global {
+            warn_workspace_scoped_token(&remote_name);
+        }
     }
 
     if let Some(root) = root {
@@ -510,13 +533,23 @@ fn push_bundle_artifact(
         "producer_version": env!("CARGO_PKG_VERSION"),
         "payload": bundle
     });
-    request_json(
+    let response = request(
         remote,
         token,
         "POST",
         &format!("/bundles/{bundle_id}/artifacts"),
         Some(&payload),
-    )
+    )?;
+    // The remote refuses any artifact whose ledger would drop nodes the
+    // current remote artifact records: another user (or another machine)
+    // pushed work this workspace has not seen yet.
+    if response.status == 409 {
+        bail!(
+            "{}: the KnitHub remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again.",
+            bundle.id
+        );
+    }
+    decode_response(response)
 }
 
 fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
@@ -533,7 +566,14 @@ fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
         "pushedBy": "knit"
     });
     if let Some(project) = project {
-        metadata["knitProject"] = serde_json::to_value(project).unwrap_or(Value::Null);
+        // The shared project record must not carry this machine's filesystem
+        // layout: every collaborator pushes the same project, and pulls
+        // rebuild paths from their own clones.
+        let mut shared = project.clone();
+        for repo in &mut shared.repos {
+            repo.path = String::new();
+        }
+        metadata["knitProject"] = serde_json::to_value(&shared).unwrap_or(Value::Null);
     }
 
     json!({
@@ -546,6 +586,8 @@ fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
 
 fn repository_payload(repo: &ProjectRepoEntry) -> Value {
     let identity = repo_identity(&repo.id, repo.remote.as_deref());
+    // No `path` here: repository records are shared across collaborators and
+    // a machine-local checkout path would just be whoever pushed last.
     json!({
         "provider": identity.provider,
         "owner": identity.owner,
@@ -555,7 +597,6 @@ fn repository_payload(repo: &ProjectRepoEntry) -> Value {
         "remote_url": repo.remote,
         "metadata": {
             "localId": repo.id,
-            "path": repo.path,
             "checkoutMode": repo.checkout_mode,
             "includeByDefault": repo.include_by_default
         }

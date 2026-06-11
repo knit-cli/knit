@@ -113,8 +113,10 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
         }
         if targets.bundles {
             // Reuse the existing active-bundle pull, which performs the
-            // fast-forward localize/refresh that another change owns.
-            if let Err(error) = super::pull::pull_remote_state(Some(remote), false) {
+            // fast-forward localize/refresh that another change owns. Diverged
+            // ledgers are reported, not merged; `knit pull --merge` is the
+            // explicit door for that.
+            if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
                 failures.push(format!("{remote} bundle: {error:#}"));
             }
         }

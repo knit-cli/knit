@@ -273,17 +273,67 @@ pub fn acquire_named_lock(root: &Path, name: &str) -> Result<KnitLock> {
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create Knit lock directory {}", dir.display()))?;
     let path = dir.join(format!("{name}.lock"));
-    match OpenOptions::new().write(true).create_new(true).open(&path) {
-        Ok(_) => Ok(KnitLock { path }),
-        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-            bail!(
-                "Another Knit process is updating this state. Remove {} only if you are sure no Knit process is running.",
-                path.display()
-            )
+    if let Some(lock) = try_create_lock(&path)? {
+        return Ok(lock);
+    }
+
+    // A lock whose recorded holder process is gone is a leftover from a crash;
+    // reclaim it instead of demanding manual cleanup.
+    if lock_holder_is_dead(&path) {
+        let _ = fs::remove_file(&path);
+        if let Some(lock) = try_create_lock(&path)? {
+            return Ok(lock);
         }
+    }
+
+    let holder = lock_holder_pid(&path)
+        .map(|pid| format!(" (pid {pid})"))
+        .unwrap_or_default();
+    bail!(
+        "Another Knit process{holder} is updating this state. Remove {} only if you are sure no Knit process is running.",
+        path.display()
+    )
+}
+
+fn try_create_lock(path: &Path) -> Result<Option<KnitLock>> {
+    match OpenOptions::new().write(true).create_new(true).open(path) {
+        Ok(mut file) => {
+            use std::io::Write;
+            let _ = write!(file, "{}", std::process::id());
+            Ok(Some(KnitLock {
+                path: path.to_path_buf(),
+            }))
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Ok(None),
         Err(error) => {
             Err(error).with_context(|| format!("failed to acquire Knit lock {}", path.display()))
         }
+    }
+}
+
+fn lock_holder_pid(path: &Path) -> Option<u32> {
+    fs::read_to_string(path).ok()?.trim().parse().ok()
+}
+
+/// True only when the lock file records a holder pid and that process is
+/// verifiably gone. Locks without a pid (older Knit versions) and platforms
+/// where liveness cannot be checked stay treated as held — never reclaim a
+/// lock that might still be active.
+fn lock_holder_is_dead(path: &Path) -> bool {
+    let Some(pid) = lock_holder_pid(path) else {
+        return false;
+    };
+    if pid == std::process::id() {
+        return false;
+    }
+    if cfg!(unix) {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .output()
+            .map(|output| !output.status.success())
+            .unwrap_or(false)
+    } else {
+        false
     }
 }
 
@@ -293,10 +343,32 @@ pub fn read_json<T: DeserializeOwned>(path: &Path) -> Result<T> {
     serde_json::from_str(&text).with_context(|| format!("failed to parse {}", path.display()))
 }
 
+/// Write JSON atomically: serialize to a sibling temp file, then rename over
+/// the target. A crash mid-write can no longer leave a torn artifact for a
+/// concurrent reader (another knit process or agent in the same workspace).
 pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = serde_json::to_string_pretty(value).context("failed to serialize JSON")?;
-    fs::write(path, format!("{text}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "knit".to_string());
+    let temp_path = path.with_file_name(format!(".{file_name}.{}.tmp", std::process::id()));
+    fs::write(&temp_path, format!("{text}\n"))
+        .with_context(|| format!("failed to write {}", temp_path.display()))?;
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        // Windows refuses to rename over an existing file; fall back to
+        // replace-then-rename, accepting the tiny non-atomic window there.
+        Err(_) if cfg!(windows) && path.exists() => {
+            fs::remove_file(path).with_context(|| format!("failed to replace {}", path.display()))?;
+            fs::rename(&temp_path, path)
+                .with_context(|| format!("failed to write {}", path.display()))
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error).with_context(|| format!("failed to write {}", path.display()))
+        }
+    }
 }
 
 pub fn find_knit_root(start: &Path) -> Option<PathBuf> {
