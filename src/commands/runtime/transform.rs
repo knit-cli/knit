@@ -462,7 +462,7 @@ mod tests {
         // gloss-web-ui is not in the bundle: additional context stays on main.
         assert_eq!(
             frontend_build["additional_contexts"]["gloss-web-ui"],
-            root.join("gloss-web-ui").display().to_string()
+            format!("{root_str}/gloss-web-ui")
         );
 
         // Bind mounts into tracked repos remap; workspace mount stays.
