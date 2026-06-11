@@ -98,7 +98,11 @@ pub fn materialize_repos(
                 materialized_repo_ids.push(repo_id);
             }
             Err(error) => {
-                println!("{}: {}", out::repo(&repo_id), out::danger("worktree failed"));
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::danger("worktree failed")
+                );
                 failures.push(format!("{repo_id}: {error:#}"));
             }
         }
@@ -114,7 +118,13 @@ pub fn materialize_repos(
             .repos
             .iter()
             .position(|repo| &repo.id == left)
-            .cmp(&active.bundle.repos.iter().position(|repo| &repo.id == right))
+            .cmp(
+                &active
+                    .bundle
+                    .repos
+                    .iter()
+                    .position(|repo| &repo.id == right),
+            )
     });
 
     Ok(materialized_repo_ids)
@@ -246,9 +256,8 @@ fn materialize_one_repo(
     }
 
     if let Some(parent) = worktree_abs.parent() {
-        fs::create_dir_all(parent).with_context(|| {
-            format!("failed to create worktree parent {}", parent.display())
-        })?;
+        fs::create_dir_all(parent)
+            .with_context(|| format!("failed to create worktree parent {}", parent.display()))?;
     }
 
     if branch_exists(&repo_root, &feature_branch) {
@@ -286,7 +295,12 @@ fn materialize_one_repo(
                 OsString::from(&remote_ref),
             ],
         )
-        .with_context(|| format!("failed to create worktree from {remote_ref} for {}", repo.id))?;
+        .with_context(|| {
+            format!(
+                "failed to create worktree from {remote_ref} for {}",
+                repo.id
+            )
+        })?;
         update.head_sha = Some(
             rev_parse(&worktree_abs, "HEAD")
                 .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
@@ -365,7 +379,12 @@ fn materialize_in_place(
                     OsString::from(&remote_ref),
                 ],
             )
-            .with_context(|| format!("{}: failed to create {feature_branch} from {remote_ref}", repo.id))?;
+            .with_context(|| {
+                format!(
+                    "{}: failed to create {feature_branch} from {remote_ref}",
+                    repo.id
+                )
+            })?;
         } else {
             git_output(
                 repo_root,

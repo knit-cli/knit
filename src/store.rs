@@ -1,6 +1,4 @@
-use crate::model::{
-    BundleState, ChangeGroup, KnitConfig,
-};
+use crate::model::{BundleState, ChangeGroup, KnitConfig};
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::env;
@@ -134,7 +132,9 @@ pub fn global_config_path() -> Result<PathBuf> {
             return Ok(PathBuf::from(profile).join(".config/knit/config.json"));
         }
     }
-    bail!("No home directory found. Set KNIT_HOME, HOME, or APPDATA before using global Knit config.")
+    bail!(
+        "No home directory found. Set KNIT_HOME, HOME, or APPDATA before using global Knit config."
+    )
 }
 
 pub fn load_global_config() -> Result<KnitConfig> {
@@ -170,11 +170,7 @@ pub fn merge_effective_config(global: KnitConfig, workspace: KnitConfig) -> Knit
             .or_else(|| effective.sync_remotes.first().cloned());
     } else if workspace.sync_remote.is_some() {
         effective.sync_remote = workspace.sync_remote.clone();
-        effective.sync_remotes = effective
-            .sync_remote
-            .iter()
-            .cloned()
-            .collect();
+        effective.sync_remotes = effective.sync_remote.iter().cloned().collect();
     }
 
     effective.advice = workspace.advice;
@@ -227,8 +223,7 @@ pub fn load_views(root: &Path, project_id: &str) -> Result<crate::model::KnitPro
 
 pub fn save_views(root: &Path, views: &crate::model::KnitProjectViews) -> Result<()> {
     let dir = root.join(".knit/views");
-    fs::create_dir_all(&dir)
-        .with_context(|| format!("failed to create {}", dir.display()))?;
+    fs::create_dir_all(&dir).with_context(|| format!("failed to create {}", dir.display()))?;
     write_json(&views_path(root, &views.project_id), views)
 }
 
@@ -347,11 +342,7 @@ fn process_is_running(pid: u32) -> bool {
     const ERROR_INVALID_PARAMETER: u32 = 87;
 
     extern "system" {
-        fn OpenProcess(
-            dwDesiredAccess: u32,
-            bInheritHandle: i32,
-            dwProcessId: u32,
-        ) -> *mut c_void;
+        fn OpenProcess(dwDesiredAccess: u32, bInheritHandle: i32, dwProcessId: u32) -> *mut c_void;
         fn GetExitCodeProcess(hProcess: *mut c_void, lpExitCode: *mut u32) -> i32;
         fn CloseHandle(hObject: *mut c_void) -> i32;
         fn GetLastError() -> u32;
@@ -394,7 +385,8 @@ pub fn write_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
         // Windows refuses to rename over an existing file; fall back to
         // replace-then-rename, accepting the tiny non-atomic window there.
         Err(_) if cfg!(windows) && path.exists() => {
-            fs::remove_file(path).with_context(|| format!("failed to replace {}", path.display()))?;
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
             fs::rename(&temp_path, path)
                 .with_context(|| format!("failed to write {}", path.display()))
         }

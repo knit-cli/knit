@@ -18,7 +18,18 @@ use std::process::Command;
 
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
     start_bundle(
-        title, None, &[], false, None, &[], &[], true, false, force, agents, None,
+        title,
+        None,
+        &[],
+        false,
+        None,
+        &[],
+        &[],
+        true,
+        false,
+        force,
+        agents,
+        None,
     )
 }
 
@@ -98,8 +109,9 @@ pub fn start_bundle(
     save_config(&root, &config)?;
 
     if let Some(project_id) = &project_id {
-        let selected =
-            select_project_repos(&root, project_id, repo_ids, all_repos, view, include, exclude)?;
+        let selected = select_project_repos(
+            &root, project_id, repo_ids, all_repos, view, include, exclude,
+        )?;
         if !selected.is_empty() {
             let mut active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             crate::commands::track::track_project_repos(

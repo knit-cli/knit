@@ -58,11 +58,7 @@ pub fn fetch_repos(
                     );
                 }
                 Err(error) => {
-                    println!(
-                        "{}: {}",
-                        out::repo(&repo_id),
-                        out::danger("fetch failed")
-                    );
+                    println!("{}: {}", out::repo(&repo_id), out::danger("fetch failed"));
                     git_failures.push(format!("{repo_id}: {error:#}"));
                 }
             }
@@ -109,9 +105,8 @@ fn fetch_repo(repo: &RepoEntry) -> Result<FetchOutcome> {
     }
 
     let remote = "origin";
-    git_output_optional(&cwd, ["remote", "get-url", remote])?.with_context(|| {
-        format!("no `{remote}` remote configured in {}", cwd.display())
-    })?;
+    git_output_optional(&cwd, ["remote", "get-url", remote])?
+        .with_context(|| format!("no `{remote}` remote configured in {}", cwd.display()))?;
 
     let remote_ref = format!("{remote}/{}", repo.base_branch);
     let before = ref_sha(&cwd, &remote_ref)?;
@@ -127,15 +122,13 @@ fn fetch_repo(repo: &RepoEntry) -> Result<FetchOutcome> {
 }
 
 fn ref_sha(cwd: &Path, reference: &str) -> Result<Option<String>> {
-    git_output_optional(cwd, ["rev-parse", "--verify", &format!("{reference}^{{commit}}")])
+    git_output_optional(
+        cwd,
+        ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )
 }
 
-fn print_fetch_summary(
-    repo_id: &str,
-    remote_ref: &str,
-    before: Option<&str>,
-    after: Option<&str>,
-) {
+fn print_fetch_summary(repo_id: &str, remote_ref: &str, before: Option<&str>, after: Option<&str>) {
     match (before, after) {
         (Some(before), Some(after)) if before != after => {
             println!(

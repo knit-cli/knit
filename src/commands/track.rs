@@ -7,9 +7,7 @@ use crate::git::{
     current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
 };
 use crate::ids::{node_id, slugify, unique_repo_id};
-use crate::model::{
-    BundleNode, CheckoutMode, ProjectRepoEntry, RepoEntry,
-};
+use crate::model::{BundleNode, CheckoutMode, ProjectRepoEntry, RepoEntry};
 use crate::output as out;
 use crate::paths::same_path;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};

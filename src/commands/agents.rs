@@ -2,8 +2,8 @@ use crate::checkout::{checkout_dir, checkout_display_path, is_in_place};
 use crate::git::git_output;
 use crate::model::{KnitProject, RepoEntry};
 use crate::output as out;
-use crate::store::ActiveBundle;
 use crate::store::read_json;
+use crate::store::ActiveBundle;
 use anyhow::{Context, Result};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -351,7 +351,7 @@ fn worktree_runtime_section(active: &ActiveBundle) -> String {
     let Some(runtime) = &project.runtime else {
         return String::new();
     };
-    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("<stack-repo>");
     if active.bundle.repos.iter().all(|repo| repo.id != stack_repo) {
         return String::new();
     }
@@ -368,8 +368,7 @@ knit run down
 
 `knit run up` lifts the stack repo's compose shape into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, run as compose project `knit-run-{bundle}`. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs; do not guess ports from an older run.
 
-"#
-        ,
+"#,
         stack_repo = stack_repo,
         bundle = active.bundle.id,
     )
@@ -377,7 +376,10 @@ knit run down
 
 fn load_bundle_project(active: &ActiveBundle) -> Option<KnitProject> {
     let project_id = active.bundle.project_id.as_deref()?;
-    let path = active.root.join(".knit/projects").join(format!("{project_id}.project.json"));
+    let path = active
+        .root
+        .join(".knit/projects")
+        .join(format!("{project_id}.project.json"));
     read_json(&path).ok()
 }
 
@@ -386,12 +388,12 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
         return String::new();
     };
 
-    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("<stack-repo>");
     let compose_file = runtime
         .compose_file
         .clone()
         .unwrap_or_else(|| "docker-compose.knit.yml or docker-compose.yml".to_string());
-    let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
+    let profile_path = runtime.profile_path.as_deref().unwrap_or("/");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
     let database_mode = database.mode;
@@ -401,7 +403,7 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
             name = database
                 .name_template
                 .as_deref()
-                .unwrap_or("knithub_{bundleId}"),
+                .unwrap_or("app_{bundleId}"),
             port = database.port_base.unwrap_or(5437),
         )
     } else {
@@ -444,8 +446,7 @@ Runtime behavior:
 
 Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode activates the compose file's `bundle-db` profile so a dedicated database container starts per runtime with its own empty database.
 
-"#
-        ,
+"#,
         config_file = config_file,
         stack_repo = stack_repo,
         compose_file = compose_file,

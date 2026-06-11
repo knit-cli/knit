@@ -197,7 +197,11 @@ pub fn merge_ledgers(local: &ChangeGroup, remote: &ChangeGroup, now: String) -> 
     merged.commit_groups = commit_groups;
 
     for repo in &remote.repos {
-        if !merged.repos.iter().any(|local_repo| local_repo.id == repo.id) {
+        if !merged
+            .repos
+            .iter()
+            .any(|local_repo| local_repo.id == repo.id)
+        {
             merged.repos.push(repo.clone());
         }
     }

@@ -1,9 +1,9 @@
 use crate::advice;
 use crate::checkout::{checkout_dir, checkout_display_path, checkout_mode_label, is_in_place};
 use crate::commands::bundle::bundle_state;
+use crate::commands::bundle::BundleStatus;
 use crate::git::current_branch;
 use crate::git::git_output;
-use crate::commands::bundle::BundleStatus;
 use crate::model::PublicationEntry;
 use crate::output as out;
 use crate::status::status_label;
@@ -22,7 +22,11 @@ pub fn show_status() -> Result<()> {
         out::node(&active.bundle.id),
         active.resolution_source.label()
     );
-    println!("{} {}\n", out::heading("State:"), out::status(state.as_str()));
+    println!(
+        "{} {}\n",
+        out::heading("State:"),
+        out::status(state.as_str())
+    );
     println!(
         "{} {} {} {} {}",
         out::header_field("repo", 14),

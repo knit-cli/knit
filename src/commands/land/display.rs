@@ -1,8 +1,8 @@
 //! Human-readable rendering of land plans, run status, and per-repo PR/check state.
 
 use super::{LandPlan, LandRun, LandStep, LandStepKind};
-use crate::model::DeployMode;
 use crate::checkout::checkout_dir;
+use crate::model::DeployMode;
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
