@@ -480,6 +480,21 @@ where
     command.status().unwrap().success()
 }
 
+/// Spawn a short-lived child process, wait for it to exit, and return its pid.
+pub fn exited_process_pid() -> u32 {
+    let mut child = if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn cmd")
+    } else {
+        Command::new("true").spawn().expect("spawn true")
+    };
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
+}
+
 pub fn run(mut command: Command) -> String {
     let output = command.output().unwrap();
     if !output.status.success() {

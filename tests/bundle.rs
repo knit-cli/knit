@@ -301,11 +301,7 @@ fn stale_bundle_lock_from_dead_process_is_reclaimed() {
 
     // A crashed knit process left its lock behind: record a pid that is
     // guaranteed dead by the time the next command runs.
-    let mut child = std::process::Command::new("true")
-        .spawn()
-        .expect("spawn true");
-    let dead_pid = child.id();
-    child.wait().unwrap();
+    let dead_pid = exited_process_pid();
     let lock_dir = workspace.join(".knit/locks");
     fs::create_dir_all(&lock_dir).unwrap();
     let lock_path = lock_dir.join("venue-capacity.lock");
