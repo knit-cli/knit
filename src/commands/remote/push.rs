@@ -510,13 +510,23 @@ fn push_bundle_artifact(
         "producer_version": env!("CARGO_PKG_VERSION"),
         "payload": bundle
     });
-    request_json(
+    let response = request(
         remote,
         token,
         "POST",
         &format!("/bundles/{bundle_id}/artifacts"),
         Some(&payload),
-    )
+    )?;
+    // The remote refuses any artifact whose ledger would drop nodes the
+    // current remote artifact records: another user (or another machine)
+    // pushed work this workspace has not seen yet.
+    if response.status == 409 {
+        bail!(
+            "{}: the KnitHub remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again.",
+            bundle.id
+        );
+    }
+    decode_response(response)
 }
 
 fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
