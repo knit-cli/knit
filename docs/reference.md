@@ -85,6 +85,7 @@ knit pull [--main] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
+knit run up|status|down                        # bundle runtime stack
 knit run --list
 knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--provider <id>|--github] [repo-id-or-path...]
