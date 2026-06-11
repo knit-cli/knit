@@ -200,7 +200,7 @@ pub(super) fn localize_bundle(mut bundle: ChangeGroup, project: &KnitProject) ->
         repo.path = local.path.clone();
         repo.remote = local.remote.clone().or_else(|| repo.remote.clone());
         repo.base_branch = local.base_branch.clone();
-        repo.checkout_mode = local.checkout_mode.clone();
+        repo.checkout_mode = local.checkout_mode;
         repo.worktree_path = None;
     }
     Ok(bundle)

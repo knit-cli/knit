@@ -8,9 +8,7 @@ pub use prune::prune_merged_bundles;
 use crate::checkout::is_in_place;
 use crate::git::{branch_exists, current_branch, git_output, git_output_optional, ref_exists};
 use crate::model::{
-    BundleNode, ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
-    BUNDLE_STATE_OPEN, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
-    SCHEMA_VERSION,
+    BundleNode, BundleState, ChangeGroup, CheckoutMode, CHANGE_GROUP_KIND, SCHEMA_VERSION,
 };
 use crate::output as out;
 use crate::store::{
@@ -116,10 +114,10 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
         let bundle: ChangeGroup = read_json(&path)?;
         let state = bundle_state(&bundle);
         if !all {
-            if state == BUNDLE_STATE_ARCHIVED && !archived {
+            if state == BundleStatus::Archived && !archived {
                 continue;
             }
-            if state == BUNDLE_STATE_DELETED && !deleted {
+            if state == BundleStatus::Deleted && !deleted {
                 continue;
             }
         }
@@ -161,7 +159,7 @@ pub fn list_open_bundle_ids(root: &Path) -> Result<Vec<String>> {
         let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
             continue;
         };
-        if bundle_state(&bundle) == BUNDLE_STATE_OPEN {
+        if bundle_state(&bundle) == BundleStatus::Open {
             ids.push(bundle.id);
         }
     }
@@ -177,7 +175,7 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool) -> Result<()> {
         bail!("No Knit bundle named `{bundle_id}` found.");
     }
     let bundle: ChangeGroup = read_json(&stored_bundle_path(&root, &bundle_id))?;
-    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
+    if bundle_state(&bundle) == BundleStatus::Archived {
         bail!("Bundle `{bundle_id}` is archived. Run `knit bundle restore {bundle_id}` first.");
     }
 
@@ -217,7 +215,7 @@ pub fn archive_bundle(
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let bundle = load_existing_bundle(&path, &bundle_id)?;
-    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
+    if bundle_state(&bundle) == BundleStatus::Archived {
         bail!("Bundle `{bundle_id}` is already archived.");
     }
     let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
@@ -226,7 +224,7 @@ pub fn archive_bundle(
     }
     let now = now_iso();
     let node = crate::ids::node_id("archive");
-    active.bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
+    active.bundle.state = Some(BundleState::Archived);
     active.bundle.archived_at = Some(now.clone());
     active
         .bundle
@@ -254,10 +252,10 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let mut bundle = load_existing_bundle(&path, &bundle_id)?;
-    if bundle_state(&bundle) != BUNDLE_STATE_ARCHIVED {
+    if bundle_state(&bundle) != BundleStatus::Archived {
         bail!("Bundle `{bundle_id}` is not archived.");
     }
-    bundle.state = Some(BUNDLE_STATE_OPEN.to_string());
+    bundle.state = Some(BundleState::Open);
     bundle.archived_at = None;
     bundle.updated_at = now_iso();
     write_json(&path, &bundle)?;
@@ -265,7 +263,7 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
         "{} {} ({})",
         out::heading("Restored bundle:"),
         out::node(&bundle_id),
-        BUNDLE_STATE_OPEN
+        BundleState::Open
     );
     crate::advice::print(
         &root,
@@ -323,7 +321,7 @@ pub fn delete_bundle(
         delete_remote_feature_branches(&bundle)?;
     }
     let now = now_iso();
-    bundle.state = Some(BUNDLE_STATE_DELETED.to_string());
+    bundle.state = Some(BundleState::Deleted);
     bundle.deleted_at = Some(now.clone());
     bundle.updated_at = now;
     let deleted_dir = root.join(".knit/deleted/bundles");
@@ -585,28 +583,58 @@ fn clear_active_if_matches(root: &std::path::Path, bundle_id: &str) -> Result<()
     Ok(())
 }
 
-pub fn bundle_state(bundle: &ChangeGroup) -> &'static str {
-    match bundle.state.as_deref() {
-        Some(BUNDLE_STATE_ARCHIVED) => return BUNDLE_STATE_ARCHIVED,
-        Some(BUNDLE_STATE_DELETED) => return BUNDLE_STATE_DELETED,
-        Some(BUNDLE_STATE_CLOSED) => return BUNDLE_STATE_CLOSED,
+/// Bundle state as presented to users: the persisted [`BundleState`] plus the
+/// derived `Landed`, which is inferred from the ledger and never written to
+/// the artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleStatus {
+    Open,
+    Closed,
+    Archived,
+    Deleted,
+    Landed,
+}
+
+impl BundleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BundleStatus::Open => "open",
+            BundleStatus::Closed => "closed",
+            BundleStatus::Archived => "archived",
+            BundleStatus::Deleted => "deleted",
+            BundleStatus::Landed => "landed",
+        }
+    }
+}
+
+impl std::fmt::Display for BundleStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+pub fn bundle_state(bundle: &ChangeGroup) -> BundleStatus {
+    match bundle.state {
+        Some(BundleState::Archived) => return BundleStatus::Archived,
+        Some(BundleState::Deleted) => return BundleStatus::Deleted,
+        Some(BundleState::Closed) => return BundleStatus::Closed,
         _ => {}
     }
     // An explicit `open` state outranks node inference so restoring an archived
     // bundle that carries a legacy `feature.closed` node actually reopens it.
-    let explicitly_open = bundle.state.as_deref() == Some(BUNDLE_STATE_OPEN);
+    let explicitly_open = bundle.state == Some(BundleState::Open);
     if !explicitly_open && has_closed_node(bundle) {
-        BUNDLE_STATE_CLOSED
+        BundleStatus::Closed
     } else if has_landed_node(bundle) {
         // "feature.landed" is a ledger marker; if any recorded publication is still open we
         // should not present the bundle as landed.
         if has_open_publications(bundle) {
-            BUNDLE_STATE_OPEN
+            BundleStatus::Open
         } else {
-            "landed"
+            BundleStatus::Landed
         }
     } else {
-        BUNDLE_STATE_OPEN
+        BundleStatus::Open
     }
 }
 
@@ -684,16 +712,7 @@ fn validate_repos(bundle: &ChangeGroup, errors: &mut Vec<String>) {
         if repo.base_branch.trim().is_empty() {
             errors.push(format!("repo `{}` baseBranch must not be empty", repo.id));
         }
-        if !matches!(
-            repo.checkout_mode.as_str(),
-            CHECKOUT_MODE_WORKTREE | CHECKOUT_MODE_IN_PLACE
-        ) {
-            errors.push(format!(
-                "repo `{}` checkoutMode must be `{CHECKOUT_MODE_WORKTREE}` or `{CHECKOUT_MODE_IN_PLACE}`",
-                repo.id
-            ));
-        }
-        if repo.checkout_mode == CHECKOUT_MODE_IN_PLACE
+        if repo.checkout_mode == CheckoutMode::InPlace
             && repo.worktree_path.as_deref() != Some(repo.path.as_str())
         {
             errors.push(format!(
@@ -877,12 +896,6 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
         if change.repo_id.trim().is_empty() {
             errors.push(format!(
                 "node `{}` repoChange repoId must not be empty",
-                node.id
-            ));
-        }
-        if change.movement.trim().is_empty() {
-            errors.push(format!(
-                "node `{}` repoChange movement must not be empty",
                 node.id
             ));
         }
