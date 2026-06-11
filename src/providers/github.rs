@@ -566,9 +566,7 @@ fn native_github_api_output(method: &str, endpoint: &str, body: Option<&str>) ->
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(20))
-        .resolver(
-            ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>,
-        )
+        .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
         .build();
     let mut request = agent
         .request(method, &url)

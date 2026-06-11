@@ -306,16 +306,22 @@ fn commit_stages_and_commits_repos_in_parallel() {
     let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
 
     append_line(&backend_feature.join("app.txt"), "parallel backend commit");
-    append_line(&frontend_feature.join("app.txt"), "parallel frontend commit");
+    append_line(
+        &frontend_feature.join("app.txt"),
+        "parallel frontend commit",
+    );
 
     let gate = root.join("commit-gate");
     install_parallel_gate_hook(&backend_feature, "pre-commit", &gate, "backend", "frontend");
-    install_parallel_gate_hook(&frontend_feature, "pre-commit", &gate, "frontend", "backend");
-
-    let commit = knit(
-        &workspace,
-        ["commit", "--all", "-m", "Parallel commit"],
+    install_parallel_gate_hook(
+        &frontend_feature,
+        "pre-commit",
+        &gate,
+        "frontend",
+        "backend",
     );
+
+    let commit = knit(&workspace, ["commit", "--all", "-m", "Parallel commit"]);
     assert!(commit.contains("backend"));
     assert!(commit.contains("frontend"));
     assert!(commit.contains("Recorded commit group"));
@@ -416,7 +422,6 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     fs::remove_dir_all(root).unwrap();
 }
 
-
 #[test]
 fn worktree_materialization_tracks_collaborator_pushed_feature_branch() {
     let root = unique_temp_dir();
@@ -489,7 +494,10 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    knit(&workspace, ["bundle", "venue capacity", "--repo", "backend"]);
+    knit(
+        &workspace,
+        ["bundle", "venue capacity", "--repo", "backend"],
+    );
 
     // This user records local work in the bundle ledger.
     let feature = workspace.join(".knit/worktrees/venue-capacity/backend");

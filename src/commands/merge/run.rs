@@ -162,7 +162,11 @@ fn apply_pending_merge_steps(
         );
     }
 
-    if run.steps.iter().all(|step| step.status == MergeStepStatus::Succeeded) {
+    if run
+        .steps
+        .iter()
+        .all(|step| step.status == MergeStepStatus::Succeeded)
+    {
         finalize_target_bundle(root, run, target_bundle_lock_held)?;
         if run.push_requested {
             if let Err(error) = push_merge_run_steps(root, run, &[], run.set_upstream) {
@@ -200,8 +204,8 @@ fn apply_merge_step(
     manual: bool,
 ) -> std::result::Result<(), MergeStepFailure> {
     let checkout = resolve_stored_path(root, &step.checkout_path);
-    let status = git_output(&checkout, ["status", "--porcelain"])
-        .map_err(MergeStepFailure::Fatal)?;
+    let status =
+        git_output(&checkout, ["status", "--porcelain"]).map_err(MergeStepFailure::Fatal)?;
     if !status.trim().is_empty() {
         return Err(MergeStepFailure::Fatal(anyhow::anyhow!(
             "target checkout is not clean: {}",
@@ -221,9 +225,7 @@ fn apply_merge_step(
 
     match merge_result {
         Ok(_) => {
-            step.after_sha = Some(
-                rev_parse(&checkout, "HEAD").map_err(MergeStepFailure::Fatal)?,
-            );
+            step.after_sha = Some(rev_parse(&checkout, "HEAD").map_err(MergeStepFailure::Fatal)?);
             step.status = MergeStepStatus::Succeeded;
             Ok(())
         }
@@ -305,7 +307,8 @@ pub(super) fn continue_latest_merge(root: &Path) -> Result<()> {
 }
 
 pub(super) fn abort_latest_merge(root: &Path) -> Result<()> {
-    let (run_path, mut run) = latest_merge_run(root, &[MergeRunStatus::Conflicted, MergeRunStatus::Running])?;
+    let (run_path, mut run) =
+        latest_merge_run(root, &[MergeRunStatus::Conflicted, MergeRunStatus::Running])?;
     let _locks = acquire_run_locks(root, &run)?;
     rollback_merge_run(root, &mut run)?;
     run.status = MergeRunStatus::Aborted;

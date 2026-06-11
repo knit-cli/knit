@@ -13,9 +13,7 @@ use crate::git::{current_branch, git_output, git_output_optional, ref_exists};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
-use crate::store::{
-    acquire_named_lock, bundle_path, find_knit_root, read_json, KnitLock,
-};
+use crate::store::{acquire_named_lock, bundle_path, find_knit_root, read_json, KnitLock};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -213,7 +211,9 @@ pub fn merge_command(
         match source {
             Some("status") => return report::show_merge_status(&root, run),
             Some("show") => return report::show_merge_run_json(&root, run),
-            Some("push") => return report::push_recorded_merge_run(&root, run, repos, set_upstream),
+            Some("push") => {
+                return report::push_recorded_merge_run(&root, run, repos, set_upstream)
+            }
             _ => {}
         }
     }

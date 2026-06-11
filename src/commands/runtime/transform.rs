@@ -180,10 +180,7 @@ fn remap_context_relative(
     }
     let resolved = context.join(&candidate);
     let remapped = remap_path(&resolved, repo_map)?;
-    Some(
-        relative_between(context, &remapped)
-            .unwrap_or_else(|| remapped.display().to_string()),
-    )
+    Some(relative_between(context, &remapped).unwrap_or_else(|| remapped.display().to_string()))
 }
 
 fn transform_volume(volume: &mut Value, repo_map: &[(PathBuf, PathBuf)]) {
@@ -437,7 +434,9 @@ mod tests {
 
         // Top-level name and container names are stripped.
         assert!(config.get("name").is_none());
-        assert!(config["services"]["backend"].get("container_name").is_none());
+        assert!(config["services"]["backend"]
+            .get("container_name")
+            .is_none());
 
         // Build paths pointing into tracked repos land in worktrees; the
         // workspace-root context stays.
@@ -467,19 +466,14 @@ mod tests {
         );
 
         // Bind mounts into tracked repos remap; workspace mount stays.
-        let backend_volumes = config["services"]["backend"]["volumes"]
-            .as_array()
-            .unwrap();
+        let backend_volumes = config["services"]["backend"]["volumes"].as_array().unwrap();
         assert_eq!(backend_volumes[0]["source"], root_str);
         assert_eq!(
             backend_volumes[1]["source"],
             worktrees.join("knithub/priv").display().to_string()
         );
         // Named volumes untouched (project scoping isolates them).
-        assert_eq!(
-            config["services"]["db"]["volumes"][0]["source"],
-            "db-data"
-        );
+        assert_eq!(config["services"]["db"]["volumes"][0]["source"], "db-data");
 
         // Every published port is remapped, container ports untouched.
         assert_eq!(ports.len(), 3);
@@ -526,6 +520,9 @@ mod tests {
             relative_between(Path::new("/work"), Path::new("/work/knit")).unwrap(),
             "knit"
         );
-        assert_eq!(relative_between(Path::new("/work"), Path::new("/work")).unwrap(), ".");
+        assert_eq!(
+            relative_between(Path::new("/work"), Path::new("/work")).unwrap(),
+            "."
+        );
     }
 }

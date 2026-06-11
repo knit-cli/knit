@@ -433,7 +433,10 @@ fn select_active_bundle(
 
     Ok(bundles
         .iter()
-        .find(|bundle| bundle.state.unwrap_or(crate::model::BundleState::Open) == crate::model::BundleState::Open)
+        .find(|bundle| {
+            bundle.state.unwrap_or(crate::model::BundleState::Open)
+                == crate::model::BundleState::Open
+        })
         .or_else(|| bundles.first())
         .map(|bundle| bundle.id.clone()))
 }
@@ -481,10 +484,8 @@ mod tests {
     fn temp_dir(tag: &str) -> PathBuf {
         static COUNTER: AtomicU32 = AtomicU32::new(0);
         let n = COUNTER.fetch_add(1, Ordering::Relaxed);
-        let dir = std::env::temp_dir().join(format!(
-            "knit-clone-test-{tag}-{}-{n}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("knit-clone-test-{tag}-{}-{n}", std::process::id()));
         fs::create_dir_all(&dir).unwrap();
         dir
     }

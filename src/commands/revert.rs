@@ -599,7 +599,10 @@ fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result<()> {
 }
 
 fn verify_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
-    if !matches!(operation.kind, RevertOpKind::Revert | RevertOpKind::CherryPick) {
+    if !matches!(
+        operation.kind,
+        RevertOpKind::Revert | RevertOpKind::CherryPick
+    ) {
         bail!("{repo_id}: unknown revert operation `{}`.", operation.kind);
     }
     let sha = operation_sha(operation)?;

@@ -2,10 +2,10 @@
 //! wide), list/fetch remote bundles, and delete remote bundle records.
 
 use super::client::{
-    configured_sync_remote_names, decode_bundle_payload, ensure_remote_bundle_fast_forward,
-    fast_forward_feature_checkouts, fetch_project_export, localize_bundle, load_project_if_present,
-    prepare_feature_branches, request_json, resolve_project_id, resolve_remote,
-    resolve_sync_remote_name, resolve_token, effective_workspace_config,
+    configured_sync_remote_names, decode_bundle_payload, effective_workspace_config,
+    ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts, fetch_project_export,
+    load_project_if_present, localize_bundle, prepare_feature_branches, request_json,
+    resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
@@ -262,10 +262,14 @@ pub fn pull_bundle_remote_state(
         .iter()
         .find(|bundle| bundle.slug == bundle_id)
     else {
-        return Ok(RemoteBundleOutcome::Skipped("not present on remote".to_string()));
+        return Ok(RemoteBundleOutcome::Skipped(
+            "not present on remote".to_string(),
+        ));
     };
     let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
-        return Ok(RemoteBundleOutcome::Skipped("no remote artifact".to_string()));
+        return Ok(RemoteBundleOutcome::Skipped(
+            "no remote artifact".to_string(),
+        ));
     };
     let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
     match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
@@ -369,7 +373,10 @@ pub fn remote_bundle_lifecycle(
 
 /// List the bundle records the sync remote holds for `project_id`, decoding each
 /// bundle's current artifact payload when it is a supported Knit bundle.
-pub fn list_remote_bundles(config: &KnitConfig, project_id: &str) -> Result<Vec<RemoteBundleRecord>> {
+pub fn list_remote_bundles(
+    config: &KnitConfig,
+    project_id: &str,
+) -> Result<Vec<RemoteBundleRecord>> {
     let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
@@ -398,8 +405,13 @@ pub fn delete_remote_bundle_by_id(config: &KnitConfig, remote_id: &str) -> Resul
     let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
-    let deleted: RemoteBundle =
-        request_json(remote, &token, "DELETE", &format!("/bundles/{remote_id}"), None)?;
+    let deleted: RemoteBundle = request_json(
+        remote,
+        &token,
+        "DELETE",
+        &format!("/bundles/{remote_id}"),
+        None,
+    )?;
     Ok(deleted.slug)
 }
 
@@ -471,8 +483,12 @@ pub fn fetch_bundles_from_remote(
     };
 
     let bundles_dir = root.join(".knit/bundles");
-    fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("failed to create bundles directory {}", bundles_dir.display()))?;
+    fs::create_dir_all(&bundles_dir).with_context(|| {
+        format!(
+            "failed to create bundles directory {}",
+            bundles_dir.display()
+        )
+    })?;
 
     let mut fetched_count = 0;
     for remote_bundle in export.bundles {
@@ -523,7 +539,11 @@ pub fn fetch_bundles_from_remote(
             out::repo(&remote_name)
         );
     } else {
-        println!("{} no bundles to fetch from {}", out::muted("already up-to-date"), out::repo(&remote_name));
+        println!(
+            "{} no bundles to fetch from {}",
+            out::muted("already up-to-date"),
+            out::repo(&remote_name)
+        );
     }
     Ok(())
 }
