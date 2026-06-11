@@ -1,0 +1,18 @@
+PackageIdentifier: marc-merino.knit
+PackageVersion: 0.1.0
+PackageLocale: en-US
+Publisher: marc-merino
+PackageName: knit
+License: Apache-2.0
+ShortDescription: Local-first CLI for coordinating cross-repo feature bundles
+Installers:
+  - Architecture: x64
+    InstallerType: zip
+    NestedInstallerType: portable
+    NestedInstallerFiles:
+      - RelativeFilePath: knit.exe
+        PortableCommandAlias: knit
+    InstallerUrl: https://github.com/marc-merino/knit/releases/download/v0.1.0/knit-v0.1.0-x86_64-pc-windows-msvc.zip
+    InstallerSha256: REPLACE_WITH_SHA256
+ManifestType: singleton
+ManifestVersion: 1.6.0
