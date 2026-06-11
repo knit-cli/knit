@@ -3,6 +3,7 @@ mod common;
 use common::*;
 use serde_json::{json, Value};
 use std::fs;
+use std::path::Path;
 
 #[test]
 fn artifact_land_apply_can_use_native_ipv4_transport() {
@@ -622,6 +623,148 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     let status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
     assert!(status.contains("succeeded"));
     assert!(status.contains("deploy"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Make the venue-capacity plan land sequentially with a failing gate between
+/// the two merges: merge-backend, then a `run` step that fails, then
+/// merge-frontend. Applying it merges backend only and leaves a failed run.
+fn write_half_failing_plan(workspace: &Path, on_failure: Option<&str>) {
+    let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
+    let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    if let Some(on_failure) = on_failure {
+        plan["onFailure"] = json!(on_failure);
+    }
+    let steps = plan["steps"].as_array_mut().unwrap();
+    for step in steps.iter_mut() {
+        if step["id"].as_str() == Some("merge-frontend") {
+            step["needs"] = json!(["gate"]);
+        }
+    }
+    steps.push(json!({
+        "id": "gate",
+        "type": "run",
+        "cwd": ".",
+        "command": ["sh", "-c", "false"],
+        "needs": ["merge-backend"]
+    }));
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+}
+
+fn latest_land_run(workspace: &Path) -> (std::path::PathBuf, Value) {
+    let run_dir = workspace.join(".knit/land-runs");
+    let mut paths: Vec<_> = fs::read_dir(&run_dir)
+        .unwrap()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .collect();
+    paths.sort();
+    let path = paths.pop().unwrap();
+    let run: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    (path, run)
+}
+
+#[test]
+fn land_rollback_creates_revert_prs_for_merged_steps_of_failed_run() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    write_half_failing_plan(&workspace, None);
+
+    let failed = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(failed.contains("stopped at step gate"), "{failed}");
+    assert!(failed.contains("knit land rollback"), "{failed}");
+    // backend merged before the gate failed; frontend never merged.
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["backend"]);
+    let (_, run) = latest_land_run(&workspace);
+    let run_id = run["id"].as_str().unwrap().to_string();
+    assert_eq!(run["status"].as_str(), Some("failed"));
+
+    // Preview shows the merged step and creates nothing.
+    let preview = knit_with_fake_gh(&workspace, ["land", "rollback"], &fake_bin, &fake_gh_dir);
+    assert!(preview.contains("Land rollback"), "{preview}");
+    assert!(
+        preview.contains("https://github.com/acme/backend/pull/101"),
+        "{preview}"
+    );
+    assert!(preview.contains("MERGED"), "{preview}");
+    assert!(preview.contains("knit land rollback --apply"), "{preview}");
+    assert!(!preview.contains("frontend"), "{preview}");
+    assert!(!fake_gh_dir.join("revert-order.txt").exists());
+
+    let applied = knit_with_fake_gh(
+        &workspace,
+        ["land", "rollback", "--apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(applied.contains("Recorded PR revert group"), "{applied}");
+    assert!(applied.contains("Rolled back"), "{applied}");
+    // Only the merged backend PR is reverted.
+    let revert_order = fs::read_to_string(fake_gh_dir.join("revert-order.txt")).unwrap();
+    assert_eq!(revert_order.lines().collect::<Vec<_>>(), vec!["backend"]);
+
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("pr.revert"));
+    assert_eq!(latest["targetNodeId"].as_str(), Some(run_id.as_str()));
+    assert_eq!(latest["provider"].as_str(), Some("github"));
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|publication| {
+            publication["repoId"].as_str() == Some("backend")
+                && publication["number"].as_u64() == Some(901)
+                && publication["state"].as_str() == Some("OPEN")
+        }));
+    assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
+
+    let (_, run) = latest_land_run(&workspace);
+    assert!(run["rolledBackAt"].as_str().is_some());
+
+    // A rolled-back run can be neither resumed nor rolled back again.
+    let resume = knit_fails_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
+    assert!(resume.contains("was rolled back"), "{resume}");
+    let again = knit_fails_with_fake_gh(&workspace, ["land", "rollback"], &fake_bin, &fake_gh_dir);
+    assert!(again.contains("already rolled back"), "{again}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_on_failure_rollback_reverts_merged_steps_automatically() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    write_half_failing_plan(&workspace, Some("rollback"));
+
+    let failed = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(failed.contains("stopped at step gate"), "{failed}");
+    assert!(failed.contains("rolling back"), "{failed}");
+    assert!(failed.contains("revert group"), "{failed}");
+
+    let revert_order = fs::read_to_string(fake_gh_dir.join("revert-order.txt")).unwrap();
+    assert_eq!(revert_order.lines().collect::<Vec<_>>(), vec!["backend"]);
+    let bundle = read_bundle(&workspace);
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("pr.revert"));
+    let (_, run) = latest_land_run(&workspace);
+    assert!(run["rolledBackAt"].as_str().is_some());
+
+    let resume = knit_fails_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
+    assert!(resume.contains("was rolled back"), "{resume}");
 
     fs::remove_dir_all(root).unwrap();
 }

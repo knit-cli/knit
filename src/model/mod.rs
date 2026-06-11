@@ -72,6 +72,32 @@ impl std::fmt::Display for DeployMode {
     }
 }
 
+/// What `knit land apply` does when a step fails: stop so the run can be
+/// resumed (default), or create revert PRs for the merge steps that already
+/// landed. Shared by project landing templates and land plans.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LandOnFailure {
+    #[default]
+    Resume,
+    Rollback,
+}
+
+impl LandOnFailure {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LandOnFailure::Resume => "resume",
+            LandOnFailure::Rollback => "rollback",
+        }
+    }
+}
+
+impl std::fmt::Display for LandOnFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
 /// How a deploy checkout is refreshed before deploying.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]

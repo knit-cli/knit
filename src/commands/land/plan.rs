@@ -84,8 +84,9 @@ pub(super) fn build_default_plan(
         id: format!("land-{}", active.bundle.id),
         provider,
         bundle_id: active.bundle.id.clone(),
-        source_project_id: project.map(|project| project.id),
+        source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
+        on_failure: landing.and_then(|landing| landing.on_failure),
         steps,
     })
 }

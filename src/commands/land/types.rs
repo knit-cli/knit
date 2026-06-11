@@ -76,6 +76,11 @@ pub(super) struct LandPlan {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_project_id: Option<String>,
     pub(super) created_at: String,
+    /// What `knit land apply` does when a step fails: stop and wait for
+    /// `knit land resume` (default), or create revert PRs for the merge steps
+    /// that already landed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) on_failure: Option<crate::model::LandOnFailure>,
     pub(super) steps: Vec<LandStep>,
 }
 
@@ -138,6 +143,10 @@ pub(super) struct LandRun {
     pub(super) status: LandStatus,
     pub(super) created_at: String,
     pub(super) updated_at: String,
+    /// Set when `knit land rollback` (or `onFailure: rollback`) created revert
+    /// PRs for this run's merged steps. A rolled-back run cannot be resumed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) rolled_back_at: Option<String>,
     pub(super) steps: Vec<LandRunStep>,
 }
 
