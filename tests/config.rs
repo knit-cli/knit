@@ -247,3 +247,37 @@ fn config_can_target_multiple_knithub_sync_remotes() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn workspace_scoped_tokens_warn_about_shared_config() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "venue capacity"]);
+
+    knit(&workspace, ["remote", "add", "hub", "http://localhost:9"]);
+    let stored = knit(&workspace, ["remote", "token", "hub", "kht_secret"]);
+    assert!(stored.contains("warning:"));
+    assert!(stored.contains("KNIT_REMOTE_HUB_TOKEN"));
+
+    // Global storage is the recommended scope and stays quiet. Use a private
+    // KNIT_HOME: the shared isolated home would leak this global remote into
+    // sibling tests' `remote list` output.
+    let private_home = root.join("private-knit-home");
+    fs::create_dir_all(&private_home).unwrap();
+    let env_home = private_home.to_string_lossy().to_string();
+    let env = [("KNIT_HOME", env_home.as_str())];
+    knit_with_env(
+        &workspace,
+        ["remote", "add", "ghub", "http://localhost:9", "--global"],
+        &env,
+    );
+    let global_store = knit_with_env(
+        &workspace,
+        ["remote", "token", "ghub", "kht_secret", "--global"],
+        &env,
+    );
+    assert!(!global_store.contains("warning:"));
+
+    fs::remove_dir_all(root).unwrap();
+}

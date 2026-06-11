@@ -18,8 +18,8 @@ use crate::model::{
 };
 use crate::output as out;
 use crate::store::{
-    bundle_path, load_active_bundle, project_path, read_json, save_active_bundle, write_json,
-    ActiveBundle,
+    acquire_named_lock, bundle_path, load_active_bundle, project_path, read_json,
+    save_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -252,6 +252,9 @@ pub fn pull_bundle_remote_state(
             "no local bundle artifact".to_string(),
         ));
     }
+    // Hold the same per-bundle lock mutating commands take, so a pull cannot
+    // interleave with a concurrent commit/sync in another knit process.
+    let _lock = acquire_named_lock(root, bundle_id)?;
     let local: ChangeGroup = read_json(&path)?;
     let Some(remote_bundle) = context
         .export
