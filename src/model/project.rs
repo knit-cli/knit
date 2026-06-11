@@ -93,11 +93,12 @@ pub struct ProjectRunCommand {
     pub env: BTreeMap<String, String>,
 }
 
-/// A project's bundle runtime. Knit owns the namespace (compose project name,
-/// host ports, database identity) and injects it as `KNIT_*` environment
-/// variables; the stack repo owns a compose file written against those
-/// variables. Knit knows nothing about service topology, build args, or app
-/// environment — that is the compose file's business.
+/// A project's bundle runtime. Knit lifts the stack repo's compose shape
+/// into a per-bundle namespace (compose project name, free host ports,
+/// bundle checkouts substituted for source paths). Repos can instead commit
+/// a compose file written against Knit's `KNIT_*` environment contract for
+/// precise control. Every field is optional: a bundle whose single repo has
+/// a docker-compose file runs with zero configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectRuntime {
@@ -108,25 +109,36 @@ pub struct ProjectRuntime {
     pub stack_repo: Option<String>,
     #[serde(default = "default_project_config_file")]
     pub project_config_file: String,
-    /// Compose file inside the stack repo, written against the `KNIT_*`
-    /// environment contract.
-    #[serde(default = "default_compose_file")]
-    pub compose_file: String,
+    /// Compose file inside the stack repo. Defaults to
+    /// `docker-compose.knit.yml` when present, then the repo's own
+    /// `docker-compose.yml`/`compose.yaml`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compose_file: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<ProjectRuntimeDatabase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<ProjectRuntimePorts>,
-    /// Path opened on the allocated frontend port after `knit run status`.
+    /// Path opened on the frontend port after `knit run status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_path: Option<String>,
 }
 
-fn default_runtime_kind() -> String {
-    "docker-compose".to_string()
+impl Default for ProjectRuntime {
+    fn default() -> Self {
+        Self {
+            kind: default_runtime_kind(),
+            stack_repo: None,
+            project_config_file: default_project_config_file(),
+            compose_file: None,
+            database: None,
+            ports: None,
+            profile_path: None,
+        }
+    }
 }
 
-fn default_compose_file() -> String {
-    "docker-compose.knit.yml".to_string()
+fn default_runtime_kind() -> String {
+    "docker-compose".to_string()
 }
 
 fn default_project_config_file() -> String {
