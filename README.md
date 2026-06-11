@@ -11,6 +11,8 @@ This walkthrough takes you from install to a landed multi-repo change in about t
 ### 1. Install
 
 ```sh
+cargo install knit-cli        # from crates.io (the binary is named `knit`)
+# or from a checkout:
 cargo install --path .
 ```
 
@@ -175,8 +177,14 @@ up in dashboards:
 
 ```sh
 knit remote add knithub https://knithub.dev --token <your-token> --global
-knit sync push                # bundles + history + views for the resolved project
+knit project push                       # create the hosted project (uploads views too)
+KNIT_BUNDLE=my-feature knit sync push   # bundles + history for the walkthrough bundle
 ```
+
+`knit project push` creates the hosted project record; run it once per project
+before the first sync. `knit sync push` resolves a bundle the same way every
+other command does — since step 8 archived `my-feature`, name it explicitly
+with `KNIT_BUNDLE` (or sync before archiving).
 
 Once a sync remote is configured, publish and land keep the hosted artifacts in
 sync automatically, hosted dashboards show bundles and project history, and

@@ -351,7 +351,7 @@ fn worktree_runtime_section(active: &ActiveBundle) -> String {
     let Some(runtime) = &project.runtime else {
         return String::new();
     };
-    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("<stack-repo>");
     if active.bundle.repos.iter().all(|repo| repo.id != stack_repo) {
         return String::new();
     }
@@ -386,12 +386,12 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
         return String::new();
     };
 
-    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("knithub");
+    let stack_repo = runtime.stack_repo.as_deref().unwrap_or("<stack-repo>");
     let compose_file = runtime
         .compose_file
         .clone()
         .unwrap_or_else(|| "docker-compose.knit.yml or docker-compose.yml".to_string());
-    let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
+    let profile_path = runtime.profile_path.as_deref().unwrap_or("/");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
     let database_mode = database.mode;
@@ -401,7 +401,7 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
             name = database
                 .name_template
                 .as_deref()
-                .unwrap_or("knithub_{bundleId}"),
+                .unwrap_or("app_{bundleId}"),
             port = database.port_base.unwrap_or(5437),
         )
     } else {
