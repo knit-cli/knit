@@ -16,13 +16,13 @@ fn expands_comma_separated_repo_selectors() {
         vec!["frontend", "docs"]
     );
     assert_eq!(
-        expand_repo_selectors(&[
-            "backend".to_string(),
-            "frontend, docs".to_string(),
-        ]),
+        expand_repo_selectors(&["backend".to_string(), "frontend, docs".to_string(),]),
         vec!["backend", "frontend", "docs"]
     );
-    assert_eq!(expand_repo_selectors(&[" , ".to_string()]), Vec::<String>::new());
+    assert_eq!(
+        expand_repo_selectors(&[" , ".to_string()]),
+        Vec::<String>::new()
+    );
 }
 
 #[test]

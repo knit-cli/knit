@@ -772,4 +772,3 @@ fn land_apply_treats_no_required_checks_as_ready() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

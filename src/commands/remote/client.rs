@@ -7,7 +7,9 @@ use crate::checkout::is_in_place;
 use crate::git::{branch_exists, current_branch, git_output, is_ancestor, ref_exists, rev_parse};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, RepoEntry};
-use crate::store::{find_knit_root, load_config, load_effective_config, project_path, read_json, ActiveBundle};
+use crate::store::{
+    find_knit_root, load_config, load_effective_config, project_path, read_json, ActiveBundle,
+};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
@@ -137,7 +139,10 @@ pub(super) fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
     )
 }
 
-pub(super) fn load_project_if_present(root: &Path, project_id: &str) -> Result<Option<KnitProject>> {
+pub(super) fn load_project_if_present(
+    root: &Path,
+    project_id: &str,
+) -> Result<Option<KnitProject>> {
     let path = project_path(root, project_id);
     if path.exists() {
         read_json(&path).map(Some)
@@ -178,7 +183,10 @@ pub(super) fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Resul
     })
 }
 
-pub(super) fn localize_bundle(mut bundle: ChangeGroup, project: &KnitProject) -> Result<ChangeGroup> {
+pub(super) fn localize_bundle(
+    mut bundle: ChangeGroup,
+    project: &KnitProject,
+) -> Result<ChangeGroup> {
     bundle.project_id = Some(project.id.clone());
     for repo in &mut bundle.repos {
         let local = project
@@ -418,8 +426,7 @@ pub(super) fn request(
         .set("authorization", &format!("Bearer {token}"));
     let result = match payload {
         Some(value) => {
-            let body =
-                serde_json::to_string(value).context("failed to serialize request body")?;
+            let body = serde_json::to_string(value).context("failed to serialize request body")?;
             request.send_string(&body)
         }
         None => request.call(),

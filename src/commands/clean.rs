@@ -1,6 +1,6 @@
 use crate::checkout::is_in_place;
-use crate::git::git_output;
 use crate::commands::bundle::BundleStatus;
+use crate::git::git_output;
 use crate::model::ChangeGroup;
 use crate::output as out;
 use crate::store::{

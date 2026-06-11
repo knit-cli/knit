@@ -128,10 +128,7 @@ mod merge_ledgers_tests {
         // later compare Equal instead of re-diverging.
         assert_eq!(ours.node_id_sequence(), theirs.node_id_sequence());
         assert_eq!(
-            knit::model::ledger_relation(
-                &ours.node_id_sequence(),
-                &theirs.node_id_sequence()
-            ),
+            knit::model::ledger_relation(&ours.node_id_sequence(), &theirs.node_id_sequence()),
             LedgerRelation::Equal
         );
         assert_eq!(ours.head_node_id.as_deref(), Some("kg_remote"));

@@ -55,7 +55,9 @@ pub(super) fn show_merge_status(root: &Path, run_selector: Option<&str>) -> Resu
                 out::sha(short_sha(pushed_sha)),
                 step.pushed_at.as_deref().unwrap_or("")
             );
-        } else if step.target_kind == MergeTargetKind::Branch && step.status == MergeStepStatus::Succeeded {
+        } else if step.target_kind == MergeTargetKind::Branch
+            && step.status == MergeStepStatus::Succeeded
+        {
             println!("  {}", out::muted("not pushed"));
         }
         if let Some(message) = &step.message {
@@ -86,7 +88,11 @@ pub(super) fn push_recorded_merge_run(
     repos: &[String],
     set_upstream: bool,
 ) -> Result<()> {
-    let (path, mut run) = resolve_merge_run(root, run_selector, &[MergeRunStatus::Succeeded, MergeRunStatus::PushFailed])?;
+    let (path, mut run) = resolve_merge_run(
+        root,
+        run_selector,
+        &[MergeRunStatus::Succeeded, MergeRunStatus::PushFailed],
+    )?;
     let _locks = acquire_run_locks(root, &run)?;
     push_merge_run_steps(root, &mut run, repos, set_upstream)?;
     run.status = MergeRunStatus::Succeeded;

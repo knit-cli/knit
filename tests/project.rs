@@ -187,7 +187,11 @@ fn view_save_accepts_comma_separated_exclude_list() {
     );
 
     let repos = knit(&workspace, ["view", "show", "backend", "--repos"]);
-    assert_eq!(repos.lines().collect::<Vec<_>>(), vec!["backend"], "{repos}");
+    assert_eq!(
+        repos.lines().collect::<Vec<_>>(),
+        vec!["backend"],
+        "{repos}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -204,9 +208,7 @@ fn view_flag_conflicts_with_repo_selection() {
 
     let error = knit_fails(
         &workspace,
-        [
-            "bundle", "x", "--view", "backend", "--repo", "backend",
-        ],
+        ["bundle", "x", "--view", "backend", "--repo", "backend"],
     );
     assert!(error.contains("not together with --repo"), "{error}");
 
@@ -472,9 +474,7 @@ fn project_agents_are_generated_from_project_json() {
     assert!(agents.contains("- `backend`"));
     assert!(!agents.contains("all four Demo repos"));
     assert!(agents.contains("<!-- BEGIN GLOSS AGENTS -->"));
-    assert!(
-        agents.contains("<!-- END KNIT PROJECT AGENTS: demo -->\n<!-- BEGIN GLOSS AGENTS -->")
-    );
+    assert!(agents.contains("<!-- END KNIT PROJECT AGENTS: demo -->\n<!-- BEGIN GLOSS AGENTS -->"));
 
     knit(
         &workspace,
@@ -614,4 +614,3 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

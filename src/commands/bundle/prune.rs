@@ -224,10 +224,7 @@ impl PruneCache {
             }
         }
         let result = path_pending_changes(&path)?;
-        self.pending_changes
-            .lock()
-            .unwrap()
-            .insert(key, result);
+        self.pending_changes.lock().unwrap().insert(key, result);
         Ok(result)
     }
 }
@@ -505,9 +502,7 @@ fn assess_bundles(
     for (id, result) in results {
         match result {
             Ok(assessment) => assessments.push(assessment),
-            Err(err) => {
-                print_prune_warning(format!("{id}: skipped during prune scan: {err:#}"))
-            }
+            Err(err) => print_prune_warning(format!("{id}: skipped during prune scan: {err:#}")),
         }
     }
     (assessments, local_ids)
@@ -816,12 +811,13 @@ fn remote_orphan_candidates(
                 scope.spawn(move || {
                     (
                         slug.clone(),
-                        remote_payload_dead_reason(root, &payload, refresh, &cache)
-                            .map(|reason| RemoteOrphan {
+                        remote_payload_dead_reason(root, &payload, refresh, &cache).map(|reason| {
+                            RemoteOrphan {
                                 remote_id,
                                 slug,
                                 reason,
-                            }),
+                            }
+                        }),
                     )
                 })
             })
@@ -871,15 +867,17 @@ fn remote_payload_dead_reason(
                 .iter()
                 .map(|publication| {
                     let publication = publication.clone();
-                    scope.spawn(move || {
-                        refresh_remote_publication_state(root, &publication, cache)
-                    })
+                    scope.spawn(move || refresh_remote_publication_state(root, &publication, cache))
                 })
                 .collect();
 
             handles
                 .into_iter()
-                .map(|handle| handle.join().expect("remote publication worker thread panicked"))
+                .map(|handle| {
+                    handle
+                        .join()
+                        .expect("remote publication worker thread panicked")
+                })
                 .collect()
         })
     } else {
@@ -960,11 +958,7 @@ fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
             detail.push("untracked files".to_string());
         }
 
-        println!(
-            "  {} {}",
-            out::node(&assessment.id),
-            out::muted(status)
-        );
+        println!("  {} {}", out::node(&assessment.id), out::muted(status));
         println!("      {}", out::muted(detail.join(", ")));
     }
     println!();
@@ -1149,8 +1143,7 @@ fn suggested_prune_apply_command(
     remote_branches: bool,
     remote_bundles: bool,
 ) -> String {
-    if worktrees && force && branches && force_branches && remote_branches && remote_bundles
-    {
+    if worktrees && force && branches && force_branches && remote_branches && remote_bundles {
         let base = "knit bundle prune --apply --all";
         return if untracked {
             format!("{base} --untracked")
@@ -1227,7 +1220,10 @@ mod prune_tests {
 
     #[test]
     fn all_merged_publications_are_dead() {
-        assert_eq!(dead_reason(&["MERGED", "merged"]), Some("remote PRs are merged"));
+        assert_eq!(
+            dead_reason(&["MERGED", "merged"]),
+            Some("remote PRs are merged")
+        );
     }
 
     #[test]
@@ -1237,7 +1233,10 @@ mod prune_tests {
 
     #[test]
     fn merged_and_closed_without_open_is_dead() {
-        assert_eq!(dead_reason(&["MERGED", "CLOSED"]), Some("remote PRs are merged"));
+        assert_eq!(
+            dead_reason(&["MERGED", "CLOSED"]),
+            Some("remote PRs are merged")
+        );
     }
 
     #[test]

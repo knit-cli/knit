@@ -78,10 +78,8 @@ pub fn create_publications(
         .iter()
         .map(|&index| {
             let repo = active.bundle.repos[index].clone();
-            let base_branch = base_overrides.branch_for(
-                &repo,
-                publication_for_repo(&active.bundle, &repo.id),
-            );
+            let base_branch =
+                base_overrides.branch_for(&repo, publication_for_repo(&active.bundle, &repo.id));
             PublishJob {
                 repo_index: index,
                 repo,
@@ -140,9 +138,7 @@ pub fn create_publications(
     } else if !sync {
         println!(
             "{}",
-            out::warn(
-                "Skipped PR body sync. Run `knit publish sync` to add cross-links later."
-            )
+            out::warn("Skipped PR body sync. Run `knit publish sync` to add cross-links later.")
         );
     }
 
@@ -221,7 +217,11 @@ pub fn create_publications_from_artifact(
 
         handles
             .into_iter()
-            .map(|handle| handle.join().expect("artifact publish worker thread panicked"))
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("artifact publish worker thread panicked")
+            })
             .collect()
     });
 
@@ -248,9 +248,7 @@ pub fn create_publications_from_artifact(
     } else if !sync {
         println!(
             "{}",
-            out::warn(
-                "Skipped PR body sync. Run `knit publish sync` to add cross-links later."
-            )
+            out::warn("Skipped PR body sync. Run `knit publish sync` to add cross-links later.")
         );
     }
 
@@ -652,10 +650,12 @@ fn publish_repo_remote_from_artifact(
             repo.id
         )
     })?;
-    let remote = repo
-        .remote
-        .as_deref()
-        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let remote = repo.remote.as_deref().with_context(|| {
+        format!(
+            "{}: no git remote recorded in the bundle artifact.",
+            repo.id
+        )
+    })?;
     let forge = providers::for_repo(repo)?;
     let repo_full_name = forge
         .repo_full_name(remote)
@@ -838,10 +838,12 @@ fn fetch_pr_summary_for_sync_from_artifact(
             repo.id
         )
     })?;
-    let remote = repo
-        .remote
-        .as_deref()
-        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let remote = repo.remote.as_deref().with_context(|| {
+        format!(
+            "{}: no git remote recorded in the bundle artifact.",
+            repo.id
+        )
+    })?;
     let forge = providers::for_repo(repo)?;
     let repo_full_name = forge
         .repo_full_name(remote)
@@ -874,10 +876,7 @@ fn sync_pr_body_remote(
     let target = PrTarget::checkout(&cwd);
     let pr = publication_for_repo(&active.bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
-    let current_body = forge
-        .view(&target, &pr.url)?
-        .body
-        .unwrap_or_default();
+    let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
     let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body == current_body {
@@ -893,10 +892,12 @@ fn sync_pr_body_remote_from_artifact(
     _repo_index: usize,
     repo: &RepoEntry,
 ) -> Result<SyncBodyResult> {
-    let remote = repo
-        .remote
-        .as_deref()
-        .with_context(|| format!("{}: no git remote recorded in the bundle artifact.", repo.id))?;
+    let remote = repo.remote.as_deref().with_context(|| {
+        format!(
+            "{}: no git remote recorded in the bundle artifact.",
+            repo.id
+        )
+    })?;
     let forge = providers::for_repo(repo)?;
     let repo_full_name = forge
         .repo_full_name(remote)
@@ -904,10 +905,7 @@ fn sync_pr_body_remote_from_artifact(
     let target = PrTarget::explicit(cwd, repo_full_name);
     let pr = publication_for_repo(bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
-    let current_body = forge
-        .view(&target, &pr.url)?
-        .body
-        .unwrap_or_default();
+    let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
     let block = render_knit_pr_block(bundle, Some(&repo.id));
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body == current_body {
@@ -1042,9 +1040,7 @@ fn sync_publications_for_indexes(
             .map(|&repo_index| {
                 let repo = active_read.bundle.repos[repo_index].clone();
                 let repo_id = repo.id.clone();
-                scope.spawn(move || {
-                    (repo_id, sync_pr_body_remote(active_read, repo_index, &repo))
-                })
+                scope.spawn(move || (repo_id, sync_pr_body_remote(active_read, repo_index, &repo)))
             })
             .collect();
 
@@ -1111,7 +1107,11 @@ fn sync_publications_for_indexes_from_artifact(
 
         handles
             .into_iter()
-            .map(|handle| handle.join().expect("artifact publish sync fetch thread panicked"))
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("artifact publish sync fetch thread panicked")
+            })
             .collect()
     });
 
@@ -1160,7 +1160,11 @@ fn sync_publications_for_indexes_from_artifact(
 
         handles
             .into_iter()
-            .map(|handle| handle.join().expect("artifact publish sync body thread panicked"))
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("artifact publish sync body thread panicked")
+            })
             .collect()
     });
 
@@ -1231,7 +1235,8 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
     match out_path {
         Some(path) => crate::store::write_json(path, bundle),
         None => {
-            let json = serde_json::to_string_pretty(bundle).context("failed to encode bundle JSON")?;
+            let json =
+                serde_json::to_string_pretty(bundle).context("failed to encode bundle JSON")?;
             println!("{json}");
             Ok(())
         }
@@ -1240,8 +1245,8 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::pr_body::{KNIT_PR_BLOCK_BEGIN, KNIT_PR_BLOCK_END};
+    use super::*;
     use crate::model::{
         CommitGroup, CommitRef, PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION,
     };

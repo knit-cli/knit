@@ -235,10 +235,7 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
     // git prints forward-slash paths on every platform; normalize both sides
     // (and case, for Windows) before comparing.
     let named_normalized = named.replace('\\', "/").to_lowercase();
-    let worktree_normalized = worktree
-        .to_string_lossy()
-        .replace('\\', "/")
-        .to_lowercase();
+    let worktree_normalized = worktree.to_string_lossy().replace('\\', "/").to_lowercase();
     assert!(named_normalized.contains(&worktree_normalized), "{named}");
 
     let raw = knit(
@@ -258,7 +255,6 @@ fn run_executes_named_project_commands_in_bundle_worktrees() {
 
     fs::remove_dir_all(root).unwrap();
 }
-
 
 #[test]
 fn bundle_creation_refuses_slug_taken_on_sync_remote() {

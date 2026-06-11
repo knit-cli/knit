@@ -164,9 +164,14 @@ fn run_up(
     let mode = detect_mode(runtime, &compose_path)?;
 
     match mode {
-        RuntimeMode::Contract => {
-            run_up_contract(active, project, runtime, stack_repo, &stack_checkout, &compose_path)
-        }
+        RuntimeMode::Contract => run_up_contract(
+            active,
+            project,
+            runtime,
+            stack_repo,
+            &stack_checkout,
+            &compose_path,
+        ),
         RuntimeMode::Transform => {
             run_up_transform(active, runtime, stack_repo, &stack_checkout, &compose_path)
         }
@@ -337,7 +342,13 @@ fn run_up_contract(
     )?;
 
     let project_name = compose_project_name(&active.bundle.id);
-    let env = runtime_env(active, project, &project_name, &service_ports, &resolved_database);
+    let env = runtime_env(
+        active,
+        project,
+        &project_name,
+        &service_ports,
+        &resolved_database,
+    );
     let profiles = if resolved_database.mode == DatabaseMode::Bundle {
         vec![BUNDLE_DB_PROFILE.to_string()]
     } else {
@@ -360,7 +371,12 @@ fn run_up_contract(
         });
     }
 
-    print_up_summary(active, compose_path, &ports, runtime.profile_path.as_deref());
+    print_up_summary(
+        active,
+        compose_path,
+        &ports,
+        runtime.profile_path.as_deref(),
+    );
 
     let mut command = Command::new("docker");
     command
@@ -438,7 +454,12 @@ fn print_up_summary(
         );
     }
     if let (Some(profile), Some(frontend)) = (profile_path, frontend_port(ports)) {
-        println!("{} http://localhost:{}{}", out::heading("Open:"), frontend, profile);
+        println!(
+            "{} http://localhost:{}{}",
+            out::heading("Open:"),
+            frontend,
+            profile
+        );
     }
 }
 
@@ -499,7 +520,11 @@ fn run_status(active: &ActiveBundle) -> Result<()> {
         out::repo(&active.bundle.id)
     );
     if services.is_empty() {
-        println!("{} {}", out::heading("Services:"), out::muted("none running"));
+        println!(
+            "{} {}",
+            out::heading("Services:"),
+            out::muted("none running")
+        );
     } else {
         for (service, service_state) in &services {
             println!("{} {}", out::heading(format!("{service}:")), service_state);
@@ -728,7 +753,10 @@ fn allocate_service_ports(
             return Ok(allocated);
         }
         offset = offset.saturating_add(step);
-        if bases.values().any(|base| base.saturating_add(offset) > 65000) {
+        if bases
+            .values()
+            .any(|base| base.saturating_add(offset) > 65000)
+        {
             bail!("Could not find free runtime ports.");
         }
     }
@@ -768,7 +796,10 @@ fn load_used_ports(root: &Path) -> Result<BTreeSet<u16>> {
 /// Names of compose projects with running containers. Empty when docker is
 /// unavailable, which makes their recorded ports eligible for reuse.
 fn running_compose_projects() -> BTreeSet<String> {
-    let Ok(output) = Command::new("docker").args(["compose", "ls", "-q"]).output() else {
+    let Ok(output) = Command::new("docker")
+        .args(["compose", "ls", "-q"])
+        .output()
+    else {
         return BTreeSet::new();
     };
     if !output.status.success() {
@@ -998,7 +1029,13 @@ mod tests {
             ("backend".to_string(), 4011u16),
             ("frontend".to_string(), 5184u16),
         ]);
-        let env = runtime_env(&active, Some(&project), "knit-run-demo", &service_ports, &database);
+        let env = runtime_env(
+            &active,
+            Some(&project),
+            "knit-run-demo",
+            &service_ports,
+            &database,
+        );
 
         assert_eq!(env.get("KNIT_BUNDLE").unwrap(), "demo");
         assert_eq!(env.get("COMPOSE_PROJECT_NAME").unwrap(), "knit-run-demo");
@@ -1008,7 +1045,10 @@ mod tests {
         assert_eq!(env.get("KNIT_DB_NAME").unwrap(), "knithub_dev");
         assert_eq!(env.get("KNIT_DB_HOST_PORT").unwrap(), "5436");
         // Bundle repo resolves to its checkout; project-only repo to its path.
-        assert!(env.get("KNIT_CHECKOUT_KNITHUB").unwrap().ends_with("knithub"));
+        assert!(env
+            .get("KNIT_CHECKOUT_KNITHUB")
+            .unwrap()
+            .ends_with("knithub"));
         assert_eq!(env.get("KNIT_SRC_KNITHUB").unwrap(), "knithub");
         assert!(env
             .get("KNIT_CHECKOUT_GLOSS_WEB_UI")
@@ -1022,7 +1062,8 @@ mod tests {
 
     #[test]
     fn parse_compose_ps_accepts_array_and_ndjson() {
-        let array = r#"[{"Service":"backend","State":"running"},{"Service":"db","State":"exited"}]"#;
+        let array =
+            r#"[{"Service":"backend","State":"running"},{"Service":"db","State":"exited"}]"#;
         assert_eq!(
             parse_compose_ps(array),
             vec![
@@ -1055,16 +1096,17 @@ mod tests {
 
     #[test]
     fn detect_mode_sniffs_contract_variables() {
-        let dir = std::env::temp_dir().join(format!(
-            "knit-runtime-mode-test-{}",
-            std::process::id()
-        ));
+        let dir =
+            std::env::temp_dir().join(format!("knit-runtime-mode-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let runtime = ProjectRuntime::default();
 
         let contract = dir.join("contract.yml");
-        std::fs::write(&contract, "services:\n  b:\n    ports: [\"${KNIT_PORT_BACKEND}:4000\"]\n")
-            .unwrap();
+        std::fs::write(
+            &contract,
+            "services:\n  b:\n    ports: [\"${KNIT_PORT_BACKEND}:4000\"]\n",
+        )
+        .unwrap();
         let plain = dir.join("plain.yml");
         std::fs::write(&plain, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
         // A bare KNIT_ mention (e.g. in a comment) is not a contract opt-in.
@@ -1077,10 +1119,22 @@ mod tests {
         let named = dir.join(CONTRACT_COMPOSE_CANDIDATES[0]);
         std::fs::write(&named, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
 
-        assert_eq!(detect_mode(&runtime, &contract).unwrap(), RuntimeMode::Contract);
-        assert_eq!(detect_mode(&runtime, &plain).unwrap(), RuntimeMode::Transform);
-        assert_eq!(detect_mode(&runtime, &comment).unwrap(), RuntimeMode::Transform);
-        assert_eq!(detect_mode(&runtime, &named).unwrap(), RuntimeMode::Contract);
+        assert_eq!(
+            detect_mode(&runtime, &contract).unwrap(),
+            RuntimeMode::Contract
+        );
+        assert_eq!(
+            detect_mode(&runtime, &plain).unwrap(),
+            RuntimeMode::Transform
+        );
+        assert_eq!(
+            detect_mode(&runtime, &comment).unwrap(),
+            RuntimeMode::Transform
+        );
+        assert_eq!(
+            detect_mode(&runtime, &named).unwrap(),
+            RuntimeMode::Contract
+        );
 
         // Explicit config wins over detection.
         let forced = ProjectRuntime {
@@ -1107,8 +1161,16 @@ mod tests {
     #[test]
     fn frontend_port_prefers_frontend_service() {
         let ports = vec![
-            ServicePort { service: "db".into(), host: 5446, container: Some(5432) },
-            ServicePort { service: "web-frontend".into(), host: 5184, container: Some(5173) },
+            ServicePort {
+                service: "db".into(),
+                host: 5446,
+                container: Some(5432),
+            },
+            ServicePort {
+                service: "web-frontend".into(),
+                host: 5184,
+                container: Some(5173),
+            },
         ];
         assert_eq!(frontend_port(&ports), Some(5184));
         assert_eq!(frontend_port(&[]), None);
