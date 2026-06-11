@@ -39,6 +39,7 @@
         "kind": { "type": "string" },
         "stackRepo": { "type": "string" },
         "composeFile": { "type": "string" },
+        "mode": { "enum": ["transform", "contract"] },
         "profilePath": { "type": "string" },
         "projectConfigFile": { "type": "string" },
         "database": {
@@ -63,7 +64,11 @@
           "properties": {
             "backendBase": { "type": "integer" },
             "frontendBase": { "type": "integer" },
-            "step": { "type": "integer" }
+            "step": { "type": "integer" },
+            "services": {
+              "type": "object",
+              "additionalProperties": { "type": "integer" }
+            }
           },
           "additionalProperties": false
         }

@@ -31,6 +31,17 @@ impl std::fmt::Display for DatabaseMode {
     }
 }
 
+/// How `knit run up` executes a compose file: lift the repo's existing shape
+/// into the bundle namespace, or run a `KNIT_*`-aware file with the contract
+/// injected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RuntimeMode {
+    #[default]
+    Transform,
+    Contract,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KnitProject {
@@ -114,6 +125,10 @@ pub struct ProjectRuntime {
     /// `docker-compose.yml`/`compose.yaml`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compose_file: Option<String>,
+    /// Force transform or contract mode instead of detecting it from the
+    /// compose file (contract filename or `${KNIT_*}` references).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<RuntimeMode>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub database: Option<ProjectRuntimeDatabase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -130,6 +145,7 @@ impl Default for ProjectRuntime {
             stack_repo: None,
             project_config_file: default_project_config_file(),
             compose_file: None,
+            mode: None,
             database: None,
             ports: None,
             profile_path: None,
@@ -189,6 +205,25 @@ pub struct ProjectRuntimePorts {
     pub frontend_base: u16,
     #[serde(default = "default_port_step")]
     pub step: u16,
+    /// Contract mode: service name -> base host port, each exposed as
+    /// `KNIT_PORT_<SERVICE>`. Empty means a backend/frontend pair from the
+    /// base fields above.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub services: BTreeMap<String, u16>,
+}
+
+impl ProjectRuntimePorts {
+    /// The service port pools contract mode allocates from.
+    pub fn service_bases(&self) -> BTreeMap<String, u16> {
+        if self.services.is_empty() {
+            BTreeMap::from([
+                ("backend".to_string(), self.backend_base),
+                ("frontend".to_string(), self.frontend_base),
+            ])
+        } else {
+            self.services.clone()
+        }
+    }
 }
 
 fn default_backend_port_base() -> u16 {
@@ -223,6 +258,7 @@ impl Default for ProjectRuntimePorts {
             backend_base: default_backend_port_base(),
             frontend_base: default_frontend_port_base(),
             step: default_port_step(),
+            services: BTreeMap::new(),
         }
     }
 }

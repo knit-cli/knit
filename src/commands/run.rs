@@ -29,20 +29,29 @@ pub fn run_project_command(
     }
 
     if raw_args.is_empty() {
-        let runtime_command = name.unwrap_or("up");
-        if RUNTIME_COMMANDS.contains(&runtime_command) {
-            if crate::commands::runtime::try_handle(Some(runtime_command), raw_args)? {
-                return Ok(());
-            }
+        if let Some(runtime_command) = name.filter(|name| RUNTIME_COMMANDS.contains(name)) {
+            // An explicitly configured project command of the same name wins
+            // over the built-in runtime verbs.
+            let shadowed = load_active_bundle()
+                .ok()
+                .and_then(|active| load_project_for_bundle(&active).ok())
+                .is_some_and(|project| {
+                    project
+                        .commands
+                        .contains_key(&crate::ids::slugify(runtime_command))
+                });
+            if !shadowed {
+                if crate::commands::runtime::try_handle(runtime_command)? {
+                    return Ok(());
+                }
 
-            let active = load_active_bundle()?;
-            if project_has_runtime(&active)? {
-                bail!(
-                    "Bundle runtime is configured but could not run `{runtime_command}`. Use an updated knit CLI from `.knit/worktrees/<bundle>/knit` and run the command from a stack worktree checkout."
-                );
-            }
+                let active = load_active_bundle()?;
+                if project_has_runtime(&active)? {
+                    bail!(
+                        "Bundle runtime is configured but could not run `{runtime_command}`. Use an updated knit CLI from `.knit/worktrees/<bundle>/knit` and run the command from a stack worktree checkout."
+                    );
+                }
 
-            if name.is_some() {
                 bail!(
                     "`knit run {runtime_command}` needs a bundle repo with a docker-compose file, or a `runtime` block in the Knit project (pull it with `knit project pull --repo <stack-repo>`)."
                 );

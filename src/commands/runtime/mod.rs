@@ -11,12 +11,17 @@
 //!   remapped to bundle worktrees, published host ports reallocated, port
 //!   references inside env values rewritten. No authoring required; see
 //!   [`transform`].
-//! - **Contract**: a compose file that references `KNIT_*` variables is run
-//!   as-is with the contract injected: `KNIT_ROOT`/`KNIT_BUNDLE`,
+//! - **Contract**: a `KNIT_*`-aware compose file is run as-is with the
+//!   contract injected: `KNIT_ROOT`/`KNIT_BUNDLE`,
 //!   `KNIT_CHECKOUT_<REPO>`/`KNIT_SRC_<REPO>`/`KNIT_REV_<REPO>` per repo,
-//!   `KNIT_PORT_BACKEND`/`KNIT_PORT_FRONTEND`, and `KNIT_DB_*`. Repo ids are
-//!   uppercased with non-alphanumerics mapped to `_`. In `bundle` database
-//!   mode the `bundle-db` compose profile is activated.
+//!   `KNIT_PORT_<SERVICE>` per configured port pool (backend/frontend by
+//!   default), and `KNIT_DB_*`. Repo and service ids are uppercased with
+//!   non-alphanumerics mapped to `_`. In `bundle` database mode the
+//!   `bundle-db` compose profile is activated.
+//!
+//! Contract mode is chosen by the `runtime.mode` project setting, the
+//! `docker-compose.knit.yml` filename, or `${KNIT_*}` references in the
+//! compose file; everything else is lifted by transformation.
 //!
 //! Either way the stack runs as compose project `knit-run-<bundle>`, so
 //! networks and named volumes are isolated per bundle, and `down`/`status`
@@ -27,14 +32,13 @@ mod transform;
 use crate::checkout::checkout_dir;
 use crate::git::rev_parse;
 use crate::model::{
-    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RepoEntry,
+    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RepoEntry, RuntimeMode,
 };
 use crate::output as out;
 use crate::store::{load_active_bundle, project_path, read_json, write_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, BTreeSet};
-use std::ffi::OsString;
 use std::fs;
 use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
@@ -54,36 +58,42 @@ const PLAIN_COMPOSE_CANDIDATES: [&str; 4] = [
     "compose.yml",
 ];
 
-pub fn try_handle(name: Option<&str>, raw_args: &[OsString]) -> Result<bool> {
-    if !raw_args.is_empty() {
-        return Ok(false);
-    }
-
+pub fn try_handle(name: &str) -> Result<bool> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active).ok();
     let runtime = project.as_ref().and_then(|p| p.runtime.clone());
 
     match name {
-        None | Some("up") => {
+        "up" => {
             let Some((runtime, stack_repo)) = resolve_runtime(&active, runtime)? else {
                 return Ok(false);
             };
             run_up(&active, project.as_ref(), &runtime, stack_repo).map(|_| true)
         }
-        Some("down") => {
-            if runtime.is_none() && !has_state(&active) {
+        "down" => {
+            if !runtime_applies(&active, runtime)? {
                 return Ok(false);
             }
             run_down(&active).map(|_| true)
         }
-        Some("status") => {
-            if runtime.is_none() && !has_state(&active) {
+        "status" => {
+            if !runtime_applies(&active, runtime)? {
                 return Ok(false);
             }
             run_status(&active).map(|_| true)
         }
-        Some(_) => Ok(false),
+        _ => Ok(false),
     }
+}
+
+/// Whether `down`/`status` should handle this bundle: a configured runtime,
+/// recorded run state, or a detectable stack repo (so cleanup works even when
+/// a failed `up` never recorded state).
+fn runtime_applies(active: &ActiveBundle, runtime: Option<ProjectRuntime>) -> Result<bool> {
+    if runtime.is_some() || has_state(active) {
+        return Ok(true);
+    }
+    Ok(resolve_runtime(active, None).unwrap_or(None).is_some())
 }
 
 /// Resolve the runtime config and stack repo for `up`. With no `runtime`
@@ -133,16 +143,6 @@ fn resolve_runtime(
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum RuntimeMode {
-    /// Lift the repo's existing compose shape into the bundle namespace.
-    #[default]
-    Transform,
-    /// Run a `KNIT_*`-aware compose file with the contract injected.
-    Contract,
-}
-
 fn run_up(
     active: &ActiveBundle,
     project: Option<&KnitProject>,
@@ -161,7 +161,7 @@ fn run_up(
     })?;
 
     let compose_path = find_compose_file(&stack_checkout, runtime)?;
-    let mode = detect_mode(&compose_path)?;
+    let mode = detect_mode(runtime, &compose_path)?;
 
     match mode {
         RuntimeMode::Contract => {
@@ -201,12 +201,22 @@ fn find_compose_file(stack_checkout: &Path, runtime: &ProjectRuntime) -> Result<
     );
 }
 
-/// A compose file that references `KNIT_` variables opts into the contract;
-/// anything else is lifted by transformation.
-fn detect_mode(compose_path: &Path) -> Result<RuntimeMode> {
+/// Explicit `runtime.mode` config wins; the contract filename or `${KNIT_*}`
+/// variable references opt into the contract; anything else is lifted by
+/// transformation.
+fn detect_mode(runtime: &ProjectRuntime, compose_path: &Path) -> Result<RuntimeMode> {
+    if let Some(mode) = runtime.mode {
+        return Ok(mode);
+    }
+    if compose_path
+        .file_name()
+        .is_some_and(|name| CONTRACT_COMPOSE_CANDIDATES.iter().any(|c| name == *c))
+    {
+        return Ok(RuntimeMode::Contract);
+    }
     let text = fs::read_to_string(compose_path)
         .with_context(|| format!("failed to read {}", compose_path.display()))?;
-    if text.contains("KNIT_") {
+    if text.contains("${KNIT_") || text.contains("$KNIT_") {
         Ok(RuntimeMode::Contract)
     } else {
         Ok(RuntimeMode::Transform)
@@ -261,24 +271,6 @@ fn run_up_transform(
     fs::write(&generated, serde_json::to_string_pretty(&config)?)
         .context("failed to write generated compose file")?;
 
-    let state = RuntimeRunState {
-        bundle_id: active.bundle.id.clone(),
-        stack_repo: stack_repo.id.clone(),
-        mode: RuntimeMode::Transform,
-        ports: ports.clone(),
-        database: None,
-        compose_file: generated
-            .strip_prefix(&active.root)
-            .unwrap_or(&generated)
-            .display()
-            .to_string(),
-        profiles: Vec::new(),
-        env: BTreeMap::new(),
-        profile_path: runtime.profile_path.clone(),
-        started_at: crate::time::now_iso(),
-    };
-    write_json(&run_dir.join("state.json"), &state)?;
-
     let project_name = compose_project_name(&active.bundle.id);
     print_up_summary(active, &generated, &ports, runtime.profile_path.as_deref());
 
@@ -293,8 +285,30 @@ fn run_up_transform(
         .status()
         .context("failed to run docker compose")?;
     if !status.success() {
-        bail!("docker compose exited with status {status}");
+        bail!(
+            "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
+        );
     }
+
+    // Recorded only after a successful start so a failed `up` does not leave
+    // phantom run state.
+    let state = RuntimeRunState {
+        bundle_id: active.bundle.id.clone(),
+        stack_repo: stack_repo.id.clone(),
+        mode: RuntimeMode::Transform,
+        ports,
+        database: None,
+        compose_file: generated
+            .strip_prefix(&active.root)
+            .unwrap_or(&generated)
+            .display()
+            .to_string(),
+        profiles: Vec::new(),
+        env: BTreeMap::new(),
+        profile_path: runtime.profile_path.clone(),
+        started_at: crate::time::now_iso(),
+    };
+    write_json(&run_dir.join("state.json"), &state)?;
     Ok(())
 }
 
@@ -316,40 +330,28 @@ fn run_up_contract(
 
     let ports_config = runtime.ports.clone().unwrap_or_default();
     let used = load_used_ports(&active.root)?;
-    let (backend_port, frontend_port) = allocate_port_pair(
+    let service_ports = allocate_service_ports(
         &used,
-        ports_config.backend_base,
-        ports_config.frontend_base,
+        &ports_config.service_bases(),
         ports_config.step.max(1),
     )?;
 
     let project_name = compose_project_name(&active.bundle.id);
-    let env = runtime_env(
-        active,
-        project,
-        &project_name,
-        backend_port,
-        frontend_port,
-        &resolved_database,
-    );
+    let env = runtime_env(active, project, &project_name, &service_ports, &resolved_database);
     let profiles = if resolved_database.mode == DatabaseMode::Bundle {
         vec![BUNDLE_DB_PROFILE.to_string()]
     } else {
         Vec::new()
     };
 
-    let mut ports = vec![
-        ServicePort {
-            service: "backend".to_string(),
-            host: backend_port,
+    let mut ports: Vec<ServicePort> = service_ports
+        .iter()
+        .map(|(service, port)| ServicePort {
+            service: service.clone(),
+            host: *port,
             container: None,
-        },
-        ServicePort {
-            service: "frontend".to_string(),
-            host: frontend_port,
-            container: None,
-        },
-    ];
+        })
+        .collect();
     if resolved_database.mode == DatabaseMode::Bundle {
         ports.push(ServicePort {
             service: "db".to_string(),
@@ -357,30 +359,6 @@ fn run_up_contract(
             container: Some(5432),
         });
     }
-
-    let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
-    fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
-    let state = RuntimeRunState {
-        bundle_id: active.bundle.id.clone(),
-        stack_repo: stack_repo.id.clone(),
-        mode: RuntimeMode::Contract,
-        ports: ports.clone(),
-        database: Some(StateDatabase {
-            mode: resolved_database.mode,
-            port: resolved_database.host_port,
-            name: resolved_database.name.clone(),
-        }),
-        compose_file: compose_path
-            .strip_prefix(&active.root)
-            .unwrap_or(compose_path)
-            .display()
-            .to_string(),
-        profiles: profiles.clone(),
-        env: env.clone(),
-        profile_path: runtime.profile_path.clone(),
-        started_at: crate::time::now_iso(),
-    };
-    write_json(&run_dir.join("state.json"), &state)?;
 
     print_up_summary(active, compose_path, &ports, runtime.profile_path.as_deref());
 
@@ -402,8 +380,36 @@ fn run_up_contract(
         .status()
         .context("failed to run docker compose")?;
     if !status.success() {
-        bail!("docker compose exited with status {status}");
+        bail!(
+            "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
+        );
     }
+
+    // Recorded only after a successful start so a failed `up` does not leave
+    // phantom run state.
+    let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
+    fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
+    let state = RuntimeRunState {
+        bundle_id: active.bundle.id.clone(),
+        stack_repo: stack_repo.id.clone(),
+        mode: RuntimeMode::Contract,
+        ports,
+        database: Some(StateDatabase {
+            mode: resolved_database.mode,
+            port: resolved_database.host_port,
+            name: resolved_database.name.clone(),
+        }),
+        compose_file: compose_path
+            .strip_prefix(&active.root)
+            .unwrap_or(compose_path)
+            .display()
+            .to_string(),
+        profiles,
+        env,
+        profile_path: runtime.profile_path.clone(),
+        started_at: crate::time::now_iso(),
+    };
+    write_json(&run_dir.join("state.json"), &state)?;
     Ok(())
 }
 
@@ -448,14 +454,18 @@ fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
 }
 
 fn run_down(active: &ActiveBundle) -> Result<()> {
-    let state = load_runtime_state(active)?;
+    // State may be missing when an `up` failed before recording it; down
+    // still works because containers are resolved by compose label.
+    let profiles = load_runtime_state(active)
+        .map(|state| state.profiles)
+        .unwrap_or_default();
     let project_name = compose_project_name(&active.bundle.id);
 
     // Project-scoped `down` resolves containers by compose label, so it works
     // even after the bundle worktree (and its compose file) is gone.
     let mut command = Command::new("docker");
     command.args(["compose", "-p", &project_name]);
-    for profile in &state.profiles {
+    for profile in &profiles {
         command.args(["--profile", profile]);
     }
     let status = command
@@ -476,12 +486,18 @@ fn run_down(active: &ActiveBundle) -> Result<()> {
 }
 
 fn run_status(active: &ActiveBundle) -> Result<()> {
-    let state = load_runtime_state(active)?;
+    // State may be missing when an `up` failed before recording it; still
+    // report containers resolved by compose label so cleanup is visible.
+    let state = load_runtime_state(active).ok();
     let project_name = compose_project_name(&active.bundle.id);
     let services = compose_service_states(&project_name);
     let any_running = services.iter().any(|(_, state)| state == "running");
 
-    println!("{} {}", out::heading("Bundle:"), out::repo(&state.bundle_id));
+    println!(
+        "{} {}",
+        out::heading("Bundle:"),
+        out::repo(&active.bundle.id)
+    );
     if services.is_empty() {
         println!("{} {}", out::heading("Services:"), out::muted("none running"));
     } else {
@@ -489,6 +505,20 @@ fn run_status(active: &ActiveBundle) -> Result<()> {
             println!("{} {}", out::heading(format!("{service}:")), service_state);
         }
     }
+
+    let Some(state) = state else {
+        println!(
+            "{} No recorded runtime state. Run `knit run up`{}.",
+            out::heading("Next:"),
+            if services.is_empty() {
+                ""
+            } else {
+                ", or `knit run down` to clean up the containers above"
+            }
+        );
+        return Ok(());
+    };
+
     for port in &state.ports {
         println!(
             "{} {} localhost:{}",
@@ -543,16 +573,19 @@ fn runtime_env(
     active: &ActiveBundle,
     project: Option<&KnitProject>,
     project_name: &str,
-    backend_port: u16,
-    frontend_port: u16,
+    service_ports: &BTreeMap<String, u16>,
     database: &ResolvedDatabase,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("KNIT_ROOT".to_string(), active.root.display().to_string());
     env.insert("KNIT_BUNDLE".to_string(), active.bundle.id.clone());
     env.insert("COMPOSE_PROJECT_NAME".to_string(), project_name.to_string());
-    env.insert("KNIT_PORT_BACKEND".to_string(), backend_port.to_string());
-    env.insert("KNIT_PORT_FRONTEND".to_string(), frontend_port.to_string());
+    for (service, port) in service_ports {
+        env.insert(
+            format!("KNIT_PORT_{}", env_var_suffix(service)),
+            port.to_string(),
+        );
+    }
     env.insert("KNIT_DB_MODE".to_string(), database.mode.to_string());
     env.insert("KNIT_DB_HOST".to_string(), database.host.clone());
     env.insert("KNIT_DB_PORT".to_string(), database.port.to_string());
@@ -667,27 +700,35 @@ fn parse_compose_ps(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Allocate a backend/frontend host-port pair for contract mode, stepping
-/// both bases together so paired stacks stay recognizable.
-fn allocate_port_pair(
+/// Allocate one free host port per contract-mode service pool, stepping all
+/// bases together so paired stacks stay recognizable.
+fn allocate_service_ports(
     used: &BTreeSet<u16>,
-    backend_base: u16,
-    frontend_base: u16,
+    bases: &BTreeMap<String, u16>,
     step: u16,
-) -> Result<(u16, u16)> {
-    let mut backend = backend_base;
-    let mut frontend = frontend_base;
+) -> Result<BTreeMap<String, u16>> {
+    if bases.is_empty() {
+        bail!("The project runtime defines no service port pools.");
+    }
+    let mut offset = 0u16;
     loop {
-        if !used.contains(&backend)
-            && !used.contains(&frontend)
-            && port_available(backend)
-            && port_available(frontend)
-        {
-            return Ok((backend, frontend));
+        let mut allocated = BTreeMap::new();
+        for (service, base) in bases {
+            let port = base.saturating_add(offset);
+            if used.contains(&port)
+                || allocated.values().any(|taken| *taken == port)
+                || !port_available(port)
+            {
+                allocated.clear();
+                break;
+            }
+            allocated.insert(service.clone(), port);
         }
-        backend = backend.saturating_add(step);
-        frontend = frontend.saturating_add(step);
-        if backend > 65000 || frontend > 65000 {
+        if allocated.len() == bases.len() {
+            return Ok(allocated);
+        }
+        offset = offset.saturating_add(step);
+        if bases.values().any(|base| base.saturating_add(offset) > 65000) {
             bail!("Could not find free runtime ports.");
         }
     }
@@ -953,7 +994,11 @@ mod tests {
             host_port: 5436,
         };
 
-        let env = runtime_env(&active, Some(&project), "knit-run-demo", 4011, 5184, &database);
+        let service_ports = BTreeMap::from([
+            ("backend".to_string(), 4011u16),
+            ("frontend".to_string(), 5184u16),
+        ]);
+        let env = runtime_env(&active, Some(&project), "knit-run-demo", &service_ports, &database);
 
         assert_eq!(env.get("KNIT_BUNDLE").unwrap(), "demo");
         assert_eq!(env.get("COMPOSE_PROJECT_NAME").unwrap(), "knit-run-demo");
@@ -1015,14 +1060,48 @@ mod tests {
             std::process::id()
         ));
         std::fs::create_dir_all(&dir).unwrap();
+        let runtime = ProjectRuntime::default();
+
         let contract = dir.join("contract.yml");
         std::fs::write(&contract, "services:\n  b:\n    ports: [\"${KNIT_PORT_BACKEND}:4000\"]\n")
             .unwrap();
         let plain = dir.join("plain.yml");
         std::fs::write(&plain, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
-        assert_eq!(detect_mode(&contract).unwrap(), RuntimeMode::Contract);
-        assert_eq!(detect_mode(&plain).unwrap(), RuntimeMode::Transform);
+        // A bare KNIT_ mention (e.g. in a comment) is not a contract opt-in.
+        let comment = dir.join("comment.yml");
+        std::fs::write(
+            &comment,
+            "# managed via KNIT_ tooling\nservices:\n  b:\n    ports: [\"4000:4000\"]\n",
+        )
+        .unwrap();
+        let named = dir.join(CONTRACT_COMPOSE_CANDIDATES[0]);
+        std::fs::write(&named, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
+
+        assert_eq!(detect_mode(&runtime, &contract).unwrap(), RuntimeMode::Contract);
+        assert_eq!(detect_mode(&runtime, &plain).unwrap(), RuntimeMode::Transform);
+        assert_eq!(detect_mode(&runtime, &comment).unwrap(), RuntimeMode::Transform);
+        assert_eq!(detect_mode(&runtime, &named).unwrap(), RuntimeMode::Contract);
+
+        // Explicit config wins over detection.
+        let forced = ProjectRuntime {
+            mode: Some(RuntimeMode::Contract),
+            ..Default::default()
+        };
+        assert_eq!(detect_mode(&forced, &plain).unwrap(), RuntimeMode::Contract);
+
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn allocate_service_ports_steps_pools_together() {
+        let bases = BTreeMap::from([
+            ("backend".to_string(), 4001u16),
+            ("frontend".to_string(), 5174u16),
+        ]);
+        let used = BTreeSet::from([4001u16, 5174u16]);
+        let allocated = allocate_service_ports(&used, &bases, 10).unwrap();
+        assert_eq!(allocated["backend"] - 4001, allocated["frontend"] - 5174);
+        assert!(allocated["backend"] >= 4011);
     }
 
     #[test]
