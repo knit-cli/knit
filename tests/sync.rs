@@ -416,3 +416,63 @@ fn in_place_repos_operate_in_original_checkout_and_guard_branch() {
     fs::remove_dir_all(root).unwrap();
 }
 
+
+#[test]
+fn worktree_materialization_tracks_collaborator_pushed_feature_branch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    // A collaborator already pushed this bundle's feature branch to origin.
+    git(&collaborator, ["checkout", "-b", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "collaborator feature work");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Collaborator feature work"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let collaborator_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    // The local clone has not fetched since that push, so materialization must
+    // discover the branch itself instead of forking a new one from base.
+    knit(&workspace, ["bundle", "venue capacity"]);
+    let add = knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    assert!(add.contains("origin/knit/venue-capacity"));
+
+    let worktree = workspace.join(".knit/worktrees/venue-capacity/backend");
+    assert_eq!(git(&worktree, ["rev-parse", "HEAD"]), collaborator_sha);
+    assert_eq!(
+        git(&worktree, ["rev-parse", "--abbrev-ref", "@{u}"]).trim(),
+        "origin/knit/venue-capacity"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn in_place_materialization_tracks_collaborator_pushed_feature_branch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    git(&collaborator, ["checkout", "-b", "knit/venue-capacity"]);
+    append_line(&collaborator.join("app.txt"), "collaborator feature work");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Collaborator feature work"]);
+    git(&collaborator, ["push", "origin", "knit/venue-capacity"]);
+    let collaborator_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        ["bundle", "add", "--in-place", backend.to_str().unwrap()],
+    );
+
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "knit/venue-capacity"
+    );
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), collaborator_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
