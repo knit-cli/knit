@@ -1,6 +1,6 @@
 use crate::checkout::{checkout_dir, checkout_display_path, is_in_place};
 use crate::git::git_output;
-use crate::model::{KnitProject, RepoEntry, DEFAULT_LANDING_MERGE_METHOD};
+use crate::model::{KnitProject, RepoEntry};
 use crate::output as out;
 use crate::store::ActiveBundle;
 use crate::store::read_json;
@@ -391,8 +391,8 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
     let profile_path = runtime.profile_path.as_deref().unwrap_or("/app/profile");
     let config_file = &runtime.project_config_file;
     let database = runtime.database.clone().unwrap_or_default();
-    let database_mode = database.mode.as_str();
-    let database_detail = if database_mode == crate::model::DATABASE_MODE_BUNDLE {
+    let database_mode = database.mode;
+    let database_detail = if database_mode == crate::model::DatabaseMode::Bundle {
         format!(
             "mode `{database_mode}` with database `{name}` on host port `{port}` (started by the bundle runtime compose file)",
             name = database
@@ -551,11 +551,7 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
             .collect::<Vec<_>>()
             .join("\n")
     };
-    let merge_method = landing
-        .merge
-        .method
-        .as_deref()
-        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD);
+    let merge_method = landing.merge.method.unwrap_or_default();
     let required_checks = landing.merge.required_checks_only.unwrap_or(true);
     let deployments = if landing.deployments.is_empty() {
         "- (none)".to_string()
@@ -569,19 +565,17 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
                     .as_deref()
                     .map(|repo| format!(" repo `{repo}`"))
                     .unwrap_or_default();
-                let mode = deployment.mode.as_deref().unwrap_or_else(|| {
-                    if deployment.command.is_empty() {
-                        "push"
-                    } else {
-                        "command"
-                    }
+                let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
+                    crate::model::DeployMode::Push
+                } else {
+                    crate::model::DeployMode::Command
                 });
                 let checkout = deployment
                     .checkout
                     .as_ref()
                     .map(|checkout| {
                         let remote = checkout.remote.as_deref().unwrap_or("origin");
-                        let update = checkout.update.as_deref().unwrap_or("fetch");
+                        let update = checkout.update.unwrap_or_default();
                         format!(" from `{remote}/{}` with `{update}`", checkout.branch)
                     })
                     .unwrap_or_default();

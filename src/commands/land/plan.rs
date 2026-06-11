@@ -2,11 +2,11 @@
 //! landing template: one merge step per recorded PR plus any project deployments.
 
 use super::{
-    ensure_provider, LandCheckout, LandPlan, LandStep, DEFAULT_LAND_PROVIDER, DEPLOY_MODE_COMMAND,
-    DEPLOY_MODE_PUSH, LAND_PLAN_KIND, STEP_DEPLOY, STEP_MERGE_PR,
+    ensure_provider, LandCheckout, LandPlan, LandStep, LandStepKind, DEFAULT_LAND_PROVIDER,
+    LAND_PLAN_KIND,
 };
 use crate::model::{
-    KnitProject, ProjectLandingMergePlan, ProjectLandingPlan, RepoEntry, DEFAULT_LANDING_MERGE_METHOD,
+    DeployMode, KnitProject, MergeMethod, ProjectLandingMergePlan, ProjectLandingPlan, RepoEntry,
     SCHEMA_VERSION,
 };
 use crate::providers::publication_for_repo;
@@ -50,7 +50,7 @@ pub(super) fn build_default_plan(
         };
         steps.push(LandStep {
             id: id.clone(),
-            step_type: STEP_MERGE_PR.to_string(),
+            step_type: LandStepKind::MergePr,
             needs,
             repo_id: Some(repo.id.clone()),
             method: Some(merge_method(merge)),
@@ -133,10 +133,8 @@ fn ordered_merge_repos<'a>(
     repos
 }
 
-fn merge_method(merge: Option<&ProjectLandingMergePlan>) -> String {
-    merge
-        .and_then(|merge| merge.method.clone())
-        .unwrap_or_else(|| DEFAULT_LANDING_MERGE_METHOD.to_string())
+fn merge_method(merge: Option<&ProjectLandingMergePlan>) -> MergeMethod {
+    merge.and_then(|merge| merge.method).unwrap_or_default()
 }
 
 fn merge_wait_for_checks(merge: Option<&ProjectLandingMergePlan>) -> bool {
@@ -175,12 +173,12 @@ fn append_project_deployments(
     };
     let merge_step_ids = steps
         .iter()
-        .filter(|step| step.step_type == STEP_MERGE_PR)
+        .filter(|step| step.step_type == LandStepKind::MergePr)
         .filter_map(|step| Some((step.repo_id.clone()?, step.id.clone())))
         .collect::<BTreeMap<_, _>>();
     let all_merge_ids = steps
         .iter()
-        .filter(|step| step.step_type == STEP_MERGE_PR)
+        .filter(|step| step.step_type == LandStepKind::MergePr)
         .map(|step| step.id.clone())
         .collect::<Vec<_>>();
 
@@ -190,12 +188,10 @@ fn append_project_deployments(
                 continue;
             }
         }
-        let mode = deployment.mode.clone().unwrap_or_else(|| {
-            if deployment.command.is_empty() {
-                DEPLOY_MODE_PUSH.to_string()
-            } else {
-                DEPLOY_MODE_COMMAND.to_string()
-            }
+        let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
+            DeployMode::Push
+        } else {
+            DeployMode::Command
         });
         let needs = if deployment.needs.is_empty() {
             default_deployment_needs(
@@ -209,11 +205,11 @@ fn append_project_deployments(
         let checkout = deployment.checkout.as_ref().map(|checkout| LandCheckout {
             branch: checkout.branch.clone(),
             remote: checkout.remote.clone(),
-            update: checkout.update.clone(),
+            update: checkout.update,
         });
         steps.push(LandStep {
             id: deployment.id.clone(),
-            step_type: STEP_DEPLOY.to_string(),
+            step_type: LandStepKind::Deploy,
             needs,
             repo_id: deployment.repo_id.clone(),
             method: None,

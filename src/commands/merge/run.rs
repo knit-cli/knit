@@ -15,7 +15,7 @@ use crate::git::{
     resolve_base_ref, rev_list, rev_parse,
 };
 use crate::ids::{node_id, slugify};
-use crate::model::{BundleNode, ChangeGroup, RepoChange, RepoEntry, SCHEMA_VERSION};
+use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry, SCHEMA_VERSION};
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, bundle_exists, bundle_path, load_active_bundle, read_json,
@@ -230,13 +230,13 @@ fn apply_merge_step(
         Err(error) if merge_in_progress(&checkout) || has_unmerged_paths(&checkout) => {
             if !manual {
                 abort_merge_if_needed(&checkout);
-                hard_reset(&checkout, &step.before_sha);
+                let _ = hard_reset(&checkout, &step.before_sha);
             }
             Err(MergeStepFailure::Conflict(format!("{error:#}")))
         }
         Err(error) => {
             abort_merge_if_needed(&checkout);
-            hard_reset(&checkout, &step.before_sha);
+            let _ = hard_reset(&checkout, &step.before_sha);
             Err(MergeStepFailure::Fatal(error))
         }
     }
@@ -322,7 +322,14 @@ fn rollback_merge_run(root: &Path, run: &mut MergeRun) -> Result<()> {
         }
         let checkout = resolve_stored_path(root, &step.checkout_path);
         abort_merge_if_needed(&checkout);
-        hard_reset(&checkout, &step.before_sha);
+        hard_reset(&checkout, &step.before_sha).with_context(|| {
+            format!(
+                "{}: failed to roll back {} to {}",
+                step.repo_id,
+                checkout.display(),
+                step.before_sha
+            )
+        })?;
         step.after_sha = None;
         step.status = MergeStepStatus::Aborted;
     }
@@ -613,7 +620,7 @@ fn finalize_target_bundle(
         }
         changes.push(RepoChange {
             repo_id: step.repo_id.clone(),
-            movement: "advanced".to_string(),
+            movement: Movement::Advanced,
             before_sha: Some(step.before_sha.clone()),
             after_sha: after_sha.clone(),
             commits,

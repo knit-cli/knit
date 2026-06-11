@@ -15,7 +15,7 @@ use crate::commands::worktree::materialize_repos;
 use crate::git::{current_branch, git_output, is_git_worktree, ref_exists};
 use crate::ids::slugify;
 use crate::model::{
-    ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry, CHECKOUT_MODE_WORKTREE,
+    ChangeGroup, CheckoutMode, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry,
     SCHEMA_VERSION,
 };
 use crate::output as out;
@@ -375,8 +375,12 @@ pub(super) fn project_repo_entry_from_export(
             .clone()
             .filter(|branch| !branch.trim().is_empty())
             .unwrap_or_else(|| "main".to_string()),
-        checkout_mode: metadata_string(&repository.metadata, "checkoutMode")
-            .unwrap_or_else(|| CHECKOUT_MODE_WORKTREE.to_string()),
+        // Remote metadata is advisory; anything other than an explicit
+        // `inPlace` falls back to the worktree default.
+        checkout_mode: match metadata_string(&repository.metadata, "checkoutMode").as_deref() {
+            Some("inPlace") => CheckoutMode::InPlace,
+            _ => CheckoutMode::Worktree,
+        },
         include_by_default: metadata_bool(&repository.metadata, "includeByDefault").unwrap_or(true),
     }
 }
@@ -429,7 +433,7 @@ fn select_active_bundle(
 
     Ok(bundles
         .iter()
-        .find(|bundle| bundle.state.as_deref().unwrap_or("open") == "open")
+        .find(|bundle| bundle.state.unwrap_or(crate::model::BundleState::Open) == crate::model::BundleState::Open)
         .or_else(|| bundles.first())
         .map(|bundle| bundle.id.clone()))
 }

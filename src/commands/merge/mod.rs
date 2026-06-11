@@ -395,8 +395,8 @@ fn abort_merge_if_needed(cwd: &Path) {
     }
 }
 
-fn hard_reset(cwd: &Path, reference: &str) {
-    let _ = git_output(cwd, ["reset", "--hard", reference]);
+fn hard_reset(cwd: &Path, reference: &str) -> Result<()> {
+    git_output(cwd, ["reset", "--hard", reference]).map(|_| ())
 }
 
 fn short_sha(sha: &str) -> &str {

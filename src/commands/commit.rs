@@ -1,7 +1,9 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch, ensure_mutable_checkouts};
 use crate::git::{commit_author, git_output, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
-use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, RepoChange, RepoEntry};
+use crate::model::{
+    BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange, RepoEntry,
+};
 use crate::output as out;
 use crate::status::has_staged_changes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
@@ -79,7 +81,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
                 });
                 repo_changes.push(RepoChange {
                     repo_id,
-                    movement: "advanced".to_string(),
+                    movement: Movement::Advanced,
                     before_sha: Some(outcome.before_sha),
                     after_sha: outcome.sha.clone(),
                     commits: vec![outcome.sha.clone()],

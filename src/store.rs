@@ -1,5 +1,5 @@
 use crate::model::{
-    ChangeGroup, KnitConfig, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
+    BundleState, ChangeGroup, KnitConfig,
 };
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -408,8 +408,8 @@ fn open_bundle_ids(root: &Path) -> Result<Vec<String>> {
 }
 
 fn is_open_bundle(bundle: &ChangeGroup) -> bool {
-    match bundle.state.as_deref() {
-        Some(BUNDLE_STATE_ARCHIVED | BUNDLE_STATE_CLOSED | BUNDLE_STATE_DELETED) => return false,
+    match bundle.state {
+        Some(BundleState::Archived | BundleState::Closed | BundleState::Deleted) => return false,
         _ => {}
     }
 
