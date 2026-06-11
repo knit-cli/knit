@@ -4,7 +4,8 @@ use crate::commands::agents::{
     write_bundle_worktree_agents_md, write_worktree_agents_md,
 };
 use crate::git::{
-    branch_exists, current_branch, git_output, is_git_worktree, resolve_base_ref, rev_parse,
+    branch_exists, current_branch, git_output, git_output_optional, is_git_worktree, ref_exists,
+    resolve_base_ref, rev_parse,
 };
 use crate::ids::node_id;
 use crate::model::{BundleNode, RepoEntry};
@@ -133,6 +134,7 @@ enum MaterializeLog {
     InPlace,
     WorktreeExists(String),
     WorktreeFromBranch,
+    WorktreeFromOrigin(String),
     WorktreeCreated(String),
 }
 
@@ -177,6 +179,12 @@ fn print_materialize_result(update: &MaterializeResult) {
             "{}: {} worktree from existing branch",
             out::repo(&update.repo_id),
             out::movement("created")
+        ),
+        MaterializeLog::WorktreeFromOrigin(remote_ref) => println!(
+            "{}: {} worktree from {}",
+            out::repo(&update.repo_id),
+            out::movement("created"),
+            out::branch(remote_ref)
         ),
         MaterializeLog::WorktreeCreated(feature_branch) => println!(
             "{}: {} {}",
@@ -262,6 +270,31 @@ fn materialize_one_repo(
         return Ok(update);
     }
 
+    // Another user may already have pushed this bundle's feature branch.
+    // Starting from origin instead of base keeps a second workspace on the
+    // same history; forking from base here would diverge immediately.
+    if let Some(remote_ref) = origin_feature_ref(&repo_root, &feature_branch) {
+        git_output(
+            &repo_root,
+            [
+                OsString::from("worktree"),
+                OsString::from("add"),
+                OsString::from("--track"),
+                OsString::from("-b"),
+                OsString::from(&feature_branch),
+                worktree_abs.as_os_str().to_os_string(),
+                OsString::from(&remote_ref),
+            ],
+        )
+        .with_context(|| format!("failed to create worktree from {remote_ref} for {}", repo.id))?;
+        update.head_sha = Some(
+            rev_parse(&worktree_abs, "HEAD")
+                .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
+        );
+        update.log = MaterializeLog::WorktreeFromOrigin(remote_ref);
+        return Ok(update);
+    }
+
     git_output(
         &repo_root,
         [
@@ -279,6 +312,21 @@ fn materialize_one_repo(
             .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
     );
     Ok(update)
+}
+
+/// Look for this bundle's feature branch on `origin` before creating a fresh
+/// local branch from base. Best-effort: a missing origin remote, an offline
+/// fetch, or an absent remote branch all return `None` and materialization
+/// falls back to branching from base. The targeted fetch keeps the
+/// remote-tracking ref current even in workspaces that received the bundle
+/// artifact without a prior `knit pull` (for example via `knit fetch`).
+fn origin_feature_ref(repo_root: &Path, feature_branch: &str) -> Option<String> {
+    git_output_optional(repo_root, ["remote", "get-url", "origin"])
+        .ok()
+        .flatten()?;
+    let _ = git_output(repo_root, ["fetch", "origin", feature_branch]);
+    let remote_ref = format!("origin/{feature_branch}");
+    ref_exists(repo_root, &remote_ref).then_some(remote_ref)
 }
 
 fn materialize_in_place(
@@ -304,6 +352,20 @@ fn materialize_in_place(
         if branch_exists(repo_root, feature_branch) {
             git_output(repo_root, ["checkout", feature_branch])
                 .with_context(|| format!("{}: failed to checkout {feature_branch}", repo.id))?;
+        } else if let Some(remote_ref) = origin_feature_ref(repo_root, feature_branch) {
+            // A collaborator already pushed this bundle's branch: track it
+            // instead of forking a same-named branch from base.
+            git_output(
+                repo_root,
+                [
+                    OsString::from("checkout"),
+                    OsString::from("--track"),
+                    OsString::from("-b"),
+                    OsString::from(feature_branch),
+                    OsString::from(&remote_ref),
+                ],
+            )
+            .with_context(|| format!("{}: failed to create {feature_branch} from {remote_ref}", repo.id))?;
         } else {
             git_output(
                 repo_root,
