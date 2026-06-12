@@ -69,21 +69,28 @@ pub(super) fn run_branch_update(
                 }
                 Err(error) => {
                     bail!(
-                        "{}: failed to update from base: {error:#}\nResolve the merge in {}, commit it, then run `knit land update --continue-merge{}`.",
+                        "{}: failed to update from base: {error:#}\nResolve the merge in {}, commit it, then run `knit land update --continue-merge --push` so the host PR sees the resolution.",
                         target.repo_id,
-                        target.cwd.display(),
-                        if push { " --push" } else { "" }
+                        target.cwd.display()
                     );
                 }
             }
         }
     }
 
-    if !changes.is_empty() {
+    let recorded_updates = !changes.is_empty();
+    if recorded_updates {
         append_land_update_node(&mut active, changes)?;
         save_active_bundle(&active)?;
     } else {
         println!("{}", out::ok("No feature branches needed base updates."));
+    }
+
+    if !push && recorded_updates {
+        println!(
+            "{} updated branches are local only. Push them with `knit push` (or rerun with --push) before `knit land check`/`apply`, or the host PR will still show the old head.",
+            out::warn("Note:")
+        );
     }
 
     if push {

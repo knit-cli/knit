@@ -87,7 +87,7 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     );
     crate::advice::print(
         &root,
-        format!("run `knit --bundle {bundle_id} worktree` to rematerialize its checkouts."),
+        format!("run `knit --bundle {bundle_id} bundle worktree` to rematerialize its checkouts."),
     );
     Ok(())
 }

@@ -350,7 +350,7 @@ Gloss should read this bundle and inspect the referenced repos, branches, and SH
 ```sh
 knit bundle archive feature-x --reason "merged"
 knit bundle archive feature-x --keep-worktrees   # ledger/state change only
-knit bundle restore feature-x                    # reopen; `knit worktree` rematerializes checkouts
+knit bundle restore feature-x                    # reopen; `knit bundle worktree` rematerializes checkouts
 ```
 
 Archiving refuses to discard dirty generated worktrees unless `--force` is passed.
