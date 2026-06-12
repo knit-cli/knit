@@ -15,7 +15,8 @@ brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
 ```
 Cargo:
 ```sh
-cargo install knit-cli        # from crates.io (the binary is named `knit`)
+cargo install knit-cli --version 0.1.0-alpha.1   # from crates.io (the binary is named `knit`;
+                                                 # cargo needs the explicit version while only pre-releases exist)
 # or from a checkout:
 cargo install --path .
 ```
@@ -198,8 +199,8 @@ sync automatically, hosted dashboards show bundles and project history, and
 machine. `knit related --pull` and `knit sync pull` read the same hosted
 history back.
 
-Projects can also be cloned form knit. `knit clone` Will clone the project
-as it's set up in knit, given your git and knit tokens allow it.
+Projects can also be cloned from Knit. `knit clone` will rebuild the project
+as it is set up in Knit, given your git and KnitHub tokens allow it.
 
 KnitHub contains `gloss`. `gloss` is another tool that allows you to run a cross repo analysis/code review
 in the same page.
