@@ -87,6 +87,9 @@ pub(super) fn build_default_plan(
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
         on_failure: landing.and_then(|landing| landing.on_failure),
+        require_checks: landing
+            .map(|landing| landing.require_checks.clone())
+            .unwrap_or_default(),
         steps,
     })
 }

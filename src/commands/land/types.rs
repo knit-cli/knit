@@ -81,6 +81,9 @@ pub(super) struct LandPlan {
     /// that already landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) on_failure: Option<crate::model::LandOnFailure>,
+    /// Named checks that must be green and fresh before `apply`/`resume`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) require_checks: Vec<String>,
     pub(super) steps: Vec<LandStep>,
 }
 

@@ -80,6 +80,7 @@
       "properties": {
         "provider": { "enum": ["github"] },
         "onFailure": { "enum": ["resume", "rollback"], "default": "resume" },
+        "requireChecks": { "type": "array", "items": { "type": "string" } },
         "merge": {
           "type": "object",
           "properties": {
