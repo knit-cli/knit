@@ -1,6 +1,6 @@
 # Knit Reference
 
-This is the full command and behavior reference for Knit. For a guided introduction, see the [Quickstart in the README](../README.md#quickstart).
+This is the full command and behavior reference for Knit. For a guided introduction, see the [quickstart](quickstart.md).
 
 ## Storage
 
