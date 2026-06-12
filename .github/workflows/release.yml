@@ -9,7 +9,18 @@ permissions:
   contents: write
 
 jobs:
+  # upload-rust-binary-action uploads assets to an existing release; create it
+  # first so tag pushes work unattended.
+  create-release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/create-gh-release-action@v1
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
   upload-assets:
+    needs: create-release
     strategy:
       matrix:
         include:
