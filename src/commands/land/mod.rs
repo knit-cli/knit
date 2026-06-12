@@ -8,6 +8,7 @@
 //! - [`check`] live landing-readiness preflight (`knit land check`)
 //! - [`validate`] validates a plan and preflights its PRs
 //! - [`execute`] schedules and runs the plan, recording progress
+//! - [`rollback`] creates revert PRs for a failed run's merged steps
 //! - [`update`] implements `knit land update` (merge base into feature branches)
 //! - [`display`] renders plans, run status, and PR/check state
 
@@ -16,6 +17,7 @@ mod check;
 mod display;
 mod execute;
 mod plan;
+mod rollback;
 mod types;
 mod update;
 mod validate;
@@ -23,6 +25,7 @@ mod validate;
 pub use artifact::apply_land_from_artifact;
 pub use check::check_landing;
 pub(crate) use check::{assess_landing_readiness, print_readiness_row};
+pub use rollback::rollback_land_run;
 
 use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
@@ -77,9 +80,16 @@ pub fn land_default() -> Result<()> {
         if run.status == LandStatus::Succeeded {
             return Ok(());
         }
+        if run.rolled_back_at.is_some() {
+            advice::print(
+                &active.root,
+                "this run was rolled back; its merged PRs have open revert PRs. Land those reverts or start over with `knit land apply` once the bundle is ready again.",
+            );
+            return Ok(());
+        }
         advice::print(
             &active.root,
-            "fix the failed or incomplete step, then run `knit land resume` when you are ready to continue execution.",
+            "fix the failed or incomplete step, then run `knit land resume` when you are ready to continue execution. Use `knit land rollback` to revert the steps that already merged instead.",
         );
         return Ok(());
     }
@@ -138,6 +148,12 @@ pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bo
             out::node(&run.id)
         );
         return Ok(());
+    }
+    if let Some(rolled_back_at) = &run.rolled_back_at {
+        bail!(
+            "Land run {} was rolled back at {rolled_back_at}; its merged PRs have revert PRs. Run `knit land apply` to start a new landing instead.",
+            run.id
+        );
     }
     let plan_path = resolve_stored_path(&active.root, &run.plan_path);
     let plan: LandPlan = read_json(&plan_path)?;
@@ -455,6 +471,7 @@ mod tests {
             status: LandStatus::Running,
             created_at: now_iso(),
             updated_at: now_iso(),
+            rolled_back_at: None,
             steps: vec![LandRunStep {
                 id: "a".to_string(),
                 step_type: LandStepKind::Run,
@@ -594,6 +611,7 @@ mod tests {
             status: LandStatus::Succeeded,
             created_at: now_iso(),
             updated_at: now_iso(),
+            rolled_back_at: None,
             steps: Vec::new(),
         };
         let text = serde_json::to_string_pretty(&run).unwrap();

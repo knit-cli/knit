@@ -129,63 +129,79 @@ pub(super) fn apply_provider_revert(
     plan: &RevertPlan,
     path: PathBuf,
 ) -> Result<()> {
+    let mut items = Vec::new();
+    for repo_plan in &plan.repos {
+        for operation in &repo_plan.operations {
+            let selector = operation_selector(operation)?;
+            items.push((repo_plan.repo_id.clone(), selector.to_string()));
+        }
+    }
+
+    create_provider_revert_prs(
+        active,
+        plan.provider.as_deref(),
+        &plan.target_node_id,
+        &plan.target_message,
+        &items,
+    )?;
+    let _ = fs::remove_file(path);
+    Ok(())
+}
+
+/// Create provider-side revert PRs for a group of merged PRs and record the
+/// `pr.revert` ledger node. `items` pairs each repo id with the merged PR's
+/// selector (URL). Shared by `knit revert --apply` (landed nodes) and
+/// `knit land rollback` (half-failed land runs). Returns the revert group id.
+pub(crate) fn create_provider_revert_prs(
+    active: &mut ActiveBundle,
+    provider: Option<&str>,
+    target_node_id: &str,
+    target_message: &str,
+    items: &[(String, String)],
+) -> Result<String> {
     let group_id = revert_group_id();
     let created_at = now_iso();
-    let logical_message = format!("Revert {}", plan.target_message);
+    let logical_message = format!("Revert {target_message}");
     let mut repo_ids = BTreeSet::new();
     let mut publication_urls = BTreeSet::new();
     let mut failures = Vec::new();
 
-    for repo_plan in &plan.repos {
-        let (repo_index, target, forge) = provider_context(active, plan, &repo_plan.repo_id)?;
+    for (repo_id, selector) in items {
+        let (repo_index, target, forge) = provider_revert_context(active, provider, repo_id)?;
         let repo = active.bundle.repos[repo_index].clone();
 
-        for operation in &repo_plan.operations {
-            let selector = match operation_selector(operation) {
-                Ok(selector) => selector,
-                Err(error) => {
-                    failures.push(format!("{}: {error:#}", repo_plan.repo_id));
-                    continue;
-                }
-            };
-            let title = format!("Revert {} ({})", active.bundle.title, repo_plan.repo_id);
-            let body = format!(
-                "Reverts {selector}\n\nKnit-Reverts: {}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
-                plan.target_node_id, active.bundle.id
-            );
-            match forge.revert_pull_request(&target, selector, &title, &body) {
-                Ok(url) => {
-                    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
-                        number: pr_number_from_url(&url).unwrap_or(0),
-                        url: url.clone(),
-                        state: Some("OPEN".to_string()),
-                        title: Some(title.clone()),
-                        base_ref_name: Some(repo.base_branch.clone()),
-                        head_ref_name: None,
-                        body: None,
-                        is_draft: None,
-                        head_ref_oid: None,
-                        mergeable: None,
-                        merge_state_status: None,
-                        review_decision: None,
-                    });
-                    providers::upsert_publication(
-                        &mut active.bundle,
-                        &repo,
-                        forge.as_ref(),
-                        &summary,
-                    );
-                    repo_ids.insert(repo_plan.repo_id.clone());
-                    publication_urls.insert(summary.url.clone());
-                    println!(
-                        "{}: {} {}",
-                        out::repo(&repo_plan.repo_id),
-                        out::movement("revert PR"),
-                        summary.url
-                    );
-                }
-                Err(error) => failures.push(format!("{}: {error:#}", repo_plan.repo_id)),
+        let title = format!("Revert {} ({})", active.bundle.title, repo_id);
+        let body = format!(
+            "Reverts {selector}\n\nKnit-Reverts: {target_node_id}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
+            active.bundle.id
+        );
+        match forge.revert_pull_request(&target, selector, &title, &body) {
+            Ok(url) => {
+                let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
+                    number: pr_number_from_url(&url).unwrap_or(0),
+                    url: url.clone(),
+                    state: Some("OPEN".to_string()),
+                    title: Some(title.clone()),
+                    base_ref_name: Some(repo.base_branch.clone()),
+                    head_ref_name: None,
+                    body: None,
+                    is_draft: None,
+                    head_ref_oid: None,
+                    mergeable: None,
+                    merge_state_status: None,
+                    review_decision: None,
+                });
+                providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
+                repo_ids.insert(repo_id.clone());
+                publication_urls.insert(summary.url.clone());
+                println!(
+                    "{}: {} {}",
+                    out::repo(repo_id),
+                    out::movement("revert PR"),
+                    summary.url
+                );
             }
+            Err(error) => failures.push(format!("{repo_id}: {error:#}")),
         }
     }
 
@@ -200,14 +216,11 @@ pub(super) fn apply_provider_revert(
         bail!("PR revert produced no review objects.");
     }
 
-    let provider = plan
-        .provider
-        .clone()
-        .unwrap_or_else(|| "provider".to_string());
+    let provider = provider.unwrap_or("provider").to_string();
     active.bundle.nodes.push(BundleNode::pr_revert(
         group_id.clone(),
         created_at,
-        plan.target_node_id.clone(),
+        target_node_id.to_string(),
         logical_message,
         provider,
         repo_ids.into_iter().collect(),
@@ -216,14 +229,13 @@ pub(super) fn apply_provider_revert(
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
     save_active_bundle(active)?;
-    let _ = fs::remove_file(path);
 
     println!(
         "{} {}",
         out::heading("Recorded PR revert group"),
-        out::node(group_id)
+        out::node(&group_id)
     );
-    Ok(())
+    Ok(group_id)
 }
 
 pub(super) fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result<()> {
@@ -314,7 +326,8 @@ fn preflight_provider_revert(
         );
     }
 
-    let (_, target, forge) = provider_context(active, plan, &repo_plan.repo_id)?;
+    let (_, target, forge) =
+        provider_revert_context(active, plan.provider.as_deref(), &repo_plan.repo_id)?;
     for operation in &repo_plan.operations {
         let selector = operation_selector(operation)?;
         let pr = forge
@@ -397,9 +410,11 @@ pub(super) fn plan_uses_provider_revert(plan: &RevertPlan) -> bool {
     })
 }
 
-fn provider_context(
+/// Resolve the forge and PR target for provider-side operations on a repo,
+/// preferring an explicit provider id over per-repo remote detection.
+pub(crate) fn provider_revert_context(
     active: &ActiveBundle,
-    plan: &RevertPlan,
+    provider: Option<&str>,
     repo_id: &str,
 ) -> Result<(usize, PrTarget, Box<dyn providers::Forge>)> {
     let (index, repo) = active
@@ -409,7 +424,7 @@ fn provider_context(
         .enumerate()
         .find(|(_, repo)| repo.id == repo_id)
         .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
-    let forge = match plan.provider.as_deref() {
+    let forge = match provider {
         Some(provider) => providers::by_id(provider)
             .with_context(|| format!("{repo_id}: unknown provider `{provider}`"))?,
         None => providers::for_repo(repo)?,
