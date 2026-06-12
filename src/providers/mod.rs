@@ -491,14 +491,10 @@ fn run_cli_output(
 
 fn gh_env_token_vars() -> Vec<&'static str> {
     let mut vars = Vec::new();
-    if std::env::var_os("GH_TOKEN")
-        .is_some_and(|value| !value.is_empty())
-    {
+    if std::env::var_os("GH_TOKEN").is_some_and(|value| !value.is_empty()) {
         vars.push("GH_TOKEN");
     }
-    if std::env::var_os("GITHUB_TOKEN")
-        .is_some_and(|value| !value.is_empty())
-    {
+    if std::env::var_os("GITHUB_TOKEN").is_some_and(|value| !value.is_empty()) {
         vars.push("GITHUB_TOKEN");
     }
     vars
@@ -638,6 +634,8 @@ mod tests {
             "HTTP 401: Bad credentials (https://api.github.com/graphql)"
         ));
         assert!(looks_like_gh_auth_failure("authentication failed"));
-        assert!(!looks_like_gh_auth_failure("graphQL: Could not resolve to a PullRequest"));
+        assert!(!looks_like_gh_auth_failure(
+            "graphQL: Could not resolve to a PullRequest"
+        ));
     }
 }

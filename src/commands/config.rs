@@ -89,14 +89,20 @@ fn apply_config_value(config: &mut KnitConfig, key: &str, value: &str) -> Result
             config.sync_remotes = remote_names;
             Ok(())
         }
-        _ => bail!("Unknown config key `{key}`. Supported: advice, push-sync, sync-remote, sync-remotes."),
+        _ => bail!(
+            "Unknown config key `{key}`. Supported: advice, push-sync, sync-remote, sync-remotes."
+        ),
     }
 }
 
 fn print_config_value(key: &str, config: &KnitConfig, scope: &str) -> Result<()> {
     match key {
         "advice" | "push-sync" | "push_sync" => {
-            let label = if key == "advice" { "advice" } else { "push-sync" };
+            let label = if key == "advice" {
+                "advice"
+            } else {
+                "push-sync"
+            };
             let value = if key == "advice" {
                 config.advice
             } else {
@@ -114,10 +120,7 @@ fn print_config_value(key: &str, config: &KnitConfig, scope: &str) -> Result<()>
                 .as_deref()
                 .map(str::to_string)
                 .unwrap_or_else(|| "none".to_string());
-            println!(
-                "{} {scope} sync-remote={remote}",
-                out::heading("Config:")
-            );
+            println!("{} {scope} sync-remote={remote}", out::heading("Config:"));
         }
         "sync-remotes" | "sync_remotes" => {
             let remotes = if config.sync_remotes.is_empty() {
@@ -125,10 +128,7 @@ fn print_config_value(key: &str, config: &KnitConfig, scope: &str) -> Result<()>
             } else {
                 config.sync_remotes.join(",")
             };
-            println!(
-                "{} {scope} sync-remotes={remotes}",
-                out::heading("Config:")
-            );
+            println!("{} {scope} sync-remotes={remotes}", out::heading("Config:"));
         }
         _ => {}
     }

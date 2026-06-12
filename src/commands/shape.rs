@@ -10,7 +10,7 @@ use crate::commands::clean::remove_repo_worktree;
 use crate::commands::init::{resolve_active_view, resolve_view_repos};
 use crate::commands::project::load_project_by_id;
 use crate::commands::track::track_project_repos;
-use crate::ids::{node_id, slugify};
+use crate::ids::{expand_repo_selectors, node_id, slugify};
 use crate::model::{BundleNode, ProjectRepoEntry};
 use crate::output as out;
 use crate::store::{load_active_bundle, load_active_bundle_for_update, save_active_bundle};
@@ -25,8 +25,8 @@ pub fn bundle_include(repos: &[String], materialize: bool, in_place: bool) -> Re
     let project = load_project_by_id(&active.root, &project_id)?;
 
     let mut selected: Vec<ProjectRepoEntry> = Vec::new();
-    for repo in repos {
-        let id = slugify(repo);
+    for repo in expand_repo_selectors(repos) {
+        let id = slugify(&repo);
         if active.bundle.repos.iter().any(|tracked| tracked.id == id) {
             bail!("Repo {} is already in this bundle.", out::repo(&id));
         }
@@ -60,8 +60,8 @@ pub fn bundle_exclude(
     let bundle_id = active.bundle.id.clone();
 
     let mut indexes = Vec::new();
-    for repo in repos {
-        let id = slugify(repo);
+    for repo in expand_repo_selectors(repos) {
+        let id = slugify(&repo);
         let index = active
             .bundle
             .repos

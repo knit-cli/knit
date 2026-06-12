@@ -13,9 +13,7 @@ use crate::git::{current_branch, git_output, git_output_optional, ref_exists};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
-use crate::store::{
-    acquire_named_lock, bundle_path, find_knit_root, read_json, KnitLock,
-};
+use crate::store::{acquire_named_lock, bundle_path, find_knit_root, read_json, KnitLock};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -23,17 +21,71 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 const MERGE_RUN_KIND: &str = "KnitMergeRun";
-const STEP_PENDING: &str = "pending";
-const STEP_SUCCEEDED: &str = "succeeded";
-const STEP_CONFLICTED: &str = "conflicted";
-const STEP_ABORTED: &str = "aborted";
-const RUN_RUNNING: &str = "running";
-const RUN_SUCCEEDED: &str = "succeeded";
-const RUN_CONFLICTED: &str = "conflicted";
-const RUN_ABORTED: &str = "aborted";
-const RUN_PUSH_FAILED: &str = "push_failed";
-const TARGET_BRANCH: &str = "branch";
-const TARGET_BUNDLE: &str = "bundle";
+
+/// Status of a whole merge run. Serialized snake_case to match the recorded
+/// run artifacts (`running`, `push_failed`, ...).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MergeRunStatus {
+    Running,
+    Succeeded,
+    Conflicted,
+    Aborted,
+    PushFailed,
+}
+
+impl MergeRunStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeRunStatus::Running => "running",
+            MergeRunStatus::Succeeded => "succeeded",
+            MergeRunStatus::Conflicted => "conflicted",
+            MergeRunStatus::Aborted => "aborted",
+            MergeRunStatus::PushFailed => "push_failed",
+        }
+    }
+}
+
+impl std::fmt::Display for MergeRunStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// Status of one repo step within a merge run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MergeStepStatus {
+    Pending,
+    Succeeded,
+    Conflicted,
+    Aborted,
+}
+
+impl MergeStepStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            MergeStepStatus::Pending => "pending",
+            MergeStepStatus::Succeeded => "succeeded",
+            MergeStepStatus::Conflicted => "conflicted",
+            MergeStepStatus::Aborted => "aborted",
+        }
+    }
+}
+
+impl std::fmt::Display for MergeStepStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+/// What kind of target a step merges into.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum MergeTargetKind {
+    Branch,
+    Bundle,
+}
 
 #[derive(Debug, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -44,7 +96,7 @@ struct MergeRun {
     source: String,
     into: String,
     manual: bool,
-    status: String,
+    status: MergeRunStatus,
     created_at: String,
     updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -69,12 +121,12 @@ struct MergeRunStep {
     repo_path: String,
     source_ref: String,
     target: String,
-    target_kind: String,
+    target_kind: MergeTargetKind,
     checkout_path: String,
     before_sha: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     after_sha: Option<String>,
-    status: String,
+    status: MergeStepStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     message: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -111,10 +163,10 @@ impl TargetPlan {
         }
     }
 
-    fn kind(&self) -> &str {
+    fn kind(&self) -> MergeTargetKind {
         match self {
-            TargetPlan::Branch { .. } => TARGET_BRANCH,
-            TargetPlan::Bundle { .. } => TARGET_BUNDLE,
+            TargetPlan::Branch { .. } => MergeTargetKind::Branch,
+            TargetPlan::Bundle { .. } => MergeTargetKind::Bundle,
         }
     }
 
@@ -159,7 +211,9 @@ pub fn merge_command(
         match source {
             Some("status") => return report::show_merge_status(&root, run),
             Some("show") => return report::show_merge_run_json(&root, run),
-            Some("push") => return report::push_recorded_merge_run(&root, run, repos, set_upstream),
+            Some("push") => {
+                return report::push_recorded_merge_run(&root, run, repos, set_upstream)
+            }
             _ => {}
         }
     }
@@ -198,7 +252,7 @@ pub fn merge_command(
 // Shared run lookup, locking, and git helpers used across the merge submodules.
 // ---------------------------------------------------------------------------
 
-fn latest_merge_run(root: &Path, statuses: &[&str]) -> Result<(PathBuf, MergeRun)> {
+fn latest_merge_run(root: &Path, statuses: &[MergeRunStatus]) -> Result<(PathBuf, MergeRun)> {
     let runs_dir = root.join(".knit/merge-runs");
     if !runs_dir.exists() {
         bail!("No merge runs found.");
@@ -214,7 +268,7 @@ fn latest_merge_run(root: &Path, statuses: &[&str]) -> Result<(PathBuf, MergeRun
             continue;
         }
         let run: MergeRun = read_json(&path)?;
-        if statuses.is_empty() || statuses.iter().any(|status| *status == run.status) {
+        if statuses.is_empty() || statuses.contains(&run.status) {
             candidates.push((path, run));
         }
     }
@@ -250,8 +304,8 @@ fn acquire_run_locks(root: &Path, run: &MergeRun) -> Result<Vec<KnitLock>> {
     }
     for step in &run.steps {
         if matches!(
-            step.status.as_str(),
-            STEP_SUCCEEDED | STEP_CONFLICTED | STEP_PENDING
+            step.status,
+            MergeStepStatus::Succeeded | MergeStepStatus::Conflicted | MergeStepStatus::Pending
         ) {
             locks.push(acquire_named_lock(
                 root,
@@ -341,8 +395,8 @@ fn abort_merge_if_needed(cwd: &Path) {
     }
 }
 
-fn hard_reset(cwd: &Path, reference: &str) {
-    let _ = git_output(cwd, ["reset", "--hard", reference]);
+fn hard_reset(cwd: &Path, reference: &str) -> Result<()> {
+    git_output(cwd, ["reset", "--hard", reference]).map(|_| ())
 }
 
 fn short_sha(sha: &str) -> &str {

@@ -211,6 +211,10 @@ pub enum Commands {
         /// Skip configured KnitHub remote sync for this pull.
         #[arg(long)]
         no_remote: bool,
+        /// Union-merge the bundle ledger when the local and remote artifacts
+        /// have diverged, instead of keeping local and warning.
+        #[arg(long)]
+        merge: bool,
     },
     /// Push tracked feature branches.
     Push {

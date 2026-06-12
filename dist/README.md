@@ -11,7 +11,7 @@ git push origin v0.1.0
 
 # 2. Wait for the release workflow to build and upload binaries
 
-# 3. Publish to crates.io
+# 3. Publish to crates.io (the crate is `knit-cli`; the installed binary stays `knit`)
 cargo publish
 
 # 4. Copy SHA256 checksums from the release assets into the manifests below

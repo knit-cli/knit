@@ -257,7 +257,7 @@ fn history_event(
         commit,
         before_sha: change.and_then(|change| change.before_sha.clone()),
         after_sha: change.map(|change| change.after_sha.clone()),
-        movement: change.map(|change| change.movement.clone()),
+        movement: change.map(|change| change.movement),
         node_id: Some(node_id.to_string()),
         node_type: Some(node_type.to_string()),
         commit_group_id: commit_group_id.map(ToString::to_string),

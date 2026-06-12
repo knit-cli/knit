@@ -113,10 +113,7 @@ fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
-    knit(
-        &workspace,
-        ["commit", "--all", "-m", "Artifact PR change"],
-    );
+    knit(&workspace, ["commit", "--all", "-m", "Artifact PR change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -197,10 +194,7 @@ fn artifact_pr_create_can_use_native_ipv4_transport() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
-    knit(
-        &workspace,
-        ["commit", "--all", "-m", "Artifact PR change"],
-    );
+    knit(&workspace, ["commit", "--all", "-m", "Artifact PR change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -278,10 +272,7 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     let backend_feature = workspace.join(".knit/worktrees/artifact-publish/backend");
     append_line(&backend_feature.join("app.txt"), "artifact PR change");
-    knit(
-        &workspace,
-        ["commit", "--all", "-m", "Artifact PR change"],
-    );
+    knit(&workspace, ["commit", "--all", "-m", "Artifact PR change"]);
 
     let fake_gh_dir = root.join("fake-gh");
     let fake_bin = root.join("fake-bin");
@@ -392,4 +383,3 @@ fn pr_create_can_override_base_branch() {
 
     fs::remove_dir_all(root).unwrap();
 }
-

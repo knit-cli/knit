@@ -1,10 +1,9 @@
 use crate::commands::bundle::bundle_state;
-use crate::model::{
-    ChangeGroup, KnitConfig, KnitProject, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED,
-    BUNDLE_STATE_OPEN,
-};
+use crate::model::{BundleState, ChangeGroup, KnitConfig, KnitProject};
 use crate::output as out;
-use crate::store::{find_knit_root, global_config_path, load_effective_config, read_json, write_json};
+use crate::store::{
+    find_knit_root, global_config_path, load_effective_config, read_json, write_json,
+};
 use crate::tracking::ledger_recorded_head_sha;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
@@ -84,10 +83,7 @@ pub fn migrate_workspace(check: bool) -> Result<()> {
         );
     }
     if check {
-        bail!(
-            "{} file(s) need migration",
-            changed.len() + removed.len()
-        );
+        bail!("{} file(s) need migration", changed.len() + removed.len());
     }
     Ok(())
 }
@@ -103,7 +99,9 @@ fn inspect_config(root: &Path, config: &KnitConfig, issues: &mut Vec<String>) {
             .join(".knit/bundles")
             .join(format!("{bundle_id}.bundle.json"));
         match read_json::<ChangeGroup>(&path) {
-            Ok(bundle) if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED => {
+            Ok(bundle)
+                if bundle_state(&bundle) == crate::commands::bundle::BundleStatus::Archived =>
+            {
                 issues.push(format!("active bundle `{bundle_id}` is archived"))
             }
             Ok(_) => {}
@@ -283,7 +281,7 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
                 .rev()
                 .find(|node| node.node_type == "feature.archived")
             {
-                bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
+                bundle.state = Some(BundleState::Archived);
                 bundle.archived_at = Some(archive_node.created_at.clone());
             } else if let Some(close_node) = bundle
                 .nodes
@@ -291,10 +289,10 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
                 .rev()
                 .find(|node| node.node_type == "feature.closed")
             {
-                bundle.state = Some(BUNDLE_STATE_CLOSED.to_string());
+                bundle.state = Some(BundleState::Closed);
                 bundle.closed_at = Some(close_node.created_at.clone());
             } else {
-                bundle.state = Some(BUNDLE_STATE_OPEN.to_string());
+                bundle.state = Some(BundleState::Open);
             }
         }
         let projected_heads = bundle

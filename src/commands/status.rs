@@ -1,9 +1,10 @@
 use crate::advice;
 use crate::checkout::{checkout_dir, checkout_display_path, checkout_mode_label, is_in_place};
 use crate::commands::bundle::bundle_state;
+use crate::commands::bundle::BundleStatus;
 use crate::git::current_branch;
 use crate::git::git_output;
-use crate::model::{PublicationEntry, BUNDLE_STATE_CLOSED};
+use crate::model::PublicationEntry;
 use crate::output as out;
 use crate::status::status_label;
 use crate::store::{ensure_workspace_fallback_status_is_unambiguous, load_active_bundle};
@@ -21,7 +22,11 @@ pub fn show_status() -> Result<()> {
         out::node(&active.bundle.id),
         active.resolution_source.label()
     );
-    println!("{} {}\n", out::heading("State:"), out::status(state));
+    println!(
+        "{} {}\n",
+        out::heading("State:"),
+        out::status(state.as_str())
+    );
     println!(
         "{} {} {} {} {}",
         out::header_field("repo", 14),
@@ -84,8 +89,8 @@ pub fn show_status() -> Result<()> {
     Ok(())
 }
 
-fn print_closed_summary(active: &crate::store::ActiveBundle, state: &str) {
-    if state != BUNDLE_STATE_CLOSED {
+fn print_closed_summary(active: &crate::store::ActiveBundle, state: BundleStatus) {
+    if state != BundleStatus::Closed {
         return;
     }
     println!();
@@ -105,7 +110,7 @@ fn print_closed_summary(active: &crate::store::ActiveBundle, state: &str) {
 
 fn print_publication_summary(active: &crate::store::ActiveBundle) {
     let state = crate::commands::bundle::bundle_state(&active.bundle);
-    if active.bundle.publications.is_empty() || state == "landed" {
+    if active.bundle.publications.is_empty() || state == BundleStatus::Landed {
         return;
     }
     let tracked_count = active.bundle.repos.len();

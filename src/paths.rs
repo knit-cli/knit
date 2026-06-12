@@ -22,12 +22,7 @@ pub fn same_path(left: &str, right: &str) -> bool {
         // duplicate repo entries.
         let normalize = |path: &Path| -> Vec<String> {
             path.components()
-                .map(|component| {
-                    component
-                        .as_os_str()
-                        .to_string_lossy()
-                        .to_lowercase()
-                })
+                .map(|component| component.as_os_str().to_string_lossy().to_lowercase())
                 .collect()
         };
         return normalize(left) == normalize(right);
@@ -59,11 +54,9 @@ pub fn strip_path_prefix(path: &Path, prefix: &Path) -> Option<std::path::PathBu
         for prefix_component in prefix.components() {
             let path_component = path_components.next()?;
             let same = match (prefix_component, path_component) {
-                (
-                    std::path::Component::Normal(left),
-                    std::path::Component::Normal(right),
-                ) => left.to_string_lossy().to_lowercase()
-                    == right.to_string_lossy().to_lowercase(),
+                (std::path::Component::Normal(left), std::path::Component::Normal(right)) => {
+                    left.to_string_lossy().to_lowercase() == right.to_string_lossy().to_lowercase()
+                }
                 (left, right) => {
                     left.as_os_str().to_string_lossy().to_lowercase()
                         == right.as_os_str().to_string_lossy().to_lowercase()

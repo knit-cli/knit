@@ -39,10 +39,7 @@
         "kind": { "type": "string" },
         "stackRepo": { "type": "string" },
         "composeFile": { "type": "string" },
-        "worktreeComposeFile": { "type": "string" },
-        "worktreeDockerfile": { "type": "string" },
-        "frontendRepo": { "type": "string" },
-        "glossWebUiRepo": { "type": "string" },
+        "mode": { "enum": ["transform", "contract"] },
         "profilePath": { "type": "string" },
         "projectConfigFile": { "type": "string" },
         "database": {
@@ -53,7 +50,12 @@
             "port": { "type": "integer" },
             "name": { "type": "string" },
             "nameTemplate": { "type": "string" },
-            "portBase": { "type": "integer" }
+            "portBase": { "type": "integer" },
+            "startCommand": {
+              "type": "array",
+              "items": { "type": "string" },
+              "minItems": 1
+            }
           },
           "additionalProperties": false
         },
@@ -63,8 +65,10 @@
             "backendBase": { "type": "integer" },
             "frontendBase": { "type": "integer" },
             "step": { "type": "integer" },
-            "backendContainer": { "type": "integer" },
-            "frontendContainer": { "type": "integer" }
+            "services": {
+              "type": "object",
+              "additionalProperties": { "type": "integer" }
+            }
           },
           "additionalProperties": false
         }
