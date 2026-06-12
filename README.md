@@ -9,9 +9,12 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 This walkthrough takes you from install to a landed multi-repo change in about ten minutes. It uses two toy repos so you can run it anywhere.
 
 ### 1. Install
-
+Brew:
 ```sh
 brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+```
+Cargo:
+```sh
 cargo install knit-cli        # from crates.io (the binary is named `knit`)
 # or from a checkout:
 cargo install --path .
