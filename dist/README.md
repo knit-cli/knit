@@ -34,7 +34,7 @@ Users install with `brew tap marc-merino/knit && brew install knit`. To release:
 #   - bump the `version` stanza in homebrew/knit.rb (URLs derive from it)
 #   - replace each sha256 with the matching .sha256 asset, e.g.:
 gh release view v0.1.0-alpha.2 --repo marc-merino/knit --json assets -q '.assets[].name'
-curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.2/knit-v0.1.0-alpha.2-aarch64-apple-darwin.tar.gz.sha256
+curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.2/knit-v0.1.0-alpha.2-aarch64-apple-darwin.sha256
 
 # Copy homebrew/knit.rb into the tap as Formula/knit.rb, commit, push:
 #   github.com/marc-merino/homebrew-knit
