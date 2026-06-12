@@ -1,28 +1,27 @@
-//! `knit bundle` lifecycle and inspection: show/list/validate, switch, archive,
-//! restore, and delete bundles, plus shared bundle-state and validation helpers.
-//! The dead-work prune subsystem lives in the [`prune`] submodule.
+//! `knit bundle` lifecycle and inspection: show/list/validate, switch, and
+//! shared bundle-state helpers. Archive/restore/delete live in [`lifecycle`],
+//! artifact validation in [`validate`], and the dead-work prune subsystem in
+//! [`prune`].
 
+mod lifecycle;
 mod prune;
+mod validate;
+
+pub(crate) use lifecycle::delete_repo_feature_branch;
+pub use lifecycle::{archive_bundle, delete_bundle, restore_bundle};
 pub use prune::prune_merged_bundles;
 
-use crate::checkout::is_in_place;
-use crate::git::{branch_exists, current_branch, git_output, git_output_optional, ref_exists};
-use crate::model::{
-    BundleNode, ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED, BUNDLE_STATE_DELETED,
-    BUNDLE_STATE_OPEN, CHANGE_GROUP_KIND, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
-    SCHEMA_VERSION,
-};
+use crate::model::{BundleState, ChangeGroup};
 use crate::output as out;
 use crate::store::{
     bundle_exists, bundle_path as stored_bundle_path, find_knit_root, load_active_bundle,
-    load_config, read_json, save_config, set_workspace_active_bundle, write_json, ActiveBundle,
+    read_json, set_workspace_active_bundle,
 };
-use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
-use std::ffi::{OsStr, OsString};
+use std::ffi::OsStr;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use validate::validate_change_group;
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;
@@ -116,10 +115,10 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
         let bundle: ChangeGroup = read_json(&path)?;
         let state = bundle_state(&bundle);
         if !all {
-            if state == BUNDLE_STATE_ARCHIVED && !archived {
+            if state == BundleStatus::Archived && !archived {
                 continue;
             }
-            if state == BUNDLE_STATE_DELETED && !deleted {
+            if state == BundleStatus::Deleted && !deleted {
                 continue;
             }
         }
@@ -161,7 +160,7 @@ pub fn list_open_bundle_ids(root: &Path) -> Result<Vec<String>> {
         let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
             continue;
         };
-        if bundle_state(&bundle) == BUNDLE_STATE_OPEN {
+        if bundle_state(&bundle) == BundleStatus::Open {
             ids.push(bundle.id);
         }
     }
@@ -177,7 +176,7 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool) -> Result<()> {
         bail!("No Knit bundle named `{bundle_id}` found.");
     }
     let bundle: ChangeGroup = read_json(&stored_bundle_path(&root, &bundle_id))?;
-    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
+    if bundle_state(&bundle) == BundleStatus::Archived {
         bail!("Bundle `{bundle_id}` is archived. Run `knit bundle restore {bundle_id}` first.");
     }
 
@@ -197,373 +196,6 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn archive_bundle(
-    bundle_id: &str,
-    reason: Option<&str>,
-    keep_worktrees: bool,
-    force: bool,
-) -> Result<()> {
-    let reason = match reason {
-        Some(reason) => {
-            let reason = reason.trim();
-            if reason.is_empty() {
-                bail!("Archive reason must not be empty when --reason is passed.");
-            }
-            Some(reason.to_string())
-        }
-        None => None,
-    };
-    let root = current_root()?;
-    let bundle_id = crate::ids::slugify(bundle_id);
-    let path = stored_bundle_path(&root, &bundle_id);
-    let bundle = load_existing_bundle(&path, &bundle_id)?;
-    if bundle_state(&bundle) == BUNDLE_STATE_ARCHIVED {
-        bail!("Bundle `{bundle_id}` is already archived.");
-    }
-    let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
-    if !keep_worktrees {
-        crate::commands::clean::clean_worktrees_for_bundle(&mut active, force)?;
-    }
-    let now = now_iso();
-    let node = crate::ids::node_id("archive");
-    active.bundle.state = Some(BUNDLE_STATE_ARCHIVED.to_string());
-    active.bundle.archived_at = Some(now.clone());
-    active
-        .bundle
-        .nodes
-        .push(BundleNode::feature_archived(node.clone(), now, reason));
-    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
-    active.bundle.updated_at = now_iso();
-    write_json(&path, &active.bundle)?;
-    clear_active_if_matches(&root, &bundle_id)?;
-    println!(
-        "{} {}",
-        out::heading("Archived bundle:"),
-        out::node(&bundle_id)
-    );
-    println!("{} {}", out::heading("Node:"), out::node(&node));
-    println!(
-        "{} local feature branches and the bundle artifact",
-        out::heading("Preserved:")
-    );
-    Ok(())
-}
-
-pub fn restore_bundle(bundle_id: &str) -> Result<()> {
-    let root = current_root()?;
-    let bundle_id = crate::ids::slugify(bundle_id);
-    let path = stored_bundle_path(&root, &bundle_id);
-    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
-    if bundle_state(&bundle) != BUNDLE_STATE_ARCHIVED {
-        bail!("Bundle `{bundle_id}` is not archived.");
-    }
-    bundle.state = Some(BUNDLE_STATE_OPEN.to_string());
-    bundle.archived_at = None;
-    bundle.updated_at = now_iso();
-    write_json(&path, &bundle)?;
-    println!(
-        "{} {} ({})",
-        out::heading("Restored bundle:"),
-        out::node(&bundle_id),
-        BUNDLE_STATE_OPEN
-    );
-    crate::advice::print(
-        &root,
-        format!("run `knit --bundle {bundle_id} worktree` to rematerialize its checkouts."),
-    );
-    Ok(())
-}
-
-pub fn delete_bundle(
-    bundle_id: &str,
-    force: bool,
-    worktrees: bool,
-    branches: bool,
-    force_branches: bool,
-    remote_branches: bool,
-    remote_bundles: bool,
-    config: Option<&crate::model::KnitConfig>,
-) -> Result<()> {
-    if !force {
-        bail!("Deleting a bundle requires --force.");
-    }
-    let root = current_root()?;
-    let bundle_id = crate::ids::slugify(bundle_id);
-    let path = stored_bundle_path(&root, &bundle_id);
-    let mut bundle = load_existing_bundle(&path, &bundle_id)?;
-    if force_branches && !branches {
-        bail!("Use --branches with --force-branches.");
-    }
-    if remote_branches && !branches {
-        bail!("Use --branches with --remote-branches.");
-    }
-    if branches && !worktrees {
-        bail!("Deleting local branches requires --worktrees so generated checkouts are removed first.");
-    }
-    if remote_bundles {
-        let loaded_config;
-        let config = match config {
-            Some(config) => config,
-            None => {
-                loaded_config = crate::store::load_effective_config(&root)?;
-                &loaded_config
-            }
-        };
-        crate::commands::remote::delete_bundle_from_remote(&root, config, &bundle)?;
-    }
-    if worktrees {
-        let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
-        crate::commands::clean::clean_worktrees_for_bundle(&mut active, force)?;
-        bundle = active.bundle;
-    }
-    if branches {
-        delete_local_feature_branches(&bundle, force_branches)?;
-    }
-    if remote_branches {
-        delete_remote_feature_branches(&bundle)?;
-    }
-    let now = now_iso();
-    bundle.state = Some(BUNDLE_STATE_DELETED.to_string());
-    bundle.deleted_at = Some(now.clone());
-    bundle.updated_at = now;
-    let deleted_dir = root.join(".knit/deleted/bundles");
-    fs::create_dir_all(&deleted_dir)
-        .with_context(|| format!("failed to create {}", deleted_dir.display()))?;
-    let deleted_path = deleted_dir.join(format!("{bundle_id}.bundle.json"));
-    write_json(&deleted_path, &bundle)?;
-    fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    clear_active_if_matches(&root, &bundle_id)?;
-    println!(
-        "{} {} {}",
-        out::heading("Deleted bundle:"),
-        out::node(&bundle_id),
-        out::path(deleted_path.display())
-    );
-    Ok(())
-}
-
-/// Delete one repo's local feature branch in its original checkout. Uses
-/// `git branch -d` (fails on unmerged/unpushed work) unless `force` selects `-D`.
-pub(crate) fn delete_repo_feature_branch(
-    repo: &crate::model::RepoEntry,
-    force: bool,
-) -> Result<()> {
-    let Some(branch) = repo.feature_branch.as_deref() else {
-        println!(
-            "{}: {}",
-            out::repo(&repo.id),
-            out::muted("no feature branch recorded")
-        );
-        return Ok(());
-    };
-    let repo_root = PathBuf::from(&repo.path);
-    if !repo_root.exists() {
-        bail!(
-            "{}: original repo path is missing, cannot delete {}",
-            repo.id,
-            branch
-        );
-    }
-    if is_in_place(repo) && current_branch(&repo_root)?.as_deref() == Some(branch) {
-        bail!(
-            "{}: {} is checked out in the source repo; switch branches before deleting it",
-            repo.id,
-            branch
-        );
-    }
-    if !branch_exists(&repo_root, branch) {
-        println!(
-            "{}: {} {}",
-            out::repo(&repo.id),
-            out::muted("branch already missing"),
-            out::branch(branch)
-        );
-        return Ok(());
-    }
-    let delete_flag = if force { "-D" } else { "-d" };
-    git_output(
-        &repo_root,
-        [
-            OsString::from("branch"),
-            OsString::from(delete_flag),
-            OsString::from(branch),
-        ],
-    )?;
-    println!(
-        "{}: {} {}",
-        out::repo(&repo.id),
-        out::movement("removed"),
-        out::branch(branch)
-    );
-    Ok(())
-}
-
-fn delete_local_feature_branches(bundle: &ChangeGroup, force: bool) -> Result<()> {
-    let mut failures = Vec::new();
-    for repo in &bundle.repos {
-        let Some(branch) = repo.feature_branch.as_deref() else {
-            println!(
-                "{}: {}",
-                out::repo(&repo.id),
-                out::muted("no feature branch recorded")
-            );
-            continue;
-        };
-        let repo_root = PathBuf::from(&repo.path);
-        if !repo_root.exists() {
-            failures.push(format!(
-                "{}: original repo path is missing, cannot delete {}",
-                repo.id, branch
-            ));
-            continue;
-        }
-        if is_in_place(repo) && current_branch(&repo_root)?.as_deref() == Some(branch) {
-            failures.push(format!(
-                "{}: {} is checked out in the source repo; switch branches before deleting it",
-                repo.id, branch
-            ));
-            continue;
-        }
-        if !branch_exists(&repo_root, branch) {
-            println!(
-                "{}: {} {}",
-                out::repo(&repo.id),
-                out::muted("branch already missing"),
-                out::branch(branch)
-            );
-            continue;
-        }
-        let delete_flag = if force { "-D" } else { "-d" };
-        let args = vec![
-            OsString::from("branch"),
-            OsString::from(delete_flag),
-            OsString::from(branch),
-        ];
-        match git_output(&repo_root, args) {
-            Ok(_) => println!(
-                "{}: {} {}",
-                out::repo(&repo.id),
-                out::movement("removed"),
-                out::branch(branch)
-            ),
-            Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
-        }
-    }
-    if !failures.is_empty() {
-        bail!(
-            "failed to delete feature branches:\n{}",
-            failures.join("\n")
-        );
-    }
-    Ok(())
-}
-
-fn delete_remote_feature_branches(bundle: &ChangeGroup) -> Result<()> {
-    let mut failures = Vec::new();
-    for repo in &bundle.repos {
-        let Some(branch) = repo.feature_branch.as_deref() else {
-            println!(
-                "{}: {}",
-                out::repo(&repo.id),
-                out::muted("no feature branch recorded")
-            );
-            continue;
-        };
-        let repo_root = PathBuf::from(&repo.path);
-        if !repo_root.exists() {
-            failures.push(format!(
-                "{}: original repo path is missing, cannot delete origin/{}",
-                repo.id, branch
-            ));
-            continue;
-        }
-        match delete_remote_feature_branch(&repo_root, &repo.id, branch) {
-            Ok(()) => {}
-            Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
-        }
-    }
-    if !failures.is_empty() {
-        bail!(
-            "failed to delete remote feature branches:\n{}",
-            failures.join("\n")
-        );
-    }
-    Ok(())
-}
-
-fn delete_remote_feature_branch(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
-    git_output_optional(repo_root, ["remote", "get-url", "origin"])?.with_context(|| {
-        format!(
-            "{}: no `origin` remote configured in {}",
-            repo_id,
-            repo_root.display()
-        )
-    })?;
-
-    let remote = format!("origin/{branch}");
-    let remote_heads = git_output(
-        repo_root,
-        [
-            OsString::from("ls-remote"),
-            OsString::from("--heads"),
-            OsString::from("origin"),
-            OsString::from(branch),
-        ],
-    )?;
-    if remote_heads.trim().is_empty() {
-        println!(
-            "{}: {} {}",
-            out::repo(repo_id),
-            out::muted("remote branch already missing"),
-            out::branch(&remote)
-        );
-        delete_remote_tracking_ref(repo_root, repo_id, branch)?;
-        return Ok(());
-    }
-
-    git_output(
-        repo_root,
-        [
-            OsString::from("push"),
-            OsString::from("origin"),
-            OsString::from("--delete"),
-            OsString::from(branch),
-        ],
-    )?;
-    println!(
-        "{}: {} {}",
-        out::repo(repo_id),
-        out::movement("removed"),
-        out::branch(&remote)
-    );
-    delete_remote_tracking_ref(repo_root, repo_id, branch)?;
-    Ok(())
-}
-
-fn delete_remote_tracking_ref(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
-    let remote = format!("origin/{branch}");
-    let remote_ref = format!("refs/remotes/{remote}");
-    if !ref_exists(repo_root, &remote_ref) {
-        return Ok(());
-    }
-    git_output(
-        repo_root,
-        [
-            OsString::from("branch"),
-            OsString::from("-r"),
-            OsString::from("-d"),
-            OsString::from(&remote),
-        ],
-    )?;
-    println!(
-        "{}: {} {}",
-        out::repo(repo_id),
-        out::movement("removed"),
-        out::branch(remote)
-    );
-    Ok(())
-}
-
 fn current_root() -> Result<std::path::PathBuf> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     find_knit_root(&cwd).context("No Knit workspace found.")
@@ -576,37 +208,58 @@ fn load_existing_bundle(path: &std::path::Path, bundle_id: &str) -> Result<Chang
     read_json(path)
 }
 
-fn clear_active_if_matches(root: &std::path::Path, bundle_id: &str) -> Result<()> {
-    let mut config = load_config(root)?;
-    if config.active_bundle.as_deref() == Some(bundle_id) {
-        config.active_bundle = None;
-        save_config(root, &config)?;
-    }
-    Ok(())
+/// Bundle state as presented to users: the persisted [`BundleState`] plus the
+/// derived `Landed`, which is inferred from the ledger and never written to
+/// the artifact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BundleStatus {
+    Open,
+    Closed,
+    Archived,
+    Deleted,
+    Landed,
 }
 
-pub fn bundle_state(bundle: &ChangeGroup) -> &'static str {
-    match bundle.state.as_deref() {
-        Some(BUNDLE_STATE_ARCHIVED) => return BUNDLE_STATE_ARCHIVED,
-        Some(BUNDLE_STATE_DELETED) => return BUNDLE_STATE_DELETED,
-        Some(BUNDLE_STATE_CLOSED) => return BUNDLE_STATE_CLOSED,
+impl BundleStatus {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            BundleStatus::Open => "open",
+            BundleStatus::Closed => "closed",
+            BundleStatus::Archived => "archived",
+            BundleStatus::Deleted => "deleted",
+            BundleStatus::Landed => "landed",
+        }
+    }
+}
+
+impl std::fmt::Display for BundleStatus {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.pad(self.as_str())
+    }
+}
+
+pub fn bundle_state(bundle: &ChangeGroup) -> BundleStatus {
+    match bundle.state {
+        Some(BundleState::Archived) => return BundleStatus::Archived,
+        Some(BundleState::Deleted) => return BundleStatus::Deleted,
+        Some(BundleState::Closed) => return BundleStatus::Closed,
         _ => {}
     }
     // An explicit `open` state outranks node inference so restoring an archived
     // bundle that carries a legacy `feature.closed` node actually reopens it.
-    let explicitly_open = bundle.state.as_deref() == Some(BUNDLE_STATE_OPEN);
+    let explicitly_open = bundle.state == Some(BundleState::Open);
     if !explicitly_open && has_closed_node(bundle) {
-        BUNDLE_STATE_CLOSED
+        BundleStatus::Closed
     } else if has_landed_node(bundle) {
         // "feature.landed" is a ledger marker; if any recorded publication is still open we
         // should not present the bundle as landed.
         if has_open_publications(bundle) {
-            BUNDLE_STATE_OPEN
+            BundleStatus::Open
         } else {
-            "landed"
+            BundleStatus::Landed
         }
     } else {
-        BUNDLE_STATE_OPEN
+        BundleStatus::Open
     }
 }
 
@@ -633,283 +286,4 @@ fn has_open_publications(bundle: &ChangeGroup) -> bool {
 
 fn publication_state_is_final(state: &str) -> bool {
     state.eq_ignore_ascii_case("merged") || state.eq_ignore_ascii_case("closed")
-}
-
-fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {
-    let mut errors = Vec::new();
-
-    if bundle.schema_version != SCHEMA_VERSION {
-        errors.push(format!(
-            "schemaVersion must be `{SCHEMA_VERSION}`, found `{}`",
-            bundle.schema_version
-        ));
-    }
-    if bundle.kind != CHANGE_GROUP_KIND {
-        errors.push(format!(
-            "kind must be `{CHANGE_GROUP_KIND}`, found `{}`",
-            bundle.kind
-        ));
-    }
-    if bundle.id.trim().is_empty() {
-        errors.push("id must not be empty".to_string());
-    }
-    if bundle.title.trim().is_empty() {
-        errors.push("title must not be empty".to_string());
-    }
-    if bundle.created_at.trim().is_empty() {
-        errors.push("createdAt must not be empty".to_string());
-    }
-    if bundle.updated_at.trim().is_empty() {
-        errors.push("updatedAt must not be empty".to_string());
-    }
-
-    validate_repos(bundle, &mut errors);
-    validate_commit_groups(bundle, &mut errors);
-    validate_nodes(bundle, &mut errors);
-
-    errors
-}
-
-fn validate_repos(bundle: &ChangeGroup, errors: &mut Vec<String>) {
-    let mut repo_ids = BTreeSet::new();
-    for repo in &bundle.repos {
-        if repo.id.trim().is_empty() {
-            errors.push("repo id must not be empty".to_string());
-        } else if !repo_ids.insert(repo.id.as_str()) {
-            errors.push(format!("repo id `{}` is duplicated", repo.id));
-        }
-        if repo.path.trim().is_empty() {
-            errors.push(format!("repo `{}` path must not be empty", repo.id));
-        }
-        if repo.base_branch.trim().is_empty() {
-            errors.push(format!("repo `{}` baseBranch must not be empty", repo.id));
-        }
-        if !matches!(
-            repo.checkout_mode.as_str(),
-            CHECKOUT_MODE_WORKTREE | CHECKOUT_MODE_IN_PLACE
-        ) {
-            errors.push(format!(
-                "repo `{}` checkoutMode must be `{CHECKOUT_MODE_WORKTREE}` or `{CHECKOUT_MODE_IN_PLACE}`",
-                repo.id
-            ));
-        }
-        if repo.checkout_mode == CHECKOUT_MODE_IN_PLACE
-            && repo.worktree_path.as_deref() != Some(repo.path.as_str())
-        {
-            errors.push(format!(
-                "repo `{}` in-place checkout must have worktreePath equal to path",
-                repo.id
-            ));
-        }
-    }
-}
-
-fn validate_commit_groups(bundle: &ChangeGroup, errors: &mut Vec<String>) {
-    let mut group_ids = BTreeSet::new();
-    for group in &bundle.commit_groups {
-        if group.id.trim().is_empty() {
-            errors.push("commit group id must not be empty".to_string());
-        } else if !group_ids.insert(group.id.as_str()) {
-            errors.push(format!("commit group id `{}` is duplicated", group.id));
-        }
-        if group.message.trim().is_empty() {
-            errors.push(format!(
-                "commit group `{}` message must not be empty",
-                group.id
-            ));
-        }
-        if group.created_at.trim().is_empty() {
-            errors.push(format!(
-                "commit group `{}` createdAt must not be empty",
-                group.id
-            ));
-        }
-        if group.commits.is_empty() {
-            errors.push(format!("commit group `{}` must record commits", group.id));
-        }
-        for commit in &group.commits {
-            validate_commit_ref(
-                "commit group",
-                &group.id,
-                &commit.repo_id,
-                &commit.sha,
-                errors,
-            );
-        }
-    }
-}
-
-fn validate_nodes(bundle: &ChangeGroup, errors: &mut Vec<String>) {
-    if bundle.nodes.is_empty() {
-        errors.push("nodes must not be empty".to_string());
-        return;
-    }
-
-    let mut node_ids = BTreeSet::new();
-    for node in &bundle.nodes {
-        validate_node(node, &mut node_ids, errors);
-    }
-
-    let last_node_id = bundle.nodes.last().map(|node| node.id.as_str());
-    if bundle.head_node_id.as_deref() != last_node_id {
-        errors.push(format!(
-            "headNodeId must point at the latest node `{}`, found `{}`",
-            last_node_id.unwrap_or(""),
-            bundle.head_node_id.as_deref().unwrap_or("")
-        ));
-    }
-}
-
-fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mut Vec<String>) {
-    if node.id.trim().is_empty() {
-        errors.push("node id must not be empty".to_string());
-    } else if !node_ids.insert(node.id.clone()) {
-        errors.push(format!("node id `{}` is duplicated", node.id));
-    }
-    if node.node_type.trim().is_empty() {
-        errors.push(format!("node `{}` type must not be empty", node.id));
-    }
-    if node.created_at.trim().is_empty() {
-        errors.push(format!("node `{}` createdAt must not be empty", node.id));
-    }
-
-    match node.node_type.as_str() {
-        "feature.created" => {
-            if node.title.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record title", node.id));
-            }
-        }
-        "repo.added" | "repo.removed" | "worktree.materialized" => {
-            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
-                errors.push(format!("node `{}` must record repoIds", node.id));
-            }
-        }
-        "commit.group" | "revert.group" => {
-            if node
-                .commit_group_id
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-            {
-                errors.push(format!("node `{}` must record commitGroupId", node.id));
-            }
-            if node.message.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record message", node.id));
-            }
-            if node.commits.is_empty() {
-                errors.push(format!("node `{}` must record commits", node.id));
-            }
-            for commit in &node.commits {
-                validate_commit_ref("node", &node.id, &commit.repo_id, &commit.sha, errors);
-            }
-            if node.node_type == "revert.group"
-                && node
-                    .target_node_id
-                    .as_deref()
-                    .unwrap_or("")
-                    .trim()
-                    .is_empty()
-            {
-                errors.push(format!("node `{}` must record targetNodeId", node.id));
-            }
-        }
-        "git.observed" => {
-            if node.repo_changes.is_empty() {
-                errors.push(format!("node `{}` must record repoChanges", node.id));
-            }
-        }
-        "land.update" => {
-            if node.repo_changes.is_empty() {
-                errors.push(format!("node `{}` must record repoChanges", node.id));
-            }
-            if node.provider.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record provider", node.id));
-            }
-        }
-        "checkpoint" => {
-            if node.message.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record message", node.id));
-            }
-        }
-        "feature.landed" => {
-            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
-                errors.push(format!("node `{}` must record repoIds", node.id));
-            }
-            if node.plan_id.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record planId", node.id));
-            }
-            if node.run_id.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record runId", node.id));
-            }
-            if node.provider.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record provider", node.id));
-            }
-            if node.publication_urls.is_empty() {
-                errors.push(format!("node `{}` must record publicationUrls", node.id));
-            }
-        }
-        "pr.revert" => {
-            if node
-                .target_node_id
-                .as_deref()
-                .unwrap_or("")
-                .trim()
-                .is_empty()
-            {
-                errors.push(format!("node `{}` must record targetNodeId", node.id));
-            }
-            if node.provider.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record provider", node.id));
-            }
-            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
-                errors.push(format!("node `{}` must record repoIds", node.id));
-            }
-            if node.publication_urls.is_empty() {
-                errors.push(format!("node `{}` must record publicationUrls", node.id));
-            }
-        }
-        "feature.closed" => {}
-        _ => {}
-    }
-
-    for change in &node.repo_changes {
-        if change.repo_id.trim().is_empty() {
-            errors.push(format!(
-                "node `{}` repoChange repoId must not be empty",
-                node.id
-            ));
-        }
-        if change.movement.trim().is_empty() {
-            errors.push(format!(
-                "node `{}` repoChange movement must not be empty",
-                node.id
-            ));
-        }
-        if change.after_sha.trim().is_empty() {
-            errors.push(format!(
-                "node `{}` repoChange afterSha must not be empty",
-                node.id
-            ));
-        }
-    }
-}
-
-fn validate_commit_ref(
-    owner_kind: &str,
-    owner_id: &str,
-    repo_id: &str,
-    sha: &str,
-    errors: &mut Vec<String>,
-) {
-    if repo_id.trim().is_empty() {
-        errors.push(format!(
-            "{owner_kind} `{owner_id}` commit repoId must not be empty"
-        ));
-    }
-    if sha.trim().is_empty() {
-        errors.push(format!(
-            "{owner_kind} `{owner_id}` commit sha must not be empty"
-        ));
-    }
 }

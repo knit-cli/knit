@@ -2,8 +2,7 @@ use crate::commands::agents::write_project_agents_md;
 use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
 use crate::ids::slugify;
 use crate::model::{
-    KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
-    CHECKOUT_MODE_WORKTREE,
+    CheckoutMode, KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
 };
 use crate::output as out;
 use crate::store::{
@@ -75,8 +74,8 @@ pub fn add_project_repo(
     agents: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd)
-        .context("No Knit project found. Run `knit init <name>` first.")?;
+    let root =
+        find_knit_root(&cwd).context("No Knit project found. Run `knit init <name>` first.")?;
     let config = load_config(&root)?;
     let project_id = config
         .active_project
@@ -410,7 +409,7 @@ fn resolve_project_repo(
         path: repo_root.to_string_lossy().to_string(),
         remote,
         base_branch,
-        checkout_mode: CHECKOUT_MODE_WORKTREE.to_string(),
+        checkout_mode: CheckoutMode::Worktree,
         include_by_default: !observe,
     })
 }

@@ -1,6 +1,7 @@
 use crate::checkout::is_in_place;
+use crate::commands::bundle::BundleStatus;
 use crate::git::git_output;
-use crate::model::{ChangeGroup, BUNDLE_STATE_ARCHIVED, BUNDLE_STATE_CLOSED};
+use crate::model::ChangeGroup;
 use crate::output as out;
 use crate::store::{
     find_knit_root, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
@@ -246,7 +247,7 @@ fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
         }
         let bundle: ChangeGroup = read_json(&path)?;
         let state = crate::commands::bundle::bundle_state(&bundle);
-        if !matches!(state, BUNDLE_STATE_CLOSED | BUNDLE_STATE_ARCHIVED) {
+        if !matches!(state, BundleStatus::Closed | BundleStatus::Archived) {
             continue;
         }
         let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);

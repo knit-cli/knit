@@ -11,6 +11,8 @@ This walkthrough takes you from install to a landed multi-repo change in about t
 ### 1. Install
 
 ```sh
+cargo install knit-cli        # from crates.io (the binary is named `knit`)
+# or from a checkout:
 cargo install --path .
 ```
 
@@ -175,8 +177,14 @@ up in dashboards:
 
 ```sh
 knit remote add knithub https://knithub.dev --token <your-token> --global
-knit sync push                # bundles + history + views for the resolved project
+knit project push                       # create the hosted project (uploads views too)
+KNIT_BUNDLE=my-feature knit sync push   # bundles + history for the walkthrough bundle
 ```
+
+`knit project push` creates the hosted project record; run it once per project
+before the first sync. `knit sync push` resolves a bundle the same way every
+other command does — since step 8 archived `my-feature`, name it explicitly
+with `KNIT_BUNDLE` (or sync before archiving).
 
 Once a sync remote is configured, publish and land keep the hosted artifacts in
 sync automatically, hosted dashboards show bundles and project history, and
@@ -196,7 +204,7 @@ history back.
 
 **Publish/land vs merge.** Two different ways to ship a bundle. `knit publish create` opens one review object (PR/MR) per repo on each repo's detected host, and `knit land` / `knit land apply` merge that whole set into each PR's base branch and run any deployments — this is the path when your repos have a code host and you want reviewed PRs. `knit merge <bundle> --into <branch>` is for local branch integration with no forge: it merges the bundle's feature branches straight into a target branch (or another bundle), all-or-none with rollback on conflict. Do not merge host PRs directly (e.g. `gh pr merge`) for Knit-owned bundles.
 
-**Views and commands.** A **view** is per-user config layered over a project: a named "bundle shape" of include/exclude deltas over the project's repo set, so different people can start bundles with different subsets of the same project (`knit view save`, `knit view default`). A project can also register reusable commands that run inside a bundle's checkouts (`knit project command set dev --repo frontend -- docker compose up`, then `knit run dev`). Both are covered in full in the reference.
+**Views and commands.** A **view** is per-user config layered over a project: a named "bundle shape" of include/exclude deltas over the project's repo set, so different people can start bundles with different subsets of the same project (`knit view save`, `knit view default`). A project can also register reusable commands that run inside a bundle's checkouts (`knit project command set dev --repo frontend -- docker compose up`, then `knit run dev`). `knit run up|status|down` additionally starts a disposable stack instance per bundle: Knit lifts the docker-compose shape the repos already run on `main` — bundle worktrees substituted for source paths, published ports reallocated, isolated compose project — or, for stacks that want precise control, runs a repo-owned compose file written against Knit's `KNIT_*` environment contract. Both are covered in full in the reference.
 
 See [docs/reference.md](docs/reference.md) for the complete behavior of every command and subsystem.
 

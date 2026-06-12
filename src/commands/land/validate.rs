@@ -3,12 +3,10 @@
 
 use super::{
     ensure_open_and_ready, ensure_provider, repo_context, required_repo_id, resolve_stored_path,
-    resolve_subdir, run_step, state_is_merged, validate_deploy_checkout_update,
-    validate_deployment_mode, validate_merge_method, LandPlan, LandRun, LandStep,
-    DEPLOY_MODE_COMMAND, DEPLOY_MODE_PUSH, LAND_PLAN_KIND, STATUS_SUCCEEDED, STEP_DEPLOY,
-    STEP_MERGE_PR, STEP_RUN, STEP_WAIT_CHECKS,
+    resolve_subdir, run_step, state_is_merged, LandPlan, LandRun, LandStatus, LandStep,
+    LandStepKind, LAND_PLAN_KIND,
 };
-use crate::model::{DEFAULT_LANDING_MERGE_METHOD, SCHEMA_VERSION};
+use crate::model::{DeployMode, SCHEMA_VERSION};
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
 use anyhow::{bail, Context, Result};
@@ -38,19 +36,14 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
     ordered_step_ids(&plan.steps)?;
 
     for step in &plan.steps {
-        match step.step_type.as_str() {
-            STEP_MERGE_PR => {
-                required_repo_id(step)?;
-                validate_merge_method(
-                    step.method
-                        .as_deref()
-                        .unwrap_or(DEFAULT_LANDING_MERGE_METHOD),
-                )?;
-            }
-            STEP_WAIT_CHECKS => {
+        match step.step_type {
+            LandStepKind::MergePr => {
                 required_repo_id(step)?;
             }
-            STEP_RUN => {
+            LandStepKind::WaitChecks => {
+                required_repo_id(step)?;
+            }
+            LandStepKind::Run => {
                 if step.command.is_empty() {
                     bail!("run step `{}` must provide command", step.id);
                 }
@@ -67,21 +60,17 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                     );
                 }
             }
-            STEP_DEPLOY => {
+            LandStepKind::Deploy => {
                 required_repo_id(step)?;
-                let mode = step
-                    .deployment_mode
-                    .as_deref()
-                    .unwrap_or(if step.command.is_empty() {
-                        DEPLOY_MODE_PUSH
-                    } else {
-                        DEPLOY_MODE_COMMAND
-                    });
-                validate_deployment_mode(mode)?;
-                if mode == DEPLOY_MODE_COMMAND && step.command.is_empty() {
+                let mode = step.deployment_mode.unwrap_or(if step.command.is_empty() {
+                    DeployMode::Push
+                } else {
+                    DeployMode::Command
+                });
+                if mode == DeployMode::Command && step.command.is_empty() {
                     bail!("deploy step `{}` must provide command", step.id);
                 }
-                if mode == DEPLOY_MODE_PUSH && !step.command.is_empty() {
+                if mode == DeployMode::Push && !step.command.is_empty() {
                     bail!(
                         "deploy step `{}` uses push mode and must not provide command",
                         step.id
@@ -94,7 +83,6 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                             step.id
                         );
                     }
-                    validate_deploy_checkout_update(checkout.update.as_deref().unwrap_or("fetch"))?;
                 } else if let Some(cwd) = &step.cwd {
                     let (_, _, checkout) = repo_context(active, required_repo_id(step)?)?;
                     let cwd = resolve_subdir(&checkout, cwd);
@@ -107,7 +95,6 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                     }
                 }
             }
-            step_type => bail!("unknown land step type `{step_type}` in `{}`", step.id),
         }
     }
     Ok(())
@@ -120,12 +107,15 @@ pub(super) fn preflight_publications(
 ) -> Result<()> {
     let mut seen = BTreeSet::new();
     for step in &plan.steps {
-        if !matches!(step.step_type.as_str(), STEP_MERGE_PR | STEP_WAIT_CHECKS) {
+        if !matches!(
+            step.step_type,
+            LandStepKind::MergePr | LandStepKind::WaitChecks
+        ) {
             continue;
         }
         if run
             .and_then(|run| run_step(run, &step.id))
-            .is_some_and(|run_step| run_step.status == STATUS_SUCCEEDED)
+            .is_some_and(|run_step| run_step.status == LandStatus::Succeeded)
         {
             continue;
         }
@@ -145,7 +135,7 @@ pub(super) fn preflight_publications(
             continue;
         }
         ensure_open_and_ready(repo_id, &pr)?;
-        if step.step_type == STEP_WAIT_CHECKS || step.wait_for_checks.unwrap_or(true) {
+        if step.step_type == LandStepKind::WaitChecks || step.wait_for_checks.unwrap_or(true) {
             let runs = forge.check_runs(
                 &target,
                 &publication.url,

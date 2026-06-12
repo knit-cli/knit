@@ -6,9 +6,8 @@ use super::report::push_merge_run_steps;
 use super::{
     abort_merge_if_needed, acquire_merge_locks, acquire_run_locks, checkout_path_for,
     ensure_checkout_on_branch, ensure_ref_exists, hard_reset, has_unmerged_paths, latest_merge_run,
-    load_bundle, merge_in_progress, merge_run_path, resolve_stored_path, MergeRun, MergeRunStep,
-    SourcePlan, TargetPlan, MERGE_RUN_KIND, RUN_ABORTED, RUN_CONFLICTED, RUN_PUSH_FAILED,
-    RUN_RUNNING, RUN_SUCCEEDED, STEP_ABORTED, STEP_CONFLICTED, STEP_PENDING, STEP_SUCCEEDED,
+    load_bundle, merge_in_progress, merge_run_path, resolve_stored_path, MergeRun, MergeRunStatus,
+    MergeRunStep, MergeStepStatus, SourcePlan, TargetPlan, MERGE_RUN_KIND,
 };
 use crate::advice;
 use crate::git::{
@@ -16,7 +15,7 @@ use crate::git::{
     resolve_base_ref, rev_list, rev_parse,
 };
 use crate::ids::{node_id, slugify};
-use crate::model::{BundleNode, ChangeGroup, RepoChange, RepoEntry, SCHEMA_VERSION};
+use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry, SCHEMA_VERSION};
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, bundle_exists, bundle_path, load_active_bundle, read_json,
@@ -54,7 +53,7 @@ pub(super) fn start_merge(
         source: source_plan.label.clone(),
         into: target_plan.label().to_string(),
         manual,
-        status: RUN_RUNNING.to_string(),
+        status: MergeRunStatus::Running,
         created_at: now.clone(),
         updated_at: now,
         source_bundle_id: source_plan.bundle_id.clone(),
@@ -92,7 +91,7 @@ fn apply_pending_merge_steps(
 ) -> Result<()> {
     let mut failures = Vec::new();
     for index in 0..run.steps.len() {
-        if run.steps[index].status != STEP_PENDING {
+        if run.steps[index].status != MergeStepStatus::Pending {
             continue;
         }
 
@@ -110,8 +109,8 @@ fn apply_pending_merge_steps(
                 write_json(run_path, run)?;
             }
             Err(MergeStepFailure::Conflict(message)) if run.manual => {
-                run.status = RUN_CONFLICTED.to_string();
-                run.steps[index].status = STEP_CONFLICTED.to_string();
+                run.status = MergeRunStatus::Conflicted;
+                run.steps[index].status = MergeStepStatus::Conflicted;
                 run.steps[index].message = Some(message);
                 write_json(run_path, run)?;
                 println!(
@@ -133,23 +132,24 @@ fn apply_pending_merge_steps(
                 );
             }
             Err(MergeStepFailure::Conflict(message)) => {
-                run.steps[index].status = STEP_ABORTED.to_string();
+                run.steps[index].status = MergeStepStatus::Aborted;
                 run.steps[index].message = Some(message.clone());
                 rollback_merge_run(root, run)?;
-                run.status = RUN_ABORTED.to_string();
+                run.status = MergeRunStatus::Aborted;
                 run.updated_at = now_iso();
                 write_json(run_path, run)?;
                 failures.push(format!("{}: {message}", run.steps[index].repo_id));
                 break;
             }
             Err(MergeStepFailure::Fatal(error)) => {
-                run.steps[index].status = STEP_ABORTED.to_string();
-                run.steps[index].message = Some(error.clone());
+                let message = format!("{error:#}");
+                run.steps[index].status = MergeStepStatus::Aborted;
+                run.steps[index].message = Some(message.clone());
                 rollback_merge_run(root, run)?;
-                run.status = RUN_ABORTED.to_string();
+                run.status = MergeRunStatus::Aborted;
                 run.updated_at = now_iso();
                 write_json(run_path, run)?;
-                failures.push(format!("{}: {error}", run.steps[index].repo_id));
+                failures.push(format!("{}: {message}", run.steps[index].repo_id));
                 break;
             }
         }
@@ -162,17 +162,21 @@ fn apply_pending_merge_steps(
         );
     }
 
-    if run.steps.iter().all(|step| step.status == STEP_SUCCEEDED) {
+    if run
+        .steps
+        .iter()
+        .all(|step| step.status == MergeStepStatus::Succeeded)
+    {
         finalize_target_bundle(root, run, target_bundle_lock_held)?;
         if run.push_requested {
             if let Err(error) = push_merge_run_steps(root, run, &[], run.set_upstream) {
-                run.status = RUN_PUSH_FAILED.to_string();
+                run.status = MergeRunStatus::PushFailed;
                 run.updated_at = now_iso();
                 write_json(run_path, run)?;
                 bail!("Merge succeeded locally, but push failed:\n{error:#}");
             }
         }
-        run.status = RUN_SUCCEEDED.to_string();
+        run.status = MergeRunStatus::Succeeded;
         run.updated_at = now_iso();
         write_json(run_path, run)?;
         println!(
@@ -186,9 +190,12 @@ fn apply_pending_merge_steps(
     Ok(())
 }
 
+/// How one merge step failed. `Conflict` carries git's conflict report (text
+/// is the honest shape there); `Fatal` keeps the full error chain so handlers
+/// format it once, at the boundary where it is stored and shown.
 enum MergeStepFailure {
     Conflict(String),
-    Fatal(String),
+    Fatal(anyhow::Error),
 }
 
 fn apply_merge_step(
@@ -197,10 +204,10 @@ fn apply_merge_step(
     manual: bool,
 ) -> std::result::Result<(), MergeStepFailure> {
     let checkout = resolve_stored_path(root, &step.checkout_path);
-    let status = git_output(&checkout, ["status", "--porcelain"])
-        .map_err(|error| MergeStepFailure::Fatal(format!("{error:#}")))?;
+    let status =
+        git_output(&checkout, ["status", "--porcelain"]).map_err(MergeStepFailure::Fatal)?;
     if !status.trim().is_empty() {
-        return Err(MergeStepFailure::Fatal(format!(
+        return Err(MergeStepFailure::Fatal(anyhow::anyhow!(
             "target checkout is not clean: {}",
             checkout.display()
         )));
@@ -218,35 +225,32 @@ fn apply_merge_step(
 
     match merge_result {
         Ok(_) => {
-            step.after_sha = Some(
-                rev_parse(&checkout, "HEAD")
-                    .map_err(|error| MergeStepFailure::Fatal(format!("{error:#}")))?,
-            );
-            step.status = STEP_SUCCEEDED.to_string();
+            step.after_sha = Some(rev_parse(&checkout, "HEAD").map_err(MergeStepFailure::Fatal)?);
+            step.status = MergeStepStatus::Succeeded;
             Ok(())
         }
         Err(error) if merge_in_progress(&checkout) || has_unmerged_paths(&checkout) => {
             if !manual {
                 abort_merge_if_needed(&checkout);
-                hard_reset(&checkout, &step.before_sha);
+                let _ = hard_reset(&checkout, &step.before_sha);
             }
             Err(MergeStepFailure::Conflict(format!("{error:#}")))
         }
         Err(error) => {
             abort_merge_if_needed(&checkout);
-            hard_reset(&checkout, &step.before_sha);
-            Err(MergeStepFailure::Fatal(format!("{error:#}")))
+            let _ = hard_reset(&checkout, &step.before_sha);
+            Err(MergeStepFailure::Fatal(error))
         }
     }
 }
 
 pub(super) fn continue_latest_merge(root: &Path) -> Result<()> {
-    let (run_path, mut run) = latest_merge_run(root, &[RUN_CONFLICTED])?;
+    let (run_path, mut run) = latest_merge_run(root, &[MergeRunStatus::Conflicted])?;
     let _locks = acquire_run_locks(root, &run)?;
     let Some(index) = run
         .steps
         .iter()
-        .position(|step| step.status == STEP_CONFLICTED)
+        .position(|step| step.status == MergeStepStatus::Conflicted)
     else {
         bail!("Latest conflicted merge run has no conflicted step.");
     };
@@ -286,7 +290,7 @@ pub(super) fn continue_latest_merge(root: &Path) -> Result<()> {
     }
 
     run.steps[index].after_sha = Some(after_sha);
-    run.steps[index].status = STEP_SUCCEEDED.to_string();
+    run.steps[index].status = MergeStepStatus::Succeeded;
     run.steps[index].message = None;
     println!(
         "{}: {} {} into {}",
@@ -295,7 +299,7 @@ pub(super) fn continue_latest_merge(root: &Path) -> Result<()> {
         out::branch(&run.steps[index].source_ref),
         out::branch(&run.steps[index].target)
     );
-    run.status = RUN_RUNNING.to_string();
+    run.status = MergeRunStatus::Running;
     run.updated_at = now_iso();
     write_json(&run_path, &run)?;
     let target_bundle_lock_held = run.target_bundle_id.is_some();
@@ -303,10 +307,11 @@ pub(super) fn continue_latest_merge(root: &Path) -> Result<()> {
 }
 
 pub(super) fn abort_latest_merge(root: &Path) -> Result<()> {
-    let (run_path, mut run) = latest_merge_run(root, &[RUN_CONFLICTED, RUN_RUNNING])?;
+    let (run_path, mut run) =
+        latest_merge_run(root, &[MergeRunStatus::Conflicted, MergeRunStatus::Running])?;
     let _locks = acquire_run_locks(root, &run)?;
     rollback_merge_run(root, &mut run)?;
-    run.status = RUN_ABORTED.to_string();
+    run.status = MergeRunStatus::Aborted;
     run.updated_at = now_iso();
     write_json(&run_path, &run)?;
     println!("{} {}", out::heading("Aborted:"), out::branch(&run.id));
@@ -315,17 +320,21 @@ pub(super) fn abort_latest_merge(root: &Path) -> Result<()> {
 
 fn rollback_merge_run(root: &Path, run: &mut MergeRun) -> Result<()> {
     for step in run.steps.iter_mut().rev() {
-        if step.status != STEP_SUCCEEDED
-            && step.status != STEP_CONFLICTED
-            && step.status != STEP_ABORTED
-        {
+        if step.status == MergeStepStatus::Pending {
             continue;
         }
         let checkout = resolve_stored_path(root, &step.checkout_path);
         abort_merge_if_needed(&checkout);
-        hard_reset(&checkout, &step.before_sha);
+        hard_reset(&checkout, &step.before_sha).with_context(|| {
+            format!(
+                "{}: failed to roll back {} to {}",
+                step.repo_id,
+                checkout.display(),
+                step.before_sha
+            )
+        })?;
         step.after_sha = None;
-        step.status = STEP_ABORTED.to_string();
+        step.status = MergeStepStatus::Aborted;
     }
     Ok(())
 }
@@ -379,11 +388,11 @@ fn prepare_merge_step(
         repo_path: source_repo.path.clone(),
         source_ref: source_ref.to_string(),
         target: target.step_target_for(&source_repo.id)?,
-        target_kind: target.kind().to_string(),
+        target_kind: target.kind(),
         checkout_path: relative_path_for_storage(root, &checkout),
         before_sha,
         after_sha: None,
-        status: STEP_PENDING.to_string(),
+        status: MergeStepStatus::Pending,
         message: None,
         pushed_at: None,
         pushed_sha: None,
@@ -603,13 +612,18 @@ fn finalize_target_bundle(
             continue;
         };
         let checkout = resolve_stored_path(root, &step.checkout_path);
-        let commits = rev_list(&checkout, &step.before_sha, after_sha).unwrap_or_default();
+        let commits = rev_list(&checkout, &step.before_sha, after_sha).with_context(|| {
+            format!(
+                "{}: merged but failed to list commits {}..{} for the bundle ledger",
+                step.repo_id, step.before_sha, after_sha
+            )
+        })?;
         if let Some(repo) = bundle.repos.iter_mut().find(|repo| repo.id == step.repo_id) {
             repo.head_sha = Some(after_sha.clone());
         }
         changes.push(RepoChange {
             repo_id: step.repo_id.clone(),
-            movement: "advanced".to_string(),
+            movement: Movement::Advanced,
             before_sha: Some(step.before_sha.clone()),
             after_sha: after_sha.clone(),
             commits,

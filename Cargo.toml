@@ -1,5 +1,7 @@
 [package]
-name = "knit"
+# Published as `knit-cli` (the crates.io name `knit` is taken); the installed
+# binary is still `knit`.
+name = "knit-cli"
 version = "0.1.0-alpha.1"
 edition = "2021"
 license = "Apache-2.0"
@@ -10,6 +12,14 @@ readme = "README.md"
 keywords = ["git", "monorepo", "worktree", "cross-repo", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
 rust-version = "1.74"
+
+[lib]
+name = "knit"
+path = "src/lib.rs"
+
+[[bin]]
+name = "knit"
+path = "src/main.rs"
 
 [dependencies]
 anyhow = "1"

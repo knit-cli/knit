@@ -7,9 +7,7 @@ use crate::git::{
     current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
 };
 use crate::ids::{node_id, slugify, unique_repo_id};
-use crate::model::{
-    BundleNode, ProjectRepoEntry, RepoEntry, CHECKOUT_MODE_IN_PLACE, CHECKOUT_MODE_WORKTREE,
-};
+use crate::model::{BundleNode, CheckoutMode, ProjectRepoEntry, RepoEntry};
 use crate::output as out;
 use crate::paths::same_path;
 use crate::store::{load_active_bundle_for_update, save_active_bundle};
@@ -24,7 +22,7 @@ pub struct RepoPlan {
     remote: Option<String>,
     base_branch: String,
     base_sha: String,
-    checkout_mode: String,
+    checkout_mode: CheckoutMode,
 }
 
 pub fn track_repos(
@@ -35,9 +33,9 @@ pub fn track_repos(
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let checkout_mode = if in_place {
-        CHECKOUT_MODE_IN_PLACE
+        CheckoutMode::InPlace
     } else {
-        CHECKOUT_MODE_WORKTREE
+        CheckoutMode::Worktree
     };
     let plans = resolve_repo_plans(repo_paths, base_override, checkout_mode)?;
     apply_repo_plans(&mut active, plans, materialize)?;
@@ -59,9 +57,9 @@ pub fn track_repo_selectors(
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let checkout_mode = if in_place {
-        CHECKOUT_MODE_IN_PLACE
+        CheckoutMode::InPlace
     } else {
-        CHECKOUT_MODE_WORKTREE
+        CheckoutMode::Worktree
     };
     let mut plans = Vec::new();
     for selector in selectors {
@@ -177,7 +175,7 @@ fn apply_repo_plans(
 fn resolve_repo_plans(
     repo_paths: &[PathBuf],
     base_override: Option<&str>,
-    checkout_mode: &str,
+    checkout_mode: CheckoutMode,
 ) -> Result<Vec<RepoPlan>> {
     let mut plans: Vec<RepoPlan> = Vec::new();
 
@@ -194,7 +192,7 @@ fn resolve_repo_plan(
     repo_path: &Path,
     base_override: Option<&str>,
     desired_id: Option<String>,
-    checkout_mode: &str,
+    checkout_mode: CheckoutMode,
 ) -> Result<RepoPlan> {
     let repo_root = git_root(repo_path)?;
     let name = repo_root
@@ -218,7 +216,7 @@ fn resolve_repo_plan(
         remote,
         base_branch,
         base_sha,
-        checkout_mode: checkout_mode.to_string(),
+        checkout_mode,
     })
 }
 
@@ -246,9 +244,9 @@ fn resolve_project_selector(
 
 fn resolve_project_repo_plan(repo: &ProjectRepoEntry, in_place: bool) -> Result<RepoPlan> {
     let checkout_mode = if in_place {
-        CHECKOUT_MODE_IN_PLACE.to_string()
+        CheckoutMode::InPlace
     } else {
-        repo.checkout_mode.clone()
+        repo.checkout_mode
     };
     let repo_root = git_root(Path::new(&repo.path))?;
     let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);

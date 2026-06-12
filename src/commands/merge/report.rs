@@ -3,7 +3,7 @@
 
 use super::{
     acquire_run_locks, latest_merge_run, resolve_stored_path, short_or_dash, short_sha, MergeRun,
-    RUN_CONFLICTED, RUN_PUSH_FAILED, RUN_SUCCEEDED, STEP_SUCCEEDED, TARGET_BRANCH,
+    MergeRunStatus, MergeStepStatus, MergeTargetKind,
 };
 use crate::advice;
 use crate::git::{git_output, rev_parse};
@@ -21,7 +21,7 @@ pub(super) fn show_merge_status(root: &Path, run_selector: Option<&str>) -> Resu
         "{} {} {}",
         out::heading("Merge run"),
         out::node(&run.id),
-        out::status(&run.status)
+        out::status(run.status.as_str())
     );
     println!("{} {} -> {}", out::heading("Flow:"), run.source, run.into);
     println!(
@@ -55,7 +55,9 @@ pub(super) fn show_merge_status(root: &Path, run_selector: Option<&str>) -> Resu
                 out::sha(short_sha(pushed_sha)),
                 step.pushed_at.as_deref().unwrap_or("")
             );
-        } else if step.target_kind == TARGET_BRANCH && step.status == STEP_SUCCEEDED {
+        } else if step.target_kind == MergeTargetKind::Branch
+            && step.status == MergeStepStatus::Succeeded
+        {
             println!("  {}", out::muted("not pushed"));
         }
         if let Some(message) = &step.message {
@@ -65,7 +67,7 @@ pub(super) fn show_merge_status(root: &Path, run_selector: Option<&str>) -> Resu
             );
         }
     }
-    if run.status == RUN_CONFLICTED {
+    if run.status == MergeRunStatus::Conflicted {
         advice::print(
             root,
             "`knit merge --continue` after resolving conflicts, or `knit merge --abort`.",
@@ -86,10 +88,14 @@ pub(super) fn push_recorded_merge_run(
     repos: &[String],
     set_upstream: bool,
 ) -> Result<()> {
-    let (path, mut run) = resolve_merge_run(root, run_selector, &[RUN_SUCCEEDED, RUN_PUSH_FAILED])?;
+    let (path, mut run) = resolve_merge_run(
+        root,
+        run_selector,
+        &[MergeRunStatus::Succeeded, MergeRunStatus::PushFailed],
+    )?;
     let _locks = acquire_run_locks(root, &run)?;
     push_merge_run_steps(root, &mut run, repos, set_upstream)?;
-    run.status = RUN_SUCCEEDED.to_string();
+    run.status = MergeRunStatus::Succeeded;
     run.updated_at = now_iso();
     write_json(&path, &run)?;
     Ok(())
@@ -108,14 +114,14 @@ pub(super) fn push_merge_run_steps(
     let mut failures = Vec::new();
     let mut eligible = 0usize;
     for step in &mut run.steps {
-        if step.target_kind != TARGET_BRANCH {
+        if step.target_kind != MergeTargetKind::Branch {
             continue;
         }
         if !repo_filter.is_empty() && !repo_filter.contains(&step.repo_id) {
             continue;
         }
         eligible += 1;
-        if step.status != STEP_SUCCEEDED {
+        if step.status != MergeStepStatus::Succeeded {
             failures.push(format!(
                 "{}: step is {}, expected succeeded",
                 step.repo_id, step.status
@@ -178,17 +184,21 @@ pub(super) fn push_merge_run_steps(
 fn resolve_merge_run(
     root: &Path,
     selector: Option<&str>,
-    statuses: &[&str],
+    statuses: &[MergeRunStatus],
 ) -> Result<(PathBuf, MergeRun)> {
     if let Some(selector) = selector {
         let path = resolve_merge_run_selector(root, selector);
         let run: MergeRun = read_json(&path)?;
-        if !statuses.is_empty() && !statuses.iter().any(|status| *status == run.status) {
+        if !statuses.is_empty() && !statuses.contains(&run.status) {
             bail!(
                 "Merge run {} is {}, expected one of {}.",
                 run.id,
                 run.status,
-                statuses.join(", ")
+                statuses
+                    .iter()
+                    .map(|status| status.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             );
         }
         return Ok((path, run));

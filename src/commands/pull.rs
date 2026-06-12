@@ -278,9 +278,10 @@ pub fn pull(
     bundles: bool,
     remote: Option<&str>,
     no_remote: bool,
+    merge: bool,
 ) -> Result<()> {
     if main || bundles {
-        return aggregate_pull(main, bundles, rebase, force, remote, no_remote);
+        return aggregate_pull(main, bundles, rebase, force, remote, no_remote, merge);
     }
 
     // A bare `knit pull` (no repo/flag target) at the workspace base means
@@ -289,13 +290,13 @@ pub fn pull(
     if selectors.is_empty() && !all && !feature {
         let active = load_active_bundle()?;
         if active.resolution_source == BundleResolutionSource::Config {
-            return aggregate_pull(true, true, rebase, force, remote, no_remote);
+            return aggregate_pull(true, true, rebase, force, remote, no_remote, merge);
         }
     }
 
     // A specific bundle is in context: pull its repos (and its KnitHub artifact).
     pull_repos(selectors, all, rebase, force, feature)?;
-    pull_remote_state(remote, no_remote)
+    pull_remote_state(remote, no_remote, merge)
 }
 
 /// Result of pulling one unit (a project repo's source checkout, or a bundle).
@@ -340,6 +341,7 @@ impl RepoGate {
 
 /// Update project main repos and/or every open bundle, in parallel, reporting
 /// each target's outcome instead of aborting on the first problem.
+#[allow(clippy::too_many_arguments)]
 fn aggregate_pull(
     main: bool,
     bundles: bool,
@@ -347,6 +349,7 @@ fn aggregate_pull(
     force: bool,
     remote: Option<&str>,
     no_remote: bool,
+    merge: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
@@ -388,8 +391,9 @@ fn aggregate_pull(
             .map(|(id, path)| {
                 let gate = &gate;
                 scope.spawn(move || {
-                    let outcome =
-                        gate.lock_all(std::slice::from_ref(path), || pull_path(path, rebase, force));
+                    let outcome = gate.lock_all(std::slice::from_ref(path), || {
+                        pull_path(path, rebase, force)
+                    });
                     (id.clone(), outcome)
                 })
             })
@@ -403,7 +407,8 @@ fn aggregate_pull(
                 let root = root.as_path();
                 let paths = bundle_repo_paths.get(id).cloned().unwrap_or_default();
                 scope.spawn(move || {
-                    let outcome = gate.lock_all(&paths, || pull_one_bundle(root, context, id));
+                    let outcome =
+                        gate.lock_all(&paths, || pull_one_bundle(root, context, id, merge));
                     (id.clone(), outcome)
                 })
             })
@@ -443,7 +448,11 @@ fn pull_path(cwd: &Path, rebase: bool, force: bool) -> Outcome {
         Err(error) => return Outcome::Failed(condense(&error)),
     };
     let mut args = vec![OsString::from("pull")];
-    args.push(OsString::from(if rebase { "--rebase" } else { "--ff-only" }));
+    args.push(OsString::from(if rebase {
+        "--rebase"
+    } else {
+        "--ff-only"
+    }));
     if let Err(error) = git_output(cwd, args) {
         return Outcome::Failed(condense(&error));
     }
@@ -458,12 +467,20 @@ fn pull_path(cwd: &Path, rebase: bool, force: bool) -> Outcome {
     }
 }
 
-fn pull_one_bundle(root: &Path, context: Option<&RemotePullContext>, bundle_id: &str) -> Outcome {
+fn pull_one_bundle(
+    root: &Path,
+    context: Option<&RemotePullContext>,
+    bundle_id: &str,
+    merge: bool,
+) -> Outcome {
     let Some(context) = context else {
         return Outcome::Skipped("no KnitHub remote configured".to_string());
     };
-    match pull_bundle_remote_state(root, context, bundle_id) {
+    match pull_bundle_remote_state(root, context, bundle_id, merge) {
         Ok(RemoteBundleOutcome::Pulled(hash)) => Outcome::Synced(hash),
+        Ok(RemoteBundleOutcome::Merged(hash)) => {
+            Outcome::Synced(format!("{hash} (merged ledgers)"))
+        }
         Ok(RemoteBundleOutcome::Skipped(reason)) => Outcome::Skipped(reason),
         Err(error) => Outcome::Failed(condense(&error)),
     }

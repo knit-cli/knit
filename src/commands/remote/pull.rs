@@ -2,10 +2,10 @@
 //! wide), list/fetch remote bundles, and delete remote bundle records.
 
 use super::client::{
-    configured_sync_remote_names, decode_bundle_payload, ensure_remote_bundle_fast_forward,
-    fast_forward_feature_checkouts, fetch_project_export, localize_bundle, load_project_if_present,
-    prepare_feature_branches, request_json, resolve_project_id, resolve_remote,
-    resolve_sync_remote_name, resolve_token, effective_workspace_config,
+    configured_sync_remote_names, decode_bundle_payload, effective_workspace_config,
+    ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts, fetch_project_export,
+    load_project_if_present, localize_bundle, prepare_feature_branches, request_json,
+    resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
@@ -13,13 +13,13 @@ use super::clone::{
 use super::{RemoteBundle, RemoteExportRepository, RemoteProjectExport, RemoteViews};
 use crate::commands::worktree::materialize_repos;
 use crate::model::{
-    ledger_relation, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews, KnitRemote,
-    LedgerRelation,
+    ledger_relation, merge_ledgers, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews,
+    KnitRemote, LedgerRelation,
 };
 use crate::output as out;
 use crate::store::{
-    bundle_path, load_active_bundle, project_path, read_json, save_active_bundle, write_json,
-    ActiveBundle,
+    acquire_named_lock, bundle_path, load_active_bundle, project_path, read_json,
+    save_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -78,6 +78,9 @@ pub struct RemotePullContext {
 pub enum RemoteBundleOutcome {
     /// The artifact was applied; carries its hash.
     Pulled(String),
+    /// Diverged ledgers were union-merged into the local artifact; carries the
+    /// remote artifact hash that was merged in.
+    Merged(String),
     /// Nothing to apply; carries a human-readable reason.
     Skipped(String),
 }
@@ -232,10 +235,16 @@ fn reconcile_project_repositories(
 /// pull can process every open bundle. Callers must serialize git work that
 /// touches shared source repos; this function only mutates the named bundle's
 /// own artifact and checkouts.
+///
+/// With `merge` set, diverged ledgers are union-merged (`merge_ledgers`)
+/// instead of skipped: the saved artifact records both sides' nodes, and any
+/// feature checkout that cannot fast-forward onto origin is reported for
+/// manual git-level merging without failing the artifact merge.
 pub fn pull_bundle_remote_state(
     root: &Path,
     context: &RemotePullContext,
     bundle_id: &str,
+    merge: bool,
 ) -> Result<RemoteBundleOutcome> {
     let path = bundle_path(root, bundle_id);
     if !path.exists() {
@@ -243,6 +252,9 @@ pub fn pull_bundle_remote_state(
             "no local bundle artifact".to_string(),
         ));
     }
+    // Hold the same per-bundle lock mutating commands take, so a pull cannot
+    // interleave with a concurrent commit/sync in another knit process.
+    let _lock = acquire_named_lock(root, bundle_id)?;
     let local: ChangeGroup = read_json(&path)?;
     let Some(remote_bundle) = context
         .export
@@ -250,10 +262,14 @@ pub fn pull_bundle_remote_state(
         .iter()
         .find(|bundle| bundle.slug == bundle_id)
     else {
-        return Ok(RemoteBundleOutcome::Skipped("not present on remote".to_string()));
+        return Ok(RemoteBundleOutcome::Skipped(
+            "not present on remote".to_string(),
+        ));
     };
     let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
-        return Ok(RemoteBundleOutcome::Skipped("no remote artifact".to_string()));
+        return Ok(RemoteBundleOutcome::Skipped(
+            "no remote artifact".to_string(),
+        ));
     };
     let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
     match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
@@ -263,10 +279,35 @@ pub fn pull_bundle_remote_state(
                 "local is ahead of remote".to_string(),
             ))
         }
-        LedgerRelation::Diverged => {
+        LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
-                "bundle {bundle_id}: local and remote artifacts have diverged; keeping local"
+                "bundle {bundle_id}: local and remote ledgers have diverged; run `knit pull --merge` to combine them"
             )))
+        }
+        LedgerRelation::Diverged => {
+            let localized = localize_bundle(remote_payload, &context.project)?;
+            prepare_feature_branches(&localized)?;
+            let merged = merge_ledgers(&local, &localized, now_iso());
+            let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
+            materialize_repos(&mut active, None)?;
+            // The artifact merge stands on its own: checkouts that cannot
+            // fast-forward have genuinely diverged git branches and need a
+            // manual merge in the worktree, after which `knit sync` and the
+            // next push reconcile the recorded heads.
+            if let Err(error) = fast_forward_feature_checkouts(&mut active) {
+                println!(
+                    "{} {error:#}",
+                    out::warn("feature checkouts did not fast-forward:")
+                );
+                println!(
+                    "{}",
+                    out::muted(
+                        "Merged ledger saved. Merge origin/<branch> in the affected worktrees, then commit and `knit push`."
+                    )
+                );
+            }
+            save_active_bundle(&active)?;
+            return Ok(RemoteBundleOutcome::Merged(artifact.artifact_hash.clone()));
         }
         LedgerRelation::RemoteAhead => {}
     }
@@ -280,15 +321,21 @@ pub fn pull_bundle_remote_state(
     Ok(RemoteBundleOutcome::Pulled(artifact.artifact_hash.clone()))
 }
 
-pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result<()> {
+pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool, merge: bool) -> Result<()> {
     let Some(context) = prepare_remote_pull(remote_name, skip_remote)? else {
         return Ok(());
     };
     let active = load_active_bundle()?;
-    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id)? {
+    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id, merge)? {
         RemoteBundleOutcome::Pulled(hash) => println!(
             "{} {} {}",
             out::movement("pulled"),
+            out::repo(&active.bundle.id),
+            out::muted(&hash)
+        ),
+        RemoteBundleOutcome::Merged(hash) => println!(
+            "{} {} {}",
+            out::movement("merged ledgers"),
             out::repo(&active.bundle.id),
             out::muted(&hash)
         ),
@@ -301,9 +348,35 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool) -> Result
     Ok(())
 }
 
+/// Look up a bundle slug on the primary sync remote, returning the remote
+/// record's lifecycle state when a non-deleted bundle with that slug already
+/// exists. Used at bundle creation to catch two users independently picking
+/// the same title for different features. Callers treat any error (no remote,
+/// no token, offline) as "unknown" so creation keeps working offline.
+pub fn remote_bundle_lifecycle(
+    config: &KnitConfig,
+    project_id: &str,
+    bundle_id: &str,
+) -> Result<Option<String>> {
+    let Some(remote_name) = configured_sync_remote_names(config).into_iter().next() else {
+        return Ok(None);
+    };
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let export = fetch_project_export(remote, &token, project_id)?;
+    Ok(export
+        .bundles
+        .into_iter()
+        .find(|bundle| bundle.slug == bundle_id && bundle.lifecycle_state != "deleted")
+        .map(|bundle| bundle.lifecycle_state))
+}
+
 /// List the bundle records the sync remote holds for `project_id`, decoding each
 /// bundle's current artifact payload when it is a supported Knit bundle.
-pub fn list_remote_bundles(config: &KnitConfig, project_id: &str) -> Result<Vec<RemoteBundleRecord>> {
+pub fn list_remote_bundles(
+    config: &KnitConfig,
+    project_id: &str,
+) -> Result<Vec<RemoteBundleRecord>> {
     let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
@@ -332,8 +405,13 @@ pub fn delete_remote_bundle_by_id(config: &KnitConfig, remote_id: &str) -> Resul
     let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
-    let deleted: RemoteBundle =
-        request_json(remote, &token, "DELETE", &format!("/bundles/{remote_id}"), None)?;
+    let deleted: RemoteBundle = request_json(
+        remote,
+        &token,
+        "DELETE",
+        &format!("/bundles/{remote_id}"),
+        None,
+    )?;
     Ok(deleted.slug)
 }
 
@@ -405,8 +483,12 @@ pub fn fetch_bundles_from_remote(
     };
 
     let bundles_dir = root.join(".knit/bundles");
-    fs::create_dir_all(&bundles_dir)
-        .with_context(|| format!("failed to create bundles directory {}", bundles_dir.display()))?;
+    fs::create_dir_all(&bundles_dir).with_context(|| {
+        format!(
+            "failed to create bundles directory {}",
+            bundles_dir.display()
+        )
+    })?;
 
     let mut fetched_count = 0;
     for remote_bundle in export.bundles {
@@ -431,7 +513,7 @@ pub fn fetch_bundles_from_remote(
                 LedgerRelation::Equal | LedgerRelation::LocalAhead => continue,
                 LedgerRelation::Diverged => {
                     println!(
-                        "{} bundle {}: local and remote artifacts have diverged; keeping local",
+                        "{} bundle {}: local and remote ledgers have diverged; keeping local (run `knit pull --merge` to combine them)",
                         out::warn("warning:"),
                         out::node(&bundle.id)
                     );
@@ -457,7 +539,11 @@ pub fn fetch_bundles_from_remote(
             out::repo(&remote_name)
         );
     } else {
-        println!("{} no bundles to fetch from {}", out::muted("already up-to-date"), out::repo(&remote_name));
+        println!(
+            "{} no bundles to fetch from {}",
+            out::muted("already up-to-date"),
+            out::repo(&remote_name)
+        );
     }
     Ok(())
 }

@@ -14,6 +14,18 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Style gate: rustfmt defaults, no local overrides. Clippy is advisory and
+  # intentionally not gated here.
+  fmt:
+    name: rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
   # Primary supported platform: full build + test suite.
   linux:
     name: Linux (build + test)

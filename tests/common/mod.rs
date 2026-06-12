@@ -17,7 +17,7 @@ pub fn setup_three_repo_project(workspace: &Path, root: &Path) {
     init_repo(&backend, "backend");
     init_repo(&frontend, "frontend");
     init_repo(&docs, "docs");
-    knit(workspace, ["init", "arbient"]);
+    knit(workspace, ["init", "demo"]);
     knit(
         workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
@@ -416,7 +416,12 @@ where
     run(command)
 }
 
-pub fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+pub fn knit_fails_with_fake_gh<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+) -> String
 where
     I: IntoIterator<Item = S>,
     S: AsRef<std::ffi::OsStr>,
@@ -478,6 +483,21 @@ where
     command.args(args).current_dir(cwd);
     command.stdout(Stdio::null()).stderr(Stdio::null());
     command.status().unwrap().success()
+}
+
+/// Spawn a short-lived child process, wait for it to exit, and return its pid.
+pub fn exited_process_pid() -> u32 {
+    let mut child = if cfg!(windows) {
+        Command::new("cmd")
+            .args(["/C", "exit", "0"])
+            .spawn()
+            .expect("spawn cmd")
+    } else {
+        Command::new("true").spawn().expect("spawn true")
+    };
+    let pid = child.id();
+    child.wait().unwrap();
+    pid
 }
 
 pub fn run(mut command: Command) -> String {
@@ -798,7 +818,11 @@ fn write_windows_shim(script: &Path) {
     #[cfg(windows)]
     {
         let shim = script.with_extension("cmd");
-        fs::write(shim, "@sh \"%~dp0{}\" %*\r\n".replace("{}", &script.file_name().unwrap().to_string_lossy())).unwrap();
+        fs::write(
+            shim,
+            "@sh \"%~dp0{}\" %*\r\n".replace("{}", &script.file_name().unwrap().to_string_lossy()),
+        )
+        .unwrap();
     }
     #[cfg(not(windows))]
     let _ = script;
@@ -901,14 +925,12 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fs::write(dir.join("api-backend-edit.json"), &body).unwrap();
             (200, fake_github_pr_json(dir, number))
         }
-        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => (
-            200,
-            "{\"total_count\":0,\"check_runs\":[]}".to_string(),
-        ),
-        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => (
-            200,
-            "{\"state\":\"success\",\"statuses\":[]}".to_string(),
-        ),
+        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => {
+            (200, "{\"total_count\":0,\"check_runs\":[]}".to_string())
+        }
+        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => {
+            (200, "{\"state\":\"success\",\"statuses\":[]}".to_string())
+        }
         _ => (
             404,
             format!("{{\"message\":\"unexpected endpoint {method} /{path}\"}}"),
@@ -918,6 +940,64 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
         stream,
         "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
         response.len()
+    )?;
+    stream.flush()
+}
+/// Spawn a minimal fake KnitHub API that answers every request with a project
+/// export containing a single bundle record. Enough for creation-time slug
+/// collision checks against the sync remote.
+pub fn spawn_fake_knithub_export(bundle_slug: &str, lifecycle_state: &str) -> String {
+    spawn_fake_knithub_with_body(format!(
+        "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
+    ))
+}
+
+/// Spawn a fake KnitHub API that answers every request with the given JSON
+/// body, e.g. a full project export including bundle artifact payloads.
+pub fn spawn_fake_knithub_with_body(body: String) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let body = body.clone();
+            std::thread::spawn(move || {
+                let _ = respond_with_json(&mut stream, &body);
+            });
+        }
+    });
+    base_url
+}
+
+fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    if content_length > 0 {
+        let mut sink = vec![0u8; content_length];
+        reader.read_exact(&mut sink)?;
+    }
+    write!(
+        stream,
+        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
+        body.len(),
+        body
     )?;
     stream.flush()
 }

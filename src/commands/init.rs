@@ -3,7 +3,7 @@ use crate::commands::agents::{
     print_bundle_worktree_agents_summary, print_worktree_agents_summary, upsert_managed_section,
     write_bundle_worktree_agents_md, write_worktree_agents_md,
 };
-use crate::ids::slugify;
+use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
 use crate::output as out;
 use crate::store::{
@@ -18,7 +18,18 @@ use std::process::Command;
 
 pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
     start_bundle(
-        title, None, &[], false, None, &[], &[], true, false, force, agents, None,
+        title,
+        None,
+        &[],
+        false,
+        None,
+        &[],
+        &[],
+        true,
+        false,
+        force,
+        agents,
+        None,
     )
 }
 
@@ -73,6 +84,10 @@ pub fn start_bundle(
         );
     }
 
+    if !force {
+        ensure_no_remote_slug_collision(&root, project, &bundle_id)?;
+    }
+
     fs::create_dir_all(&bundle_dir).context("failed to create .knit/bundles")?;
     fs::create_dir_all(&worktree_dir).context("failed to create .knit/worktrees")?;
     fs::create_dir_all(knit_dir.join("projects")).context("failed to create .knit/projects")?;
@@ -94,8 +109,9 @@ pub fn start_bundle(
     save_config(&root, &config)?;
 
     if let Some(project_id) = &project_id {
-        let selected =
-            select_project_repos(&root, project_id, repo_ids, all_repos, view, include, exclude)?;
+        let selected = select_project_repos(
+            &root, project_id, repo_ids, all_repos, view, include, exclude,
+        )?;
         if !selected.is_empty() {
             let mut active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             crate::commands::track::track_project_repos(
@@ -194,6 +210,40 @@ fn default_shell() -> std::ffi::OsString {
     }
 }
 
+/// Refuse to create a bundle whose slug already exists on the KnitHub sync
+/// remote for this project: two users independently picking the same title
+/// would otherwise share one remote record and one `knit/<slug>` branch
+/// namespace across every repo. Best-effort by design — no workspace config,
+/// no sync remote, no token, or an unreachable remote all skip the check so
+/// creation keeps working offline. `--force` skips it explicitly.
+fn ensure_no_remote_slug_collision(
+    root: &Path,
+    project: Option<&str>,
+    bundle_id: &str,
+) -> Result<()> {
+    if !root.join(".knit/config.json").exists() {
+        return Ok(());
+    }
+    let Ok(config) = crate::store::load_effective_config(root) else {
+        return Ok(());
+    };
+    let Some(project_id) = project
+        .map(slugify)
+        .or_else(|| config.active_project.clone())
+    else {
+        return Ok(());
+    };
+    match crate::commands::remote::remote_bundle_lifecycle(&config, &project_id, bundle_id) {
+        Ok(Some(state)) => bail!(
+            "Bundle `{bundle_id}` already exists on the KnitHub sync remote for project `{project_id}` ({state}). Join the existing bundle with `knit fetch` and `knit --bundle {bundle_id} worktree`, pick another title, or pass --force to create a local bundle with the same id anyway."
+        ),
+        // Offline, missing remote/token, or a server error must never block
+        // local bundle creation; the push-time ledger gate still protects the
+        // remote record itself.
+        Ok(None) | Err(_) => Ok(()),
+    }
+}
+
 fn resolve_start_project(
     root: &Path,
     project: Option<&str>,
@@ -276,10 +326,13 @@ pub(crate) fn resolve_view_repos(
     exclude: &[String],
 ) -> Result<Vec<ProjectRepoEntry>> {
     use std::collections::BTreeSet;
+    let repo_ids = expand_repo_selectors(repo_ids);
+    let include = expand_repo_selectors(include);
+    let exclude = expand_repo_selectors(exclude);
     let mut selected: BTreeSet<String> = BTreeSet::new();
 
     if !repo_ids.is_empty() {
-        for repo_id in repo_ids {
+        for repo_id in &repo_ids {
             selected.insert(project_repo(project, repo_id)?.id.clone());
         }
     } else if all_repos {
@@ -304,10 +357,10 @@ pub(crate) fn resolve_view_repos(
 
     // Ad-hoc flags apply on top in every mode, so `--all-repos --exclude sej`
     // and `--view backend --include gloss` both work.
-    for repo_id in include {
+    for repo_id in &include {
         selected.insert(project_repo(project, repo_id)?.id.clone());
     }
-    for repo_id in exclude {
+    for repo_id in &exclude {
         selected.remove(&project_repo(project, repo_id)?.id);
     }
 
@@ -556,6 +609,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit sync` records Git commits made outside Knit (local reconcile, no network).
 - `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...` is the one verb family for moving artifacts to KnitHub; with no target flag it pushes bundle, history, and views.
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...` pulls those same artifacts from KnitHub.
+- `knit pull --merge` union-merges the bundle ledger when the local and KnitHub artifacts have diverged (two users recorded work concurrently); diverged feature branches still need a git merge in the worktree afterwards.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
 - `knit push --remote local --remote knithub` pushes the resolved bundle's branches and artifact to both configured KnitHub remotes so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.

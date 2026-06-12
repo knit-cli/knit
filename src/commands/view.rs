@@ -7,7 +7,7 @@
 
 use crate::commands::init::{resolve_active_view, resolve_view_repos};
 use crate::commands::project::load_project_by_id;
-use crate::ids::slugify;
+use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{KnitProjectViews, ProjectView};
 use crate::output as out;
 use crate::store::{
@@ -32,7 +32,12 @@ pub fn list_views(project: Option<&str>) -> Result<()> {
         } else {
             " "
         };
-        println!("{} {} {}", marker, out::repo(name), out::muted(summary(view)));
+        println!(
+            "{} {} {}",
+            marker,
+            out::repo(name),
+            out::muted(summary(view))
+        );
     }
     Ok(())
 }
@@ -271,8 +276,8 @@ fn derive_from_bundle(
 /// Slugify, validate against the project, and de-duplicate a list of repo ids.
 fn normalize_ids(project: &crate::model::KnitProject, repos: &[String]) -> Result<Vec<String>> {
     let mut ids = Vec::new();
-    for repo in repos {
-        let id = slugify(repo);
+    for repo in expand_repo_selectors(repos) {
+        let id = slugify(&repo);
         if !project.repos.iter().any(|repo| repo.id == id) {
             bail!(
                 "Project {} has no repo named {}.",
