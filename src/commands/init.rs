@@ -235,7 +235,7 @@ fn ensure_no_remote_slug_collision(
     };
     match crate::commands::remote::remote_bundle_lifecycle(&config, &project_id, bundle_id) {
         Ok(Some(state)) => bail!(
-            "Bundle `{bundle_id}` already exists on the KnitHub sync remote for project `{project_id}` ({state}). Join the existing bundle with `knit fetch` and `knit --bundle {bundle_id} worktree`, pick another title, or pass --force to create a local bundle with the same id anyway."
+            "Bundle `{bundle_id}` already exists on the KnitHub sync remote for project `{project_id}` ({state}). Join the existing bundle with `knit fetch` and `knit --bundle {bundle_id} bundle worktree`, pick another title, or pass --force to create a local bundle with the same id anyway."
         ),
         // Offline, missing remote/token, or a server error must never block
         // local bundle creation; the push-time ledger gate still protects the
@@ -582,7 +582,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.
 - `knit bundle archive <bundle> [--reason "merged"]` marks a bundle done: it records an archive node and removes generated worktrees while preserving local feature branches (`--keep-worktrees` to leave them, `--force` to discard dirty checkouts).
-- `knit bundle restore <bundle>` reopens an archived bundle; run `knit worktree` afterwards to rematerialize checkouts.
+- `knit bundle restore <bundle>` reopens an archived bundle; run `knit bundle worktree` afterwards to rematerialize checkouts.
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
