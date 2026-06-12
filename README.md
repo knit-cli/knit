@@ -11,6 +11,7 @@ This walkthrough takes you from install to a landed multi-repo change in about t
 ### 1. Install
 
 ```sh
+brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
 cargo install knit-cli        # from crates.io (the binary is named `knit`)
 # or from a checkout:
 cargo install --path .
@@ -215,6 +216,7 @@ See [docs/reference.md](docs/reference.md) for the complete behavior of every co
 - **[docs/reference.md](docs/reference.md)** — the full command synopsis and the complete behavior reference for every subsystem: projects and views, bundle lifecycle and pruning, staging/diff/fetch/pull/push, publish, land, merge, history and `related`, revert, the storage layout, bundle node types, current limitations, and the roadmap.
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/manual-test.md](docs/manual-test.md)** — a small two-repo smoke test.
+- **[dist/README.md](dist/README.md)** — how releases are cut: tag-triggered binary builds, crates.io (`knit-cli`), and the Homebrew/Scoop/winget manifests.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the current bundle (`ChangeGroup`) fields.
 
 ## Knit And Gloss
