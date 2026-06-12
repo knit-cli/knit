@@ -1,6 +1,6 @@
 # Knit
 
-Knit is a local-first Rust CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": a **bundle** is the cross-repo analogue of a git branch, holding a small set of related repositories. Knit creates a coordinated checkout per repo, commits staged changes across them all at once, and records the result in a language-neutral JSON artifact. From that bundle it can open one pull request per repo and land them as a single set, or merge the feature branches into local targets when there is no code host. Parallel features stay isolated: the same source repo can appear in many bundles at once, each on its own branch and worktree.
+Knit is a local-first CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": a **bundle** is the cross-repo analogue of a git branch, holding a small set of related repositories. Knit creates a coordinated checkout per repo, commits staged changes across them all at once, and records the result in a language-neutral JSON artifact. From that bundle it can open one pull request per repo and land them as a single set, or merge the feature branches into local targets when there is no code host. Parallel features stay isolated: the same source repo can appear in many bundles at once, each on its own branch and worktree.
 
 Knit shells out to `git`. It does not use libgit2 and it does not try to replace git — everyday verbs (`status`, `diff`, `add`, `commit`, `push`, `log`) just run across every repo in the bundle at once.
 
@@ -9,9 +9,12 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 This walkthrough takes you from install to a landed multi-repo change in about ten minutes. It uses two toy repos so you can run it anywhere.
 
 ### 1. Install
-
+Brew:
 ```sh
 brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+```
+Cargo:
+```sh
 cargo install knit-cli --version 0.1.0-alpha.1   # from crates.io (the binary is named `knit`;
                                                  # cargo needs the explicit version while only pre-releases exist)
 # or from a checkout:
@@ -195,6 +198,12 @@ sync automatically, hosted dashboards show bundles and project history, and
 `knit clone <owner>/<project>` can rebuild a working workspace on another
 machine. `knit related --pull` and `knit sync pull` read the same hosted
 history back.
+
+Projects can also be cloned from Knit. `knit clone` will rebuild the project
+as it is set up in Knit, given your git and KnitHub tokens allow it.
+
+KnitHub contains `gloss`. `gloss` is another tool that allows you to run a cross repo analysis/code review
+in the same page.
 
 ## Concepts
 
