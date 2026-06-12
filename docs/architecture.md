@@ -11,10 +11,10 @@ src/
   cli.rs        clap command definitions
   commands/
     mod.rs            command module wiring
-    bundle/           bundle inspection, listing, switching, validation; prune.rs scans dead work
+    bundle/           bundle inspection, listing, switching; lifecycle.rs archive/restore/delete, validate.rs artifact checks, prune/ scans dead work
     land/             landing plan/check/execute/update/validate/display
     merge/            local integration runs and reports
-    publish/          publish workflow and PR body generation
+    publish/          publish workflow: scope/remote/sync/status phases plus PR body generation
     remote/           KnitHub transport: client, facade, per-artifact push/pull/history, clone
     agents.rs         generated AGENTS.md guidance
     cherrypick.rs     move recorded commits between bundles
@@ -25,14 +25,14 @@ src/
     doctor.rs
     fetch.rs
     git_passthrough.rs
-    history.rs        `knit history` / `knit related` queries
+    history/          `knit history` / `knit related`: target resolution + git/Knit-history join
     init.rs
     log.rs
     project.rs
     pull.rs
     push.rs
     remove.rs
-    revert.rs
+    revert/           revert plans (plan.rs) and execution (apply.rs)
     run.rs            configured/one-off commands inside checkouts
     runtime/          bundle runtime stacks (`knit run up/status/down`): mod.rs orchestrates, transform.rs lifts compose shapes
     schema.rs
@@ -45,7 +45,7 @@ src/
     worktree.rs
   providers/
     mod.rs        Forge trait, PrTarget, host detection, shared CLI runner + publication helpers
-    github.rs     GitHub forge adapter via the gh CLI
+    github/       GitHub forge adapter: gh CLI impl, REST api ops, HTTP transport
     gitlab.rs     GitLab forge adapter via the glab CLI (merge requests)
     forgejo.rs    Codeberg/Forgejo forge adapter via the tea CLI
   model/
@@ -74,7 +74,7 @@ tests/
   merge.rs  model.rs  project.rs  publish.rs  runtime.rs  status.rs  sync.rs
 ```
 
-Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model/` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each module in `commands/` coordinates one user-facing command with filesystem and git operations. A command starts as a single file and becomes a directory module only when it grows distinct phases (plan/execute/report), as `bundle/`, `land/`, `merge/`, `publish/`, `remote/`, and `runtime/` have.
+Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model/` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each module in `commands/` coordinates one user-facing command with filesystem and git operations. A command starts as a single file and becomes a directory module only when it grows distinct phases (plan/execute/report), as `bundle/`, `history/`, `land/`, `merge/`, `publish/`, `remote/`, `revert/`, and `runtime/` have. Keep command files under ~700 lines; split by phase or concern once they pass it.
 
 ## Boundaries
 
