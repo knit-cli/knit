@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
 
+pub(crate) use apply::{create_provider_revert_prs, provider_revert_context};
+
 use apply::{apply_local_revert, apply_provider_revert, plan_uses_provider_revert, preflight_plan};
 use plan::build_plan;
 

@@ -193,12 +193,29 @@ pub(super) fn execute_run(
             } else {
                 "steps"
             };
-            bail!(
-                "Land run {} stopped at {} {}. Fix the issue and run `knit land resume`.",
+            let stopped = format!(
+                "Land run {} stopped at {} {}.",
                 run.id,
                 label,
                 failed_ids.join(", ")
             );
+
+            if plan.on_failure == Some(crate::model::LandOnFailure::Rollback) {
+                println!(
+                    "{} creating revert PRs for already-merged steps (onFailure: rollback)",
+                    out::movement("rolling back")
+                );
+                match super::rollback::rollback_merged_steps(active, run, run_path) {
+                    Ok(Some(group_id)) => bail!(
+                        "{stopped} Rolled back: revert group {group_id} opened revert PRs for the merged steps."
+                    ),
+                    Ok(None) => bail!("{stopped} No PRs had merged yet; nothing to roll back."),
+                    Err(error) => bail!(
+                        "{stopped} Automatic rollback failed: {error:#}. Run `knit land rollback` to retry it."
+                    ),
+                };
+            }
+            bail!("{stopped} Fix the issue and run `knit land resume`, or run `knit land rollback` to revert the steps that already merged.");
         }
     }
 
@@ -679,6 +696,7 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
         status: LandStatus::Running,
         created_at: now.clone(),
         updated_at: now,
+        rolled_back_at: None,
         steps: plan
             .steps
             .iter()
