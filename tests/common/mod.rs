@@ -317,7 +317,8 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env("KNIT_HOME", isolated_knit_home());
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE");
     run(command)
 }
 
@@ -330,7 +331,8 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env("KNIT_HOME", isolated_knit_home());
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE");
     // Test-provided env wins, so a test can still point KNIT_HOME at its own dir.
     for (key, value) in env {
         command.env(key, value);
@@ -347,7 +349,8 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env("KNIT_HOME", isolated_knit_home());
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE");
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
@@ -366,7 +369,8 @@ where
     command
         .args(args)
         .current_dir(cwd)
-        .env("KNIT_HOME", isolated_knit_home());
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -408,6 +412,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
@@ -450,6 +455,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {

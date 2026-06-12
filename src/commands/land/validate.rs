@@ -7,6 +7,7 @@ use super::{
     LandStepKind, LAND_PLAN_KIND,
 };
 use crate::model::{DeployMode, SCHEMA_VERSION};
+use crate::output as out;
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
 use anyhow::{bail, Context, Result};
@@ -210,4 +211,83 @@ pub(super) fn ordered_step_ids(steps: &[LandStep]) -> Result<Vec<String>> {
             bail!("land plan contains a dependency cycle");
         }
     }
+}
+
+/// State of one required check at the bundle's current heads.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum RequiredCheckState {
+    Green,
+    Red,
+    Stale,
+    Missing,
+}
+
+impl RequiredCheckState {
+    pub(super) fn label(self) -> &'static str {
+        match self {
+            RequiredCheckState::Green => "green",
+            RequiredCheckState::Red => "red",
+            RequiredCheckState::Stale => "stale",
+            RequiredCheckState::Missing => "missing",
+        }
+    }
+}
+
+/// Evaluate the named checks required for landing against the latest recorded
+/// verdicts: green means a pass recorded at the exact current per-repo heads.
+pub(super) fn assess_required_checks(
+    active: &ActiveBundle,
+    names: &[String],
+) -> Vec<(String, RequiredCheckState)> {
+    let latest = crate::commands::check::latest_checks(&active.bundle);
+    names
+        .iter()
+        .map(|name| {
+            let state = match latest.get(name.as_str()) {
+                None => RequiredCheckState::Missing,
+                Some(node) if !crate::commands::check::check_passed(node) => {
+                    RequiredCheckState::Red
+                }
+                Some(node) if !crate::commands::check::check_is_fresh(active, node) => {
+                    RequiredCheckState::Stale
+                }
+                Some(_) => RequiredCheckState::Green,
+            };
+            (name.clone(), state)
+        })
+        .collect()
+}
+
+/// Refuse to execute a landing whose required checks are not green and fresh.
+/// `--skip-checks` is the explicit escape hatch.
+pub(super) fn preflight_required_checks(
+    active: &ActiveBundle,
+    names: &[String],
+    skip: bool,
+) -> Result<()> {
+    if names.is_empty() {
+        return Ok(());
+    }
+    if skip {
+        println!(
+            "{}",
+            out::warn(format!(
+                "Skipping required checks ({}) because --skip-checks was passed.",
+                names.join(", ")
+            ))
+        );
+        return Ok(());
+    }
+    let failing: Vec<String> = assess_required_checks(active, names)
+        .into_iter()
+        .filter(|(_, state)| *state != RequiredCheckState::Green)
+        .map(|(name, state)| format!("{name} ({})", state.label()))
+        .collect();
+    if !failing.is_empty() {
+        bail!(
+            "Required checks are not green at the current heads: {}. Refresh them with `knit check run <name>` (or `knit check record <name> --pass`), or pass --skip-checks to land anyway.",
+            failing.join(", ")
+        );
+    }
+    Ok(())
 }

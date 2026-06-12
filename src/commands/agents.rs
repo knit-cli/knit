@@ -103,6 +103,7 @@ fn bundle_worktree_agents_section(active: &ActiveBundle, bundle_root: &Path) -> 
         .collect::<Vec<_>>()
         .join("\n");
     let runtime_section = worktree_runtime_section(active);
+    let checks_section = worktree_checks_section(active);
 
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
@@ -131,8 +132,7 @@ knit related --repo <repo-id> path/inside/repo --pull
 ```
 
 Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
-{runtime_section}
-For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
+{runtime_section}{checks_section}For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
 
 Tracked checkouts for this bundle:
 
@@ -144,6 +144,7 @@ Do not edit the original source checkout for feature work unless the bundle was 
         bundle = active.bundle.id,
         bundle_root = bundle_root_display,
         runtime_section = runtime_section,
+        checks_section = checks_section,
         checkouts = if checkouts.is_empty() {
             "(none)".to_string()
         } else {
@@ -295,6 +296,7 @@ fn worktree_agents_section(active: &ActiveBundle, repo: &RepoEntry, checkout: &P
         .collect::<Vec<_>>()
         .join("\n");
     let runtime_section = worktree_runtime_section(active);
+    let checks_section = worktree_checks_section(active);
 
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
@@ -324,8 +326,7 @@ knit related --repo <repo-id> path/inside/repo --pull
 ```
 
 Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
-{runtime_section}
-Sibling worktrees for this bundle:
+{runtime_section}{checks_section}Sibling worktrees for this bundle:
 
 {repo_worktrees}
 
@@ -336,6 +337,7 @@ Do not edit the original source checkout for feature work unless the bundle was 
         repo = repo.id,
         checkout = checkout_display,
         runtime_section = runtime_section,
+        checks_section = checks_section,
         repo_worktrees = if repo_worktrees.is_empty() {
             "(none)".to_string()
         } else {
@@ -371,6 +373,29 @@ knit run down
 "#,
         stack_repo = stack_repo,
         bundle = active.bundle.id,
+    )
+}
+
+/// Guidance shown in worktree AGENTS.md when the project requires checks for
+/// landing: agents should refresh them after the last commit.
+fn worktree_checks_section(active: &ActiveBundle) -> String {
+    let Some(project) = load_bundle_project(active) else {
+        return String::new();
+    };
+    let names = project
+        .landing
+        .map(|landing| landing.require_checks)
+        .unwrap_or_default();
+    if names.is_empty() {
+        return String::new();
+    }
+    let joined = names.join("`, `knit check run `");
+    format!(
+        r#"
+This project requires green checks before landing: after your final commit, run `knit check run {joined}` and confirm `knit check status` reports every required check green and fresh. Verdicts are pinned to the current commits, so re-run after any new commit. `knit land apply` refuses to execute while a required check is missing, red, or stale.
+
+"#,
+        joined = joined
     )
 }
 
@@ -563,6 +588,19 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
     };
     let merge_method = landing.merge.method.unwrap_or_default();
     let required_checks = landing.merge.required_checks_only.unwrap_or(true);
+    let require_checks_line = if landing.require_checks.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nRequired bundle checks before landing: {} — refresh with `knit check run <name>` after the final commit; `knit land apply` refuses while any is missing, red, or stale.\n",
+            landing
+                .require_checks
+                .iter()
+                .map(|name| format!("`{name}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     let deployments = if landing.deployments.is_empty() {
         "- (none)".to_string()
     } else {
@@ -612,7 +650,7 @@ Configured landing merge order:
 {merge_order}
 
 Merge defaults: method `{merge_method}`, required checks only `{required_checks}`.
-
+{require_checks_line}
 Configured deployment steps:
 
 {deployments}

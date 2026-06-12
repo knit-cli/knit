@@ -1,5 +1,6 @@
 pub mod agents;
 pub mod bundle;
+pub mod check;
 pub mod cherrypick;
 pub mod clean;
 pub mod commit;
@@ -35,6 +36,7 @@ pub use bundle::{
     archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
     restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
 };
+pub use check::{record_check, run_check, show_check_status};
 pub use cherrypick::cherrypick_from_bundle;
 pub use clean::clean_generated;
 pub use commit::commit_staged;

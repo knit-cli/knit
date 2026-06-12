@@ -87,6 +87,9 @@ knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run up|status|down                        # bundle runtime stack
 knit run --list
+knit check run <project-command> [--repo <repo>]... [--all]
+knit check record <name> --pass|--fail [--detail <text>]
+knit check status
 knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
@@ -189,6 +192,36 @@ The stack repo is `runtime.stackRepo` when configured; with no `runtime` block a
 Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`).
 
 In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts. In transform mode the lifted shape brings its own database service, which gets a fresh project-scoped volume per bundle automatically.
+
+### Checks
+
+A **check** is a named verdict recorded on the bundle ledger — the bundle-level analogue of a commit status. Each verdict is pinned to the exact per-repo head SHAs it was computed against, so it can never silently claim more than it saw:
+
+```sh
+knit check run ci          # run the project command `ci`, record pass/fail
+knit check record functional --pass --detail "manual QA on staging"
+knit check status          # latest verdict per check, with freshness
+```
+
+`knit check run <name>` executes the configured project command of that name (the same definition `knit run <name>` uses — define it with `knit project command set ci -- cargo test`) and records a `check.recorded` node: pass if every targeted repo exited 0, fail otherwise. A failing run is still recorded before the command errors, so the red verdict is on the ledger. `knit check record` is the door for verdicts computed elsewhere — another tool, a host CI run, a human — without making that tool a second source of truth: the record always lives in the bundle artifact and syncs to KnitHub with it.
+
+**Freshness.** A verdict is *fresh* while every repo currently tracked in the bundle still sits on the head SHA the verdict was pinned to. Any new commit, any repo added later, and the verdict reads *stale*. There is no way to assert "merge ready" directly — readiness is always derived: required checks green **and** fresh at the current heads. `knit check status` shows both dimensions:
+
+```txt
+check       status  state   recorded
+ci          green   fresh   2026-06-12T09:14:03.118Z knit@b245236
+functional  green   stale   2026-06-11T22:40:11.402Z knit@9020475
+```
+
+**Gating landing.** Projects can require checks in the landing template:
+
+```json
+{ "landing": { "requireChecks": ["ci"] } }
+```
+
+`knit land plan` copies `requireChecks` into the editable per-bundle plan, `knit land check` reports each required check (green/red/stale/missing) and counts anything non-green as blocked, and `knit land apply`/`resume` refuse to execute until every required check is green and fresh — `--skip-checks` is the explicit escape hatch. Re-record after the last commit, land while it is still fresh.
+
+Checks are attestations, not hosted CI: Knit runs one command per check, the exit code is the verdict, and whoever can write the bundle can record one — the same trust model as committing. Knit never schedules, watches, or retries checks.
 
 ### Views
 
@@ -632,6 +665,7 @@ Typical node types:
 - `feature.landed`
 - `pr.revert`
 - `land.update`
+- `check.recorded`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

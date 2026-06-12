@@ -233,6 +233,11 @@ pub enum Commands {
         #[arg(long)]
         no_remote: bool,
     },
+    /// Record and inspect named check verdicts on the bundle ledger.
+    Check {
+        #[command(subcommand)]
+        command: CheckCommand,
+    },
     /// Run a project command inside resolved bundle checkouts.
     Run {
         /// Configured project command name. Omit when passing a raw command after --.
@@ -979,6 +984,37 @@ pub enum PublishCommand {
 }
 
 #[derive(Subcommand)]
+pub enum CheckCommand {
+    /// Run the project command of the same name and record the verdict.
+    Run {
+        /// Configured project command name (e.g. `ci`).
+        name: String,
+        /// Target repo id or path. Overrides configured repos.
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Run against every tracked repo.
+        #[arg(long)]
+        all: bool,
+    },
+    /// Record a verdict computed elsewhere (another tool or a human).
+    Record {
+        /// Check name (e.g. `ci`, `functional`).
+        name: String,
+        /// Record the check as green.
+        #[arg(long, conflicts_with = "fail")]
+        pass: bool,
+        /// Record the check as red.
+        #[arg(long)]
+        fail: bool,
+        /// Optional human-readable detail stored with the verdict.
+        #[arg(long)]
+        detail: Option<String>,
+    },
+    /// Show the latest verdict per check and whether it is still fresh.
+    Status,
+}
+
+#[derive(Subcommand)]
 pub enum LandCommand {
     /// Generate an editable landing plan from recorded publications.
     Plan {
@@ -997,6 +1033,9 @@ pub enum LandCommand {
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
         #[arg(long)]
         plan: Option<PathBuf>,
+        /// Land even when required checks are missing, red, or stale.
+        #[arg(long)]
+        skip_checks: bool,
         /// Read a bundle JSON artifact from this path and land PRs without a local Knit workspace.
         #[arg(long)]
         from_artifact: Option<PathBuf>,
@@ -1022,6 +1061,9 @@ pub enum LandCommand {
     },
     /// Resume a failed or incomplete landing run.
     Resume {
+        /// Resume even when required checks are missing, red, or stale.
+        #[arg(long)]
+        skip_checks: bool,
         /// Run file to resume. Defaults to the latest run.
         #[arg(long)]
         run: Option<PathBuf>,

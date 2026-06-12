@@ -199,6 +199,29 @@ fn print_node(node: &BundleNode) {
                 node.message.as_deref().unwrap_or("")
             );
         }
+        "check.recorded" => {
+            let name = node.title.as_deref().unwrap_or("check");
+            let message = node.message.as_deref().unwrap_or("");
+            let verdict = if message.starts_with("pass") {
+                out::ok("pass")
+            } else {
+                out::danger("fail")
+            };
+            println!(
+                "{}  {} {}  {}",
+                out::node(&node.id),
+                out::heading(format!("check {name}")),
+                verdict,
+                out::muted(message)
+            );
+            for pin in &node.commits {
+                println!(
+                    "  {} {}",
+                    out::repo(&pin.repo_id),
+                    out::sha(short_sha(&pin.sha))
+                );
+            }
+        }
         "feature.closed" => {
             let reason = node.message.as_deref().unwrap_or("closed");
             println!(

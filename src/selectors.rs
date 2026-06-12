@@ -4,7 +4,8 @@ use anyhow::{bail, Context, Result};
 pub fn is_loggable_node(node: &BundleNode) -> bool {
     matches!(
         node.node_type.as_str(),
-        "checkpoint"
+        "check.recorded"
+            | "checkpoint"
             | "commit.group"
             | "feature.closed"
             | "feature.landed"
