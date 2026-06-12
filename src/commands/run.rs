@@ -191,6 +191,63 @@ fn resolve_default_repo(active: &ActiveBundle) -> Result<Vec<usize>> {
 }
 
 fn run_invocation(active: &ActiveBundle, invocation: RunInvocation) -> Result<()> {
+    let failures = run_invocation_collect(active, invocation)?;
+    if !failures.is_empty() {
+        bail!("run command failed: {}", failures.join(", "));
+    }
+    Ok(())
+}
+
+/// What `run_named_command_collect` learned from one execution: the command
+/// line it ran and the per-repo failures (empty means every repo exited 0).
+pub(crate) struct NamedRunOutcome {
+    pub(crate) command_display: String,
+    pub(crate) failures: Vec<String>,
+}
+
+/// Run the configured project command `name` across its repos like `knit run
+/// <name>`, but report per-repo failures instead of failing the command.
+/// Used by `knit check run`, where a failing command is a recordable verdict
+/// rather than an error.
+pub(crate) fn run_named_command_collect(
+    active: &ActiveBundle,
+    name: &str,
+    explicit_repos: &[String],
+    all: bool,
+) -> Result<NamedRunOutcome> {
+    if active.bundle.repos.is_empty() {
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
+    }
+    let project = load_project_for_bundle(active)?;
+    let command_name = crate::ids::slugify(name);
+    let Some(command) = project.commands.get(&command_name) else {
+        bail!(
+            "Project command `{command_name}` is not configured. Define it with `knit project command set {command_name} -- <command>`."
+        );
+    };
+    let invocation = RunInvocation {
+        label: command_name,
+        repos: resolve_command_repos(active, command, explicit_repos, all)?,
+        args: command.command.iter().map(OsString::from).collect(),
+        cwd: command.cwd.clone(),
+        env: command
+            .env
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect(),
+    };
+    if invocation.args.is_empty() {
+        bail!("Command `{}` has no executable.", invocation.label);
+    }
+    let command_display = command.command.join(" ");
+    let failures = run_invocation_collect(active, invocation)?;
+    Ok(NamedRunOutcome {
+        command_display,
+        failures,
+    })
+}
+
+fn run_invocation_collect(active: &ActiveBundle, invocation: RunInvocation) -> Result<Vec<String>> {
     let multiple = invocation.repos.len() > 1;
     let mut failures = Vec::new();
     for index in invocation.repos {
@@ -236,10 +293,7 @@ fn run_invocation(active: &ActiveBundle, invocation: RunInvocation) -> Result<()
         }
     }
 
-    if !failures.is_empty() {
-        bail!("run command failed: {}", failures.join(", "));
-    }
-    Ok(())
+    Ok(failures)
 }
 
 fn command_cwd(active: &ActiveBundle, repo: &RepoEntry, subdir: Option<&str>) -> Result<PathBuf> {

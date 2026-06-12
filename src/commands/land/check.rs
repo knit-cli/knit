@@ -54,6 +54,28 @@ pub fn check_landing() -> Result<()> {
     }
 
     println!("Bundle: {}\n", out::heading(&active.bundle.id));
+
+    let required = super::required_check_names(&active);
+    let mut checks_blocked = 0usize;
+    if !required.is_empty() {
+        for (name, state) in super::validate::assess_required_checks(&active, &required) {
+            let label = match state {
+                super::validate::RequiredCheckState::Green => out::ok("green"),
+                super::validate::RequiredCheckState::Stale => out::warn("stale"),
+                _ => out::danger(state.label()),
+            };
+            if state != super::validate::RequiredCheckState::Green {
+                checks_blocked += 1;
+            }
+            println!(
+                "{} {} {}",
+                out::heading("Required check:"),
+                out::repo(&name),
+                label
+            );
+        }
+        println!();
+    }
     println!(
         "{}  {}  {}  {}  {}  {}  {}",
         out::header_field("repo", 16),
@@ -81,6 +103,17 @@ pub fn check_landing() -> Result<()> {
     }
 
     println!();
+    if checks_blocked > 0 {
+        println!(
+            "{} {ready} ready, {blocked} blocked, {landed} already landed; {checks_blocked} required check(s) not green",
+            out::heading("Readiness:")
+        );
+        println!(
+            "{} refresh required checks with `knit check run <name>` before `knit land apply`.",
+            out::heading("Next:")
+        );
+        return Ok(());
+    }
     println!(
         "{} {ready} ready, {blocked} blocked, {landed} already landed",
         out::heading("Readiness:")

@@ -273,6 +273,10 @@ pub struct ProjectLandingPlan {
     /// merge steps that already landed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub on_failure: Option<super::LandOnFailure>,
+    /// Named checks (see `knit check`) that must be green and fresh at the
+    /// current bundle heads before `knit land apply` will execute.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub require_checks: Vec<String>,
     #[serde(default)]
     pub merge: ProjectLandingMergePlan,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

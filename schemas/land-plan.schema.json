@@ -11,6 +11,7 @@
     "sourceProjectId": { "type": "string" },
     "createdAt": { "type": "string" },
     "onFailure": { "enum": ["resume", "rollback"], "default": "resume" },
+    "requireChecks": { "type": "array", "items": { "type": "string" } },
     "steps": {
       "type": "array",
       "minItems": 1,
