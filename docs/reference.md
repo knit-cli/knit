@@ -213,7 +213,7 @@ ci          green   fresh   2026-06-12T09:14:03.118Z knit@b245236
 functional  green   stale   2026-06-11T22:40:11.402Z knit@9020475
 ```
 
-**Gating landing.** Projects can require checks in the landing template:
+**Gating landing.** Checks are purely informational by default: recording them never blocks anything, and projects that configure nothing are completely unaffected. Gating is opt-in — a project that wants it requires named checks in its landing template:
 
 ```json
 { "landing": { "requireChecks": ["ci"] } }
