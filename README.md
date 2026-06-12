@@ -120,7 +120,9 @@ knit land               # creates/shows the landing plan (does not merge)
 knit land apply         # merges each PR into its base, then runs any deploy steps
 ```
 
-`knit land` is safe on its own: it only creates or shows the plan. Nothing merges until `knit land apply`. If a landing fails halfway, `knit land resume` continues it, and `knit land rollback --apply` opens revert PRs for the steps that already merged (or set `onFailure: "rollback"` in the landing template to do that automatically).
+`knit land` is safe on its own: it only creates or shows the plan. Nothing merges until `knit land apply`.
+
+Before landing, you can record test verdicts on the bundle itself: `knit check run ci` runs the project command named `ci` and pins the pass/fail result to the exact per-repo commits it ran against. Verdicts go stale the moment the bundle moves, and a project can require named checks to be green and fresh before `knit land apply` will execute (`landing.requireChecks`). With several bundles in flight — especially agent-driven ones — `knit check status` answers "which of these is actually ready?" from the ledger instead of from claims. If a landing fails halfway, `knit land resume` continues it, and `knit land rollback --apply` opens revert PRs for the steps that already merged (or set `onFailure: "rollback"` in the landing template to do that automatically).
 
 **Local-only, no code host** — integrate the bundle's feature branches into a target branch directly:
 

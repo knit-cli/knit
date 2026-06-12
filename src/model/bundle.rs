@@ -544,6 +544,35 @@ impl BundleNode {
         }
     }
 
+    /// A recorded check verdict: a named check (`ci`, `functional`, ...)
+    /// passed or failed against the exact per-repo heads in `pins`. `title`
+    /// carries the check name, `message` the verdict (`pass — ...` /
+    /// `fail — ...`), and `commits` the head pins the verdict applies to.
+    pub fn check_recorded(
+        id: String,
+        created_at: String,
+        name: String,
+        message: String,
+        pins: Vec<CommitRef>,
+    ) -> Self {
+        Self {
+            id,
+            node_type: "check.recorded".to_string(),
+            created_at,
+            title: Some(name),
+            repo_ids: None,
+            commit_group_id: None,
+            message: Some(message),
+            target_node_id: None,
+            plan_id: None,
+            run_id: None,
+            provider: None,
+            publication_urls: Vec::new(),
+            commits: pins,
+            repo_changes: Vec::new(),
+        }
+    }
+
     pub fn feature_archived(id: String, created_at: String, reason: Option<String>) -> Self {
         Self {
             id,

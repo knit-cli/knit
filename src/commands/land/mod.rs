@@ -110,7 +110,12 @@ pub fn land_default() -> Result<()> {
     generate_land_plan(None, None, false)
 }
 
-pub fn apply_land_plan(plan_path: Option<&Path>, remote: &[String], no_remote: bool) -> Result<()> {
+pub fn apply_land_plan(
+    plan_path: Option<&Path>,
+    remote: &[String],
+    no_remote: bool,
+    skip_checks: bool,
+) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_plan_path(&active, plan_path)?;
     if !path.exists() {
@@ -121,6 +126,7 @@ pub fn apply_land_plan(plan_path: Option<&Path>, remote: &[String], no_remote: b
     }
     let plan: LandPlan = read_json(&path)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
+    validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
     validate::preflight_publications(&active, &plan, None)?;
 
@@ -136,7 +142,12 @@ pub fn apply_land_plan(plan_path: Option<&Path>, remote: &[String], no_remote: b
     Ok(())
 }
 
-pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bool) -> Result<()> {
+pub fn resume_land_run(
+    run_path: Option<&Path>,
+    remote: &[String],
+    no_remote: bool,
+    skip_checks: bool,
+) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
@@ -158,6 +169,7 @@ pub fn resume_land_run(run_path: Option<&Path>, remote: &[String], no_remote: bo
     let plan_path = resolve_stored_path(&active.root, &run.plan_path);
     let plan: LandPlan = read_json(&plan_path)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
+    validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
     validate::preflight_publications(&active, &plan, Some(&run))?;
     run.status = LandStatus::Running;
@@ -212,6 +224,31 @@ pub fn update_land_branches(
 // ---------------------------------------------------------------------------
 // Shared helpers used across the land submodules.
 // ---------------------------------------------------------------------------
+
+/// The check names landing requires for this bundle: the plan file's
+/// `requireChecks` when a plan exists, else the project landing template's.
+pub(super) fn required_check_names(active: &ActiveBundle) -> Vec<String> {
+    if let Ok(path) = resolve_land_plan_path(active, None) {
+        if path.exists() {
+            if let Ok(plan) = read_json::<LandPlan>(&path) {
+                return plan.require_checks;
+            }
+        }
+    }
+    crate::store::load_config(&active.root)
+        .ok()
+        .and_then(|config| active.bundle.project_id.clone().or(config.active_project))
+        .and_then(|project_id| {
+            read_json::<crate::model::KnitProject>(&crate::store::project_path(
+                &active.root,
+                &project_id,
+            ))
+            .ok()
+        })
+        .and_then(|project| project.landing)
+        .map(|landing| landing.require_checks)
+        .unwrap_or_default()
+}
 
 fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, RepoEntry, PathBuf)> {
     let (index, repo) = active

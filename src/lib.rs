@@ -19,8 +19,9 @@ pub mod tracking;
 use anyhow::Result;
 
 pub use cli::{
-    BundleCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand, ProjectCommand,
-    ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand, SyncCommand, ViewCommand,
+    BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
+    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    SyncCommand, ViewCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -303,6 +304,21 @@ pub fn run(cli: Cli) -> Result<()> {
             remote,
             no_remote,
         } => commands::push_repos(&repos, all, set_upstream, &remote, no_remote),
+        Commands::Check { command } => match command {
+            CheckCommand::Run { name, repos, all } => commands::run_check(&name, &repos, all),
+            CheckCommand::Record {
+                name,
+                pass,
+                fail,
+                detail,
+            } => {
+                if pass == fail {
+                    anyhow::bail!("Pass exactly one of --pass or --fail.");
+                }
+                commands::record_check(&name, pass, detail.as_deref())
+            }
+            CheckCommand::Status => commands::show_check_status(),
+        },
         Commands::Run {
             name,
             repos,
@@ -397,9 +413,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 out,
                 remote,
                 no_remote,
+                skip_checks,
             }) => match from_artifact {
                 Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
-                None => commands::apply_land_plan(plan.as_deref(), &remote, no_remote),
+                None => commands::apply_land_plan(plan.as_deref(), &remote, no_remote, skip_checks),
             },
             Some(LandCommand::Rollback { run, apply }) => {
                 commands::rollback_land_run(run.as_deref(), apply)
@@ -408,7 +425,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 run,
                 remote,
                 no_remote,
-            }) => commands::resume_land_run(run.as_deref(), &remote, no_remote),
+                skip_checks,
+            }) => commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks),
             Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
             Some(LandCommand::Check) => commands::check_landing(),
             Some(LandCommand::Update {

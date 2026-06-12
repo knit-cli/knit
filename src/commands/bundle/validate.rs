@@ -193,6 +193,20 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record message", node.id));
             }
         }
+        "check.recorded" => {
+            if node.title.as_deref().unwrap_or("").trim().is_empty() {
+                errors.push(format!("node `{}` must record title", node.id));
+            }
+            if node.message.as_deref().unwrap_or("").trim().is_empty() {
+                errors.push(format!("node `{}` must record message", node.id));
+            }
+            if node.commits.is_empty() {
+                errors.push(format!("node `{}` must record commits", node.id));
+            }
+            for commit in &node.commits {
+                validate_commit_ref("node", &node.id, &commit.repo_id, &commit.sha, errors);
+            }
+        }
         "feature.landed" => {
             if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
                 errors.push(format!("node `{}` must record repoIds", node.id));
