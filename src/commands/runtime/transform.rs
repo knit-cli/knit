@@ -352,6 +352,14 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    fn normalized_path_text(value: impl AsRef<str>) -> String {
+        value.as_ref().replace('\\', "/")
+    }
+
+    fn json_path_text(value: &Value) -> String {
+        normalized_path_text(value.as_str().unwrap())
+    }
+
     fn knithub_like_config(root: &str) -> Value {
         json!({
             "name": "knithub",
@@ -441,7 +449,10 @@ mod tests {
         // Build paths pointing into tracked repos land in worktrees; the
         // workspace-root context stays.
         let backend_build = &config["services"]["backend"]["build"];
-        assert_eq!(backend_build["context"], root_str);
+        assert_eq!(
+            json_path_text(&backend_build["context"]),
+            normalized_path_text(&root_str)
+        );
         assert_eq!(
             backend_build["dockerfile"],
             ".knit/worktrees/demo/knithub/Dockerfile.worktree"
@@ -456,21 +467,24 @@ mod tests {
 
         let frontend_build = &config["services"]["frontend"]["build"];
         assert_eq!(
-            frontend_build["context"],
-            worktrees.join("knithub-frontend").display().to_string()
+            json_path_text(&frontend_build["context"]),
+            normalized_path_text(worktrees.join("knithub-frontend").display().to_string())
         );
         // gloss-web-ui is not in the bundle: additional context stays on main.
         assert_eq!(
-            frontend_build["additional_contexts"]["gloss-web-ui"],
-            format!("{root_str}/gloss-web-ui")
+            json_path_text(&frontend_build["additional_contexts"]["gloss-web-ui"]),
+            normalized_path_text(format!("{root_str}/gloss-web-ui"))
         );
 
         // Bind mounts into tracked repos remap; workspace mount stays.
         let backend_volumes = config["services"]["backend"]["volumes"].as_array().unwrap();
-        assert_eq!(backend_volumes[0]["source"], root_str);
         assert_eq!(
-            backend_volumes[1]["source"],
-            worktrees.join("knithub/priv").display().to_string()
+            json_path_text(&backend_volumes[0]["source"]),
+            normalized_path_text(&root_str)
+        );
+        assert_eq!(
+            json_path_text(&backend_volumes[1]["source"]),
+            normalized_path_text(worktrees.join("knithub").join("priv").display().to_string())
         );
         // Named volumes untouched (project scoping isolates them).
         assert_eq!(config["services"]["db"]["volumes"][0]["source"], "db-data");
