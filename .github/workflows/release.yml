@@ -28,8 +28,10 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-musl
             os: ubuntu-latest
+          # Intel macOS is cross-compiled from the arm64 runner; the macos-13
+          # (last Intel) runner pool was retired by GitHub.
           - target: x86_64-apple-darwin
-            os: macos-13
+            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-pc-windows-msvc
