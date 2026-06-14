@@ -566,8 +566,8 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
         }
     });
     let base_url = spawn_fake_knithub_with_body(export.to_string());
-    knit(&workspace, ["remote", "add", "knithub", &base_url]);
-    let env = [("KNITHUB_TOKEN", "test-token")];
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     // Without --merge, diverged ledgers are kept local and reported.
     let plain = knit_with_env(&workspace, ["pull"], &env);

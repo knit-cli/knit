@@ -57,13 +57,13 @@ pub enum Commands {
         project: String,
         /// Directory to create. Defaults to the project slug.
         target: Option<PathBuf>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
-        /// KnitHub base URL. Required outside an existing configured workspace unless KNITHUB_URL is set.
+        /// Named KnitHub remote. Defaults to the configured sync remote.
+        #[arg(long)]
+        remote: Option<String>,
+        /// KnitHub base URL. Required when the remote is not configured.
         #[arg(long)]
         url: Option<String>,
-        /// KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN.
+        /// KnitHub token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.
         #[arg(long)]
         token: Option<String>,
         /// Bundle to make active after clone. Defaults to the latest open exported bundle.
@@ -174,7 +174,7 @@ pub enum Commands {
         /// Fetch mode: --all (default), --git only, --knit only.
         #[arg(long, default_value = "all", value_name = "MODE")]
         mode: FetchMode,
-        /// Named KnitHub remote for knit fetch. Uses `knithub` or sync_remote if not specified.
+        /// Named KnitHub remote for knit fetch. Defaults to the configured sync remote.
         #[arg(long, value_name = "REMOTE")]
         remote: Option<String>,
         /// (Deprecated, use --git) Skip KnitHub remote sync.
@@ -205,8 +205,8 @@ pub enum Commands {
         /// Update every open bundle's checkouts from its KnitHub artifact. Combine with --main.
         #[arg(long)]
         bundles: bool,
-        /// Also pull the current bundle artifact from a KnitHub remote. With no value, uses `knithub`.
-        #[arg(long, value_name = "REMOTE", num_args = 0..=1, default_missing_value = "knithub")]
+        /// Also pull the current bundle artifact from a named KnitHub remote.
+        #[arg(long, value_name = "REMOTE")]
         remote: Option<String>,
         /// Skip configured KnitHub remote sync for this pull.
         #[arg(long)]
@@ -349,8 +349,8 @@ pub enum Commands {
         #[arg(long)]
         pull: bool,
         /// Named KnitHub remote used with --pull.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// Commit staged changes across tracked checkouts.
     Commit {
@@ -425,8 +425,7 @@ pub enum SyncCommand {
     Push {
         #[command(flatten)]
         targets: SyncTargetArgs,
-        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
-        /// sync remotes, then a remote named `knithub`.
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
     },
@@ -435,8 +434,7 @@ pub enum SyncCommand {
     Pull {
         #[command(flatten)]
         targets: SyncTargetArgs,
-        /// Named KnitHub remote(s). Repeat for several. Defaults to configured
-        /// sync remotes, then a remote named `knithub`.
+        /// Named KnitHub remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
     },
@@ -666,9 +664,9 @@ pub enum ProjectCommand {
     Push {
         /// Project name. Defaults to the active project.
         name: Option<String>,
-        /// Named KnitHub remote.
-        #[arg(long, default_value = "knithub")]
-        remote: String,
+        /// Named KnitHub remote. Defaults to the configured sync remote.
+        #[arg(long)]
+        remote: Option<String>,
     },
     /// Write or refresh project-specific AGENTS.md guidance.
     Agents {
@@ -821,11 +819,11 @@ pub enum ViewCommand {
 pub enum RemoteCommand {
     /// Add or replace a named KnitHub API remote.
     Add {
-        /// Remote name, for example `knithub`.
+        /// Remote name, for example `hosted`.
         name: String,
-        /// KnitHub base URL, for example `http://localhost:4000` or `https://api.knithub.example`.
+        /// KnitHub base URL, for example `http://localhost:4000` or `https://host.example`.
         url: String,
-        /// Optional KnitHub token. Prefer KNITHUB_TOKEN or KNIT_REMOTE_<NAME>_TOKEN for shared workspaces.
+        /// Optional KnitHub token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
         /// Store this remote in the user-level Knit config instead of the workspace.
