@@ -1,6 +1,6 @@
 # Knit
 
-Knit is a local-first CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": a **bundle** is the cross-repo analogue of a git branch, holding a small set of related repositories. Knit creates a coordinated checkout per repo, commits staged changes across them all at once, and records the result in a language-neutral JSON artifact. From that bundle it can open one pull request per repo and land them as a single set, or merge the feature branches into local targets when there is no code host. Parallel features stay isolated: the same source repo can appear in many bundles at once, each on its own branch and worktree.
+Knit is a CLI for authoring and coordinating multi-repo feature work. Think of it as "git for cross-repo feature work": a **bundle** is the cross-repo analogue of a git branch, holding a small set of related repositories. Knit creates a coordinated checkout per repo, commits staged changes across them all at once, and records the result in a language-neutral JSON artifact. From that bundle it can open one pull request per repo and land them as a single set, or merge the feature branches into local targets when there is no code host. Parallel features stay isolated: the same source repo can appear in many bundles at once, each on its own branch and worktree.
 
 Knit shells out to `git`. It does not use libgit2 and it does not try to replace git — everyday verbs (`status`, `diff`, `add`, `commit`, `push`, `log`) just run across every repo in the bundle at once.
 
@@ -48,6 +48,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
 - **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
 - **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and [Gloss](https://github.com/marc-merino/gloss) cross-repo reviews on top of the same artifact.
+- **Gloss-ready review.** The same bundle artifact gives `gloss` enough cross-repo context to prepare reviews and explanations.
 
 ## Concepts in one breath
 
