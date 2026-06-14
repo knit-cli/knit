@@ -175,11 +175,12 @@ history ledger from a KnitHub remote first.
 ## 10. Host it on KnitHub (optional)
 
 Knit is local-first, but bundles, project history, and saved views can be
-hosted on [knithub.dev](https://knithub.dev) so they survive machines and show
-up in dashboards:
+hosted on your KnitHub deployment so they survive machines and show up in
+dashboards:
 
 ```sh
-knit remote add knithub https://knithub.dev --token <your-token> --global
+knit remote add hosted https://<your-knit-api-url> --token <your-token> --global
+knit config set --global sync-remotes hosted
 knit project push                       # create the hosted project (uploads views too)
 KNIT_BUNDLE=my-feature knit sync push   # bundles + history for the walkthrough bundle
 ```
@@ -195,7 +196,7 @@ sync automatically, hosted dashboards show bundles and project history, and
 machine. `knit related --pull` and `knit sync pull` read the same hosted
 history back.
 
-<!-- image: docs/assets/knithub-dashboard.png — a project's bundles on knithub.dev -->
+<!-- image: docs/assets/knithub-dashboard.png — a project's bundles in a KnitHub deployment -->
 
 Projects can also be cloned from Knit. `knit clone` will rebuild the project
 as it is set up in Knit, given your git and KnitHub tokens allow it.

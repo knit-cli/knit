@@ -46,8 +46,9 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **Bundles are branches that span repos.** One feature unit across N repositories: shared status, combined diff, one logical commit, one PR per repo landed as a set.
 - **Parallel by construction.** The same repo can sit in many bundles at once, each on its own branch and generated worktree. Run one coding agent per bundle — they cannot collide, and each worktree carries its own `AGENTS.md` so agents wake up oriented.
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
-- **Local-first, host optional.** Everything works against plain git repos. [KnitHub](https://knithub.dev) adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and [Gloss](https://github.com/marc-merino/gloss) cross-repo reviews on top of the same artifact.
-- Facilitates cross repo review with `gloss`.
+- **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
+- **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and [Gloss](https://github.com/marc-merino/gloss) cross-repo reviews on top of the same artifact.
+- **Gloss-ready review.** The same bundle artifact gives `gloss` enough cross-repo context to prepare reviews and explanations.
 
 ## Concepts in one breath
 

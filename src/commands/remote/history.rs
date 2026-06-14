@@ -2,7 +2,7 @@
 
 use super::client::{
     effective_workspace_config, load_project_if_present, request_json, resolve_project_id,
-    resolve_remote, resolve_token,
+    resolve_remote, resolve_sync_remote_name, resolve_token,
 };
 use crate::history::{append_history_events, load_history_events, refresh_project_history};
 use crate::model::{HistoryEvent, KnitRemote};
@@ -50,11 +50,15 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
     Ok(())
 }
 
-pub fn pull_history_from_remote(project: Option<&str>, remote_name: &str) -> Result<()> {
+pub fn pull_history_from_remote(project: Option<&str>, remote_name: Option<&str>) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, project)?;
-    let remote = resolve_remote(&config, remote_name)?;
-    let token = resolve_token(remote_name, remote)?;
+    let remote_name = match remote_name {
+        Some(remote_name) => crate::ids::slugify(remote_name),
+        None => resolve_sync_remote_name(&config)?,
+    };
+    let remote = resolve_remote(&config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
     let events = fetch_project_history_events(remote, &token, &project_id)?;
     let appended = append_history_events(&root, &project_id, &events)?;
     println!(

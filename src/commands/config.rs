@@ -221,7 +221,7 @@ fn parse_remote_names(value: &str) -> Result<Vec<String>> {
         }
     }
     if names.is_empty() {
-        bail!("Expected at least one remote name, for example `local,knithub`.");
+        bail!("Expected at least one remote name, for example `prod,staging`.");
     }
     Ok(names)
 }
