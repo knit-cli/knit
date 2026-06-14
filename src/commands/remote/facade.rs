@@ -47,13 +47,13 @@ impl SyncTargets {
 
 /// Resolve the remote names this sync should hit. Explicit `--remote` overrides
 /// win; otherwise fall back to configured sync remotes (`syncRemotes`,
-/// `sync_remote`, then a remote literally named `knithub`).
+/// `sync_remote`, then the sole configured remote).
 fn resolve_remotes(remote_overrides: &[String]) -> Result<Vec<String>> {
     let (_, config) = effective_workspace_config()?;
     let remotes = resolve_sync_remote_names(&config, remote_overrides);
     if remotes.is_empty() {
         bail!(
-            "No KnitHub remote configured. Run `knit remote add --global knithub <url>`, `knit remote add knithub <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
+            "No KnitHub remote configured. Run `knit remote add --global <name> <url>`, `knit remote add <name> <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
         );
     }
     Ok(remotes)
@@ -121,7 +121,7 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             }
         }
         if targets.history {
-            if let Err(error) = pull_history_from_remote(None, remote) {
+            if let Err(error) = pull_history_from_remote(None, Some(remote)) {
                 failures.push(format!("{remote} history: {error:#}"));
             }
         }

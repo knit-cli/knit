@@ -263,8 +263,8 @@ fn bundle_creation_refuses_slug_taken_on_sync_remote() {
     setup_three_repo_project(&workspace, &root);
 
     let base_url = spawn_fake_knithub_export("payment-flow", "open");
-    knit(&workspace, ["remote", "add", "knithub", &base_url]);
-    let env = [("KNITHUB_TOKEN", "test-token")];
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     let refused = knit_fails_with_env(&workspace, ["bundle", "payment flow"], &env);
     assert!(refused.contains("already exists on the KnitHub sync remote"));

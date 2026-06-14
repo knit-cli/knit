@@ -502,8 +502,8 @@ knit --bundle feature-a push --set-upstream
 Push the bundle to one or more KnitHub remotes so it appears in hosted dashboards. `knit push --remote` pushes feature branches and the bundle artifact together; `knit sync push` is the artifact-only door and is the one verb family for moving bundles, history, and views to KnitHub:
 
 ```sh
-knit --bundle feature-a push --remote local --remote knithub
-knit --bundle feature-a sync push --remote local --remote knithub
+knit --bundle feature-a push --remote hosted
+knit --bundle feature-a sync push --remote hosted
 knit --bundle feature-a sync push --bundles
 knit --bundle feature-a sync pull --history
 ```
@@ -605,14 +605,14 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
-- `knit config set sync-remotes local,knithub` makes push-sync upload bundle artifacts to multiple KnitHub remotes.
+- `knit config set sync-remotes hosted` makes push-sync upload bundle artifacts to your configured KnitHub remote.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit (local reconcile, no network).
 - `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...` is the one verb family for moving artifacts to KnitHub; with no target flag it pushes bundle, history, and views.
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...` pulls those same artifacts from KnitHub.
 - `knit pull --merge` union-merges the bundle ledger when the local and KnitHub artifacts have diverged (two users recorded work concurrently); diverged feature branches still need a git merge in the worktree afterwards.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
-- `knit push --remote local --remote knithub` pushes the resolved bundle's branches and artifact to both configured KnitHub remotes so it is visible in hosted dashboards.
+- `knit push --remote hosted` pushes the resolved bundle's branches and artifact to the configured KnitHub remote so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit clean --archived --worktrees` removes generated worktrees left behind by bundles archived with `--keep-worktrees`.
 

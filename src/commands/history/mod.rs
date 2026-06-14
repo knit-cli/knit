@@ -78,7 +78,7 @@ pub fn show_related_history(
     limit: usize,
     commit_limit: usize,
     pull: bool,
-    remote: &str,
+    remote: Option<&str>,
 ) -> Result<()> {
     if paths.is_empty() {
         bail!("Pass at least one path to inspect.");

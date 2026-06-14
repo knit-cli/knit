@@ -64,7 +64,7 @@ pub(super) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&
 pub(super) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
-        .context("No KnitHub token configured. Set KNITHUB_TOKEN, KNIT_REMOTE_<NAME>_TOKEN, or `knit remote token <name> <token>`.")
+        .context("No KnitHub token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")
 }
 
 pub(super) fn token_from_env(name: &str) -> Option<String> {
@@ -81,12 +81,16 @@ pub(super) fn token_from_env(name: &str) -> Option<String> {
     std::env::var(env_name)
         .ok()
         .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("KNIT_REMOTE_TOKEN").ok())
+        .filter(|value| !value.trim().is_empty())
         .or_else(|| std::env::var("KNITHUB_TOKEN").ok())
         .filter(|value| !value.trim().is_empty())
 }
 
 /// Return configured KnitHub sync remotes in priority order. `syncRemotes` is the
-/// multi-target form; `syncRemote` remains the legacy single-target form.
+/// multi-target form; `syncRemote` remains the legacy single-target form. If a
+/// config has exactly one remote and no explicit sync remote, that sole remote
+/// is the sync remote by convention.
 pub fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
     let mut names = Vec::new();
     if !config.sync_remotes.is_empty() {
@@ -99,8 +103,10 @@ pub fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
             push_unique_remote_name(&mut names, name);
         }
     }
-    if names.is_empty() && config.remotes.contains_key("knithub") {
-        names.push("knithub".to_string());
+    if names.is_empty() && config.remotes.len() == 1 {
+        if let Some(name) = config.remotes.keys().next() {
+            push_unique_remote_name(&mut names, name);
+        }
     }
     names
 }
@@ -132,10 +138,10 @@ fn push_unique_remote_name(names: &mut Vec<String>, name: &str) {
 }
 
 /// Resolve the primary KnitHub sync remote, preferring `syncRemotes[0]`, then
-/// legacy `syncRemote`, then a remote literally named `knithub`.
+/// legacy `syncRemote`, then the sole configured remote.
 pub(super) fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
     configured_sync_remote_names(config).into_iter().next().context(
-        "No KnitHub sync remote configured. Run `knit remote add knithub <url>`, `knit config set sync-remote <name>`, or use explicit prune flags instead of --all.",
+        "No KnitHub sync remote configured. Run `knit remote add <name> <url>`, `knit config set sync-remote <name>`, or use explicit prune flags instead of --all.",
     )
 }
 

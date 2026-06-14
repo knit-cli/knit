@@ -505,10 +505,10 @@ knit sync push --history       # push only project history events
 knit sync push --views         # push only your saved views
 knit sync pull                 # pull bundle + history + views
 knit sync pull --history       # pull only project history events
-knit sync push --remote local --remote knithub   # fan out to several remotes
+knit sync push --remote hosted    # use an explicit remote
 ```
 
-With no target flag (`--bundles`/`--history`/`--views`/`--all`), `knit sync push`/`pull` move every relevant artifact family. Remotes default to the configured sync remotes (`knit config set sync-remotes ...`, then `sync-remote`), falling back to a remote named `knithub`; override with one or more `--remote <name>`.
+With no target flag (`--bundles`/`--history`/`--views`/`--all`), `knit sync push`/`pull` move every relevant artifact family. Remotes default to the configured sync remotes (`knit config set sync-remotes ...`, then `sync-remote`), falling back to the sole configured remote; override with one or more `--remote <name>`.
 
 The git-shaped verbs keep their git semantics but route through the same internal sync module: `knit push --remote <name>` still pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` still pull recorded bundle state. Landing's automatic artifact sync (when `push-sync` is enabled) goes through the same module too. There is one implementation behind several differently shaped doors.
 
@@ -516,18 +516,18 @@ The git-shaped verbs keep their git semantics but route through the same interna
 Remotes can be workspace-local or user-global. Workspace `.knit/config.json` remotes override global remotes of the same name; otherwise commands fall back to the user-level config at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. This lets every workspace share the same hosted KnitHub remote unless a workspace deliberately points that name somewhere else:
 
 ```sh
-knit remote add --global knithub https://api.knithub.dev
-export KNIT_REMOTE_KNITHUB_TOKEN="<KnitHub API token>"
-knit config set --global sync-remotes knithub
+knit remote add --global hosted https://<your-knit-api-url>
+export KNIT_REMOTE_HOSTED_TOKEN="<KnitHub API token>"
+knit config set --global sync-remotes hosted
 knit config show
-knit remote show knithub
+knit remote show hosted
 ```
 
 Workspace-only overrides stay local:
 
 ```sh
-knit remote add local http://localhost:4000
-knit config set sync-remotes local,knithub
+knit remote add staging http://localhost:4000
+knit config set sync-remotes staging
 knit push
 ```
 

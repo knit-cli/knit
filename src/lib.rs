@@ -40,7 +40,7 @@ pub fn run(cli: Cli) -> Result<()> {
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
             ProjectCommand::Remove { name, force } => commands::remove_project(&name, force),
             ProjectCommand::Push { name, remote } => {
-                commands::push_project_to_remote(name.as_deref(), &remote)
+                commands::push_project_to_remote(name.as_deref(), remote.as_deref())
             }
             ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
             ProjectCommand::Pull { name, repo, agents } => {
@@ -127,7 +127,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::clone_project_from_remote(
             &project,
             target.as_deref(),
-            &remote,
+            remote.as_deref(),
             url.as_deref(),
             token.as_deref(),
             active_bundle.as_deref(),
@@ -519,7 +519,7 @@ pub fn run(cli: Cli) -> Result<()> {
             limit,
             commit_limit,
             pull,
-            &remote,
+            remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
         Commands::Log {

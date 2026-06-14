@@ -103,8 +103,8 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
             "remote",
             "add",
             "--global",
-            "knithub",
-            "https://api.knithub.dev",
+            "hosted",
+            "https://remote.example.invalid",
             "--token",
             "global-token",
         ],
@@ -113,33 +113,33 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
     let global_config: Value =
         serde_json::from_str(&fs::read_to_string(knit_home.join("config.json")).unwrap()).unwrap();
     assert_eq!(
-        global_config["remotes"]["knithub"]["url"].as_str(),
-        Some("https://api.knithub.dev")
+        global_config["remotes"]["hosted"]["url"].as_str(),
+        Some("https://remote.example.invalid")
     );
 
     knit_with_env(&workspace, ["init", "demo"], &env);
-    let inherited = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
-    assert!(inherited.contains("https://api.knithub.dev"));
+    let inherited = knit_with_env(&workspace, ["remote", "show", "hosted"], &env);
+    assert!(inherited.contains("https://remote.example.invalid"));
     assert!(inherited.contains("Scope: global"));
     assert!(inherited.contains("Token: stored"));
 
     knit_with_env(
         &workspace,
-        ["remote", "add", "knithub", "http://localhost:4000"],
+        ["remote", "add", "hosted", "http://localhost:4000"],
         &env,
     );
-    let overridden = knit_with_env(&workspace, ["remote", "show", "knithub"], &env);
+    let overridden = knit_with_env(&workspace, ["remote", "show", "hosted"], &env);
     assert!(overridden.contains("http://localhost:4000"));
     assert!(overridden.contains("Scope: workspace"));
 
-    let global_only = knit_with_env(&workspace, ["remote", "show", "--global", "knithub"], &env);
-    assert!(global_only.contains("https://api.knithub.dev"));
+    let global_only = knit_with_env(&workspace, ["remote", "show", "--global", "hosted"], &env);
+    assert!(global_only.contains("https://remote.example.invalid"));
     assert!(global_only.contains("Scope: global"));
 
     let show = knit_with_env(&workspace, ["config", "show"], &env);
     assert!(show.contains("Global config"));
     assert!(show.contains("Effective config"));
-    assert!(show.contains("https://api.knithub.dev"));
+    assert!(show.contains("https://remote.example.invalid"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -161,7 +161,7 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
             "remote",
             "add",
             "--global",
-            "knithub",
+            "hosted",
             "http://127.0.0.1:9",
             "--token",
             "global-token",
@@ -200,7 +200,10 @@ fn config_can_target_multiple_knithub_sync_remotes() {
         &workspace,
         ["remote", "add", "local", "http://localhost:4000"],
     );
-    knit(&workspace, ["remote", "add", "prod", "https://knithub.dev"]);
+    knit(
+        &workspace,
+        ["remote", "add", "prod", "https://prod.example.invalid"],
+    );
 
     let set = knit(&workspace, ["config", "set", "sync-remotes", "local,prod"]);
     assert!(set.contains("sync-remotes=local,prod"), "{set}");
