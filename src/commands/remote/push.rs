@@ -5,7 +5,8 @@
 use super::client::{
     configured_sync_remote_names, decode_response, effective_workspace_config,
     load_project_if_present, normalize_base_url, request, request_json, resolve_project_id,
-    resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env, workspace_config,
+    resolve_remote, resolve_sync_remote_name, resolve_sync_remote_names, resolve_token,
+    token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::ids::slugify;
@@ -218,11 +219,15 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
     Ok(())
 }
 
-pub fn push_project_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
+pub fn push_project_to_remote(name: Option<&str>, remote_name: Option<&str>) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
-    let remote = resolve_remote(&config, remote_name)?;
-    let token = resolve_token(remote_name, remote)?;
+    let remote_name = match remote_name {
+        Some(remote_name) => slugify(remote_name),
+        None => resolve_sync_remote_name(&config)?,
+    };
+    let remote = resolve_remote(&config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
     let project = load_project_if_present(&root, &project_id)?;
     let pushed = upsert_project(remote, &token, &project_id, project.as_ref())?;
     let repo_count = match project.as_ref() {
@@ -351,11 +356,11 @@ pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result
 /// git push, when enabled.
 ///
 /// Resolution order for remotes: repeated explicit `--remote`, then
-/// `syncRemotes`, then legacy `sync_remote`, then a remote literally named
-/// `knithub`. With no remote configured this is a silent no-op. The `push_sync`
-/// config disables implicit sync, but explicit `--remote` still forces it.
-/// `--no-remote` always skips. Sync failures are reported as warnings and never
-/// fail the git push that already succeeded.
+/// `syncRemotes`, then legacy `sync_remote`, then the sole configured remote.
+/// With no remote configured this is a silent no-op. The `push_sync` config
+/// disables implicit sync, but explicit `--remote` still forces it. `--no-remote`
+/// always skips. Sync failures are reported as warnings and never fail the git
+/// push that already succeeded.
 pub fn maybe_sync_bundle_to_remote(remote_overrides: &[String], no_remote: bool) -> Result<()> {
     if no_remote {
         return Ok(());

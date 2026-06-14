@@ -98,7 +98,7 @@ pub struct RemoteBundleRecord {
 /// time. Returns `None` when the pull opts out (`--no-remote`) or no remote is
 /// configured, so callers can skip the artifact step without it being an error.
 /// Remote resolution matches the primary push-sync remote: explicit override,
-/// then `syncRemotes[0]`/`sync_remote`, then a remote literally named `knithub`.
+/// then `syncRemotes[0]`/`sync_remote`, then the sole configured remote.
 pub fn prepare_remote_pull(
     remote_override: Option<&str>,
     skip_remote: bool,

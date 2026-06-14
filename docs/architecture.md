@@ -131,7 +131,7 @@ This is consolidated into one verb family. `knit sync` keeps its original meanin
 - `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...`
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...`
 
-With no target flag, both move every relevant artifact family. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then a remote named `knithub`.
+With no target flag, both move every relevant artifact family. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote.
 
 The absorbed verbs are deleted, not aliased or hidden: `knit bundle push`, `knit history push/pull/sync` (only `history list` and `history refresh` remain), `knit view push/pull`, and `knit land sync` no longer exist. The philosophy is one way per outcome — delete, do not hide.
 

@@ -3,8 +3,9 @@
 //! optionally materialize the active bundle.
 
 use super::client::{
-    decode_bundle_payload, fast_forward_feature_checkouts, fetch_project_export, localize_bundle,
-    normalize_base_url, prepare_feature_branches, token_from_env,
+    configured_sync_remote_names, decode_bundle_payload, fast_forward_feature_checkouts,
+    fetch_project_export, localize_bundle, normalize_base_url, prepare_feature_branches,
+    token_from_env,
 };
 use super::{RemoteExportRepository, RemoteProjectExport};
 use crate::commands::agents::{
@@ -33,14 +34,14 @@ use std::path::{Path, PathBuf};
 pub fn clone_project_from_remote(
     project_identifier: &str,
     target: Option<&Path>,
-    remote_name: &str,
+    remote_name: Option<&str>,
     url: Option<&str>,
     token: Option<&str>,
     active_bundle: Option<&str>,
     materialize: bool,
 ) -> Result<()> {
-    let remote_name = slugify(remote_name);
-    let (remote, stored_token, token) = resolve_remote_for_clone(&remote_name, url, token)?;
+    let (remote_name, remote, stored_token, token) =
+        resolve_remote_for_clone(remote_name, url, token)?;
     let export = fetch_project_export(&remote, &token, project_identifier)?;
     let target_root = resolve_clone_target(target, project_identifier)?;
     prepare_clone_target(&target_root)?;
@@ -155,25 +156,39 @@ pub fn clone_project_from_remote(
 }
 
 fn resolve_remote_for_clone(
-    remote_name: &str,
+    remote_name: Option<&str>,
     url: Option<&str>,
     token: Option<&str>,
-) -> Result<(KnitRemote, Option<String>, String)> {
+) -> Result<(String, KnitRemote, Option<String>, String)> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     // Inside a workspace, the effective config already merges global remotes in.
     // Outside one, fall back to the user-global config so `knit clone` works from
     // any directory, not just an existing Knit workspace.
-    let configured = match find_knit_root(&cwd) {
+    let config = match find_knit_root(&cwd) {
         Some(root) => crate::store::load_effective_config(&root).ok(),
         None => crate::store::load_global_config().ok(),
-    }
-    .and_then(|config| config.remotes.get(remote_name).cloned());
+    };
+    let requested_name = remote_name.map(slugify).filter(|name| !name.is_empty());
+    let configured_name = config
+        .as_ref()
+        .and_then(|config| configured_sync_remote_names(config).into_iter().next());
+    let remote_name = requested_name.or(configured_name).with_context(|| {
+        "No KnitHub remote selected. Pass `--remote <name>` with `--url <url>`, or configure a sync remote first."
+    })?;
+    let configured = config
+        .as_ref()
+        .and_then(|config| config.remotes.get(&remote_name).cloned());
+    let env_url = std::env::var("KNIT_REMOTE_URL")
+        .ok()
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| std::env::var("KNITHUB_URL").ok())
+        .filter(|value| !value.trim().is_empty());
     let remote_url = url
         .map(ToString::to_string)
-        .or_else(|| std::env::var("KNITHUB_URL").ok())
+        .or(env_url)
         .or_else(|| configured.as_ref().map(|remote| remote.url.clone()))
         .with_context(|| {
-            format!("No KnitHub URL configured. Pass --url, set KNITHUB_URL, or run `knit remote add {remote_name} <url>`.")
+            format!("No KnitHub URL configured for remote `{remote_name}`. Pass --url, set KNIT_REMOTE_URL, or run `knit remote add {remote_name} <url>`.")
         })?;
     let stored_token = token
         .map(ToString::to_string)
@@ -184,11 +199,11 @@ fn resolve_remote_for_clone(
     };
     let resolved_token = token
         .map(ToString::to_string)
-        .or_else(|| token_from_env(remote_name))
+        .or_else(|| token_from_env(&remote_name))
         .or_else(|| remote.token.clone())
-        .context("No KnitHub token configured. Set KNITHUB_TOKEN, KNIT_REMOTE_<NAME>_TOKEN, pass --token, or configure a stored remote token.")?;
+        .context("No KnitHub token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, pass --token, or configure a stored remote token.")?;
 
-    Ok((remote, stored_token, resolved_token))
+    Ok((remote_name, remote, stored_token, resolved_token))
 }
 
 fn resolve_clone_target(target: Option<&Path>, project_identifier: &str) -> Result<PathBuf> {
