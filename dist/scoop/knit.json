@@ -1,11 +1,11 @@
 {
-    "version": "0.1.0-alpha.2",
+    "version": "0.1.0-alpha.3",
     "description": "Local-first CLI for coordinating cross-repo feature bundles",
     "homepage": "https://github.com/marc-merino/knit",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.2/knit-v0.1.0-alpha.2-x86_64-pc-windows-msvc.zip",
+            "url": "https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.3/knit-v0.1.0-alpha.3-x86_64-pc-windows-msvc.zip",
             "hash": "REPLACE_WITH_SHA256"
         }
     },

@@ -10,6 +10,24 @@ use std::path::{Path, PathBuf};
 
 const KNIT_AGENTS_BEGIN: &str = "<!-- BEGIN KNIT AGENTS -->";
 const KNIT_AGENTS_END: &str = "<!-- END KNIT AGENTS -->";
+const AGENT_TEAMWORK_SENTINEL: &str = "If the harness provides subagents or agent teams";
+
+pub(crate) fn agent_teamwork_section(heading: &str) -> String {
+    format!(
+        r#"{heading}
+
+{sentinel}, use them deliberately:
+
+- The main agent keeps architect ownership: understand the issue, define boundaries, identify cross-repo interfaces, and prepare enough context that delegated agents can work without hidden assumptions.
+- For multi-repo work, split tasks by repo or by clearly stated interface boundary. Include the expected contract, files, commands, and acceptance checks in each handoff.
+- Delegate only the smallest independent task to the minimum capable subagent/model the harness supports. Do not spawn broad or speculative parallel work.
+- When subagents report back, the main agent integrates the work, runs the normal Knit/git/project tests, and fixes or redirects the procedure if verification fails.
+- If subagents are not available, proceed as a single agent while preserving the same boundary-setting and verification discipline.
+
+"#,
+        sentinel = AGENT_TEAMWORK_SENTINEL
+    )
+}
 
 pub(crate) fn write_bundle_worktree_agents_md(active: &ActiveBundle) -> Result<Option<PathBuf>> {
     if active.bundle.repos.is_empty() {
@@ -104,6 +122,7 @@ fn bundle_worktree_agents_section(active: &ActiveBundle, bundle_root: &Path) -> 
         .join("\n");
     let runtime_section = worktree_runtime_section(active);
     let checks_section = worktree_checks_section(active);
+    let teamwork_section = agent_teamwork_section("## Agent Teamwork");
 
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
@@ -124,6 +143,7 @@ knit commit --all -m "Describe the feature change"
 knit push --set-upstream
 ```
 
+{teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
 
 ```sh
@@ -143,6 +163,7 @@ Do not edit the original source checkout for feature work unless the bundle was 
 "#,
         bundle = active.bundle.id,
         bundle_root = bundle_root_display,
+        teamwork_section = teamwork_section,
         runtime_section = runtime_section,
         checks_section = checks_section,
         checkouts = if checkouts.is_empty() {
@@ -155,12 +176,15 @@ Do not edit the original source checkout for feature work unless the bundle was 
 
 pub(crate) fn write_project_agents_md(root: &Path, project: &KnitProject) -> Result<PathBuf> {
     let path = root.join("AGENTS.md");
-    let section = project_agents_section(project);
     let next = if path.exists() {
         let existing = fs::read_to_string(&path)
             .with_context(|| format!("failed to read existing {}", path.display()))?;
+        let include_teamwork =
+            !existing_outside_project_section(&existing, project).contains(AGENT_TEAMWORK_SENTINEL);
+        let section = project_agents_section(project, include_teamwork);
         upsert_project_agents_section(&existing, project, &section)
     } else {
+        let section = project_agents_section(project, true);
         format!("# AGENTS.md\n\n{section}")
     };
 
@@ -201,6 +225,29 @@ fn upsert_project_agents_section(existing: &str, project: &KnitProject, section:
     }
 
     append_section(existing, section)
+}
+
+fn existing_outside_project_section(existing: &str, project: &KnitProject) -> String {
+    let begin = project_agents_begin(&project.id);
+    let end_marker = project_agents_end(&project.id);
+    if let Some(start) = existing.find(&begin) {
+        if let Some(end_offset) = existing[start..].find(&end_marker) {
+            let end = start + end_offset + end_marker.len();
+            let mut next = String::new();
+            next.push_str(&existing[..start]);
+            next.push_str(&existing[end..]);
+            return next;
+        }
+    }
+
+    if let Some((start, end)) = legacy_project_section_range(existing, project) {
+        let mut next = String::new();
+        next.push_str(&existing[..start]);
+        next.push_str(&existing[end..]);
+        return next;
+    }
+
+    existing.to_string()
 }
 
 fn upsert_between_markers(
@@ -297,6 +344,7 @@ fn worktree_agents_section(active: &ActiveBundle, repo: &RepoEntry, checkout: &P
         .join("\n");
     let runtime_section = worktree_runtime_section(active);
     let checks_section = worktree_checks_section(active);
+    let teamwork_section = agent_teamwork_section("## Agent Teamwork");
 
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
@@ -317,6 +365,7 @@ knit commit --all -m "Describe the feature change"
 knit push --set-upstream
 ```
 
+{teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
 
 ```sh
@@ -336,6 +385,7 @@ Do not edit the original source checkout for feature work unless the bundle was 
         bundle = active.bundle.id,
         repo = repo.id,
         checkout = checkout_display,
+        teamwork_section = teamwork_section,
         runtime_section = runtime_section,
         checks_section = checks_section,
         repo_worktrees = if repo_worktrees.is_empty() {
@@ -487,7 +537,7 @@ Shared database mode attaches bundle stacks to an existing dev database. Bundle 
     )
 }
 
-fn project_agents_section(project: &KnitProject) -> String {
+fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> String {
     let begin = project_agents_begin(&project.id);
     let end = project_agents_end(&project.id);
     let default_repos = project
@@ -518,6 +568,11 @@ fn project_agents_section(project: &KnitProject) -> String {
     };
     let landing_section = project_landing_agents_section(project);
     let runtime_section = project_runtime_agents_section(project);
+    let teamwork_section = if include_teamwork {
+        agent_teamwork_section("### Agent Teamwork")
+    } else {
+        String::new()
+    };
 
     format!(
         r#"{begin}
@@ -557,7 +612,7 @@ knit related --repo <repo-id> path/inside/repo --pull
 ```
 
 Use `--pull` when you want to refresh the local history ledger from KnitHub first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.
-{runtime_section}{landing_section}
+{teamwork_section}{runtime_section}{landing_section}
 {end}
 "#,
         begin = begin,
@@ -565,6 +620,7 @@ Use `--pull` when you want to refresh the local history ledger from KnitHub firs
         project_id = project.id,
         default_repos = default_repos,
         observed_section = observed_section,
+        teamwork_section = teamwork_section,
         runtime_section = runtime_section,
         landing_section = landing_section
     )

@@ -30,6 +30,8 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit --bundle feature-a commit"));
     assert!(agents.contains("knit --bundle feature-a commit --all"));
     assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
+    assert!(agents.contains("If the harness provides subagents or agent teams"));
+    assert!(agents.contains("minimum capable subagent/model"));
     assert!(agents.contains("Project JSON can define a default `landing` template"));
     assert!(agents.contains(".knit/land-plans/<bundle>.land.json"));
     assert!(agents.contains("gloss prepare"));
@@ -472,6 +474,8 @@ fn project_agents_are_generated_from_project_json() {
     assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: demo -->"));
     assert!(agents.contains("That command adds these default repos from the project data:"));
     assert!(agents.contains("- `backend`"));
+    assert!(agents.contains("### Agent Teamwork"));
+    assert!(agents.contains("minimum capable subagent/model"));
     assert!(!agents.contains("all four Demo repos"));
     assert!(agents.contains("<!-- BEGIN GLOSS AGENTS -->"));
     assert!(agents.contains("<!-- END KNIT PROJECT AGENTS: demo -->\n<!-- BEGIN GLOSS AGENTS -->"));
@@ -576,10 +580,14 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(bundle_agents.contains("bundle `agent-docs`"));
     assert!(bundle_agents.contains("`backend`: `.knit/worktrees/agent-docs/backend`"));
     assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
+    assert!(bundle_agents.contains("## Agent Teamwork"));
+    assert!(bundle_agents.contains("minimum capable subagent/model"));
     let backend_agents = fs::read_to_string(&backend_agents_path).unwrap();
     assert!(backend_agents.contains("Knit Worktree Guide"));
     assert!(backend_agents.contains("bundle `agent-docs`"));
     assert!(backend_agents.contains("repo `backend`"));
+    assert!(backend_agents.contains("## Agent Teamwork"));
+    assert!(backend_agents.contains("minimum capable subagent/model"));
     assert!(backend_agents.contains("knit commit --all"));
     assert!(backend_agents.contains("knit push --set-upstream"));
     assert!(!backend_agents.contains("knit --bundle"));
