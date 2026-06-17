@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::commands::agents::{
-    print_bundle_worktree_agents_summary, print_worktree_agents_summary, upsert_managed_section,
-    write_bundle_worktree_agents_md, write_worktree_agents_md,
+    agent_teamwork_section, print_bundle_worktree_agents_summary, print_worktree_agents_summary,
+    upsert_managed_section, write_bundle_worktree_agents_md, write_worktree_agents_md,
 };
 use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
@@ -389,12 +389,13 @@ fn project_repo<'a>(project: &'a KnitProject, repo_id: &str) -> Result<&'a Proje
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
     let path = root.join("AGENTS.md");
+    let section = agents_section();
     let next = if path.exists() {
         let existing = fs::read_to_string(&path)
             .with_context(|| format!("failed to read existing {}", path.display()))?;
-        upsert_managed_section(&existing, agents_section())
+        upsert_managed_section(&existing, &section)
     } else {
-        format!("# AGENTS.md\n\n{}", agents_section())
+        format!("# AGENTS.md\n\n{section}")
     };
 
     fs::write(&path, next)
@@ -402,8 +403,9 @@ fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
     Ok(path)
 }
 
-fn agents_section() -> &'static str {
-    r#"<!-- BEGIN KNIT AGENTS -->
+fn agents_section() -> String {
+    format!(
+        r#"<!-- BEGIN KNIT AGENTS -->
 ## Knit Workspace Guide
 
 This is a Knit workspace. Knit coordinates feature work that spans one or more Git repositories and records the work in `.knit/bundles/<slug>.bundle.json`.
@@ -461,6 +463,7 @@ knit bundle remove frontend                    # tear down its worktree
 knit bundle apply-view backend                 # reshape the live bundle to a saved view
 ```
 
+{agent_teamwork_section}
 For coding agents in the source workspace, moving into a checkout means each shell/tool call must actually run with that checkout as its cwd/workdir. A narrated `cd`, or a `cd` from a previous non-persistent shell command, is not enough. If this agent is working on one feature, open the generated worktree folder and keep tool calls rooted there. If several agents or features are active, open a separate folder or agent rooted at each new worktree. From the source workspace, use explicit `--bundle <bundle>` on bundle-scoped Knit commands for the feature being changed:
 
 ```sh
@@ -629,5 +632,7 @@ gloss prepare
 gloss view
 ```
 <!-- END KNIT AGENTS -->
-"#
+"#,
+        agent_teamwork_section = agent_teamwork_section("## Agent Teamwork")
+    )
 }
