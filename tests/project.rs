@@ -34,7 +34,8 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("minimum capable subagent/model"));
     assert!(agents.contains("Project JSON can define a default `landing` template"));
     assert!(agents.contains(".knit/land-plans/<bundle>.land.json"));
-    assert!(agents.contains("gloss prepare"));
+    assert!(agents.contains("urdir review --bundle"));
+    assert!(agents.contains("gloss view --review"));
 
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
     let existing_workspace_output = knit(&workspace, ["bundle", "venue capacity", "--agents"]);

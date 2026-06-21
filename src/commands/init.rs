@@ -621,15 +621,15 @@ knit cherrypick --from feature-a --repo backend abc123
 
 Knit resolves bundle context from `--bundle`, then `KNIT_BUNDLE`, then generated worktree cwd, then the workspace fallback. Inside `.knit/worktrees/<bundle>/<repo>/`, agents do not need to run `knit switch`.
 
-## Knit And Gloss
+## Knit, Urdir, And Gloss
 
-Knit owns authoring: worktrees, feature branches, commits, sync, reverts, and the bundle ledger. Gloss reads Knit bundles later to prepare review plans, explanations, and UI views.
+Knit owns authoring: worktrees, feature branches, commits, sync, reverts, and the bundle ledger. Urdir reads Knit bundles later to produce review analysis artifacts. Gloss displays and explains those artifacts.
 
-When using Gloss from this workspace, the active Knit bundle can usually be discovered automatically:
+When using Gloss from this workspace, first ask Urdir to build the review artifact, then open it in Gloss:
 
 ```sh
-gloss prepare
-gloss view
+urdir review --bundle path/to/feature.bundle.json --out .gloss/reviews/feature.review.json
+gloss view --review feature
 ```
 <!-- END KNIT AGENTS -->
 "#,
