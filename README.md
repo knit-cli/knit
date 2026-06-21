@@ -47,8 +47,8 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **Parallel by construction.** The same repo can sit in many bundles at once, each on its own branch and generated worktree. Run one coding agent per bundle — they cannot collide, and each worktree carries its own `AGENTS.md` so agents wake up oriented.
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
 - **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
-- **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and [Gloss](https://github.com/marc-merino/gloss) cross-repo reviews on top of the same artifact.
-- **Gloss-ready review.** The same bundle artifact gives `gloss` enough cross-repo context to prepare reviews and explanations.
+- **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and Urdir/Gloss cross-repo reviews on top of the same artifact.
+- **Review-ready artifact.** The same bundle artifact gives `urdir` enough cross-repo context to prepare review analysis that `gloss` can display and explain.
 
 ## Concepts in one breath
 
@@ -69,6 +69,6 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
 - **[dist/README.md](dist/README.md)** — how releases are cut (binaries, crates.io, Homebrew/Scoop/winget).
 
-## Knit and Gloss
+## Knit, Urdir, and Gloss
 
-Knit and Gloss share a single artifact: the bundle. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Gloss reads a bundle later and produces cross-repo review, ranking, and explanation output; on KnitHub the two meet in one page.
+Knit, Urdir, and Gloss share a simple handoff. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Urdir reads a bundle later and produces cross-repo review analysis. Gloss displays and explains that review artifact; on KnitHub the three meet in one page.
