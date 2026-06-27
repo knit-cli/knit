@@ -167,7 +167,8 @@ pub(crate) fn create_provider_revert_prs(
     let mut failures = Vec::new();
 
     for (repo_id, selector) in items {
-        let (repo_index, target, forge) = provider_revert_context(active, provider, repo_id)?;
+        let (repo_index, target, forge) =
+            provider_revert_context(active, provider, repo_id, Some(selector))?;
         let repo = active.bundle.repos[repo_index].clone();
 
         let title = format!("Revert {} ({})", active.bundle.title, repo_id);
@@ -326,8 +327,16 @@ fn preflight_provider_revert(
         );
     }
 
-    let (_, target, forge) =
-        provider_revert_context(active, plan.provider.as_deref(), &repo_plan.repo_id)?;
+    let selector_hint = repo_plan
+        .operations
+        .iter()
+        .find_map(|operation| operation.selector.as_deref());
+    let (_, target, forge) = provider_revert_context(
+        active,
+        plan.provider.as_deref(),
+        &repo_plan.repo_id,
+        selector_hint,
+    )?;
     for operation in &repo_plan.operations {
         let selector = operation_selector(operation)?;
         let pr = forge
@@ -416,6 +425,7 @@ pub(crate) fn provider_revert_context(
     active: &ActiveBundle,
     provider: Option<&str>,
     repo_id: &str,
+    selector_hint: Option<&str>,
 ) -> Result<(usize, PrTarget, Box<dyn providers::Forge>)> {
     let (index, repo) = active
         .bundle
@@ -429,7 +439,7 @@ pub(crate) fn provider_revert_context(
             .with_context(|| format!("{repo_id}: unknown provider `{provider}`"))?,
         None => providers::for_repo(repo)?,
     };
-    let target = provider_target(active, repo, forge.as_ref())?;
+    let target = provider_target(active, repo, forge.as_ref(), selector_hint)?;
 
     Ok((index, target, forge))
 }
@@ -438,6 +448,7 @@ fn provider_target(
     active: &ActiveBundle,
     repo: &crate::model::RepoEntry,
     forge: &dyn providers::Forge,
+    selector_hint: Option<&str>,
 ) -> Result<PrTarget> {
     if let Some(full_name) = repo
         .remote
@@ -449,10 +460,32 @@ fn provider_target(
     if let Some(cwd) = checkout_dir(active, repo) {
         return Ok(PrTarget::checkout(cwd));
     }
+    if let Some(full_name) = selector_hint.and_then(repo_full_name_from_pr_url) {
+        return Ok(PrTarget::explicit(active.root.clone(), full_name));
+    }
     bail!(
         "{}: no checkout or parseable remote is available for provider PR revert.",
         repo.id
     );
+}
+
+fn repo_full_name_from_pr_url(selector: &str) -> Option<String> {
+    let path = selector
+        .split_once("://")
+        .and_then(|(_, rest)| rest.split_once('/').map(|(_, path)| path))?;
+    let path = path.split(['?', '#']).next().unwrap_or(path);
+    let segments = path
+        .split('/')
+        .filter(|segment| !segment.is_empty())
+        .collect::<Vec<_>>();
+    let marker = segments
+        .iter()
+        .position(|segment| matches!(*segment, "pull" | "pulls" | "merge_requests"))?;
+    let mut repo_segments = &segments[..marker];
+    if repo_segments.last() == Some(&"-") {
+        repo_segments = &repo_segments[..repo_segments.len().saturating_sub(1)];
+    }
+    (repo_segments.len() >= 2).then(|| repo_segments.join("/"))
 }
 
 fn pull_request_is_merged(pr: &PullRequest) -> bool {

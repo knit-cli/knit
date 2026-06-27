@@ -711,7 +711,7 @@ Configured deployment steps:
 
 {deployments}
 
-Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan.
+Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan. A successful apply archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed.
 "#
     )
 }

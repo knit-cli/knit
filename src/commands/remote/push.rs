@@ -14,7 +14,7 @@ use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepo
 use crate::output as out;
 use crate::store::{
     find_knit_root, load_active_bundle, load_config, load_effective_config, load_global_config,
-    save_config, save_global_config,
+    save_config, save_global_config, ActiveBundle,
 };
 use anyhow::{bail, Context, Result};
 use serde_json::{json, Value};
@@ -300,6 +300,14 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
 
 pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result<()> {
     let active = load_active_bundle()?;
+    push_active_bundle_to_remote(remote_name, project, &active)
+}
+
+fn push_active_bundle_to_remote(
+    remote_name: &str,
+    project: Option<&str>,
+    active: &ActiveBundle,
+) -> Result<()> {
     let config = load_effective_config(&active.root)?;
     let project_id = project
         .map(slugify)
@@ -430,6 +438,26 @@ pub fn sync_bundle_to_remote_if_enabled(
     sync_bundle_to_remote_names(&config, &remote_names)
 }
 
+pub fn sync_active_bundle_to_remote_if_enabled(
+    active: &ActiveBundle,
+    remote_overrides: &[String],
+    no_remote: bool,
+) -> Result<()> {
+    if no_remote {
+        return Ok(());
+    }
+    let config = load_effective_config(&active.root)?;
+    if !config.push_sync && remote_overrides.is_empty() {
+        return Ok(());
+    }
+    let remote_names = resolve_sync_remote_names(&config, remote_overrides);
+    if remote_names.is_empty() {
+        return Ok(());
+    }
+
+    sync_active_bundle_to_remote_names(&config, &remote_names, active)
+}
+
 fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> Result<()> {
     let multiple = remote_names.len() > 1;
     let mut failures = Vec::new();
@@ -442,6 +470,36 @@ fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> 
             println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
         }
         if let Err(error) = push_bundle_to_remote(remote_name, None) {
+            failures.push(format!("{remote_name}: {error:#}"));
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "KnitHub sync failed for {} remote(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
+}
+
+fn sync_active_bundle_to_remote_names(
+    config: &KnitConfig,
+    remote_names: &[String],
+    active: &ActiveBundle,
+) -> Result<()> {
+    let multiple = remote_names.len() > 1;
+    let mut failures = Vec::new();
+    for remote_name in remote_names {
+        if let Err(error) = resolve_remote(config, remote_name) {
+            failures.push(format!("{remote_name}: {error:#}"));
+            continue;
+        }
+        if multiple {
+            println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
+        }
+        if let Err(error) = push_active_bundle_to_remote(remote_name, None, active) {
             failures.push(format!("{remote_name}: {error:#}"));
         }
     }
