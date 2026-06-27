@@ -688,11 +688,17 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
 
     let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
     let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let failing_deploy_command = concat!(
+        "if test \"$DEPLOY_OK\" = \"yes\" && test -f deploy-ok; then exit 0; fi; ",
+        "printf 'deploy stdout context\\n'; ",
+        "printf 'fatal: deploy-ok marker is missing\\n' >&2; ",
+        "exit 42"
+    );
     plan["steps"].as_array_mut().unwrap().push(json!({
         "id": "deploy",
         "type": "run",
         "cwd": ".",
-        "command": ["sh", "-c", "test \"$DEPLOY_OK\" = \"yes\" && test -f deploy-ok"],
+        "command": ["sh", "-c", failing_deploy_command],
         "env": { "DEPLOY_OK": "yes" },
         "needs": ["merge-backend"]
     }));
@@ -700,6 +706,12 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
 
     let failed = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(failed.contains("stopped at step deploy"));
+    assert!(failed.contains("deploy failed output excerpt"), "{failed}");
+    assert!(
+        failed.contains("fatal: deploy-ok marker is missing"),
+        "{failed}"
+    );
+    assert!(failed.contains("Full output:"), "{failed}");
     let bundle_after_failure = read_bundle(&workspace);
     assert_ne!(
         bundle_after_failure["nodes"]
