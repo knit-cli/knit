@@ -224,6 +224,12 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         ["--bundle", "venue-capacity", "bundle", "validate"]
     )
     .contains("Bundle valid"));
+    let archived_status = knit(&workspace, ["--bundle", "venue-capacity", "status"]);
+    assert!(
+        archived_status.contains("State: archived"),
+        "{archived_status}"
+    );
+    assert!(!archived_status.contains("not landed"), "{archived_status}");
     assert!(knit(&workspace, ["--bundle", "venue-capacity", "log", "-1"]).contains("landed"));
     let sync_error = knit_fails(
         &workspace,
