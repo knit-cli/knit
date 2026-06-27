@@ -163,7 +163,7 @@ knit land
 knit land status
 ```
 
-Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Bare `knit land` creates or shows the plan but does not execute it. Only run `knit land apply` against PRs you are comfortable merging. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json`; after fixing the failed step, run `knit land resume`.
+Expected result: `.knit/land-plans/venue-capacity.land.json` lists one `merge_pr` step per published repo. Bare `knit land` creates or shows the plan but does not execute it. Only run `knit land apply` against PRs you are comfortable merging. A successful apply archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed. A failed apply writes `.knit/land-runs/<plan-id>-<timestamp>.run.json` and leaves generated worktrees in place; after fixing the failed step, run `knit land resume`.
 
 After PR approval and a land/release instruction, use `knit land`, inspect or edit the plan, then run `knit land apply`. Do not land Knit-owned PRs with `gh pr merge`, and do not use `knit merge --into main` as a PR landing substitute.
 
