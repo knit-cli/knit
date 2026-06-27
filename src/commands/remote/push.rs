@@ -298,6 +298,92 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
     Ok(())
 }
 
+/// Push the project architecture artifact (repo-level rollup produced by
+/// `urdir kg architecture`) to a KnitHub remote. Reads the conventional
+/// `.urdir/kg/<slug>/architecture.json`; a missing file is a soft skip with a
+/// hint, not an error, so `knit sync push` (everything) stays safe.
+pub fn push_architecture_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
+    let (root, config) = effective_workspace_config()?;
+    let project_id = resolve_project_id(&root, &config, name)?;
+    let path = root.join(".urdir").join("kg").join(&project_id).join("architecture.json");
+    let raw = match read_graph_artifact(&path, "architecture", "urdir kg architecture --project <slug>")? {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+    let remote = resolve_remote(&config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    request_json::<Value>(
+        remote,
+        &token,
+        "PUT",
+        &format!("/projects/{project_id}/architecture"),
+        Some(&raw),
+    )?;
+    let repos = raw.get("repos").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0);
+    let edges = raw.get("edges").and_then(|v| v.as_array()).map(Vec::len).unwrap_or(0);
+    println!(
+        "{} {} {}",
+        out::movement("pushed architecture"),
+        out::repo(&project_id),
+        out::muted(format!("{repos} repo(s), {edges} edge(s)"))
+    );
+    Ok(())
+}
+
+/// Push the knowledge-graph viz slice (produced by `urdir kg viz`) to a
+/// KnitHub remote. Reads `.urdir/kg/<slug>/viz.json`; missing file is a soft
+/// skip with a hint.
+pub fn push_kg_graph_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
+    let (root, config) = effective_workspace_config()?;
+    let project_id = resolve_project_id(&root, &config, name)?;
+    let path = root.join(".urdir").join("kg").join(&project_id).join("viz.json");
+    let raw = match read_graph_artifact(&path, "knowledge graph", "urdir kg viz --project <slug>")? {
+        Some(v) => v,
+        None => return Ok(()),
+    };
+    let remote = resolve_remote(&config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    request_json::<Value>(
+        remote,
+        &token,
+        "PUT",
+        &format!("/projects/{project_id}/kg-graph"),
+        Some(&raw),
+    )?;
+    let nodes = raw.get("nodeCount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let edges = raw.get("edgeCount").and_then(|v| v.as_u64()).unwrap_or(0);
+    let truncated = raw.get("truncated").and_then(|v| v.as_bool()).unwrap_or(false);
+    println!(
+        "{} {} {}",
+        out::movement("pushed kg graph"),
+        out::repo(&project_id),
+        out::muted(format!("{nodes} node(s), {edges} edge(s){}", if truncated { " (truncated)" } else { "" }))
+    );
+    Ok(())
+}
+
+/// Load a graph artifact JSON, with a soft-skip note when it is absent (so a
+/// bare `knit sync push` does not hard-fail on workspaces that have not run the
+/// producing urdir command). Returns `Ok(None)` after printing a hint.
+fn read_graph_artifact(path: &Path, label: &str, hint: &str) -> Result<Option<Value>> {
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok(Some(
+            serde_json::from_str(&text)
+                .with_context(|| format!("failed to parse {label} artifact at {}", path.display()))?,
+        )),
+        Err(_) => {
+            println!(
+                "{}",
+                out::muted(format!(
+                    "no {label} artifact at {}; skipped (run `{hint}` to produce one)",
+                    path.display()
+                ))
+            );
+            Ok(None)
+        }
+    }
+}
+
 pub fn push_bundle_to_remote(remote_name: &str, project: Option<&str>) -> Result<()> {
     let active = load_active_bundle()?;
     push_active_bundle_to_remote(remote_name, project, &active)

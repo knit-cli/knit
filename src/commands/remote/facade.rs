@@ -12,7 +12,9 @@
 use super::client::{effective_workspace_config, resolve_sync_remote_names};
 use super::history::{pull_history_from_remote, push_history_to_remote};
 use super::pull::pull_views_from_remote;
-use super::push::{push_bundle_to_remote, push_views_to_remote};
+use super::push::{
+    push_architecture_to_remote, push_bundle_to_remote, push_kg_graph_to_remote, push_views_to_remote,
+};
 use crate::output as out;
 use anyhow::{bail, Result};
 
@@ -23,23 +25,37 @@ pub struct SyncTargets {
     pub bundles: bool,
     pub history: bool,
     pub views: bool,
+    pub architecture: bool,
+    pub kg: bool,
 }
 
 impl SyncTargets {
     /// Resolve the artifact selection from the CLI flags. Bare invocation (no
-    /// `--bundles/--history/--views/--all`) means everything.
-    pub fn resolve(bundles: bool, history: bool, views: bool, all: bool) -> Self {
-        if all || !(bundles || history || views) {
+    /// `--bundles/--history/--views/--architecture/--kg/--all`) means everything;
+    /// architecture/kg are no-op-with-note when no artifact has been produced.
+    pub fn resolve(
+        bundles: bool,
+        history: bool,
+        views: bool,
+        architecture: bool,
+        kg: bool,
+        all: bool,
+    ) -> Self {
+        if all || !(bundles || history || views || architecture || kg) {
             SyncTargets {
                 bundles: true,
                 history: true,
                 views: true,
+                architecture: true,
+                kg: true,
             }
         } else {
             SyncTargets {
                 bundles,
                 history,
                 views,
+                architecture,
+                kg,
             }
         }
     }
@@ -89,6 +105,16 @@ pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
         if targets.views {
             if let Err(error) = push_views_to_remote(None, remote) {
                 failures.push(format!("{remote} views: {error:#}"));
+            }
+        }
+        if targets.architecture {
+            if let Err(error) = push_architecture_to_remote(None, remote) {
+                failures.push(format!("{remote} architecture: {error:#}"));
+            }
+        }
+        if targets.kg {
+            if let Err(error) = push_kg_graph_to_remote(None, remote) {
+                failures.push(format!("{remote} kg: {error:#}"));
             }
         }
     }
