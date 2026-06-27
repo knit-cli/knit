@@ -183,6 +183,7 @@ pub(super) fn execute_run(
         }
 
         if any_failed {
+            print_failed_output_excerpts(&results, &active.root, run_path);
             let failed_ids: Vec<_> = results
                 .iter()
                 .filter(|(_, o)| !o.success)
@@ -199,6 +200,10 @@ pub(super) fn execute_run(
                 label,
                 failed_ids.join(", ")
             );
+            let full_output = format!(
+                "Full output: {}.",
+                out::path(display_path_for_storage(&active.root, run_path))
+            );
 
             if plan.on_failure == Some(crate::model::LandOnFailure::Rollback) {
                 println!(
@@ -207,15 +212,17 @@ pub(super) fn execute_run(
                 );
                 match super::rollback::rollback_merged_steps(active, run, run_path) {
                     Ok(Some(group_id)) => bail!(
-                        "{stopped} Rolled back: revert group {group_id} opened revert PRs for the merged steps."
+                        "{stopped} {full_output} Rolled back: revert group {group_id} opened revert PRs for the merged steps."
                     ),
-                    Ok(None) => bail!("{stopped} No PRs had merged yet; nothing to roll back."),
+                    Ok(None) => bail!(
+                        "{stopped} {full_output} No PRs had merged yet; nothing to roll back."
+                    ),
                     Err(error) => bail!(
-                        "{stopped} Automatic rollback failed: {error:#}. Run `knit land rollback` to retry it."
+                        "{stopped} {full_output} Automatic rollback failed: {error:#}. Run `knit land rollback` to retry it."
                     ),
                 };
             }
-            bail!("{stopped} Fix the issue and run `knit land resume`, or run `knit land rollback` to revert the steps that already merged.");
+            bail!("{stopped} {full_output} Fix the issue and run `knit land resume`, or run `knit land rollback` to revert the steps that already merged.");
         }
     }
 
@@ -226,6 +233,143 @@ pub(super) fn execute_run(
     save_active_bundle(active)?;
     println!("{} {}", out::heading("Feature landed"), out::node(&run.id));
     Ok(())
+}
+
+fn print_failed_output_excerpts(results: &[(String, StepOutcome)], root: &Path, run_path: &Path) {
+    for (step_id, outcome) in results.iter().filter(|(_, outcome)| !outcome.success) {
+        let Some(excerpt) = failure_output_excerpt(outcome) else {
+            continue;
+        };
+        println!(
+            "  {} {} output excerpt:",
+            out::node(step_id),
+            out::danger("failed")
+        );
+        println!("{excerpt}");
+    }
+    println!(
+        "  {} {}",
+        out::heading("Full output:"),
+        out::path(display_path_for_storage(root, run_path))
+    );
+}
+
+fn failure_output_excerpt(outcome: &StepOutcome) -> Option<String> {
+    let mut sections = Vec::new();
+    if let Some(stderr) = outcome.stderr.as_deref().and_then(stream_excerpt) {
+        sections.push(format!("    stderr:\n{}", indent(&stderr, "      ")));
+    }
+    if let Some(stdout) = outcome.stdout.as_deref().and_then(stream_excerpt) {
+        sections.push(format!("    stdout:\n{}", indent(&stdout, "      ")));
+    }
+    if sections.is_empty() {
+        None
+    } else {
+        Some(sections.join("\n"))
+    }
+}
+
+fn stream_excerpt(output: &str) -> Option<String> {
+    const DIAGNOSTIC_SEARCH_LINES: usize = 80;
+    const CONTEXT_BEFORE: usize = 4;
+    const CONTEXT_AFTER: usize = 20;
+    const TAIL_LINES: usize = 24;
+    const MAX_LINE_CHARS: usize = 220;
+
+    let normalized = output.replace('\r', "\n");
+    let lines: Vec<_> = normalized
+        .lines()
+        .map(str::trim_end)
+        .filter(|line| !line.trim().is_empty())
+        .collect();
+    if lines.is_empty() {
+        return None;
+    }
+
+    let search_start = lines.len().saturating_sub(DIAGNOSTIC_SEARCH_LINES);
+    let recent = &lines[search_start..];
+    let diagnostic_index = recent
+        .iter()
+        .position(|line| is_strong_diagnostic_line(line))
+        .or_else(|| recent.iter().position(|line| is_weak_diagnostic_line(line)))
+        .map(|offset| search_start + offset);
+    let (start, end) = if let Some(index) = diagnostic_index {
+        (
+            index.saturating_sub(CONTEXT_BEFORE),
+            lines.len().min(index + CONTEXT_AFTER + 1),
+        )
+    } else {
+        (lines.len().saturating_sub(TAIL_LINES), lines.len())
+    };
+
+    let mut excerpt = Vec::new();
+    if start > 0 {
+        excerpt.push(format!("... {} earlier line(s) omitted", start));
+    }
+    excerpt.extend(
+        lines[start..end]
+            .iter()
+            .map(|line| truncate_line(line, MAX_LINE_CHARS)),
+    );
+    if end < lines.len() {
+        excerpt.push(format!("... {} later line(s) omitted", lines.len() - end));
+    }
+    Some(excerpt.join("\n"))
+}
+
+fn is_strong_diagnostic_line(line: &str) -> bool {
+    let lower = line.to_ascii_lowercase();
+    lower.contains("error:")
+        || lower.contains("fatal:")
+        || lower.contains("traceback")
+        || lower.contains("exception")
+        || lower.contains("panic")
+}
+
+fn is_weak_diagnostic_line(line: &str) -> bool {
+    line.to_ascii_lowercase().contains("failed")
+}
+
+fn truncate_line(line: &str, max_chars: usize) -> String {
+    let mut chars = line.chars();
+    let truncated: String = chars.by_ref().take(max_chars).collect();
+    if chars.next().is_some() {
+        format!("{truncated}...")
+    } else {
+        truncated
+    }
+}
+
+fn indent(text: &str, prefix: &str) -> String {
+    text.lines()
+        .map(|line| format!("{prefix}{line}"))
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_excerpt;
+
+    #[test]
+    fn stream_excerpt_prefers_early_diagnostic_in_recent_output() {
+        let mut output = String::new();
+        for index in 0..20 {
+            output.push_str(&format!("#{index} compiling dependency\n"));
+        }
+        output.push_str("#21 14.95 error: cannot find macro `cfg_select` in this scope\n");
+        output.push_str("#21 15.02 error: could not compile `libsqlite3-sys`\n");
+        for index in 0..50 {
+            output.push_str(&format!("#{index} later build output\n"));
+        }
+        output.push_str("Error: failed to fetch an image or build from source: error building\n");
+
+        let excerpt = stream_excerpt(&output).expect("excerpt");
+
+        assert!(excerpt.contains("cannot find macro `cfg_select`"));
+        assert!(excerpt.contains("later line(s) omitted"));
+        assert!(!excerpt.contains("Error: failed to fetch an image"));
+    }
 }
 
 pub(super) fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec<String>>> {
