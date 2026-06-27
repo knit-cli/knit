@@ -451,6 +451,12 @@ pub struct SyncTargetArgs {
     /// Sync your saved views for the project.
     #[arg(long)]
     pub views: bool,
+    /// Sync the project architecture artifact (produced by `urdir kg architecture`).
+    #[arg(long)]
+    pub architecture: bool,
+    /// Sync the knowledge-graph viz slice (produced by `urdir kg viz`).
+    #[arg(long)]
+    pub kg: bool,
     /// Sync every artifact family. This is also the default with no target flags.
     #[arg(long)]
     pub all: bool,
