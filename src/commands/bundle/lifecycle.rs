@@ -15,43 +15,24 @@ use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
+pub(crate) struct ArchiveSummary {
+    pub(crate) node_id: String,
+    pub(crate) removed_worktrees: usize,
+}
+
 pub fn archive_bundle(
     bundle_id: &str,
     reason: Option<&str>,
     keep_worktrees: bool,
     force: bool,
 ) -> Result<()> {
-    let reason = match reason {
-        Some(reason) => {
-            let reason = reason.trim();
-            if reason.is_empty() {
-                bail!("Archive reason must not be empty when --reason is passed.");
-            }
-            Some(reason.to_string())
-        }
-        None => None,
-    };
+    let reason = archive_reason(reason)?;
     let root = current_root()?;
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let bundle = load_existing_bundle(&path, &bundle_id)?;
-    if bundle_state(&bundle) == BundleStatus::Archived {
-        bail!("Bundle `{bundle_id}` is already archived.");
-    }
     let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
-    if !keep_worktrees {
-        crate::commands::clean::clean_worktrees_for_bundle(&mut active, force)?;
-    }
-    let now = now_iso();
-    let node = crate::ids::node_id("archive");
-    active.bundle.state = Some(BundleState::Archived);
-    active.bundle.archived_at = Some(now.clone());
-    active
-        .bundle
-        .nodes
-        .push(BundleNode::feature_archived(node.clone(), now, reason));
-    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
-    active.bundle.updated_at = now_iso();
+    let summary = archive_active_bundle(&mut active, reason, keep_worktrees, force)?;
     write_json(&path, &active.bundle)?;
     clear_active_if_matches(&root, &bundle_id)?;
     println!(
@@ -59,12 +40,59 @@ pub fn archive_bundle(
         out::heading("Archived bundle:"),
         out::node(&bundle_id)
     );
-    println!("{} {}", out::heading("Node:"), out::node(&node));
+    println!("{} {}", out::heading("Node:"), out::node(&summary.node_id));
     println!(
         "{} local feature branches and the bundle artifact",
         out::heading("Preserved:")
     );
     Ok(())
+}
+
+pub(crate) fn archive_active_bundle(
+    active: &mut ActiveBundle,
+    reason: Option<String>,
+    keep_worktrees: bool,
+    force: bool,
+) -> Result<ArchiveSummary> {
+    if bundle_state(&active.bundle) == BundleStatus::Archived {
+        bail!("Bundle `{}` is already archived.", active.bundle.id);
+    }
+    let removed_worktrees = if keep_worktrees {
+        0
+    } else {
+        crate::commands::clean::clean_worktrees_for_bundle(active, force)?
+    };
+    let now = now_iso();
+    let node_id = crate::ids::node_id("archive");
+    active.bundle.state = Some(BundleState::Archived);
+    active.bundle.archived_at = Some(now.clone());
+    active
+        .bundle
+        .nodes
+        .push(BundleNode::feature_archived(node_id.clone(), now, reason));
+    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+    active.bundle.updated_at = now_iso();
+    Ok(ArchiveSummary {
+        node_id,
+        removed_worktrees,
+    })
+}
+
+pub(crate) fn clear_workspace_active_if_matches(root: &Path, bundle_id: &str) -> Result<()> {
+    clear_active_if_matches(root, bundle_id)
+}
+
+fn archive_reason(reason: Option<&str>) -> Result<Option<String>> {
+    match reason {
+        Some(reason) => {
+            let reason = reason.trim();
+            if reason.is_empty() {
+                bail!("Archive reason must not be empty when --reason is passed.");
+            }
+            Ok(Some(reason.to_string()))
+        }
+        None => Ok(None),
+    }
 }
 
 pub fn restore_bundle(bundle_id: &str) -> Result<()> {

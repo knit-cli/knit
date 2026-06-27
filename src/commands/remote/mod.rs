@@ -27,7 +27,7 @@ pub use pull::{
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_bundle_to_remote,
     push_project_to_remote, push_views_to_remote, remove_remote, set_remote_token, show_remote,
-    sync_bundle_to_remote_if_enabled,
+    sync_active_bundle_to_remote_if_enabled, sync_bundle_to_remote_if_enabled,
 };
 
 use crate::model::{HistoryEvent, KnitProject, ProjectView};
