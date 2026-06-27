@@ -480,6 +480,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.bundles,
                     targets.history,
                     targets.views,
+                    targets.architecture,
+                    targets.kg,
                     targets.all,
                 );
                 commands::remote::sync_push(targets, &remote)
@@ -489,6 +491,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.bundles,
                     targets.history,
                     targets.views,
+                    targets.architecture,
+                    targets.kg,
                     targets.all,
                 );
                 commands::remote::sync_pull(targets, &remote)
