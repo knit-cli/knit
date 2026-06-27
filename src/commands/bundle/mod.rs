@@ -7,7 +7,9 @@ mod lifecycle;
 mod prune;
 mod validate;
 
-pub(crate) use lifecycle::delete_repo_feature_branch;
+pub(crate) use lifecycle::{
+    archive_active_bundle, clear_workspace_active_if_matches, delete_repo_feature_branch,
+};
 pub use lifecycle::{archive_bundle, delete_bundle, restore_bundle};
 pub use prune::prune_merged_bundles;
 

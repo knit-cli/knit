@@ -1034,6 +1034,9 @@ pub enum LandCommand {
         /// Land even when required checks are missing, red, or stale.
         #[arg(long)]
         skip_checks: bool,
+        /// Keep generated bundle worktrees after a successful land.
+        #[arg(long = "keep-worktrees")]
+        keep_worktrees: bool,
         /// Read a bundle JSON artifact from this path and land PRs without a local Knit workspace.
         #[arg(long)]
         from_artifact: Option<PathBuf>,

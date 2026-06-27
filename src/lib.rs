@@ -414,9 +414,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 remote,
                 no_remote,
                 skip_checks,
+                keep_worktrees,
             }) => match from_artifact {
                 Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
-                None => commands::apply_land_plan(plan.as_deref(), &remote, no_remote, skip_checks),
+                None => commands::apply_land_plan(
+                    plan.as_deref(),
+                    &remote,
+                    no_remote,
+                    skip_checks,
+                    keep_worktrees,
+                ),
             },
             Some(LandCommand::Rollback { run, apply }) => {
                 commands::rollback_land_run(run.as_deref(), apply)

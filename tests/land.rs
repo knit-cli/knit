@@ -5,6 +5,16 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 
+fn latest_node_of_type<'a>(bundle: &'a Value, node_type: &str) -> &'a Value {
+    bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|node| node["type"].as_str() == Some(node_type))
+        .unwrap()
+}
+
 #[test]
 fn artifact_land_apply_can_use_native_ipv4_transport() {
     let root = unique_temp_dir();
@@ -167,6 +177,22 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         &fake_gh_dir,
     );
     assert!(apply.contains("Feature landed"));
+    assert!(
+        apply.contains("landed venue-capacity; removed 2 worktree(s)"),
+        "{apply}"
+    );
+    assert!(!workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
+    assert!(!workspace
+        .join(".knit/worktrees/venue-capacity/frontend")
+        .exists());
+    assert!(
+        git(&backend, ["branch", "--list", "knit/venue-capacity"]).contains("knit/venue-capacity")
+    );
+    assert!(
+        git(&frontend, ["branch", "--list", "knit/venue-capacity"]).contains("knit/venue-capacity")
+    );
     // This plan sets no repoOrder, so merges share a wave and run in parallel;
     // their relative order is unspecified, so compare as a set.
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
@@ -179,19 +205,38 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     assert_eq!(method_lines, vec!["backend --merge", "frontend --merge"]);
 
     let bundle = read_bundle(&workspace);
-    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
-    assert_eq!(latest["type"].as_str(), Some("feature.landed"));
-    assert_eq!(latest["provider"].as_str(), Some("github"));
-    assert_eq!(latest["repoIds"].as_array().unwrap().len(), 2);
-    assert_eq!(latest["publicationUrls"].as_array().unwrap().len(), 2);
-    let landed_node_id = latest["id"].as_str().unwrap().to_string();
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let archive = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(archive["type"].as_str(), Some("feature.archived"));
+    assert_eq!(archive["message"].as_str(), Some("landed"));
+    assert_eq!(
+        bundle["headNodeId"].as_str(),
+        Some(archive["id"].as_str().unwrap())
+    );
+    let landed = latest_node_of_type(&bundle, "feature.landed");
+    assert_eq!(landed["provider"].as_str(), Some("github"));
+    assert_eq!(landed["repoIds"].as_array().unwrap().len(), 2);
+    assert_eq!(landed["publicationUrls"].as_array().unwrap().len(), 2);
+    let landed_node_id = landed["id"].as_str().unwrap().to_string();
     assert!(workspace.join(".knit/land-runs").exists());
-    assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
-    assert!(knit(&workspace, ["log", "-1"]).contains("landed"));
-    let sync_error = knit_fails(&workspace, ["sync", "push", "--bundles"]);
+    assert!(knit(
+        &workspace,
+        ["--bundle", "venue-capacity", "bundle", "validate"]
+    )
+    .contains("Bundle valid"));
+    assert!(knit(&workspace, ["--bundle", "venue-capacity", "log", "-1"]).contains("landed"));
+    let sync_error = knit_fails(
+        &workspace,
+        ["--bundle", "venue-capacity", "sync", "push", "--bundles"],
+    );
     assert!(sync_error.contains("No KnitHub remote configured"));
 
-    let revert_plan = knit_with_fake_gh(&workspace, ["revert", "HEAD"], &fake_bin, &fake_gh_dir);
+    let revert_plan = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", "venue-capacity", "revert", "HEAD"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     assert!(revert_plan.contains("Revert plan"), "{revert_plan}");
     assert!(revert_plan.contains("Provider: github"), "{revert_plan}");
     assert!(revert_plan.contains("prRevert"), "{revert_plan}");
@@ -206,7 +251,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
 
     let revert_apply = knit_with_fake_gh(
         &workspace,
-        ["revert", "HEAD", "--apply"],
+        ["--bundle", "venue-capacity", "revert", "HEAD", "--apply"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -251,9 +296,13 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
                 && publication["number"].as_u64() == Some(902)
                 && publication["state"].as_str() == Some("OPEN")
         }));
-    assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
-    assert!(knit(&workspace, ["log", "-1"]).contains("pr revert"));
-    let show_revert = knit(&workspace, ["show", "HEAD"]);
+    assert!(knit(
+        &workspace,
+        ["--bundle", "venue-capacity", "bundle", "validate"]
+    )
+    .contains("Bundle valid"));
+    assert!(knit(&workspace, ["--bundle", "venue-capacity", "log", "-1"]).contains("pr revert"));
+    let show_revert = knit(&workspace, ["--bundle", "venue-capacity", "show", "HEAD"]);
     assert!(show_revert.contains("pr.revert"), "{show_revert}");
     assert!(show_revert.contains(&landed_node_id), "{show_revert}");
     assert!(
@@ -268,10 +317,15 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         format!("{}\n", serde_json::to_string_pretty(&stale_bundle).unwrap()),
     )
     .unwrap();
-    let stale_status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
+    let stale_status = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", "venue-capacity", "land", "status"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     assert!(!stale_status.contains("publication missing"));
-    assert!(stale_status.contains("https://github.com/acme/backend/pull/101"));
-    assert!(stale_status.contains("https://github.com/acme/frontend/pull/202"));
+    assert!(stale_status.contains("backend checkout missing"));
+    assert!(stale_status.contains("frontend checkout missing"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -301,6 +355,42 @@ fn land_apply_skips_already_merged_pr() {
         vec!["frontend"],
         "{order}"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_apply_keep_worktrees_archives_but_preserves_generated_checkouts() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote", "--keep-worktrees"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        apply.contains("landed venue-capacity; kept generated worktrees"),
+        "{apply}"
+    );
+    assert!(workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
+    assert!(workspace
+        .join(".knit/worktrees/venue-capacity/frontend")
+        .exists());
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let latest = bundle["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(latest["type"].as_str(), Some("feature.archived"));
+    assert!(bundle["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|repo| repo["worktreePath"].as_str().is_some()));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -614,6 +704,10 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
             .as_str(),
         Some("feature.landed")
     );
+    assert_ne!(bundle_after_failure["state"].as_str(), Some("archived"));
+    assert!(workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
 
     fs::write(workspace.join("deploy-ok"), "ready\n").unwrap();
     let resumed = knit_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
@@ -886,7 +980,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
 
     let status = knit_with_fake_gh_env(
         &workspace,
-        ["land", "status"],
+        ["--bundle", "docs-cleanup", "land", "status"],
         &fake_bin,
         &fake_gh_dir,
         &[("GH_FAKE_NO_REQUIRED_CHECKS_ERROR", "1")],
@@ -904,7 +998,7 @@ fn land_apply_treats_no_required_checks_as_ready() {
     assert!(apply.contains("Feature landed"));
     let run_status = knit_with_fake_gh_env(
         &workspace,
-        ["land", "status"],
+        ["--bundle", "docs-cleanup", "land", "status"],
         &fake_bin,
         &fake_gh_dir,
         &[("GH_FAKE_NO_REQUIRED_CHECKS_ERROR", "1")],

@@ -33,7 +33,8 @@ use crate::model::RepoEntry;
 use crate::output as out;
 use crate::providers::{self, Forge, PrTarget, PullRequest};
 use crate::store::{
-    load_active_bundle, load_active_bundle_for_update, read_json, write_json, ActiveBundle,
+    load_active_bundle, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
+    ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -115,6 +116,7 @@ pub fn apply_land_plan(
     remote: &[String],
     no_remote: bool,
     skip_checks: bool,
+    keep_worktrees: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_plan_path(&active, plan_path)?;
@@ -138,7 +140,9 @@ pub fn apply_land_plan(
     let mut run = execute::new_run(&active, &plan, &path);
     write_json(&run_path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
-    crate::commands::remote::sync_bundle_to_remote_if_enabled(remote, no_remote)?;
+    let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
+    crate::commands::remote::sync_active_bundle_to_remote_if_enabled(&active, remote, no_remote)?;
+    print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
     Ok(())
 }
 
@@ -209,6 +213,33 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         display::print_planned_step(&active, step);
     }
     Ok(())
+}
+
+fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Result<usize> {
+    let summary = crate::commands::bundle::archive_active_bundle(
+        active,
+        Some("landed".to_string()),
+        keep_worktrees,
+        false,
+    )?;
+    save_active_bundle(active)?;
+    crate::commands::bundle::clear_workspace_active_if_matches(&active.root, &active.bundle.id)?;
+    Ok(summary.removed_worktrees)
+}
+
+fn print_landed_summary(bundle_id: &str, removed_worktrees: usize, keep_worktrees: bool) {
+    if keep_worktrees {
+        println!(
+            "landed {}; kept generated worktrees (--keep-worktrees)",
+            out::node(bundle_id)
+        );
+    } else {
+        println!(
+            "landed {}; removed {} worktree(s) (keep with --keep-worktrees)",
+            out::node(bundle_id),
+            removed_worktrees
+        );
+    }
 }
 
 pub fn update_land_branches(

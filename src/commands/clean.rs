@@ -64,12 +64,13 @@ fn clean_revert_plans(active: &ActiveBundle) -> Result<()> {
     Ok(())
 }
 
-pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool) -> Result<()> {
+pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool) -> Result<usize> {
     if active.bundle.repos.is_empty() {
         println!("{}", out::muted("No repos are tracked in this bundle."));
-        return Ok(());
+        return Ok(0);
     }
 
+    let mut removed = 0usize;
     let mut failures = Vec::new();
     for repo in &mut active.bundle.repos {
         if is_in_place(repo) {
@@ -119,6 +120,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
                     out::path(path.display())
                 );
                 repo.worktree_path = None;
+                removed += 1;
             }
             Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
         }
@@ -129,7 +131,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
     }
 
     remove_empty_dirs(active.root.join(".knit/worktrees").join(&active.bundle.id));
-    Ok(())
+    Ok(removed)
 }
 
 /// Tear down a single repo's generated worktree, clearing its recorded

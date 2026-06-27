@@ -541,13 +541,20 @@ api_pr_json() {
     state="closed"
     merged="true"
   fi
+  title="$pr_repo PR"
+  if [ -f "$GH_FAKE_DIR/revert-$pr_repo.number" ] && [ "$number" = "$(cat "$GH_FAKE_DIR/revert-$pr_repo.number")" ]; then
+    state="open"
+    merged="false"
+    title="Revert $pr_repo PR"
+    head="knit/revert-$pr_repo"
+  fi
   mergeable="true"
   mergestate="clean"
   if [ -f "$GH_FAKE_DIR/conflict-$pr_repo" ]; then
     mergeable="false"
     mergestate="dirty"
   fi
-  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s PR","body":"Existing body","draft":false,"head":{"ref":"%s","sha":"%s-head"},"base":{"ref":"%s"},"merged":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$pr_repo" "$head" "$pr_repo" "$base" "$merged" "$mergeable" "$mergestate"
+  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s","body":"Existing body","draft":false,"head":{"ref":"%s","sha":"%s-head"},"base":{"ref":"%s"},"merged":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$title" "$head" "$pr_repo" "$base" "$merged" "$mergeable" "$mergestate"
 }
 
 if [ "$1" = "api" ]; then

@@ -118,12 +118,12 @@ From here the path depends on whether your repos have a code host.
 ```sh
 knit publish create     # pushes branches, opens a PR per repo, cross-links them
 knit land               # creates/shows the landing plan (does not merge)
-knit land apply         # merges each PR into its base, then runs any deploy steps
+knit land apply         # merges, runs deploy steps, archives, removes worktrees
 ```
 
 `knit land` is safe on its own: it only creates or shows the plan. Nothing merges until `knit land apply`.
 
-Before landing, you can record test verdicts on the bundle itself: `knit check run ci` runs the project command named `ci` and pins the pass/fail result to the exact per-repo commits it ran against. Verdicts go stale the moment the bundle moves. Checks are informational by default; a project can opt in to gating by requiring named checks to be green and fresh before `knit land apply` will execute (`landing.requireChecks`). With several bundles in flight — especially agent-driven ones — `knit check status` answers "which of these is actually ready?" from the ledger instead of from claims. If a landing fails halfway, `knit land resume` continues it, and `knit land rollback --apply` opens revert PRs for the steps that already merged (or set `onFailure: "rollback"` in the landing template to do that automatically).
+Before landing, you can record test verdicts on the bundle itself: `knit check run ci` runs the project command named `ci` and pins the pass/fail result to the exact per-repo commits it ran against. Verdicts go stale the moment the bundle moves. Checks are informational by default; a project can opt in to gating by requiring named checks to be green and fresh before `knit land apply` will execute (`landing.requireChecks`). With several bundles in flight — especially agent-driven ones — `knit check status` answers "which of these is actually ready?" from the ledger instead of from claims. If a landing fails halfway, `knit land resume` continues it, and `knit land rollback --apply` opens revert PRs for the steps that already merged (or set `onFailure: "rollback"` in the landing template to do that automatically). On full success, `knit land apply` archives the bundle and removes its generated worktrees; pass `--keep-worktrees` to keep those checkouts.
 
 **Local-only, no code host** — integrate the bundle's feature branches into a target branch directly:
 
@@ -135,7 +135,7 @@ This merges every repo's `knit/my-feature` branch into its own `main`, recording
 
 ## 8. Wrap up
 
-Mark the bundle done. This removes the generated worktrees but keeps the branches and the bundle artifact:
+If you used `knit land apply`, the bundle is already archived and its generated worktrees are gone. After a local-only `knit merge`, or when you want to close an unlanded bundle manually, archive it yourself; this removes generated worktrees but keeps branches and the bundle artifact:
 
 ```sh
 knit bundle archive my-feature --reason done
