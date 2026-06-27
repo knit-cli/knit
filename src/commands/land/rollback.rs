@@ -144,7 +144,8 @@ fn preflight_merged(
     merged: &[(String, String)],
 ) -> Result<()> {
     for (repo_id, url) in merged {
-        let (_, target, forge) = provider_revert_context(active, Some(&run.provider), repo_id)?;
+        let (_, target, forge) =
+            provider_revert_context(active, Some(&run.provider), repo_id, Some(url))?;
         let pr = forge
             .view(&target, url)
             .with_context(|| format!("{repo_id}: failed to load {url}"))?;

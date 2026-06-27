@@ -35,8 +35,7 @@ knit commit --all -m "Add my feature"   # one logical commit, recorded across re
 
 knit check run ci                       # record a test verdict pinned to these exact commits
 knit publish create                     # one PR per repo, cross-linked
-knit land && knit land apply            # merge the whole set; deploys, resume, rollback
-knit bundle archive my-feature --reason done
+knit land && knit land apply            # merge, deploy, archive, remove worktrees
 ```
 
 The [quickstart](docs/quickstart.md) walks this loop end to end with two toy repos in about ten minutes.
