@@ -13,7 +13,8 @@ use super::client::{effective_workspace_config, resolve_sync_remote_names};
 use super::history::{pull_history_from_remote, push_history_to_remote};
 use super::pull::pull_views_from_remote;
 use super::push::{
-    push_architecture_to_remote, push_bundle_to_remote, push_kg_graph_to_remote, push_views_to_remote,
+    push_architecture_to_remote, push_bundle_to_remote, push_kg_graph_to_remote,
+    push_views_to_remote,
 };
 use crate::output as out;
 use anyhow::{bail, Result};
