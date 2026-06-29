@@ -12,9 +12,9 @@ Templates for publishing knit to package managers. The canonical release flow:
 # 2. Tag and push — triggers .github/workflows/release.yml, which builds
 #    macOS (x64/arm64), Linux (x64/arm64 musl), and Windows (x64) binaries
 #    and uploads them (plus .sha256 files) to a GitHub release. A tag
-#    containing `-` (e.g. v0.1.0-alpha.3) is marked as a pre-release.
-git tag v0.1.0-alpha.3
-git push origin v0.1.0-alpha.3
+#    containing `-` (e.g. v0.1.0-alpha.4) is marked as a pre-release.
+git tag v0.1.0-alpha.4
+git push origin v0.1.0-alpha.4
 
 # 3. Wait for the Release workflow to finish:
 gh run watch --repo marc-merino/knit "$(gh run list --repo marc-merino/knit --workflow Release --limit 1 --json databaseId -q '.[0].databaseId')"
@@ -33,8 +33,8 @@ Users install with `brew tap marc-merino/knit && brew install knit`. To release:
 # Fill the formula from the release assets:
 #   - bump the `version` stanza in homebrew/knit.rb (URLs derive from it)
 #   - replace each sha256 with the matching .sha256 asset, e.g.:
-gh release view v0.1.0-alpha.3 --repo marc-merino/knit --json assets -q '.assets[].name'
-curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.3/knit-v0.1.0-alpha.3-aarch64-apple-darwin.sha256
+gh release view v0.1.0-alpha.4 --repo marc-merino/knit --json assets -q '.assets[].name'
+curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.4/knit-v0.1.0-alpha.4-aarch64-apple-darwin.sha256
 
 # Copy homebrew/knit.rb into the tap as Formula/knit.rb, commit, push:
 #   github.com/marc-merino/homebrew-knit
