@@ -1,5 +1,5 @@
 PackageIdentifier: marc-merino.knit
-PackageVersion: 0.1.0-alpha.3
+PackageVersion: 0.1.0-alpha.4
 PackageLocale: en-US
 Publisher: marc-merino
 PackageName: knit
@@ -12,7 +12,7 @@ Installers:
     NestedInstallerFiles:
       - RelativeFilePath: knit.exe
         PortableCommandAlias: knit
-    InstallerUrl: https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.3/knit-v0.1.0-alpha.3-x86_64-pc-windows-msvc.zip
+    InstallerUrl: https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.4/knit-v0.1.0-alpha.4-x86_64-pc-windows-msvc.zip
     InstallerSha256: REPLACE_WITH_SHA256
 ManifestType: singleton
 ManifestVersion: 1.6.0
