@@ -6,7 +6,9 @@ use crate::model::{
 };
 use crate::output as out;
 use crate::status::has_staged_changes;
-use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
+use crate::store::{
+    load_active_bundle_for_update, load_effective_config, save_active_bundle, ActiveBundle,
+};
 use crate::time::now_iso;
 use crate::tracking::{sync_note, sync_observed_changes};
 use anyhow::{bail, Context, Result};
@@ -39,10 +41,15 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
 
     let group_id = commit_group_id();
     let created_at = now_iso();
-    let commit_message = format!(
-        "{message}\n\nKnit-Group: {group_id}\nKnit-Bundle: {}",
-        active.bundle.id
-    );
+    let config = load_effective_config(&active.root)?;
+    let commit_message = if config.stealth_enabled() {
+        message.to_string()
+    } else {
+        format!(
+            "{message}\n\nKnit-Group: {group_id}\nKnit-Bundle: {}",
+            active.bundle.id
+        )
+    };
     let mut commits = Vec::new();
     let mut repo_changes = Vec::new();
 

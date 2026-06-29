@@ -200,6 +200,49 @@ fn commit_from_worktree_uses_worktree_bundle_not_workspace_fallback() {
 }
 
 #[test]
+fn stealth_config_suppresses_knit_trailers_in_git_commits() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "quiet work"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let checkout = workspace.join(".knit/worktrees/quiet-work/backend");
+
+    append_line(&checkout.join("app.txt"), "default commit");
+    knit(&workspace, ["commit", "--all", "-m", "Default commit"]);
+    let default_message = git(&checkout, ["log", "-1", "--format=%B"]);
+    assert!(default_message.contains("Default commit"));
+    assert!(default_message.contains("Knit-Group:"), "{default_message}");
+    assert!(
+        default_message.contains("Knit-Bundle:"),
+        "{default_message}"
+    );
+
+    let set = knit(&workspace, ["config", "set", "stealth", "true"]);
+    assert!(set.contains("stealth=true"), "{set}");
+
+    append_line(&checkout.join("app.txt"), "stealth commit");
+    knit(&workspace, ["commit", "--all", "-m", "Stealth commit"]);
+    let stealth_message = git(&checkout, ["log", "-1", "--format=%B"]);
+    assert_eq!(stealth_message.trim(), "Stealth commit");
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/quiet-work.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["commitGroups"][1]["message"].as_str(),
+        Some("Stealth commit")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn run_executes_named_project_commands_in_bundle_worktrees() {
     let root = unique_temp_dir();
     let backend = root.join("backend");

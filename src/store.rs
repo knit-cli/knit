@@ -174,6 +174,9 @@ pub fn merge_effective_config(global: KnitConfig, workspace: KnitConfig) -> Knit
     }
 
     effective.advice = workspace.advice;
+    if workspace.stealth.is_some() {
+        effective.stealth = workspace.stealth;
+    }
     effective.push_sync = workspace.push_sync;
     effective.remotes.extend(workspace.remotes);
 
