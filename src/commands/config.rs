@@ -63,6 +63,10 @@ fn apply_config_value(config: &mut KnitConfig, key: &str, value: &str) -> Result
             config.advice = parse_bool(value)?;
             Ok(())
         }
+        "stealth" | "stealth-mode" | "stealth_mode" => {
+            config.stealth = Some(parse_bool(value)?);
+            Ok(())
+        }
         "push-sync" | "push_sync" => {
             config.push_sync = parse_bool(value)?;
             Ok(())
@@ -90,13 +94,24 @@ fn apply_config_value(config: &mut KnitConfig, key: &str, value: &str) -> Result
             Ok(())
         }
         _ => bail!(
-            "Unknown config key `{key}`. Supported: advice, push-sync, sync-remote, sync-remotes."
+            "Unknown config key `{key}`. Supported: advice, stealth, push-sync, sync-remote, sync-remotes."
         ),
     }
 }
 
 fn print_config_value(key: &str, config: &KnitConfig, scope: &str) -> Result<()> {
     match key {
+        "stealth" | "stealth-mode" | "stealth_mode" => {
+            println!(
+                "{} {scope} stealth={}",
+                out::heading("Config:"),
+                if config.stealth_enabled() {
+                    "true"
+                } else {
+                    "false"
+                }
+            );
+        }
         "advice" | "push-sync" | "push_sync" => {
             let label = if key == "advice" {
                 "advice"
@@ -147,6 +162,15 @@ fn print_config_section(title: &str, path: &std::path::Path, config: &KnitConfig
         "{} {}",
         out::heading("Push sync:"),
         if config.push_sync { "true" } else { "false" }
+    );
+    println!(
+        "{} {}",
+        out::heading("Stealth:"),
+        if config.stealth_enabled() {
+            "true"
+        } else {
+            "false"
+        }
     );
     let sync_remotes = configured_sync_remote_names(config);
     println!(
