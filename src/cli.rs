@@ -883,7 +883,7 @@ pub enum ConfigCommand {
     },
     /// Set a Knit config value.
     Set {
-        /// Config key: advice, push-sync, sync-remote, or sync-remotes.
+        /// Config key: advice, stealth, push-sync, sync-remote, or sync-remotes.
         key: String,
         /// Config value.
         value: String,
