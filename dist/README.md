@@ -12,9 +12,9 @@ Templates for publishing knit to package managers. The canonical release flow:
 # 2. Tag and push — triggers .github/workflows/release.yml, which builds
 #    macOS (x64/arm64), Linux (x64/arm64 musl), and Windows (x64) binaries
 #    and uploads them (plus .sha256 files) to a GitHub release. A tag
-#    containing `-` (e.g. v0.1.0-alpha.3) is marked as a pre-release.
-git tag v0.1.0-alpha.3
-git push origin v0.1.0-alpha.3
+#    containing `-` (e.g. v0.1.0-alpha.4) is marked as a pre-release.
+git tag v0.1.0-alpha.4
+git push origin v0.1.0-alpha.4
 
 # 3. Wait for the Release workflow to finish:
 gh run watch --repo marc-merino/knit "$(gh run list --repo marc-merino/knit --workflow Release --limit 1 --json databaseId -q '.[0].databaseId')"
@@ -22,7 +22,8 @@ gh run watch --repo marc-merino/knit "$(gh run list --repo marc-merino/knit --wo
 # 4. Publish to crates.io (the crate is `knit-cli`; the installed binary stays `knit`):
 cargo publish
 
-# 5. Update the Homebrew tap (see below).
+# 5. Update the Homebrew tap (see below). If HOMEBREW_TAP_TOKEN is configured,
+#    the release workflow opens this PR automatically after assets upload.
 ```
 
 ## Homebrew tap (`marc-merino/homebrew-knit`)
@@ -30,11 +31,15 @@ cargo publish
 Users install with `brew tap marc-merino/knit && brew install knit`. To release:
 
 ```sh
-# Fill the formula from the release assets:
+# The release workflow opens a formula bump PR automatically when the
+# HOMEBREW_TAP_TOKEN secret is configured with Contents:write and
+# Pull requests:write access to marc-merino/homebrew-knit.
+#
+# If that secret is not configured, fill the formula from the release assets:
 #   - bump the `version` stanza in homebrew/knit.rb (URLs derive from it)
 #   - replace each sha256 with the matching .sha256 asset, e.g.:
-gh release view v0.1.0-alpha.3 --repo marc-merino/knit --json assets -q '.assets[].name'
-curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.3/knit-v0.1.0-alpha.3-aarch64-apple-darwin.sha256
+gh release view v0.1.0-alpha.4 --repo marc-merino/knit --json assets -q '.assets[].name'
+curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.4/knit-v0.1.0-alpha.4-aarch64-apple-darwin.sha256
 
 # Copy homebrew/knit.rb into the tap as Formula/knit.rb, commit, push:
 #   github.com/marc-merino/homebrew-knit
@@ -53,6 +58,6 @@ curl -sL https://github.com/marc-merino/knit/releases/download/v0.1.0-alpha.3/kn
 1. Bump `version` in `Cargo.toml`, land it
 2. Tag `v<version>` and push; wait for the Release workflow
 3. `cargo publish`
-4. Homebrew: bump the formula `version` stanza, refresh the four sha256s, push to the tap
+4. Homebrew: merge the automatically opened tap PR, or manually bump the formula `version` stanza, refresh the four sha256s, and push to the tap
 5. Scoop: bump version + hash (`autoupdate` handles URLs)
 6. Winget: submit a new manifest for the new version

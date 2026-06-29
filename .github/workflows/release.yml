@@ -59,3 +59,97 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: gh release edit ${{ github.ref_name }} --prerelease
+
+  bump-homebrew-tap:
+    needs: upload-assets
+    runs-on: ubuntu-latest
+    env:
+      TAP_REPO: marc-merino/homebrew-knit
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - name: Skip when tap token is not configured
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "::notice::HOMEBREW_TAP_TOKEN is not configured; skipping Homebrew tap PR."
+
+      - name: Download release checksums
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release download "${GITHUB_REF_NAME}" \
+            --repo "${GITHUB_REPOSITORY}" \
+            --pattern "*.sha256" \
+            --dir shas
+
+      - name: Open tap formula bump PR
+        if: env.TAP_TOKEN != ''
+        env:
+          GH_TOKEN: ${{ env.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          version="${GITHUB_REF_NAME#v}"
+          branch="bump-knit-${version}-${GITHUB_RUN_ID}"
+
+          read_sha() {
+            local target="$1"
+            awk '{print $1}' "shas/knit-v${version}-${target}.tar.gz.sha256"
+          }
+
+          arm_macos_sha="$(read_sha aarch64-apple-darwin)"
+          intel_macos_sha="$(read_sha x86_64-apple-darwin)"
+          arm_linux_sha="$(read_sha aarch64-unknown-linux-musl)"
+          intel_linux_sha="$(read_sha x86_64-unknown-linux-musl)"
+
+          git clone "https://x-access-token:${GH_TOKEN}@github.com/${TAP_REPO}.git" tap
+          cd tap
+          git switch -c "${branch}"
+
+          python3 - \
+            "${version}" \
+            "${arm_macos_sha}" \
+            "${intel_macos_sha}" \
+            "${arm_linux_sha}" \
+            "${intel_linux_sha}" <<'PY'
+          import re
+          import sys
+
+          version, arm_macos, intel_macos, arm_linux, intel_linux = sys.argv[1:6]
+          path = "Formula/knit.rb"
+          with open(path, encoding="utf-8") as handle:
+              formula = handle.read()
+
+          formula = re.sub(r'version "[^"]*"', f'version "{version}"', formula, count=1)
+          replacements = {
+              "aarch64-apple-darwin": arm_macos,
+              "x86_64-apple-darwin": intel_macos,
+              "aarch64-unknown-linux-musl": arm_linux,
+              "x86_64-unknown-linux-musl": intel_linux,
+          }
+          for target, sha in replacements.items():
+              pattern = rf'(knit-v#\{{version\}}-{re.escape(target)}\.tar\.gz"\n\s*sha256 ")[0-9a-f]{{64}}'
+              formula, count = re.subn(pattern, rf'\g<1>{sha}', formula, count=1)
+              if count != 1:
+                  raise SystemExit(f"failed to update sha for {target}")
+
+          with open(path, "w", encoding="utf-8") as handle:
+              handle.write(formula)
+          PY
+
+          if git diff --quiet; then
+            echo "::notice::Homebrew formula already points at ${version}."
+            exit 0
+          fi
+
+          git config user.name "knit-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add Formula/knit.rb
+          git commit -m "knit ${version}"
+          git push -u origin "${branch}"
+          gh pr create \
+            --repo "${TAP_REPO}" \
+            --title "knit ${version}" \
+            --body "Automated formula bump for knit ${version}." \
+            --head "${branch}" \
+            --base main
