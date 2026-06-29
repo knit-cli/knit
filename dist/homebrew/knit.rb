@@ -2,7 +2,7 @@ class Knit < Formula
   desc "Local-first CLI for coordinating cross-repo feature bundles"
   homepage "https://github.com/marc-merino/knit"
   license "Apache-2.0"
-  version "0.1.0-alpha.3"
+  version "0.1.0-alpha.4"
 
   on_macos do
     if Hardware::CPU.arm?
