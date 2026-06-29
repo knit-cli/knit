@@ -18,6 +18,8 @@ pub struct KnitConfig {
     pub sync_remotes: Vec<String>,
     #[serde(default = "default_advice")]
     pub advice: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stealth: Option<bool>,
     /// When true (default), git-pushing commands also push the bundle artifact to
     /// the configured KnitHub remote. Set false to never sync on push.
     #[serde(default = "default_push_sync")]
@@ -35,6 +37,7 @@ impl KnitConfig {
             sync_remote: None,
             sync_remotes: Vec::new(),
             advice: true,
+            stealth: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
@@ -48,6 +51,7 @@ impl KnitConfig {
             sync_remote: None,
             sync_remotes: Vec::new(),
             advice: true,
+            stealth: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
@@ -61,9 +65,14 @@ impl KnitConfig {
             sync_remote: None,
             sync_remotes: Vec::new(),
             advice: true,
+            stealth: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
+    }
+
+    pub fn stealth_enabled(&self) -> bool {
+        self.stealth.unwrap_or(false)
     }
 }
 
