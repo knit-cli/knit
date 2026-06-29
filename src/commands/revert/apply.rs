@@ -9,7 +9,7 @@ use crate::ids::{revert_group_id, short_sha};
 use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange};
 use crate::output as out;
 use crate::providers::{self, pr_number_from_url, PrTarget, PullRequest};
-use crate::store::{save_active_bundle, ActiveBundle};
+use crate::store::{load_effective_config, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
@@ -25,10 +25,15 @@ pub(super) fn apply_local_revert(
     let group_id = revert_group_id();
     let created_at = now_iso();
     let logical_message = format!("Revert {}", plan.target_message);
-    let commit_message = format!(
-        "{logical_message}\n\nKnit-Reverts: {}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
-        plan.target_node_id, active.bundle.id
-    );
+    let config = load_effective_config(&active.root)?;
+    let commit_message = if config.stealth_enabled() {
+        logical_message.clone()
+    } else {
+        format!(
+            "{logical_message}\n\nKnit-Reverts: {}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
+            plan.target_node_id, active.bundle.id
+        )
+    };
     let mut commits = Vec::new();
     let mut repo_changes = Vec::new();
     let mut group_author: Option<CommitAuthor> = None;

@@ -100,6 +100,7 @@ pub fn clone_project_from_remote(
         sync_remote: Some(remote_name.clone()),
         sync_remotes: vec![remote_name.clone()],
         advice: true,
+        stealth: None,
         push_sync: true,
         remotes,
     };

@@ -231,6 +231,46 @@ fn push_sends_feature_branch_and_can_set_upstream() {
 }
 
 #[test]
+fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
+    let root = unique_temp_dir();
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "stale remote"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/stale-remote/backend");
+
+    append_line(
+        &feature.join("app.txt"),
+        "feature push with stale sync remote",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Feature push"]);
+    let sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["syncRemote"] = serde_json::json!("svartal");
+    config["syncRemotes"] = serde_json::json!(["svartal"]);
+    fs::write(
+        &config_path,
+        format!("{}\n", serde_json::to_string_pretty(&config).unwrap()),
+    )
+    .unwrap();
+
+    let push = knit(&workspace, ["push", "backend"]);
+    assert!(push.contains("backend"), "{push}");
+    assert!(push.contains("KnitHub sync skipped (svartal):"), "{push}");
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/stale-remote"]),
+        sha
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[cfg(unix)]
 fn push_sends_selected_feature_branches_in_parallel() {
     let root = unique_temp_dir();

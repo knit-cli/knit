@@ -14,6 +14,7 @@
       "uniqueItems": true
     },
     "advice": { "type": "boolean" },
+    "stealth": { "type": "boolean" },
     "pushSync": { "type": "boolean" },
     "remotes": {
       "type": "object",
