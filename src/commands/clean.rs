@@ -130,7 +130,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         bail!("failed to clean worktrees:\n{}", failures.join("\n"));
     }
 
-    remove_empty_dirs(active.root.join(".knit/worktrees").join(&active.bundle.id));
+    remove_bundle_worktree_container(&active.root, &active.bundle.id);
     Ok(removed)
 }
 
@@ -178,7 +178,7 @@ pub(crate) fn remove_repo_worktree(
         out::path(path.display())
     );
     repo.worktree_path = None;
-    remove_empty_dirs(root.join(".knit/worktrees").join(bundle_id));
+    remove_bundle_worktree_container(root, bundle_id);
     Ok(())
 }
 
@@ -231,6 +231,25 @@ fn remove_empty_dirs(path: PathBuf) {
         remove_empty_dirs(entry.path());
     }
     let _ = fs::remove_dir(path);
+}
+
+fn remove_bundle_worktree_container(root: &Path, bundle_id: &str) {
+    let dir = root.join(".knit/worktrees").join(bundle_id);
+    if !dir.is_dir() {
+        return;
+    }
+    let has_checkout = fs::read_dir(&dir)
+        .map(|entries| {
+            entries
+                .flatten()
+                .any(|entry| entry.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        })
+        .unwrap_or(false);
+    if has_checkout {
+        return;
+    }
+    let _ = fs::remove_file(dir.join("AGENTS.md"));
+    remove_empty_dirs(dir);
 }
 
 fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
