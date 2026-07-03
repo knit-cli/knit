@@ -623,6 +623,35 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
 }
 
 #[test]
+fn prune_removes_bundle_worktree_container_dir_and_agents_md() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "container cleanup"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+
+    let bundle_root = workspace.join(".knit/worktrees/container-cleanup");
+    let feature = bundle_root.join("backend");
+    assert!(feature.exists());
+    assert!(bundle_root.join("AGENTS.md").exists());
+
+    let pruned = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--apply", "--worktrees"],
+    );
+    assert!(pruned.contains("Deleted bundle"));
+    assert!(pruned.contains("container-cleanup"));
+    assert!(!feature.exists());
+    assert!(!bundle_root.join("AGENTS.md").exists());
+    assert!(!bundle_root.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_prune_keeps_bundles_with_unpublished_commits() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
