@@ -296,3 +296,208 @@ fn run_up_transform_mode_lifts_main_shape_with_zero_config() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+fn write_fake_docker_multi(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let fake_bin = root.join("fake-bin");
+    fs::create_dir_all(&fake_bin).unwrap();
+    let log_dir = root.join("fake-docker-logs");
+    fs::create_dir_all(&log_dir).unwrap();
+    let docker = fake_bin.join("docker");
+    fs::write(
+        &docker,
+        r#"#!/bin/sh
+case " $* " in
+  *" config "*)
+    case " $* " in
+      */alpha/*) cat "$FAKE_DOCKER_DIR/config-alpha.json";;
+      */beta/*) cat "$FAKE_DOCKER_DIR/config-beta.json";;
+    esac
+    exit 0;;
+  *" ls "*) exit 0;;
+esac
+printf '%s\n' "$*" >> "$FAKE_DOCKER_DIR/calls.log"
+exit 0
+"#,
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    let mut permissions = fs::metadata(&docker).unwrap().permissions();
+    permissions.set_mode(0o755);
+    fs::set_permissions(&docker, permissions).unwrap();
+    (fake_bin, log_dir)
+}
+
+#[cfg(unix)]
+#[test]
+fn run_up_lifts_every_compose_repo_and_cross_wires_ports() {
+    let root = unique_temp_dir();
+    let alpha = root.join("alpha");
+    let beta = root.join("beta");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&alpha, "alpha");
+    init_repo(&beta, "beta");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "alpha", alpha.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "beta", beta.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "venue capacity"]);
+
+    for repo in ["alpha", "beta"] {
+        fs::write(
+            workspace.join(format!(
+                ".knit/worktrees/venue-capacity/{repo}/docker-compose.yml"
+            )),
+            "services:\n  app:\n    build: .\n",
+        )
+        .unwrap();
+    }
+
+    let (fake_bin, log_dir) = write_fake_docker_multi(&root);
+    // Canned `docker compose config` outputs, resolved in source-space. Each
+    // stack references the OTHER stack's published port in its environment.
+    fs::write(
+        log_dir.join("config-alpha.json"),
+        serde_json::to_string_pretty(&json!({
+            "name": "alpha",
+            "services": {
+                "api": {
+                    "build": { "context": alpha.display().to_string() },
+                    "environment": {
+                        "SELF_URL": "http://localhost:47510",
+                        "PEER_URL": "http://host.docker.internal:47620"
+                    },
+                    "ports": [
+                        {"mode": "ingress", "target": 8080, "published": "47510", "protocol": "tcp"}
+                    ]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+    fs::write(
+        log_dir.join("config-beta.json"),
+        serde_json::to_string_pretty(&json!({
+            "name": "beta",
+            "services": {
+                "web": {
+                    "build": { "context": beta.display().to_string() },
+                    "environment": { "API_URL": "http://localhost:47510" },
+                    "ports": [
+                        {"mode": "ingress", "target": 3000, "published": "47620", "protocol": "tcp"}
+                    ]
+                }
+            }
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let output = knit_with_env(
+        &workspace,
+        ["run", "up"],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+        ],
+    );
+    assert!(
+        output.contains("Runtime up:"),
+        "unexpected output: {output}"
+    );
+    assert!(
+        output.contains("Stack: alpha"),
+        "missing alpha stack: {output}"
+    );
+    assert!(
+        output.contains("Stack: beta"),
+        "missing beta stack: {output}"
+    );
+
+    // Both stacks started, each as its own per-repo compose project.
+    let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
+    assert!(calls.contains("-p knit-run-venue-capacity--alpha up --build -d"));
+    assert!(calls.contains("-p knit-run-venue-capacity--beta up --build -d"));
+
+    let run_dir = workspace.join(".knit/runtime-runs/venue-capacity");
+    let alpha_generated: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("docker-compose.alpha.yml")).unwrap(),
+    )
+    .unwrap();
+    let beta_generated: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("docker-compose.beta.yml")).unwrap())
+            .unwrap();
+
+    // Build contexts remap to each repo's worktree.
+    assert!(alpha_generated["services"]["api"]["build"]["context"]
+        .as_str()
+        .unwrap()
+        .ends_with(".knit/worktrees/venue-capacity/alpha"));
+    assert!(beta_generated["services"]["web"]["build"]["context"]
+        .as_str()
+        .unwrap()
+        .ends_with(".knit/worktrees/venue-capacity/beta"));
+
+    // Fresh ports per stack.
+    let alpha_port = alpha_generated["services"]["api"]["ports"][0]["published"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let beta_port = beta_generated["services"]["web"]["ports"][0]["published"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    assert_ne!(alpha_port, "47510");
+    assert_ne!(beta_port, "47620");
+    assert_ne!(alpha_port, beta_port);
+
+    // Own-stack references rewritten (phase 1) AND cross-stack references
+    // rewired to the sibling's NEW bundle port (phase 2).
+    let alpha_env = &alpha_generated["services"]["api"]["environment"];
+    assert_eq!(
+        alpha_env["SELF_URL"],
+        format!("http://localhost:{alpha_port}")
+    );
+    assert_eq!(
+        alpha_env["PEER_URL"],
+        format!("http://host.docker.internal:{beta_port}")
+    );
+    assert_eq!(
+        beta_generated["services"]["web"]["environment"]["API_URL"],
+        format!("http://localhost:{alpha_port}")
+    );
+
+    // One run state records every stack.
+    let state: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("state.json")).unwrap()).unwrap();
+    let stacks = state["stacks"].as_array().unwrap();
+    assert_eq!(stacks.len(), 2);
+    assert_eq!(stacks[0]["repo"], "alpha");
+    assert_eq!(stacks[0]["projectName"], "knit-run-venue-capacity--alpha");
+    assert_eq!(stacks[1]["repo"], "beta");
+
+    // `run down` tears down every stack's compose project.
+    fs::remove_file(log_dir.join("calls.log")).unwrap();
+    knit_with_env(
+        &workspace,
+        ["run", "down"],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+        ],
+    );
+    let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
+    assert!(calls.contains("-p knit-run-venue-capacity--alpha down --remove-orphans"));
+    assert!(calls.contains("-p knit-run-venue-capacity--beta down --remove-orphans"));
+
+    fs::remove_dir_all(root).unwrap();
+}

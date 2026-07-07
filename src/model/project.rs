@@ -115,9 +115,15 @@ pub struct ProjectRunCommand {
 pub struct ProjectRuntime {
     #[serde(default = "default_runtime_kind")]
     pub kind: String,
-    /// Repo whose checkout hosts the runtime compose file.
+    /// Repo whose checkout hosts the runtime compose file. When set, the
+    /// runtime is that single stack.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stack_repo: Option<String>,
+    /// Repos whose compose stacks `knit run up` lifts, each as its own
+    /// isolated per-bundle compose project. Empty (and no `stackRepo`) means
+    /// every bundle repo with a compose file.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stacks: Vec<String>,
     #[serde(default = "default_project_config_file")]
     pub project_config_file: String,
     /// Compose file inside the stack repo. Defaults to
@@ -143,6 +149,7 @@ impl Default for ProjectRuntime {
         Self {
             kind: default_runtime_kind(),
             stack_repo: None,
+            stacks: Vec::new(),
             project_config_file: default_project_config_file(),
             compose_file: None,
             mode: None,

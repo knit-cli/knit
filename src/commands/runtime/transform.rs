@@ -38,12 +38,14 @@ pub struct ServicePort {
 /// Transform a resolved compose config (the JSON output of `docker compose
 /// config --format json`) in place. `repo_map` maps canonical source repo
 /// paths to bundle checkouts; `allocate` maps an original published host
-/// port to a fresh free one.
+/// port to a fresh free one. Returns the published ports and the
+/// `(old_host, new_host)` map so multi-stack runs can rewire references to
+/// THIS stack's ports inside sibling stacks.
 pub fn transform_compose(
     config: &mut Value,
     repo_map: &[(PathBuf, PathBuf)],
     allocate: &mut dyn FnMut(u16) -> Result<u16>,
-) -> Result<Vec<ServicePort>> {
+) -> Result<(Vec<ServicePort>, Vec<(u16, u16)>)> {
     if let Some(top) = config.as_object_mut() {
         top.remove("name");
         // `docker compose config` fully resolves named volumes and networks to
@@ -109,6 +111,29 @@ pub fn transform_compose(
     // Second pass: rewrite textual references to remapped host ports in app
     // configuration, now that the full port map is known (services commonly
     // reference each other's published ports, e.g. CORS origins).
+    rewrite_service_port_references(services, &port_map);
+
+    Ok((ports, port_map))
+}
+
+/// Rewrite `localhost:<old>`-style references to remapped host ports in every
+/// service's environment and build args. Multi-stack runs call this a second
+/// time per stack with the OTHER stacks' port maps, so cross-stack references
+/// (a backend pointing at a sibling repo's published API port) land on the
+/// bundle instance instead of the dev one.
+pub fn rewrite_extra_port_references(config: &mut Value, port_map: &[(u16, u16)]) {
+    if port_map.is_empty() {
+        return;
+    }
+    if let Some(services) = config
+        .get_mut("services")
+        .and_then(|services| services.as_object_mut())
+    {
+        rewrite_service_port_references(services, port_map);
+    }
+}
+
+fn rewrite_service_port_references(services: &mut Map<String, Value>, port_map: &[(u16, u16)]) {
     for service in services.values_mut() {
         let Some(service) = service.as_object_mut() else {
             continue;
@@ -117,7 +142,7 @@ pub fn transform_compose(
             .get_mut("environment")
             .and_then(Value::as_object_mut)
         {
-            rewrite_port_references(environment, &port_map);
+            rewrite_port_references(environment, port_map);
         }
         if let Some(args) = service
             .get_mut("build")
@@ -125,11 +150,9 @@ pub fn transform_compose(
             .and_then(|build| build.get_mut("args"))
             .and_then(Value::as_object_mut)
         {
-            rewrite_port_references(args, &port_map);
+            rewrite_port_references(args, port_map);
         }
     }
-
-    Ok(ports)
 }
 
 /// Whether a top-level volume/network entry is declared `external`. Compose
@@ -487,7 +510,8 @@ mod tests {
             next += 1;
             Ok(old + 10 * next)
         };
-        let ports = transform_compose(&mut config, &repo_map, &mut allocate).unwrap();
+        let (ports, port_map) = transform_compose(&mut config, &repo_map, &mut allocate).unwrap();
+        assert_eq!(port_map.len(), 3);
 
         // Top-level name and container names are stripped.
         assert!(config.get("name").is_none());
