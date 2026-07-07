@@ -12,8 +12,10 @@
 //! - reallocates every published host port to a free one (container side
 //!   untouched) and rewrites textual references to the old host ports inside
 //!   environment values and build args (`localhost:5173` -> `localhost:5183`)
-//! - strips `container_name` and the top-level `name` so the result runs as
-//!   an isolated compose project with its own networks and volumes
+//! - strips `container_name`, the top-level `name`, and the resolved `name`
+//!   `docker compose config` bakes onto each named volume and network, so the
+//!   result runs as an isolated compose project with its own (freshly named)
+//!   networks and volumes rather than binding the source stack's
 //!
 //! The result is the same composed shape with different ports and the new
 //! code. Repos that need precise control can instead commit a compose file
@@ -44,6 +46,24 @@ pub fn transform_compose(
 ) -> Result<Vec<ServicePort>> {
     if let Some(top) = config.as_object_mut() {
         top.remove("name");
+        // `docker compose config` fully resolves named volumes and networks to
+        // "<source-project>_<name>" and records it as an explicit `name`. Left
+        // in place, the bundle stack binds the *source* project's volumes and
+        // networks instead of its own — sharing (and corrupting) the canonical
+        // stack's database. Strip the resolved name so the bundle's own compose
+        // project re-derives an isolated "<bundle-project>_<name>". Entries
+        // marked `external` keep their name: the shared reference is deliberate.
+        for key in ["volumes", "networks"] {
+            if let Some(entries) = top.get_mut(key).and_then(Value::as_object_mut) {
+                for entry in entries.values_mut() {
+                    if let Some(entry) = entry.as_object_mut() {
+                        if !is_external(entry) {
+                            entry.remove("name");
+                        }
+                    }
+                }
+            }
+        }
     }
 
     let Some(services) = config
@@ -110,6 +130,16 @@ pub fn transform_compose(
     }
 
     Ok(ports)
+}
+
+/// Whether a top-level volume/network entry is declared `external`. Compose
+/// accepts `external: true` or the legacy `external: { name: ... }` object.
+fn is_external(entry: &Map<String, Value>) -> bool {
+    match entry.get("external") {
+        Some(Value::Bool(value)) => *value,
+        Some(Value::Object(_)) => true,
+        _ => false,
+    }
 }
 
 fn transform_build(build: &mut Map<String, Value>, repo_map: &[(PathBuf, PathBuf)]) -> Result<()> {
@@ -521,6 +551,43 @@ mod tests {
         );
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn transform_strips_resolved_volume_and_network_names() {
+        // Mirrors what `docker compose config` actually emits for a compose
+        // file with a top-level `name:`: named volumes and networks carry a
+        // resolved "<project>_<name>". Left in place, the bundle stack binds
+        // the source project's volumes/networks instead of its own.
+        let mut config = json!({
+            "name": "knithub",
+            "services": {
+                "db": {
+                    "image": "postgres:17",
+                    "volumes": [
+                        {"type": "volume", "source": "db-data", "target": "/var/lib/postgresql/data"}
+                    ],
+                    "networks": {"default": {}}
+                }
+            },
+            "networks": {"default": {"ipam": {}, "name": "knithub_default"}},
+            "volumes": {
+                "db-data": {"name": "knithub_db-data"},
+                "shared": {"external": true, "name": "prod_shared"}
+            }
+        });
+        let mut allocate = |old: u16| -> Result<u16> { Ok(old) };
+        transform_compose(&mut config, &[], &mut allocate).unwrap();
+
+        // Top-level name gone; resolved volume/network names stripped so the
+        // bundle's own compose project re-namespaces them.
+        assert!(config.get("name").is_none());
+        assert!(config["volumes"]["db-data"].get("name").is_none());
+        assert!(config["networks"]["default"].get("name").is_none());
+        // Service-level volume reference keeps the short name.
+        assert_eq!(config["services"]["db"]["volumes"][0]["source"], "db-data");
+        // External volumes keep their name: the shared reference is deliberate.
+        assert_eq!(config["volumes"]["shared"]["name"], "prod_shared");
     }
 
     #[test]
