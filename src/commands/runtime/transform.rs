@@ -121,6 +121,122 @@ pub fn transform_compose(
 /// time per stack with the OTHER stacks' port maps, so cross-stack references
 /// (a backend pointing at a sibling repo's published API port) land on the
 /// bundle instance instead of the dev one.
+/// Shared-database mode for transform stacks: remove the compose service that
+/// IS the database and rewire references to it onto the shared dev database,
+/// so the bundle runs its code (and migrations) against real dev data instead
+/// of a fresh empty instance. Rewrites, in every remaining service's
+/// environment and build args:
+///
+/// - `<service>:<container_port>` -> `<host>:<host_port>` (connection URLs)
+/// - values exactly equal to the service name -> `<host>` (split HOST vars)
+/// - values exactly equal to the container port whose key mentions PORT ->
+///   `<host_port>` (split PORT vars) — heuristic by design, like the port
+///   reference rewriting above
+///
+/// `depends_on` entries on the removed service are dropped, as are top-level
+/// named volumes no remaining service references (keeping `external` ones).
+/// Returns true when the service existed and was stripped.
+pub fn strip_shared_database(
+    config: &mut Value,
+    service: &str,
+    host: &str,
+    host_port: u16,
+    container_port: u16,
+) -> bool {
+    let Some(services) = config
+        .get_mut("services")
+        .and_then(|services| services.as_object_mut())
+    else {
+        return false;
+    };
+    if services.remove(service).is_none() {
+        return false;
+    }
+
+    let old_addr = format!("{service}:{container_port}");
+    let new_addr = format!("{host}:{host_port}");
+    let container_port_text = container_port.to_string();
+    let host_port_text = host_port.to_string();
+
+    for remaining in services.values_mut() {
+        let Some(remaining) = remaining.as_object_mut() else {
+            continue;
+        };
+        match remaining.get_mut("depends_on") {
+            Some(Value::Object(depends)) => {
+                depends.remove(service);
+                if depends.is_empty() {
+                    remaining.remove("depends_on");
+                }
+            }
+            Some(Value::Array(depends)) => {
+                depends.retain(|entry| entry.as_str() != Some(service));
+                if depends.is_empty() {
+                    remaining.remove("depends_on");
+                }
+            }
+            _ => {}
+        }
+
+        let rewire = |values: &mut Map<String, Value>| {
+            for (key, value) in values.iter_mut() {
+                let Some(text) = value.as_str() else {
+                    continue;
+                };
+                if text == service {
+                    *value = Value::String(host.to_string());
+                } else if text == container_port_text && key.to_lowercase().contains("port") {
+                    *value = Value::String(host_port_text.clone());
+                } else if text.contains(&old_addr) {
+                    *value = Value::String(text.replace(&old_addr, &new_addr));
+                }
+            }
+        };
+        if let Some(environment) = remaining
+            .get_mut("environment")
+            .and_then(Value::as_object_mut)
+        {
+            rewire(environment);
+        }
+        if let Some(args) = remaining
+            .get_mut("build")
+            .and_then(Value::as_object_mut)
+            .and_then(|build| build.get_mut("args"))
+            .and_then(Value::as_object_mut)
+        {
+            rewire(args);
+        }
+    }
+
+    // Drop named volumes only the removed service used.
+    let referenced: std::collections::BTreeSet<String> = services
+        .values()
+        .filter_map(|entry| entry.get("volumes"))
+        .filter_map(Value::as_array)
+        .flatten()
+        .filter_map(|volume| match volume {
+            Value::Object(entry) if entry.get("type").and_then(Value::as_str) == Some("volume") => {
+                entry
+                    .get("source")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            }
+            Value::String(text) => text.split_once(':').map(|(source, _)| source.to_string()),
+            _ => None,
+        })
+        .collect();
+    if let Some(volumes) = config
+        .get_mut("volumes")
+        .and_then(|volumes| volumes.as_object_mut())
+    {
+        volumes.retain(|name, entry| {
+            referenced.contains(name) || entry.as_object().is_some_and(is_external)
+        });
+    }
+
+    true
+}
+
 pub fn rewrite_extra_port_references(config: &mut Value, port_map: &[(u16, u16)]) {
     if port_map.is_empty() {
         return;
@@ -640,6 +756,81 @@ mod tests {
         assert_eq!(config["services"]["db"]["volumes"][0]["source"], "db-data");
         // External volumes keep their name: the shared reference is deliberate.
         assert_eq!(config["volumes"]["shared"]["name"], "prod_shared");
+    }
+
+    #[test]
+    fn strip_shared_database_removes_service_and_rewires_references() {
+        let mut config = json!({
+            "services": {
+                "db": {
+                    "image": "postgres:17",
+                    "ports": [{"target": 5432, "published": "5435"}],
+                    "volumes": [
+                        {"type": "volume", "source": "postgres_data", "target": "/var/lib/postgresql/data"}
+                    ]
+                },
+                "web": {
+                    "environment": {
+                        "DATABASE_URL": "postgres://u:p@db:5432/mydatabase",
+                        "DATABASE_HOST": "db",
+                        "DATABASE_PORT": "5432",
+                        "REDIS_HOST": "redis"
+                    },
+                    "depends_on": {"db": {"condition": "service_started"}, "redis": {"condition": "service_started"}}
+                },
+                "worker": {
+                    "environment": {"DATABASE_URL": "postgres://u:p@db:5432/mydatabase"},
+                    "depends_on": ["db", "redis"]
+                },
+                "redis": {
+                    "image": "redis:alpine",
+                    "volumes": [{"type": "volume", "source": "redis_data", "target": "/data"}]
+                }
+            },
+            "volumes": {"postgres_data": {}, "redis_data": {}}
+        });
+
+        assert!(strip_shared_database(
+            &mut config,
+            "db",
+            "host.docker.internal",
+            5435,
+            5432
+        ));
+
+        // Service gone; dependents no longer wait on it; redis untouched.
+        assert!(config["services"].get("db").is_none());
+        let web = &config["services"]["web"];
+        assert!(web["depends_on"].get("db").is_none());
+        assert!(web["depends_on"].get("redis").is_some());
+        assert_eq!(config["services"]["worker"]["depends_on"], json!(["redis"]));
+
+        // URL, split-host, and split-port variables all rewired; unrelated
+        // values untouched.
+        assert_eq!(
+            web["environment"]["DATABASE_URL"],
+            "postgres://u:p@host.docker.internal:5435/mydatabase"
+        );
+        assert_eq!(web["environment"]["DATABASE_HOST"], "host.docker.internal");
+        assert_eq!(web["environment"]["DATABASE_PORT"], "5435");
+        assert_eq!(web["environment"]["REDIS_HOST"], "redis");
+        assert_eq!(
+            config["services"]["worker"]["environment"]["DATABASE_URL"],
+            "postgres://u:p@host.docker.internal:5435/mydatabase"
+        );
+
+        // The db's named volume is dropped; volumes still in use survive.
+        assert!(config["volumes"].get("postgres_data").is_none());
+        assert!(config["volumes"].get("redis_data").is_some());
+
+        // Absent service: untouched, reports false.
+        assert!(!strip_shared_database(
+            &mut config,
+            "nope",
+            "host.docker.internal",
+            5435,
+            5432
+        ));
     }
 
     #[test]
