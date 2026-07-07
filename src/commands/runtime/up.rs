@@ -72,11 +72,14 @@ pub(super) fn run_up_stacks(
         })
         .collect();
 
-    // Shared-database reachability gates contract stacks; check it once.
+    // Shared-database reachability gates contract stacks and transform stacks
+    // that strip their db service; check it once.
     let database_config = runtime.database.clone().unwrap_or_default();
+    let mut shared_db_checked = false;
     if let Some(contract) = plans.iter().find(|plan| plan.mode == RuntimeMode::Contract) {
         if database_config.mode == DatabaseMode::Shared {
             ensure_shared_database_reachable(&database_config, &contract.checkout)?;
+            shared_db_checked = true;
         }
     }
 
@@ -87,6 +90,32 @@ pub(super) fn run_up_stacks(
             RuntimeMode::Transform => {
                 let source_dir = PathBuf::from(&plan.repo.path);
                 let mut config = transform::resolve_compose_config(&plan.compose, &source_dir)?;
+                // Shared database: strip the db service BEFORE port
+                // reallocation, so references to the shared dev port are
+                // never rewritten away from it.
+                let mut database: Option<StateDatabase> = None;
+                if database_config.mode == DatabaseMode::Shared {
+                    if let Some(service) = &database_config.service {
+                        let container_port = database_config.container_port.unwrap_or(5432);
+                        if transform::strip_shared_database(
+                            &mut config,
+                            service,
+                            &database_config.host,
+                            database_config.port,
+                            container_port,
+                        ) {
+                            if !shared_db_checked {
+                                ensure_shared_database_reachable(&database_config, &plan.checkout)?;
+                                shared_db_checked = true;
+                            }
+                            database = Some(StateDatabase {
+                                mode: DatabaseMode::Shared,
+                                port: database_config.port,
+                                name: database_config.name.clone(),
+                            });
+                        }
+                    }
+                }
                 let mut allocate = |old: u16| -> Result<u16> {
                     let mut candidate = old.saturating_add(step);
                     loop {
@@ -104,7 +133,7 @@ pub(super) fn run_up_stacks(
                     transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
                 ready.push(Ready {
                     ports,
-                    database: None,
+                    database,
                     prepared: Prepared::Transform { config, port_map },
                 });
             }
