@@ -24,27 +24,44 @@ pub(super) fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
 }
 
 pub(super) fn run_down(active: &ActiveBundle) -> Result<()> {
-    // State may be missing when an `up` failed before recording it; down
-    // still works because containers are resolved by compose label.
-    let profiles = load_runtime_state(active)
-        .map(|state| state.profiles)
-        .unwrap_or_default();
-    let project_name = compose_project_name(&active.bundle.id);
-
     // Project-scoped `down` resolves containers by compose label, so it works
-    // even after the bundle worktree (and its compose file) is gone.
-    let mut command = Command::new("docker");
-    command.args(["compose", "-p", &project_name]);
-    for profile in &profiles {
-        command.args(["--profile", profile]);
+    // even after the bundle worktree (and its compose file) is gone. With
+    // recorded state, tear down exactly the stacks it lists; without state
+    // (an `up` that failed before recording), sweep the legacy single-stack
+    // name plus the per-repo names multi-stack runs derive.
+    let mut targets: Vec<(String, Vec<String>)> = Vec::new();
+    match load_runtime_state(active).ok() {
+        Some(state) if !state.stacks.is_empty() => {
+            for stack in &state.stacks {
+                targets.push((stack.project_name.clone(), stack.profiles.clone()));
+            }
+        }
+        Some(state) => {
+            targets.push((compose_project_name(&active.bundle.id), state.profiles));
+        }
+        None => {
+            let legacy = compose_project_name(&active.bundle.id);
+            for repo in &active.bundle.repos {
+                targets.push((format!("{legacy}--{}", repo.id), Vec::new()));
+            }
+            targets.push((legacy, Vec::new()));
+        }
     }
-    let status = command
-        .args(["down", "--remove-orphans"])
-        .status()
-        .context("failed to run docker compose down")?;
 
-    if !status.success() {
-        bail!("docker compose down exited with status {status}");
+    for (project_name, profiles) in &targets {
+        let mut command = Command::new("docker");
+        command.args(["compose", "-p", project_name]);
+        for profile in profiles {
+            command.args(["--profile", profile]);
+        }
+        let status = command
+            .args(["down", "--remove-orphans"])
+            .status()
+            .context("failed to run docker compose down")?;
+
+        if !status.success() {
+            bail!("docker compose down exited with status {status}");
+        }
     }
 
     println!(
@@ -59,25 +76,43 @@ pub(super) fn run_status(active: &ActiveBundle) -> Result<()> {
     // State may be missing when an `up` failed before recording it; still
     // report containers resolved by compose label so cleanup is visible.
     let state = load_runtime_state(active).ok();
-    let project_name = compose_project_name(&active.bundle.id);
-    let services = compose_service_states(&project_name);
-    let any_running = services.iter().any(|(_, state)| state == "running");
+
+    // (stack label, compose project) pairs to report; single-stack runs keep
+    // the unlabelled legacy shape.
+    let views: Vec<(Option<String>, String)> = match &state {
+        Some(state) if !state.stacks.is_empty() => state
+            .stacks
+            .iter()
+            .map(|stack| (Some(stack.repo.clone()), stack.project_name.clone()))
+            .collect(),
+        _ => vec![(None, compose_project_name(&active.bundle.id))],
+    };
 
     println!(
         "{} {}",
         out::heading("Bundle:"),
         out::repo(&active.bundle.id)
     );
-    if services.is_empty() {
-        println!(
-            "{} {}",
-            out::heading("Services:"),
-            out::muted("none running")
-        );
-    } else {
-        for (service, service_state) in &services {
-            println!("{} {}", out::heading(format!("{service}:")), service_state);
+    let mut any_running = false;
+    let mut services: Vec<(String, String)> = Vec::new();
+    for (label, project_name) in &views {
+        let stack_services = compose_service_states(project_name);
+        any_running |= stack_services.iter().any(|(_, state)| state == "running");
+        if let Some(label) = label {
+            println!("{} {}", out::heading("Stack:"), out::repo(label));
         }
+        if stack_services.is_empty() {
+            println!(
+                "{} {}",
+                out::heading("Services:"),
+                out::muted("none running")
+            );
+        } else {
+            for (service, service_state) in &stack_services {
+                println!("{} {}", out::heading(format!("{service}:")), service_state);
+            }
+        }
+        services.extend(stack_services);
     }
 
     let Some(state) = state else {
@@ -128,7 +163,18 @@ pub(super) fn run_status(active: &ActiveBundle) -> Result<()> {
             );
         }
     }
-    println!("{} {}", out::muted("Compose:"), state.compose_file);
+    if state.stacks.len() > 1 {
+        for stack in &state.stacks {
+            println!(
+                "{} {} {}",
+                out::muted("Compose:"),
+                out::repo(&stack.repo),
+                stack.compose_file
+            );
+        }
+    } else {
+        println!("{} {}", out::muted("Compose:"), state.compose_file);
+    }
     if !any_running {
         println!(
             "{} Runtime is stopped. Run `knit run up` from a stack worktree checkout.",
@@ -249,6 +295,31 @@ pub(super) struct RuntimeRunState {
     pub(super) env: BTreeMap<String, String>,
     pub(super) profile_path: Option<String>,
     pub(super) started_at: String,
+    /// Every stack this run started. Single-stack runs also mirror the first
+    /// stack into the legacy top-level fields above so older tooling keeps
+    /// reading state files.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) stacks: Vec<RuntimeStackState>,
+}
+
+/// One stack of a runtime run: a bundle repo's compose lifted into its own
+/// per-bundle compose project.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(super) struct RuntimeStackState {
+    pub(super) repo: String,
+    pub(super) project_name: String,
+    #[serde(default)]
+    pub(super) mode: RuntimeMode,
+    pub(super) compose_file: String,
+    #[serde(default)]
+    pub(super) ports: Vec<ServicePort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub(super) profiles: Vec<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) env: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) database: Option<StateDatabase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

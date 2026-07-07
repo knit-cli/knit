@@ -1,19 +1,23 @@
-//! `knit run up`: build and start the per-bundle stack. Owns both up paths
-//! (transform and contract), host-port allocation across live runtimes, the
-//! `KNIT_*` environment contract, and database resolution.
+//! `knit run up`: build and start the per-bundle stacks. Owns stack
+//! preparation for both modes (transform and contract), cross-stack port
+//! wiring, host-port allocation across live runtimes, the `KNIT_*`
+//! environment contract, and database resolution.
 
 use super::state::{
-    compose_project_name, frontend_port, runtime_run_dir, RuntimeRunState, StateDatabase,
+    compose_project_name, frontend_port, runtime_run_dir, RuntimeRunState, RuntimeStackState,
+    StateDatabase,
 };
 use super::transform::{self, ServicePort};
+use super::StackPlan;
 use crate::checkout::checkout_dir;
 use crate::git::rev_parse;
 use crate::model::{
-    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RepoEntry, RuntimeMode,
+    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode,
 };
 use crate::output as out;
 use crate::store::{read_json, write_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::net::{TcpListener, TcpStream};
@@ -24,15 +28,38 @@ use std::time::Duration;
 
 const BUNDLE_DB_PROFILE: &str = "bundle-db";
 
-pub(super) fn run_up_transform(
+/// A stack prepared for launch but not yet started.
+enum Prepared {
+    Transform {
+        config: Value,
+        port_map: Vec<(u16, u16)>,
+    },
+    Contract {
+        profiles: Vec<String>,
+        env: BTreeMap<String, String>,
+    },
+}
+
+struct Ready {
+    ports: Vec<ServicePort>,
+    database: Option<StateDatabase>,
+    prepared: Prepared,
+}
+
+/// Start every planned stack: prepare all of them first (so cross-stack port
+/// wiring sees every port map), print the full plan, then `docker compose up`
+/// each stack in bundle order. Run state is recorded only after every stack
+/// starts, so a failed `up` leaves no phantom state — `knit run down` still
+/// cleans up by derived project names.
+pub(super) fn run_up_stacks(
     active: &ActiveBundle,
+    project: Option<&KnitProject>,
     runtime: &ProjectRuntime,
-    stack_repo: &RepoEntry,
-    stack_checkout: &Path,
-    compose_path: &Path,
+    plans: Vec<StackPlan<'_>>,
 ) -> Result<()> {
-    let source_dir = PathBuf::from(&stack_repo.path);
-    let mut config = transform::resolve_compose_config(compose_path, &source_dir)?;
+    let multi = plans.len() > 1;
+    let mut taken = load_used_ports(&active.root)?;
+    let step = runtime.ports.clone().unwrap_or_default().step.max(1);
 
     let repo_map: Vec<(PathBuf, PathBuf)> = active
         .bundle
@@ -45,209 +72,204 @@ pub(super) fn run_up_transform(
         })
         .collect();
 
-    let step = runtime.ports.clone().unwrap_or_default().step.max(1);
-    let mut taken = load_used_ports(&active.root)?;
-    let mut allocate = |old: u16| -> Result<u16> {
-        let mut candidate = old.saturating_add(step);
-        loop {
-            if !taken.contains(&candidate) && port_available(candidate) {
-                taken.insert(candidate);
-                return Ok(candidate);
+    // Shared-database reachability gates contract stacks; check it once.
+    let database_config = runtime.database.clone().unwrap_or_default();
+    if let Some(contract) = plans.iter().find(|plan| plan.mode == RuntimeMode::Contract) {
+        if database_config.mode == DatabaseMode::Shared {
+            ensure_shared_database_reachable(&database_config, &contract.checkout)?;
+        }
+    }
+
+    // Phase 1: prepare every stack without starting docker.
+    let mut ready: Vec<Ready> = Vec::new();
+    for plan in &plans {
+        match plan.mode {
+            RuntimeMode::Transform => {
+                let source_dir = PathBuf::from(&plan.repo.path);
+                let mut config = transform::resolve_compose_config(&plan.compose, &source_dir)?;
+                let mut allocate = |old: u16| -> Result<u16> {
+                    let mut candidate = old.saturating_add(step);
+                    loop {
+                        if !taken.contains(&candidate) && port_available(candidate) {
+                            taken.insert(candidate);
+                            return Ok(candidate);
+                        }
+                        candidate = candidate.saturating_add(step);
+                        if candidate > 65000 {
+                            bail!("Could not find a free runtime port for {old}.");
+                        }
+                    }
+                };
+                let (ports, port_map) =
+                    transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
+                ready.push(Ready {
+                    ports,
+                    database: None,
+                    prepared: Prepared::Transform { config, port_map },
+                });
             }
-            candidate = candidate.saturating_add(step);
-            if candidate > 65000 {
-                bail!("Could not find a free runtime port for {old}.");
+            RuntimeMode::Contract => {
+                let resolved = resolve_database(&database_config, &active.bundle.id, &mut taken);
+                let ports_config = runtime.ports.clone().unwrap_or_default();
+                let service_ports = allocate_service_ports(
+                    &taken,
+                    &ports_config.service_bases(),
+                    ports_config.step.max(1),
+                )?;
+                taken.extend(service_ports.values().copied());
+                let env = runtime_env(
+                    active,
+                    project,
+                    &plan.project_name,
+                    &service_ports,
+                    &resolved,
+                );
+                let profiles = if resolved.mode == DatabaseMode::Bundle {
+                    vec![BUNDLE_DB_PROFILE.to_string()]
+                } else {
+                    Vec::new()
+                };
+                let mut ports: Vec<ServicePort> = service_ports
+                    .iter()
+                    .map(|(service, port)| ServicePort {
+                        service: service.clone(),
+                        host: *port,
+                        container: None,
+                    })
+                    .collect();
+                if resolved.mode == DatabaseMode::Bundle {
+                    ports.push(ServicePort {
+                        service: "db".to_string(),
+                        host: resolved.host_port,
+                        container: Some(5432),
+                    });
+                }
+                let database = Some(StateDatabase {
+                    mode: resolved.mode,
+                    port: resolved.host_port,
+                    name: resolved.name.clone(),
+                });
+                ready.push(Ready {
+                    ports,
+                    database,
+                    prepared: Prepared::Contract { profiles, env },
+                });
             }
         }
-    };
+    }
 
-    let ports = transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
+    // Phase 2: cross-stack wiring. References to a SIBLING stack's old
+    // published port are rewritten to its new bundle port, so stacks find
+    // each other's bundle instances instead of the dev ones. A stack's own
+    // ports were already rewritten in phase 1 and win; old ports that are
+    // ambiguous across siblings are left alone.
+    if multi {
+        let all_maps: Vec<Vec<(u16, u16)>> = ready
+            .iter()
+            .map(|entry| match &entry.prepared {
+                Prepared::Transform { port_map, .. } => port_map.clone(),
+                Prepared::Contract { .. } => Vec::new(),
+            })
+            .collect();
+        for (index, entry) in ready.iter_mut().enumerate() {
+            let Prepared::Transform { config, port_map } = &mut entry.prepared else {
+                continue;
+            };
+            let own: BTreeSet<u16> = port_map.iter().map(|(old, _)| *old).collect();
+            let mut candidates: BTreeMap<u16, BTreeSet<u16>> = BTreeMap::new();
+            for (other_index, map) in all_maps.iter().enumerate() {
+                if other_index == index {
+                    continue;
+                }
+                for (old, new) in map {
+                    if !own.contains(old) {
+                        candidates.entry(*old).or_default().insert(*new);
+                    }
+                }
+            }
+            let cross: Vec<(u16, u16)> = candidates
+                .into_iter()
+                .filter_map(|(old, news)| {
+                    (news.len() == 1).then(|| (old, news.into_iter().next().unwrap()))
+                })
+                .collect();
+            transform::rewrite_extra_port_references(config, &cross);
+        }
+    }
 
+    // Phase 3: write generated files, print the full plan, then start every
+    // stack in bundle order.
     let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
     fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
-    // JSON is valid YAML, so the generated file can stay a compose file.
-    let generated = run_dir.join("docker-compose.yml");
-    fs::write(&generated, serde_json::to_string_pretty(&config)?)
-        .context("failed to write generated compose file")?;
 
-    let project_name = compose_project_name(&active.bundle.id);
-    print_up_summary(active, &generated, &ports, runtime.profile_path.as_deref());
-
-    let status = Command::new("docker")
-        .args(["compose", "-f"])
-        .arg(&generated)
-        .args(["-p", &project_name, "up", "--build", "-d"])
-        .current_dir(stack_checkout)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run docker compose")?;
-    if !status.success() {
-        bail!(
-            "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
-        );
-    }
-
-    // Recorded only after a successful start so a failed `up` does not leave
-    // phantom run state.
-    let state = RuntimeRunState {
-        bundle_id: active.bundle.id.clone(),
-        stack_repo: stack_repo.id.clone(),
-        mode: RuntimeMode::Transform,
-        ports,
-        database: None,
-        compose_file: generated
-            .strip_prefix(&active.root)
-            .unwrap_or(&generated)
-            .display()
-            .to_string(),
-        profiles: Vec::new(),
-        env: BTreeMap::new(),
-        profile_path: runtime.profile_path.clone(),
-        started_at: crate::time::now_iso(),
-    };
-    write_json(&run_dir.join("state.json"), &state)?;
-    Ok(())
-}
-
-/// Contract mode: inject the `KNIT_*` environment into the repo-owned
-/// compose file and run it in place.
-pub(super) fn run_up_contract(
-    active: &ActiveBundle,
-    project: Option<&KnitProject>,
-    runtime: &ProjectRuntime,
-    stack_repo: &RepoEntry,
-    stack_checkout: &Path,
-    compose_path: &Path,
-) -> Result<()> {
-    let database = runtime.database.clone().unwrap_or_default();
-    let resolved_database = resolve_database(&database, &active.bundle.id);
-    if resolved_database.mode == DatabaseMode::Shared {
-        ensure_shared_database_reachable(&database, stack_checkout)?;
-    }
-
-    let ports_config = runtime.ports.clone().unwrap_or_default();
-    let used = load_used_ports(&active.root)?;
-    let service_ports = allocate_service_ports(
-        &used,
-        &ports_config.service_bases(),
-        ports_config.step.max(1),
-    )?;
-
-    let project_name = compose_project_name(&active.bundle.id);
-    let env = runtime_env(
-        active,
-        project,
-        &project_name,
-        &service_ports,
-        &resolved_database,
-    );
-    let profiles = if resolved_database.mode == DatabaseMode::Bundle {
-        vec![BUNDLE_DB_PROFILE.to_string()]
-    } else {
-        Vec::new()
-    };
-
-    let mut ports: Vec<ServicePort> = service_ports
-        .iter()
-        .map(|(service, port)| ServicePort {
-            service: service.clone(),
-            host: *port,
-            container: None,
-        })
-        .collect();
-    if resolved_database.mode == DatabaseMode::Bundle {
-        ports.push(ServicePort {
-            service: "db".to_string(),
-            host: resolved_database.host_port,
-            container: Some(5432),
-        });
-    }
-
-    print_up_summary(
-        active,
-        compose_path,
-        &ports,
-        runtime.profile_path.as_deref(),
-    );
-
-    let mut command = Command::new("docker");
-    command
-        .args(["compose", "-f"])
-        .arg(compose_path)
-        .args(["-p", &project_name]);
-    for profile in &profiles {
-        command.args(["--profile", profile]);
-    }
-    let status = command
-        .args(["up", "--build", "-d"])
-        .envs(&env)
-        .current_dir(stack_checkout)
-        .stdin(Stdio::inherit())
-        .stdout(Stdio::inherit())
-        .stderr(Stdio::inherit())
-        .status()
-        .context("failed to run docker compose")?;
-    if !status.success() {
-        bail!(
-            "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
-        );
-    }
-
-    // Recorded only after a successful start so a failed `up` does not leave
-    // phantom run state.
-    let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
-    fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
-    let state = RuntimeRunState {
-        bundle_id: active.bundle.id.clone(),
-        stack_repo: stack_repo.id.clone(),
-        mode: RuntimeMode::Contract,
-        ports,
-        database: Some(StateDatabase {
-            mode: resolved_database.mode,
-            port: resolved_database.host_port,
-            name: resolved_database.name.clone(),
-        }),
-        compose_file: compose_path
-            .strip_prefix(&active.root)
-            .unwrap_or(compose_path)
-            .display()
-            .to_string(),
-        profiles,
-        env,
-        profile_path: runtime.profile_path.clone(),
-        started_at: crate::time::now_iso(),
-    };
-    write_json(&run_dir.join("state.json"), &state)?;
-    Ok(())
-}
-
-fn print_up_summary(
-    active: &ActiveBundle,
-    compose_path: &Path,
-    ports: &[ServicePort],
-    profile_path: Option<&str>,
-) {
     println!(
         "{} {}",
         out::heading("Runtime up:"),
         out::repo(&active.bundle.id)
     );
-    println!(
-        "{} {}",
-        out::muted("Compose:"),
-        out::path(compose_path.display())
-    );
-    for port in ports {
+    let mut stack_states: Vec<RuntimeStackState> = Vec::new();
+    for (plan, entry) in plans.iter().zip(&ready) {
+        let compose_file: PathBuf = match &entry.prepared {
+            Prepared::Transform { config, .. } => {
+                // JSON is valid YAML, so the generated file stays a compose file.
+                let generated = if multi {
+                    run_dir.join(format!("docker-compose.{}.yml", plan.repo.id))
+                } else {
+                    run_dir.join("docker-compose.yml")
+                };
+                fs::write(&generated, serde_json::to_string_pretty(config)?)
+                    .context("failed to write generated compose file")?;
+                generated
+            }
+            Prepared::Contract { .. } => plan.compose.clone(),
+        };
+        if multi {
+            println!(
+                "{} {} ({})",
+                out::heading("Stack:"),
+                out::repo(&plan.repo.id),
+                out::muted(&plan.project_name)
+            );
+        }
         println!(
-            "{} {} localhost:{}",
-            out::muted("Port:"),
-            port.service,
-            port.host
+            "{} {}",
+            out::muted("Compose:"),
+            out::path(compose_file.display())
         );
+        for port in &entry.ports {
+            println!(
+                "{} {} localhost:{}",
+                out::muted("Port:"),
+                port.service,
+                port.host
+            );
+        }
+        let (profiles, env) = match &entry.prepared {
+            Prepared::Contract { profiles, env } => (profiles.clone(), env.clone()),
+            Prepared::Transform { .. } => (Vec::new(), BTreeMap::new()),
+        };
+        stack_states.push(RuntimeStackState {
+            repo: plan.repo.id.clone(),
+            project_name: plan.project_name.clone(),
+            mode: plan.mode,
+            compose_file: compose_file
+                .strip_prefix(&active.root)
+                .unwrap_or(&compose_file)
+                .display()
+                .to_string(),
+            ports: entry.ports.clone(),
+            profiles,
+            env,
+            database: entry.database.clone(),
+        });
     }
-    if let (Some(profile), Some(frontend)) = (profile_path, frontend_port(ports)) {
+    let all_ports: Vec<ServicePort> = stack_states
+        .iter()
+        .flat_map(|stack| stack.ports.clone())
+        .collect();
+    if let (Some(profile), Some(frontend)) =
+        (runtime.profile_path.as_deref(), frontend_port(&all_ports))
+    {
         println!(
             "{} http://localhost:{}{}",
             out::heading("Open:"),
@@ -255,9 +277,50 @@ fn print_up_summary(
             profile
         );
     }
-}
 
-/// The port to attach UI URLs to: a service named `frontend`, else anything
+    for (plan, stack) in plans.iter().zip(&stack_states) {
+        let mut command = Command::new("docker");
+        command.args(["compose", "-f"]);
+        command.arg(active.root.join(&stack.compose_file));
+        command.args(["-p", &plan.project_name]);
+        for profile in &stack.profiles {
+            command.args(["--profile", profile]);
+        }
+        let status = command
+            .args(["up", "--build", "-d"])
+            .envs(&stack.env)
+            .current_dir(&plan.checkout)
+            .stdin(Stdio::inherit())
+            .stdout(Stdio::inherit())
+            .stderr(Stdio::inherit())
+            .status()
+            .context("failed to run docker compose")?;
+        if !status.success() {
+            bail!(
+                "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
+            );
+        }
+    }
+
+    // Recorded only after every stack starts so a failed `up` does not leave
+    // phantom run state.
+    let first = &stack_states[0];
+    let state = RuntimeRunState {
+        bundle_id: active.bundle.id.clone(),
+        stack_repo: first.repo.clone(),
+        mode: first.mode,
+        ports: all_ports,
+        database: stack_states.iter().find_map(|stack| stack.database.clone()),
+        compose_file: first.compose_file.clone(),
+        profiles: first.profiles.clone(),
+        env: first.env.clone(),
+        profile_path: runtime.profile_path.clone(),
+        started_at: crate::time::now_iso(),
+        stacks: stack_states,
+    };
+    write_json(&run_dir.join("state.json"), &state)?;
+    Ok(())
+}
 
 fn runtime_env(
     active: &ActiveBundle,
@@ -392,12 +455,25 @@ fn load_used_ports(root: &Path) -> Result<BTreeSet<u16>> {
         let Ok(state) = read_json::<RuntimeRunState>(&state_path) else {
             continue;
         };
-        if running.contains(&compose_project_name(&bundle_id)) {
+        let alive = running.contains(&compose_project_name(&bundle_id))
+            || state
+                .stacks
+                .iter()
+                .any(|stack| running.contains(&stack.project_name));
+        if alive {
             for port in &state.ports {
                 used.insert(port.host);
             }
             if let Some(database) = &state.database {
                 used.insert(database.port);
+            }
+            for stack in &state.stacks {
+                for port in &stack.ports {
+                    used.insert(port.host);
+                }
+                if let Some(database) = &stack.database {
+                    used.insert(database.port);
+                }
             }
         }
     }
@@ -465,14 +541,24 @@ fn ensure_shared_database_reachable(
     );
 }
 
-fn resolve_database(database: &ProjectRuntimeDatabase, bundle_id: &str) -> ResolvedDatabase {
+fn resolve_database(
+    database: &ProjectRuntimeDatabase,
+    bundle_id: &str,
+    taken: &mut BTreeSet<u16>,
+) -> ResolvedDatabase {
     if database.mode == DatabaseMode::Bundle {
         let template = database
             .name_template
             .as_deref()
             .unwrap_or("app_{bundleId}");
         let name = template.replace("{bundleId}", bundle_id);
-        let host_port = database.port_base.unwrap_or(5437);
+        // Multiple bundle-db stacks in one run each need their own host port.
+        let base = database.port_base.unwrap_or(5437);
+        let mut host_port = base;
+        while taken.contains(&host_port) && host_port < 65000 {
+            host_port = host_port.saturating_add(1);
+        }
+        taken.insert(host_port);
         ResolvedDatabase {
             mode: DatabaseMode::Bundle,
             host: "db".to_string(),
@@ -517,7 +603,7 @@ struct ResolvedDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::ChangeGroup;
+    use crate::model::{ChangeGroup, RepoEntry};
     use crate::store::ActiveBundle;
     use crate::time::now_iso;
 
@@ -615,11 +701,15 @@ mod tests {
             mode: DatabaseMode::Bundle,
             ..Default::default()
         };
-        let resolved = resolve_database(&database, "venue-capacity");
+        let mut taken = BTreeSet::new();
+        let resolved = resolve_database(&database, "venue-capacity", &mut taken);
         assert_eq!(resolved.name, "app_venue-capacity");
         assert_eq!(resolved.host, "db");
         assert_eq!(resolved.port, 5432);
         assert_eq!(resolved.host_port, 5437);
+        // A second bundle-db stack in the same run steps past the taken port.
+        let second = resolve_database(&database, "venue-capacity", &mut taken);
+        assert_eq!(second.host_port, 5438);
     }
 
     #[test]
