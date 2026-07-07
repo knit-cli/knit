@@ -192,7 +192,9 @@ knit run down      # stop and remove the bundle stack
 
 Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`).
 
-In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts. In transform mode the lifted shape brings its own database service, which gets a fresh project-scoped volume per bundle automatically.
+In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts.
+
+In transform mode the lifted shape brings its own database service by default, with a fresh project-scoped volume per bundle — isolated and empty. To test bundles against real dev data instead, set `database.mode: "shared"` and name the compose service that IS the database in `database.service`: the service is stripped from every lifted stack that has it, and references to it in environments and build args are rewired to `host`/`port` — connection URLs (`@db:5432` → `@host:port`), values exactly equal to the service name (split HOST vars), and values equal to `containerPort` (default 5432) whose key mentions PORT. Reachability is checked before anything starts. Note the tradeoff: bundle code, including its migrations, then runs against the shared dev database.
 
 ### Checks
 
