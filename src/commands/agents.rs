@@ -418,7 +418,7 @@ knit run status
 knit run down
 ```
 
-`knit run up` lifts the stack repo's compose shape into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, run as compose project `knit-run-{bundle}`. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs; do not guess ports from an older run.
+`knit run up` lifts EVERY bundle repo with a compose file into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, references to sibling stacks' published ports rewired to the bundle instances. One stack runs as compose project `knit-run-{bundle}`; several run as `knit-run-{bundle}--<repo>` each. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs; do not guess ports from an older run.
 
 "#,
         stack_repo = stack_repo,
