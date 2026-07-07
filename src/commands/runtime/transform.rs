@@ -148,13 +148,14 @@ fn transform_build(build: &mut Map<String, Value>, repo_map: &[(PathBuf, PathBuf
         .and_then(Value::as_str)
         .map(PathBuf::from);
 
-    if let Some(context) = &original_context {
-        if let Some(remapped) = remap_path(context, repo_map) {
-            build.insert(
-                "context".to_string(),
-                Value::String(remapped.display().to_string()),
-            );
-        }
+    let remapped_context = original_context
+        .as_ref()
+        .and_then(|context| remap_path(context, repo_map));
+    if let Some(remapped) = &remapped_context {
+        build.insert(
+            "context".to_string(),
+            Value::String(remapped.display().to_string()),
+        );
     }
 
     if let Some(contexts) = build
@@ -170,15 +171,21 @@ fn transform_build(build: &mut Map<String, Value>, repo_map: &[(PathBuf, PathBuf
         }
     }
 
-    // Dockerfiles and build args are resolved against the *original* context;
-    // when they land inside a tracked repo they are re-expressed relative to
-    // the context so the result stays inside the build context.
+    // Dockerfiles and build args are resolved against the *original* context,
+    // but docker resolves the rewritten values against the *final* context.
+    // When the context itself moved to a worktree, relatives must be
+    // re-expressed against that new location — both for values that remap
+    // (usually collapsing back to the same relative, e.g. `Dockerfile`) and
+    // for values that stay in source-space (now needing `..` hops back).
     let Some(context) = original_context else {
         return Ok(());
     };
+    let express_base = remapped_context.as_deref().unwrap_or(&context);
 
     if let Some(dockerfile) = build.get("dockerfile").and_then(Value::as_str) {
-        if let Some(rewritten) = remap_context_relative(&context, dockerfile, repo_map) {
+        if let Some(rewritten) =
+            remap_context_relative(&context, express_base, dockerfile, repo_map)
+        {
             build.insert("dockerfile".to_string(), Value::String(rewritten));
         }
     }
@@ -186,7 +193,9 @@ fn transform_build(build: &mut Map<String, Value>, repo_map: &[(PathBuf, PathBuf
     if let Some(args) = build.get_mut("args").and_then(Value::as_object_mut) {
         for value in args.values_mut() {
             if let Some(text) = value.as_str() {
-                if let Some(rewritten) = remap_context_relative(&context, text, repo_map) {
+                if let Some(rewritten) =
+                    remap_context_relative(&context, express_base, text, repo_map)
+                {
                     *value = Value::String(rewritten);
                 }
             }
@@ -196,11 +205,13 @@ fn transform_build(build: &mut Map<String, Value>, repo_map: &[(PathBuf, PathBuf
     Ok(())
 }
 
-/// Remap a path expressed relative to a build context (or absolute). Returns
-/// the rewritten value preserving the original flavor: relative inputs stay
-/// relative to the context, absolute inputs stay absolute.
+/// Remap a path expressed relative to a build context (or absolute). The value
+/// resolves against the original context (`resolve_base`) but is re-expressed
+/// against the possibly-remapped final context (`express_base`), preserving
+/// the original flavor: relative inputs stay relative, absolute stay absolute.
 fn remap_context_relative(
-    context: &Path,
+    resolve_base: &Path,
+    express_base: &Path,
     value: &str,
     repo_map: &[(PathBuf, PathBuf)],
 ) -> Option<String> {
@@ -208,9 +219,15 @@ fn remap_context_relative(
     if candidate.is_absolute() {
         return remap_path(&candidate, repo_map).map(|path| path.display().to_string());
     }
-    let resolved = context.join(&candidate);
-    let remapped = remap_path(&resolved, repo_map)?;
-    Some(relative_between(context, &remapped).unwrap_or_else(|| remapped.display().to_string()))
+    let resolved = resolve_base.join(&candidate);
+    let remapped = remap_path(&resolved, repo_map);
+    if remapped.is_none() && express_base == resolve_base {
+        // Context unchanged and value not in a tracked repo: leave it alone.
+        return None;
+    }
+    let target =
+        remapped.unwrap_or_else(|| crate::paths::canonicalize(&resolved).unwrap_or(resolved));
+    Some(relative_between(express_base, &target).unwrap_or_else(|| target.display().to_string()))
 }
 
 fn transform_volume(volume: &mut Value, repo_map: &[(PathBuf, PathBuf)]) {
@@ -421,6 +438,8 @@ mod tests {
                 "frontend": {
                     "build": {
                         "context": format!("{root}/knithub-frontend"),
+                        "dockerfile": "Dockerfile",
+                        "args": {"GLOSS_SRC": "../gloss-web-ui"},
                         "additional_contexts": {"gloss-web-ui": format!("{root}/gloss-web-ui")}
                     },
                     "environment": {"VITE_KNITHUB_API_URL": "http://localhost:4000"},
@@ -504,6 +523,15 @@ mod tests {
         assert_eq!(
             json_path_text(&frontend_build["additional_contexts"]["gloss-web-ui"]),
             normalized_path_text(format!("{root_str}/gloss-web-ui"))
+        );
+        // The context moved to the worktree, so context-relative values are
+        // re-expressed against the NEW context: the in-repo dockerfile
+        // collapses back to the same relative, while a source-space relative
+        // arg gains `..` hops so it still points at the unchanged repo.
+        assert_eq!(frontend_build["dockerfile"], "Dockerfile");
+        assert_eq!(
+            normalized_path_text(frontend_build["args"]["GLOSS_SRC"].as_str().unwrap()),
+            "../../../../gloss-web-ui"
         );
 
         // Bind mounts into tracked repos remap; workspace mount stays.
