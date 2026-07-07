@@ -1,0 +1,6 @@
+# knit is consumed as the `knit-source` additional build context by
+# knithub/Dockerfile.worktree (`COPY --from=knit-source . ./`). A named build
+# context uses the .dockerignore at its own root, so without this the multi-GB
+# Rust `target/` dir is shipped into the build context on every `knit run`.
+**/target
+.git
