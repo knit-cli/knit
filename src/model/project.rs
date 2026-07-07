@@ -183,6 +183,16 @@ pub struct ProjectRuntimeDatabase {
     pub name_template: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub port_base: Option<u16>,
+    /// Shared mode, transform stacks: the compose service that IS the
+    /// database. The service is stripped from the lifted stack and env
+    /// references to it are rewired to `host:port`, so the bundle runs its
+    /// code against the shared dev database instead of a fresh empty one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service: Option<String>,
+    /// Container-side port of the stripped service (default 5432), used to
+    /// rewrite `<service>:<containerPort>` and bare port references.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub container_port: Option<u16>,
     /// Optional command run in the stack checkout to start the shared dev
     /// database when it is unreachable (e.g. `docker compose up -d db`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -254,6 +264,8 @@ impl Default for ProjectRuntimeDatabase {
             name: default_database_name(),
             name_template: None,
             port_base: None,
+            service: None,
+            container_port: None,
             start_command: None,
         }
     }
