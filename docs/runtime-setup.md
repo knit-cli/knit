@@ -105,20 +105,36 @@ Everything in `runtime` is optional. The fields you'll actually reach for:
 | `ports` | Contract-mode port pools (see below). |
 | `profilePath` | Path opened on the frontend port by `knit run status`. |
 
-## Step 3 — only if you need exact control: contract mode
+## Step 3 — when the lift gets your stack wrong: `knit run eject`
 
-A compose file named `docker-compose.knit.yml` (or one referencing `${KNIT_*}`
-variables) is run **as-is** with knit's environment contract injected instead
-of being transformed:
+The transform is a heuristic rewrite of your compose file, and some stacks are
+beyond it — multi-database services, unusual build graphs, config the rewriter
+can't see. The exit is one command:
+
+```sh
+knit run eject
+```
+
+It writes the lift as `docker-compose.knit.yml` into the stack repo checkout:
+your compose shape, with repo paths, published ports, and the database wiring
+replaced by `${KNIT_*}` interpolations (the file's header documents them all).
+That file is ordinary docker compose — fix whatever the lift got wrong, run
+`knit run up`, and commit it with the bundle. From then on the file is run
+**as-is** with the environment contract injected (contract mode), and the
+automatic transform no longer applies to that repo:
 
 - `KNIT_ROOT`, `KNIT_BUNDLE`
 - `KNIT_CHECKOUT_<REPO>` / `KNIT_SRC_<REPO>` / `KNIT_REV_<REPO>` per repo
-- `KNIT_PORT_<SERVICE>` per configured port pool
+- `KNIT_PORT_<SERVICE>` per published service — pools come from the
+  `${KNIT_PORT_X:-default}` defaults in the file itself (or `runtime.ports`
+  config, which wins)
 - `KNIT_DB_HOST` / `KNIT_DB_PORT` / `KNIT_DB_NAME` / `KNIT_DB_HOST_PORT` / `KNIT_DB_MODE`
 
-Reach for it when the transform's conventions don't fit — multi-database
-services, unusual build graphs, or when you want the bundle shape to diverge
-deliberately from the dev shape. Most projects never need it.
+You can also write a contract file from scratch (any compose file named
+`docker-compose.knit.yml` or referencing `${KNIT_*}` opts in), but ejecting a
+working lift and editing it is almost always faster. Most projects never need
+either — the point is that when the transform fails, the fix is a file in your
+repo, not a knit change.
 
 ## Checklist for a new project
 
@@ -143,5 +159,8 @@ deliberately from the dev shape. Most projects never need it.
   multi-stack runs.
 - **App talks to the wrong port** — the reference isn't in compose
   `environment:`; move it there (step 1).
+- **`knit run up` fails, or the lifted stack is just wrong** — `knit run
+  eject`, then edit the generated `docker-compose.knit.yml` (step 3). Don't
+  fight the transform.
 - **First build is slow** — real image builds; layer cache makes subsequent
   runs fast. `knit run down` never deletes named volumes.
