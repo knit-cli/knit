@@ -362,3 +362,52 @@ fn stale_bundle_lock_from_dead_process_is_reclaimed() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ledger_nodes_record_ambient_session_identity() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    // An agent harness exports KNIT_SESSION per conversation; every ledger
+    // node written by commands run in that session carries it.
+    let env = [("KNIT_SESSION", "k3-thread-123")];
+    knit_with_env(&workspace, ["bundle", "venue capacity"], &env);
+    knit_with_env(&workspace, ["bundle", "add", backend.to_str().unwrap()], &env);
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "session work",
+    );
+    knit_with_env(
+        &workspace,
+        ["commit", "--all", "-m", "Session-attributed work"],
+        &env,
+    );
+
+    let bundle = read_bundle(&workspace);
+    let nodes = bundle["nodes"].as_array().unwrap();
+    assert!(nodes.len() >= 3);
+    for node in nodes {
+        assert_eq!(
+            node["sessionId"].as_str(),
+            Some("k3-thread-123"),
+            "node {} missing sessionId",
+            node["id"]
+        );
+    }
+
+    // Plain CLI use (no KNIT_SESSION) stays unattributed.
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "human work",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Unattributed work"]);
+    let bundle = read_bundle(&workspace);
+    let last = bundle["nodes"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["type"].as_str(), Some("commit.group"));
+    assert!(last.get("sessionId").is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
