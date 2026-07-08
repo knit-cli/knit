@@ -549,7 +549,7 @@ fn project_agents_are_generated_from_project_json() {
 }
 
 #[test]
-fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
+fn bundle_agents_are_written_at_bundle_root_not_in_repo_checkouts() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let frontend = root.join("frontend");
@@ -557,6 +557,12 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     fs::create_dir_all(&workspace).unwrap();
 
     init_repo(&backend, "backend");
+    // A repo that tracks its own AGENTS.md must keep it byte-identical in the
+    // checkout: a Knit-written section would become a tracked modification,
+    // get committed with the bundle, and conflict on every publish.
+    fs::write(backend.join("AGENTS.md"), "backend guidance\n").unwrap();
+    git(&backend, ["add", "AGENTS.md"]);
+    git(&backend, ["commit", "-m", "Add backend agents guidance"]);
     init_repo(&frontend, "frontend");
 
     knit(&workspace, ["init", "demo"]);
@@ -570,7 +576,7 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     );
 
     let start = knit(&workspace, ["bundle", "agent docs"]);
-    assert!(start.contains("Worktree AGENTS.md: 2 repo worktree(s)"));
+    assert!(!start.contains("Worktree AGENTS.md"));
     assert!(!workspace.join("AGENTS.md").exists());
 
     let bundle_agents_path = workspace.join(".knit/worktrees/agent-docs/AGENTS.md");
@@ -583,17 +589,14 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
     assert!(bundle_agents.contains("## Agent Teamwork"));
     assert!(bundle_agents.contains("minimum capable subagent/model"));
-    let backend_agents = fs::read_to_string(&backend_agents_path).unwrap();
-    assert!(backend_agents.contains("Knit Worktree Guide"));
-    assert!(backend_agents.contains("bundle `agent-docs`"));
-    assert!(backend_agents.contains("repo `backend`"));
-    assert!(backend_agents.contains("## Agent Teamwork"));
-    assert!(backend_agents.contains("minimum capable subagent/model"));
-    assert!(backend_agents.contains("knit commit --all"));
-    assert!(backend_agents.contains("knit push --set-upstream"));
-    assert!(!backend_agents.contains("knit --bundle"));
-    assert!(backend_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
-    assert!(frontend_agents_path.exists());
+    assert!(bundle_agents.contains("knit commit --all"));
+    assert!(bundle_agents.contains("knit push --set-upstream"));
+    assert!(!bundle_agents.contains("knit --bundle"));
+    assert_eq!(
+        fs::read_to_string(&backend_agents_path).unwrap(),
+        "backend guidance\n"
+    );
+    assert!(!frontend_agents_path.exists());
     assert!(git(
         &workspace.join(".knit/worktrees/agent-docs/backend"),
         ["status", "--short"]
@@ -601,25 +604,23 @@ fn worktree_agents_are_written_by_default_and_refreshed_with_agents_flag() {
     .trim()
     .is_empty());
 
-    fs::write(&backend_agents_path, "repo guidance\n").unwrap();
     knit(&workspace, ["bundle", "agent docs", "--agents"]);
-    let updated = fs::read_to_string(&backend_agents_path).unwrap();
-    assert!(updated.contains("repo guidance"));
-    assert_eq!(updated.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
-    assert!(updated.contains("knit status"));
-    assert!(updated.contains("knit push --set-upstream"));
-    assert!(!updated.contains("knit --bundle"));
+    let refreshed = fs::read_to_string(&bundle_agents_path).unwrap();
+    assert_eq!(refreshed.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
+    assert_eq!(
+        fs::read_to_string(&backend_agents_path).unwrap(),
+        "backend guidance\n"
+    );
     assert!(workspace.join("AGENTS.md").exists());
 
     let second_start = knit(&workspace, ["bundle", "agent docs two"]);
-    assert!(second_start.contains("Worktree AGENTS.md: 2 repo worktree(s)"));
+    assert!(!second_start.contains("Worktree AGENTS.md"));
     let second_agents =
-        fs::read_to_string(workspace.join(".knit/worktrees/agent-docs-two/backend/AGENTS.md"))
-            .unwrap();
+        fs::read_to_string(workspace.join(".knit/worktrees/agent-docs-two/AGENTS.md")).unwrap();
     assert!(second_agents.contains("bundle `agent-docs-two`"));
-    assert!(second_agents.contains("knit commit --all"));
-    assert!(second_agents.contains("knit push --set-upstream"));
-    assert!(!second_agents.contains("knit --bundle"));
+    assert!(!workspace
+        .join(".knit/worktrees/agent-docs-two/frontend/AGENTS.md")
+        .exists());
 
     fs::remove_dir_all(root).unwrap();
 }
