@@ -728,3 +728,66 @@ fn sync_pull_discovers_remote_bundles_project_wide() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_pull_does_not_resurrect_locally_deleted_bundles() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Author a bundle and capture the artifact the remote still holds — the
+    // copy pushed at publish time, before the bundle was landed and pruned
+    // here. Nothing pushes terminal state back, so the remote says "open".
+    knit(&workspace, ["bundle", "pruned work", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/pruned-work/backend");
+    append_line(&feature.join("app.txt"), "work later landed and pruned");
+    knit(&workspace, ["commit", "--all", "-m", "Landed work"]);
+    let artifact_path = workspace.join(".knit/bundles/pruned-work.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    knit(&workspace, ["bundle", "delete", "pruned-work", "--force"]);
+    assert!(!artifact_path.exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/pruned-work.bundle.json")
+        .exists());
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "pruned-work",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-stale-open", "payload": payload},
+            }],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "pull", "--bundles", "--remote", "hosted"],
+        &env,
+    );
+    assert!(output.contains("up-to-date"), "{output}");
+
+    // The local delete quarantine is the authority: the stale-open remote
+    // record must not come back as an open, worktree-less bundle.
+    assert!(!artifact_path.exists());
+    let list = knit(&workspace, ["bundle", "list"]);
+    assert!(!list.contains("pruned-work"), "{list}");
+
+    fs::remove_dir_all(root).unwrap();
+}
