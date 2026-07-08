@@ -424,9 +424,21 @@ dependencies = [
  "chrono",
  "clap",
  "dunce",
+ "knit-runtime",
  "serde",
  "serde_json",
  "ureq",
+]
+
+[[package]]
+name = "knit-runtime"
+version = "0.1.0-alpha.4"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "dunce",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]
