@@ -1,6 +1,5 @@
-use crate::checkout::{checkout_dir, checkout_display_path, is_in_place};
-use crate::git::git_output;
-use crate::model::{KnitProject, RepoEntry};
+use crate::checkout::checkout_display_path;
+use crate::model::KnitProject;
 use crate::output as out;
 use crate::store::read_json;
 use crate::store::ActiveBundle;
@@ -29,6 +28,11 @@ pub(crate) fn agent_teamwork_section(heading: &str) -> String {
     )
 }
 
+/// Generated bundle guidance is written only here, at the bundle worktree
+/// root (a parent of every repo checkout), never inside a repo checkout:
+/// repos that track their own AGENTS.md would commit the bundle-specific
+/// section and conflict on every publish, and `.git/info/exclude` cannot
+/// hide changes to tracked files.
 pub(crate) fn write_bundle_worktree_agents_md(active: &ActiveBundle) -> Result<Option<PathBuf>> {
     if active.bundle.repos.is_empty() {
         return Ok(None);
@@ -57,52 +61,12 @@ pub(crate) fn write_bundle_worktree_agents_md(active: &ActiveBundle) -> Result<O
     Ok(Some(path))
 }
 
-pub(crate) fn write_worktree_agents_md(active: &ActiveBundle) -> Result<Vec<PathBuf>> {
-    let mut paths = Vec::new();
-    for repo in &active.bundle.repos {
-        if is_in_place(repo) {
-            continue;
-        }
-        let Some(checkout) = checkout_dir(active, repo) else {
-            continue;
-        };
-        let path = checkout.join("AGENTS.md");
-        let section = worktree_agents_section(active, repo, &checkout);
-        let next = if path.exists() {
-            let existing = fs::read_to_string(&path)
-                .with_context(|| format!("failed to read existing {}", path.display()))?;
-            upsert_managed_section(&existing, &section)
-        } else {
-            format!("# AGENTS.md\n\n{section}")
-        };
-        fs::write(&path, next).with_context(|| {
-            format!(
-                "failed to write Knit worktree guidance at {}",
-                path.display()
-            )
-        })?;
-        exclude_worktree_agents(&checkout)?;
-        paths.push(path);
-    }
-    Ok(paths)
-}
-
 pub(crate) fn print_bundle_worktree_agents_summary(path: Option<&Path>) {
     if let Some(path) = path {
         println!(
             "{} {}",
             out::heading("Bundle AGENTS.md:"),
             out::path(path.display())
-        );
-    }
-}
-
-pub(crate) fn print_worktree_agents_summary(paths: &[PathBuf]) {
-    if !paths.is_empty() {
-        println!(
-            "{} {} repo worktree(s)",
-            out::heading("Worktree AGENTS.md:"),
-            paths.len()
         );
     }
 }
@@ -287,113 +251,6 @@ fn ensure_trailing_newline(mut text: String) -> String {
         text.push('\n');
     }
     text
-}
-
-fn exclude_worktree_agents(checkout: &Path) -> Result<()> {
-    let exclude_path = git_output(checkout, ["rev-parse", "--git-path", "info/exclude"])
-        .context("failed to locate git exclude file")?;
-    let exclude_path = resolve_checkout_path(checkout, exclude_path.trim());
-    if let Some(parent) = exclude_path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("failed to create git exclude parent {}", parent.display()))?;
-    }
-    let mut text = if exclude_path.exists() {
-        fs::read_to_string(&exclude_path)
-            .with_context(|| format!("failed to read {}", exclude_path.display()))?
-    } else {
-        String::new()
-    };
-    if !text.lines().any(|line| line.trim() == "AGENTS.md") {
-        if !text.is_empty() && !text.ends_with('\n') {
-            text.push('\n');
-        }
-        text.push_str("AGENTS.md\n");
-        fs::write(&exclude_path, text)
-            .with_context(|| format!("failed to write {}", exclude_path.display()))?;
-    }
-    Ok(())
-}
-
-fn resolve_checkout_path(checkout: &Path, path: &str) -> PathBuf {
-    let path = PathBuf::from(path);
-    if path.is_absolute() {
-        path
-    } else {
-        checkout.join(path)
-    }
-}
-
-fn worktree_agents_section(active: &ActiveBundle, repo: &RepoEntry, checkout: &Path) -> String {
-    let checkout_display = checkout
-        .strip_prefix(&active.root)
-        .unwrap_or(checkout)
-        .display()
-        .to_string();
-    let repo_worktrees = active
-        .bundle
-        .repos
-        .iter()
-        .filter(|repo| !is_in_place(repo))
-        .filter_map(|repo| {
-            repo.worktree_path
-                .as_ref()
-                .map(|path| (repo.id.as_str(), path))
-        })
-        .map(|(repo_id, path)| format!("- `{repo_id}`: `{path}`"))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let runtime_section = worktree_runtime_section(active);
-    let checks_section = worktree_checks_section(active);
-    let teamwork_section = agent_teamwork_section("## Agent Teamwork");
-
-    format!(
-        r#"<!-- BEGIN KNIT AGENTS -->
-## Knit Worktree Guide
-
-This checkout belongs to Knit bundle `{bundle}` and repo `{repo}`.
-
-```txt
-{checkout}
-```
-
-Make this folder the actual cwd/workdir for repo-local tool calls. Because this cwd is inside the generated worktree, bundle-scoped Knit commands resolve this bundle automatically:
-
-```sh
-knit status
-knit add
-knit commit --all -m "Describe the feature change"
-knit push --set-upstream
-```
-
-{teamwork_section}
-Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
-
-```sh
-knit related path/inside/repo
-knit related --repo <repo-id> path/inside/repo
-knit related --repo <repo-id> path/inside/repo --pull
-```
-
-Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
-{runtime_section}{checks_section}Sibling worktrees for this bundle:
-
-{repo_worktrees}
-
-Do not edit the original source checkout for feature work unless the bundle was created with `--in-place`.
-<!-- END KNIT AGENTS -->
-"#,
-        bundle = active.bundle.id,
-        repo = repo.id,
-        checkout = checkout_display,
-        teamwork_section = teamwork_section,
-        runtime_section = runtime_section,
-        checks_section = checks_section,
-        repo_worktrees = if repo_worktrees.is_empty() {
-            "(none)".to_string()
-        } else {
-            repo_worktrees
-        }
-    )
 }
 
 fn worktree_runtime_section(active: &ActiveBundle) -> String {
