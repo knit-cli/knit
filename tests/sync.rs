@@ -633,3 +633,98 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_pull_discovers_remote_bundles_project_wide() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Author a bundle with a commit and capture its artifact — the payload
+    // another machine would have pushed to KnitHub — then erase it locally as
+    // if it had never existed here.
+    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::remove_file(&artifact_path).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+
+    // Two other open bundles make the source-root fallback ambiguous — the
+    // situation where the old active-bundle-only sync pull broke.
+    knit(&workspace, ["bundle", "other work", "--repo", "backend"]);
+    knit(&workspace, ["bundle", "third work", "--repo", "backend"]);
+
+    let mut archived_payload = payload.clone();
+    archived_payload["id"] = serde_json::json!("old-landed");
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "svartal-made",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "hash-svartal", "payload": payload},
+                },
+                {
+                    "id": "rb-2",
+                    "slug": "dead-bundle",
+                    "lifecycleState": "deleted",
+                    "currentArtifact": null,
+                },
+                {
+                    "id": "rb-3",
+                    "slug": "old-landed",
+                    "lifecycleState": "archived",
+                    "currentArtifact": {"artifactHash": "hash-old", "payload": archived_payload},
+                },
+            ],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "pull", "--bundles", "--remote", "hosted"],
+        &env,
+    );
+    assert!(output.contains("fetched"), "{output}");
+
+    // The open remote-only bundle is localized as an artifact; deleted and
+    // archived remote records are not — discovery never resurrects the
+    // project's dead-work history.
+    assert!(artifact_path.exists());
+    let list = knit(&workspace, ["bundle", "list"]);
+    assert!(list.contains("svartal-made"), "{list}");
+    assert!(!list.contains("dead-bundle"), "{list}");
+    assert!(!list.contains("old-landed"), "{list}");
+    assert!(!workspace
+        .join(".knit/bundles/old-landed.bundle.json")
+        .exists());
+
+    // `knit fetch --mode knit` shares the project-wide path and must also work
+    // from the source root while several open bundles exist.
+    let fetch_output = knit_with_env(&workspace, ["fetch", "--mode", "knit"], &env);
+    assert!(
+        fetch_output.contains("up-to-date") || fetch_output.contains("fetched"),
+        "{fetch_output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

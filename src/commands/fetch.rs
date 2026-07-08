@@ -66,10 +66,14 @@ pub fn fetch_repos(
     }
 
     if fetch_knit {
-        let active = load_active_bundle()?;
+        // Bundle fetch is project-wide and needs only the workspace, not a
+        // resolvable bundle — it must work from the source root even when
+        // several open bundles make the fallback ambiguous.
+        let cwd = std::env::current_dir().context("failed to read current directory")?;
+        let root = crate::store::find_knit_root(&cwd).context("No Knit workspace found.")?;
         knit_result = crate::commands::fetch_bundles_from_remote(
-            &active.root,
-            &crate::store::load_config(&active.root)?,
+            &root,
+            &crate::store::load_config(&root)?,
             remote,
         );
         if let Err(ref error) = knit_result {
