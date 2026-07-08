@@ -8,13 +8,14 @@ use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-const RUNTIME_COMMANDS: [&str; 3] = ["up", "down", "status"];
+const RUNTIME_COMMANDS: [&str; 4] = ["up", "down", "status", "eject"];
 
 pub fn run_project_command(
     name: Option<&str>,
     explicit_repos: &[String],
     all: bool,
     list: bool,
+    force: bool,
     raw_args: &[OsString],
 ) -> Result<()> {
     if list {
@@ -41,7 +42,7 @@ pub fn run_project_command(
                         .contains_key(&crate::ids::slugify(runtime_command))
                 });
             if !shadowed {
-                if crate::commands::runtime::try_handle(runtime_command)? {
+                if crate::commands::runtime::try_handle(runtime_command, force)? {
                     return Ok(());
                 }
 
@@ -60,7 +61,9 @@ pub fn run_project_command(
     }
 
     if name.is_none() && raw_args.is_empty() {
-        bail!("Pass a project command name, `knit run up|down|status`, or a raw command after --.");
+        bail!(
+            "Pass a project command name, `knit run up|down|status|eject`, or a raw command after --."
+        );
     }
 
     let active = load_active_bundle()?;
@@ -115,7 +118,10 @@ fn list_commands() -> Result<()> {
     let project = load_project_for_bundle(&active)?;
     if project.commands.is_empty() {
         if project.runtime.is_some() {
-            println!("{}", out::muted("Runtime commands: up, down, status"));
+            println!(
+                "{}",
+                out::muted("Runtime commands: up, down, status, eject")
+            );
             return Ok(());
         }
         println!("{}", out::muted("No project commands."));
@@ -138,7 +144,7 @@ fn list_commands() -> Result<()> {
     if project.runtime.is_some() {
         println!(
             "{} {}",
-            out::repo("up|down|status"),
+            out::repo("up|down|status|eject"),
             out::muted("bundle runtime (docker-compose)")
         );
     }
