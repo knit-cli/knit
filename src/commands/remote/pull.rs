@@ -503,6 +503,15 @@ pub fn fetch_bundles_from_remote(
             .with_context(|| format!("failed to decode bundle `{}`", remote_bundle.slug))?;
 
         let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
+        // Discovery is for bundles you might act on: a remote bundle with no
+        // local artifact is only localized while it is open. Resurrecting the
+        // project's full landed/archived history would flood the workspace
+        // and undo `knit bundle prune` on every sync. Existing local
+        // artifacts still fast-forward whatever their state, so work landed
+        // or archived on another machine is reflected here.
+        if !bundle_path.exists() && remote_bundle.lifecycle_state != "open" {
+            continue;
+        }
         // An existing local artifact is only refreshed when the remote ledger is
         // strictly ahead (a fast-forward). Equal/local-ahead artifacts are left
         // untouched; diverged ledgers keep local and warn.

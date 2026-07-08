@@ -139,12 +139,32 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             println!("{} {}", out::heading("Remote:"), out::repo(remote));
         }
         if targets.bundles {
-            // Reuse the existing active-bundle pull, which performs the
-            // fast-forward localize/refresh that another change owns. Diverged
-            // ledgers are reported, not merged; `knit pull --merge` is the
-            // explicit door for that.
-            if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
-                failures.push(format!("{remote} bundle: {error:#}"));
+            // Deep refresh (feature branches, worktree checkouts) for the
+            // resolved bundle when one resolves. From the workspace root with
+            // several open bundles there is no resolvable bundle — that is
+            // fine, the project-wide artifact sync below still runs. Order
+            // matters: the artifact-only sync would fast-forward the active
+            // bundle's artifact first and turn this into a skip, leaving its
+            // checkouts stale.
+            if crate::store::load_active_bundle().is_ok() {
+                if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
+                    failures.push(format!("{remote} bundle: {error:#}"));
+                }
+            }
+            // Project-wide: localize remote bundles absent locally and
+            // fast-forward stale artifacts, so bundles (and their recorded
+            // PRs) created on other machines appear here without knowing
+            // their slugs. Diverged ledgers are reported, not merged;
+            // `knit pull --merge` is the explicit door for that.
+            match effective_workspace_config() {
+                Ok((root, config)) => {
+                    if let Err(error) =
+                        super::pull::fetch_bundles_from_remote(&root, &config, Some(remote))
+                    {
+                        failures.push(format!("{remote} bundles: {error:#}"));
+                    }
+                }
+                Err(error) => failures.push(format!("{remote} bundles: {error:#}")),
             }
         }
         if targets.history {
