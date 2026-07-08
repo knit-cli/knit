@@ -50,7 +50,7 @@ knit bundle "my feature" --cd --agents
 This creates `.knit/bundles/my-feature.bundle.json` and checkouts under
 `.knit/worktrees/my-feature/<repo>/`. `--cd` drops your shell straight into the
 bundle's worktree root, and `--agents` writes an `AGENTS.md` tutorial for the
-workspace (each generated worktree gets its own `AGENTS.md` guidance by
+workspace (the bundle worktree root gets its own `AGENTS.md` guidance by
 default). From that directory you can simply run `claude`, `opencode`, or any
 other coding agent — it wakes up inside an isolated checkout whose context
 resolves automatically, with guidance already on disk.
