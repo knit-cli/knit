@@ -1,99 +1,43 @@
-//! `knit run up|status|down` — disposable per-bundle runtime instances.
-//!
-//! The goal: take the docker shape the repos already run on their main
-//! branches and lift a parallel instance of that same shape — different
-//! ports, isolated compose project, and the bundle's code substituted in.
-//!
-//! Two modes, picked per compose file:
-//!
-//! - **Transform** (default): the stack repo's own compose file is resolved
-//!   with `docker compose config` and rewritten — paths into tracked repos
-//!   remapped to bundle worktrees, published host ports reallocated, port
-//!   references inside env values rewritten. No authoring required; see
-//!   [`transform`].
-//! - **Contract**: a `KNIT_*`-aware compose file is run as-is with the
-//!   contract injected: `KNIT_ROOT`/`KNIT_BUNDLE`,
-//!   `KNIT_CHECKOUT_<REPO>`/`KNIT_SRC_<REPO>`/`KNIT_REV_<REPO>` per repo,
-//!   `KNIT_PORT_<SERVICE>` per configured port pool (backend/frontend by
-//!   default), and `KNIT_DB_*`. Repo and service ids are uppercased with
-//!   non-alphanumerics mapped to `_`. In `bundle` database mode the
-//!   `bundle-db` compose profile is activated.
-//!
-//! Contract mode is chosen by the `runtime.mode` project setting, the
-//! `docker-compose.knit.yml` filename, or `${KNIT_*}` references in the
-//! compose file; everything else is lifted by transformation.
-//!
-//! `knit run up` lifts EVERY bundle repo with a compose file — the runtime is
-//! "docker compose up in each repo, with the bundle's code". A single stack
-//! runs as compose project `knit-run-<bundle>`; with several stacks each runs
-//! as `knit-run-<bundle>--<repo>` so networks and named volumes stay isolated
-//! per stack, cross-stack references to sibling published ports are rewritten
-//! to the bundle instances, and `down`/`status` resolve containers by label
-//! and survive worktree deletion. `runtime.stacks` narrows the set; the
-//! legacy `runtime.stackRepo` forces a single stack.
-
-mod state;
-mod transform;
-mod up;
+//! `knit run up|status|down` — the adapter between knit bundle state and the
+//! `knit-runtime` crate, which owns the actual per-bundle docker-compose
+//! runtime (see that crate for semantics). This module resolves the active
+//! bundle and project, translates them into the crate's [`RuntimeContext`]
+//! contract, and applies knit-side config semantics (`runtime.stacks`
+//! narrowing, legacy `stackRepo`, repo-id slugging). Keeping the runtime
+//! behind that contract keeps knit's core version-control shaped.
 
 use crate::checkout::checkout_dir;
-use crate::model::{KnitProject, ProjectRuntime, RepoEntry, RuntimeMode};
+use crate::model::{KnitProject, ProjectRuntime};
 use crate::store::{load_active_bundle, project_path, read_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
-use state::{compose_project_name, has_state, run_down, run_status};
-use std::fs;
-use std::path::{Path, PathBuf};
-use up::run_up_stacks;
-
-const RUNTIME_KIND_DOCKER_COMPOSE: &str = "docker-compose";
-const CONTRACT_COMPOSE_CANDIDATES: [&str; 1] = ["docker-compose.knit.yml"];
-const PLAIN_COMPOSE_CANDIDATES: [&str; 4] = [
-    "docker-compose.yml",
-    "docker-compose.yaml",
-    "compose.yaml",
-    "compose.yml",
-];
-
-/// One stack `knit run up` will start: a bundle repo, its checkout, the
-/// compose file to lift, the detected mode, and the compose project name the
-/// containers run under.
-pub(super) struct StackPlan<'a> {
-    pub(super) repo: &'a RepoEntry,
-    pub(super) checkout: PathBuf,
-    pub(super) compose: PathBuf,
-    pub(super) mode: RuntimeMode,
-    pub(super) project_name: String,
-}
+use knit_runtime::{RuntimeContext, RuntimeRepo};
+use std::path::PathBuf;
 
 pub fn try_handle(name: &str) -> Result<bool> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active).ok();
     let runtime = project.as_ref().and_then(|p| p.runtime.clone());
+    let ctx = runtime_context(&active, project.as_ref());
 
     match name {
         "up" => {
-            let stack_repos = resolve_stack_repos(&active, runtime.as_ref())?;
-            if stack_repos.is_empty() {
+            let stack_repo_ids = resolve_stack_repo_ids(&ctx, runtime.as_ref())?;
+            if stack_repo_ids.is_empty() {
                 return Ok(false);
             }
-            let runtime = runtime.unwrap_or_default();
-            if runtime.kind != RUNTIME_KIND_DOCKER_COMPOSE {
-                bail!("Unsupported runtime kind `{}`.", runtime.kind);
-            }
-            let plans = build_stack_plans(&active, &runtime, &stack_repos)?;
-            run_up_stacks(&active, project.as_ref(), &runtime, plans).map(|_| true)
+            knit_runtime::up(&ctx, &runtime.unwrap_or_default(), &stack_repo_ids).map(|_| true)
         }
         "down" => {
-            if !runtime_applies(&active, runtime)? {
+            if !runtime_applies(&ctx, runtime.as_ref()) {
                 return Ok(false);
             }
-            run_down(&active).map(|_| true)
+            knit_runtime::down(&ctx).map(|_| true)
         }
         "status" => {
-            if !runtime_applies(&active, runtime)? {
+            if !runtime_applies(&ctx, runtime.as_ref()) {
                 return Ok(false);
             }
-            run_status(&active).map(|_| true)
+            knit_runtime::status(&ctx).map(|_| true)
         }
         _ => Ok(false),
     }
@@ -102,159 +46,68 @@ pub fn try_handle(name: &str) -> Result<bool> {
 /// Whether `down`/`status` should handle this bundle: a configured runtime,
 /// recorded run state, or a detectable stack repo (so cleanup works even when
 /// a failed `up` never recorded state).
-fn runtime_applies(active: &ActiveBundle, runtime: Option<ProjectRuntime>) -> Result<bool> {
-    if runtime.is_some() || has_state(active) {
-        return Ok(true);
-    }
-    Ok(!resolve_stack_repos(active, None)
-        .unwrap_or_default()
-        .is_empty())
+fn runtime_applies(ctx: &RuntimeContext, runtime: Option<&ProjectRuntime>) -> bool {
+    runtime.is_some()
+        || knit_runtime::has_state(ctx)
+        || !knit_runtime::detect_stack_repo_ids(ctx).is_empty()
 }
 
 /// The bundle repos whose stacks `up` lifts. `runtime.stacks` narrows to an
 /// explicit set (repos absent from this bundle are skipped, so narrowed
 /// bundles run what they contain); the legacy `stackRepo` forces one stack;
 /// otherwise every bundle repo with a compose file is a stack.
-fn resolve_stack_repos<'a>(
-    active: &'a ActiveBundle,
+fn resolve_stack_repo_ids(
+    ctx: &RuntimeContext,
     runtime: Option<&ProjectRuntime>,
-) -> Result<Vec<&'a RepoEntry>> {
+) -> Result<Vec<String>> {
     if let Some(runtime) = runtime {
         if !runtime.stacks.is_empty() {
-            let mut repos = Vec::new();
-            for id in &runtime.stacks {
-                let slug = crate::ids::slugify(id);
-                if let Some(repo) = active.bundle.repos.iter().find(|repo| repo.id == slug) {
-                    repos.push(repo);
-                }
-            }
-            return Ok(repos);
+            return Ok(runtime
+                .stacks
+                .iter()
+                .map(|id| crate::ids::slugify(id))
+                .filter(|slug| ctx.repos.iter().any(|repo| repo.id == *slug))
+                .collect());
         }
         if let Some(stack_repo_id) = &runtime.stack_repo {
-            let repo = active
-                .bundle
+            if !ctx.repos.iter().any(|repo| repo.id == *stack_repo_id) {
+                bail!("stack repo `{stack_repo_id}` is not tracked in this bundle");
+            }
+            return Ok(vec![stack_repo_id.clone()]);
+        }
+    }
+    Ok(knit_runtime::detect_stack_repo_ids(ctx))
+}
+
+/// Translate the active bundle (plus project repos, for the `KNIT_*` env
+/// contract) into the runtime crate's context.
+fn runtime_context(active: &ActiveBundle, project: Option<&KnitProject>) -> RuntimeContext {
+    let repos = active
+        .bundle
+        .repos
+        .iter()
+        .map(|repo| RuntimeRepo {
+            id: repo.id.clone(),
+            source_path: PathBuf::from(&repo.path),
+            checkout: checkout_dir(active, repo),
+        })
+        .collect();
+    let extra_checkouts = project
+        .map(|project| {
+            project
                 .repos
                 .iter()
-                .find(|repo| repo.id == *stack_repo_id)
-                .with_context(|| {
-                    format!("stack repo `{stack_repo_id}` is not tracked in this bundle")
-                })?;
-            return Ok(vec![repo]);
-        }
-    }
-
-    let mut detected = Vec::new();
-    for repo in &active.bundle.repos {
-        let Some(checkout) = checkout_dir(active, repo) else {
-            continue;
-        };
-        let has_compose = CONTRACT_COMPOSE_CANDIDATES
-            .iter()
-            .chain(PLAIN_COMPOSE_CANDIDATES.iter())
-            .any(|candidate| checkout.join(candidate).exists());
-        if has_compose {
-            detected.push(repo);
-        }
-    }
-    Ok(detected)
-}
-
-fn build_stack_plans<'a>(
-    active: &ActiveBundle,
-    runtime: &ProjectRuntime,
-    stack_repos: &[&'a RepoEntry],
-) -> Result<Vec<StackPlan<'a>>> {
-    let multi = stack_repos.len() > 1;
-    stack_repos
-        .iter()
-        .map(|repo| {
-            let checkout = checkout_dir(active, repo).with_context(|| {
-                format!(
-                    "{} has no checkout. Run `knit bundle worktree` first.",
-                    repo.id
-                )
-            })?;
-            // A configured `composeFile` names a file inside the configured
-            // stack repo; every other stack uses its own default compose file.
-            let compose = if runtime.compose_file.is_some()
-                && (!multi || runtime.stack_repo.as_deref() == Some(repo.id.as_str()))
-            {
-                find_compose_file(&checkout, runtime)?
-            } else {
-                find_default_compose_file(&checkout)?
-            };
-            let mode = detect_mode(runtime, &compose)?;
-            let project_name = if multi {
-                format!("{}--{}", compose_project_name(&active.bundle.id), repo.id)
-            } else {
-                compose_project_name(&active.bundle.id)
-            };
-            Ok(StackPlan {
-                repo,
-                checkout,
-                compose,
-                mode,
-                project_name,
-            })
+                .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
+                .collect()
         })
-        .collect()
-}
-
-/// Pick the compose file: explicit `composeFile` config wins, then the
-/// contract file, then the repo's own compose file.
-fn find_compose_file(stack_checkout: &Path, runtime: &ProjectRuntime) -> Result<PathBuf> {
-    if let Some(configured) = &runtime.compose_file {
-        let path = stack_checkout.join(configured);
-        if !path.exists() {
-            bail!(
-                "Runtime compose file not found: {}. Configured as `composeFile` in the project runtime.",
-                path.display()
-            );
-        }
-        return Ok(path);
-    }
-    find_default_compose_file(stack_checkout)
-}
-
-fn find_default_compose_file(stack_checkout: &Path) -> Result<PathBuf> {
-    for candidate in CONTRACT_COMPOSE_CANDIDATES
-        .iter()
-        .chain(PLAIN_COMPOSE_CANDIDATES.iter())
-    {
-        let path = stack_checkout.join(candidate);
-        if path.exists() {
-            return Ok(path);
-        }
-    }
-    bail!(
-        "No compose file found in {}. Add a docker-compose.yml to the stack repo (lifted automatically) or a docker-compose.knit.yml written against the KNIT_* contract.",
-        stack_checkout.display()
-    );
-}
-
-/// Explicit `runtime.mode` config wins; the contract filename or `${KNIT_*}`
-/// variable references opt into the contract; anything else is lifted by
-/// transformation.
-fn detect_mode(runtime: &ProjectRuntime, compose_path: &Path) -> Result<RuntimeMode> {
-    if let Some(mode) = runtime.mode {
-        return Ok(mode);
-    }
-    if compose_path
-        .file_name()
-        .is_some_and(|name| CONTRACT_COMPOSE_CANDIDATES.iter().any(|c| name == *c))
-    {
-        return Ok(RuntimeMode::Contract);
-    }
-    let text = fs::read_to_string(compose_path)
-        .with_context(|| format!("failed to read {}", compose_path.display()))?;
-    if text.contains("${KNIT_") || text.contains("$KNIT_") {
-        Ok(RuntimeMode::Contract)
-    } else {
-        Ok(RuntimeMode::Transform)
+        .unwrap_or_default();
+    RuntimeContext {
+        root: active.root.clone(),
+        bundle_id: active.bundle.id.clone(),
+        repos,
+        extra_checkouts,
     }
 }
-
-/// Transform mode: resolve the repo's compose file in source-space, rewrite
 
 fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
     let config = crate::store::load_config(&active.root)?;
@@ -265,61 +118,4 @@ fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
         .or(config.active_project.as_deref())
         .context("The resolved bundle is not associated with a Knit project.")?;
     read_json(&project_path(&active.root, project_id))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn detect_mode_sniffs_contract_variables() {
-        let dir =
-            std::env::temp_dir().join(format!("knit-runtime-mode-test-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let runtime = ProjectRuntime::default();
-
-        let contract = dir.join("contract.yml");
-        std::fs::write(
-            &contract,
-            "services:\n  b:\n    ports: [\"${KNIT_PORT_BACKEND}:4000\"]\n",
-        )
-        .unwrap();
-        let plain = dir.join("plain.yml");
-        std::fs::write(&plain, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
-        // A bare KNIT_ mention (e.g. in a comment) is not a contract opt-in.
-        let comment = dir.join("comment.yml");
-        std::fs::write(
-            &comment,
-            "# managed via KNIT_ tooling\nservices:\n  b:\n    ports: [\"4000:4000\"]\n",
-        )
-        .unwrap();
-        let named = dir.join(CONTRACT_COMPOSE_CANDIDATES[0]);
-        std::fs::write(&named, "services:\n  b:\n    ports: [\"4000:4000\"]\n").unwrap();
-
-        assert_eq!(
-            detect_mode(&runtime, &contract).unwrap(),
-            RuntimeMode::Contract
-        );
-        assert_eq!(
-            detect_mode(&runtime, &plain).unwrap(),
-            RuntimeMode::Transform
-        );
-        assert_eq!(
-            detect_mode(&runtime, &comment).unwrap(),
-            RuntimeMode::Transform
-        );
-        assert_eq!(
-            detect_mode(&runtime, &named).unwrap(),
-            RuntimeMode::Contract
-        );
-
-        // Explicit config wins over detection.
-        let forced = ProjectRuntime {
-            mode: Some(RuntimeMode::Contract),
-            ..Default::default()
-        };
-        assert_eq!(detect_mode(&forced, &plain).unwrap(), RuntimeMode::Contract);
-
-        std::fs::remove_dir_all(dir).unwrap();
-    }
 }

@@ -3,10 +3,10 @@
 //! are resolved by compose project label so down/status survive missing state
 //! and torn-down worktrees.
 
-use super::transform::ServicePort;
-use crate::model::{DatabaseMode, RuntimeMode};
-use crate::output as out;
-use crate::store::{read_json, ActiveBundle};
+use crate::config::{DatabaseMode, RuntimeMode};
+use crate::support::{out, read_json};
+use crate::transform::ServicePort;
+use crate::RuntimeContext;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
@@ -14,7 +14,7 @@ use std::net::TcpStream;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-pub(super) fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
+pub(crate) fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
     ports
         .iter()
         .find(|port| port.service == "frontend")
@@ -23,25 +23,25 @@ pub(super) fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
         .map(|port| port.host)
 }
 
-pub(super) fn run_down(active: &ActiveBundle) -> Result<()> {
+pub(crate) fn run_down(ctx: &RuntimeContext) -> Result<()> {
     // Project-scoped `down` resolves containers by compose label, so it works
     // even after the bundle worktree (and its compose file) is gone. With
     // recorded state, tear down exactly the stacks it lists; without state
     // (an `up` that failed before recording), sweep the legacy single-stack
     // name plus the per-repo names multi-stack runs derive.
     let mut targets: Vec<(String, Vec<String>)> = Vec::new();
-    match load_runtime_state(active).ok() {
+    match load_runtime_state(ctx).ok() {
         Some(state) if !state.stacks.is_empty() => {
             for stack in &state.stacks {
                 targets.push((stack.project_name.clone(), stack.profiles.clone()));
             }
         }
         Some(state) => {
-            targets.push((compose_project_name(&active.bundle.id), state.profiles));
+            targets.push((compose_project_name(&ctx.bundle_id), state.profiles));
         }
         None => {
-            let legacy = compose_project_name(&active.bundle.id);
-            for repo in &active.bundle.repos {
+            let legacy = compose_project_name(&ctx.bundle_id);
+            for repo in &ctx.repos {
                 targets.push((format!("{legacy}--{}", repo.id), Vec::new()));
             }
             targets.push((legacy, Vec::new()));
@@ -67,15 +67,15 @@ pub(super) fn run_down(active: &ActiveBundle) -> Result<()> {
     println!(
         "{} {}",
         out::heading("Runtime down:"),
-        out::repo(&active.bundle.id)
+        out::repo(&ctx.bundle_id)
     );
     Ok(())
 }
 
-pub(super) fn run_status(active: &ActiveBundle) -> Result<()> {
+pub(crate) fn run_status(ctx: &RuntimeContext) -> Result<()> {
     // State may be missing when an `up` failed before recording it; still
     // report containers resolved by compose label so cleanup is visible.
-    let state = load_runtime_state(active).ok();
+    let state = load_runtime_state(ctx).ok();
 
     // (stack label, compose project) pairs to report; single-stack runs keep
     // the unlabelled legacy shape.
@@ -85,14 +85,10 @@ pub(super) fn run_status(active: &ActiveBundle) -> Result<()> {
             .iter()
             .map(|stack| (Some(stack.repo.clone()), stack.project_name.clone()))
             .collect(),
-        _ => vec![(None, compose_project_name(&active.bundle.id))],
+        _ => vec![(None, compose_project_name(&ctx.bundle_id))],
     };
 
-    println!(
-        "{} {}",
-        out::heading("Bundle:"),
-        out::repo(&active.bundle.id)
-    );
+    println!("{} {}", out::heading("Bundle:"), out::repo(&ctx.bundle_id));
     let mut any_running = false;
     let mut services: Vec<(String, String)> = Vec::new();
     for (label, project_name) in &views {
@@ -189,22 +185,22 @@ pub(super) fn run_status(active: &ActiveBundle) -> Result<()> {
 /// database. Covers every project repo plus any ad-hoc bundle repos; a repo
 /// tracked in the bundle resolves to its bundle checkout, anything else to
 
-pub(super) fn compose_project_name(bundle_id: &str) -> String {
+pub(crate) fn compose_project_name(bundle_id: &str) -> String {
     format!("knit-run-{bundle_id}")
 }
 
-pub(super) fn has_state(active: &ActiveBundle) -> bool {
-    runtime_run_dir(&active.root, &active.bundle.id)
+pub(crate) fn has_state(ctx: &RuntimeContext) -> bool {
+    runtime_run_dir(&ctx.root, &ctx.bundle_id)
         .join("state.json")
         .exists()
 }
 
-fn load_runtime_state(active: &ActiveBundle) -> Result<RuntimeRunState> {
-    let state_path = runtime_run_dir(&active.root, &active.bundle.id).join("state.json");
+fn load_runtime_state(ctx: &RuntimeContext) -> Result<RuntimeRunState> {
+    let state_path = runtime_run_dir(&ctx.root, &ctx.bundle_id).join("state.json");
     if !state_path.exists() {
         bail!(
             "No runtime state found for bundle `{}`. Run `knit run up` first.",
-            active.bundle.id
+            ctx.bundle_id
         );
     }
     read_json(&state_path)
@@ -268,67 +264,67 @@ fn database_status_label(database: &StateDatabase, services: &[(String, String)]
     }
 }
 
-pub(super) fn runtime_run_dir(root: &Path, bundle_id: &str) -> PathBuf {
+pub(crate) fn runtime_run_dir(root: &Path, bundle_id: &str) -> PathBuf {
     root.join(".knit/runtime-runs").join(bundle_id)
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct RuntimeRunState {
-    pub(super) bundle_id: String,
-    pub(super) stack_repo: String,
+pub(crate) struct RuntimeRunState {
+    pub(crate) bundle_id: String,
+    pub(crate) stack_repo: String,
     #[serde(default)]
-    pub(super) mode: RuntimeMode,
+    pub(crate) mode: RuntimeMode,
     #[serde(default)]
-    pub(super) ports: Vec<ServicePort>,
+    pub(crate) ports: Vec<ServicePort>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) database: Option<StateDatabase>,
+    pub(crate) database: Option<StateDatabase>,
     /// Workspace-relative path of the compose file this run executed
     /// (generated file in transform mode, repo file in contract mode).
-    pub(super) compose_file: String,
+    pub(crate) compose_file: String,
     /// Compose profiles activated by this run (e.g. `bundle-db`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) profiles: Vec<String>,
+    pub(crate) profiles: Vec<String>,
     /// The injected environment contract (contract mode), recorded so the
     /// same compose file can be driven manually for debugging.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(super) env: BTreeMap<String, String>,
-    pub(super) profile_path: Option<String>,
-    pub(super) started_at: String,
+    pub(crate) env: BTreeMap<String, String>,
+    pub(crate) profile_path: Option<String>,
+    pub(crate) started_at: String,
     /// Every stack this run started. Single-stack runs also mirror the first
     /// stack into the legacy top-level fields above so older tooling keeps
     /// reading state files.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) stacks: Vec<RuntimeStackState>,
+    pub(crate) stacks: Vec<RuntimeStackState>,
 }
 
 /// One stack of a runtime run: a bundle repo's compose lifted into its own
 /// per-bundle compose project.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct RuntimeStackState {
-    pub(super) repo: String,
-    pub(super) project_name: String,
+pub(crate) struct RuntimeStackState {
+    pub(crate) repo: String,
+    pub(crate) project_name: String,
     #[serde(default)]
-    pub(super) mode: RuntimeMode,
-    pub(super) compose_file: String,
+    pub(crate) mode: RuntimeMode,
+    pub(crate) compose_file: String,
     #[serde(default)]
-    pub(super) ports: Vec<ServicePort>,
+    pub(crate) ports: Vec<ServicePort>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub(super) profiles: Vec<String>,
+    pub(crate) profiles: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub(super) env: BTreeMap<String, String>,
+    pub(crate) env: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub(super) database: Option<StateDatabase>,
+    pub(crate) database: Option<StateDatabase>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct StateDatabase {
+pub(crate) struct StateDatabase {
     #[serde(default)]
-    pub(super) mode: DatabaseMode,
-    pub(super) port: u16,
-    pub(super) name: String,
+    pub(crate) mode: DatabaseMode,
+    pub(crate) port: u16,
+    pub(crate) name: String,
 }
 
 #[cfg(test)]
