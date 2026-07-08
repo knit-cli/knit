@@ -1,4 +1,4 @@
-//! `knit run up|status|down` — the adapter between knit bundle state and the
+//! `knit run up|status|down|eject` — the adapter between knit bundle state and the
 //! `knit-runtime` crate, which owns the actual per-bundle docker-compose
 //! runtime (see that crate for semantics). This module resolves the active
 //! bundle and project, translates them into the crate's [`RuntimeContext`]
@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use knit_runtime::{RuntimeContext, RuntimeRepo};
 use std::path::PathBuf;
 
-pub fn try_handle(name: &str) -> Result<bool> {
+pub fn try_handle(name: &str, force: bool) -> Result<bool> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active).ok();
     let runtime = project.as_ref().and_then(|p| p.runtime.clone());
@@ -26,6 +26,14 @@ pub fn try_handle(name: &str) -> Result<bool> {
                 return Ok(false);
             }
             knit_runtime::up(&ctx, &runtime.unwrap_or_default(), &stack_repo_ids).map(|_| true)
+        }
+        "eject" => {
+            let stack_repo_ids = resolve_stack_repo_ids(&ctx, runtime.as_ref())?;
+            if stack_repo_ids.is_empty() {
+                return Ok(false);
+            }
+            knit_runtime::eject(&ctx, &runtime.unwrap_or_default(), &stack_repo_ids, force)
+                .map(|_| true)
         }
         "down" => {
             if !runtime_applies(&ctx, runtime.as_ref()) {

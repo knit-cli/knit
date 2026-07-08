@@ -251,6 +251,9 @@ pub enum Commands {
         /// List configured commands for the active bundle's project.
         #[arg(long)]
         list: bool,
+        /// Overwrite an existing docker-compose.knit.yml (`knit run eject`).
+        #[arg(long)]
+        force: bool,
         /// Raw command to execute, for example `knit run -r web -- docker compose up`.
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<OsString>,
