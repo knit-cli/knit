@@ -23,10 +23,13 @@ fn bundle_start_and_add_support_ad_hoc_work() {
 
     knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
     assert!(workspace.join(".knit/worktrees/ad-hoc/backend").exists());
-    let worktree_agents =
-        fs::read_to_string(workspace.join(".knit/worktrees/ad-hoc/backend/AGENTS.md")).unwrap();
-    assert!(worktree_agents.contains("bundle `ad-hoc`"));
-    assert!(!worktree_agents.contains("knit --bundle"));
+    let bundle_agents =
+        fs::read_to_string(workspace.join(".knit/worktrees/ad-hoc/AGENTS.md")).unwrap();
+    assert!(bundle_agents.contains("bundle `ad-hoc`"));
+    assert!(!bundle_agents.contains("knit --bundle"));
+    assert!(!workspace
+        .join(".knit/worktrees/ad-hoc/backend/AGENTS.md")
+        .exists());
 
     fs::remove_dir_all(root).unwrap();
 }

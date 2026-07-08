@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::commands::agents::{
-    agent_teamwork_section, print_bundle_worktree_agents_summary, print_worktree_agents_summary,
-    upsert_managed_section, write_bundle_worktree_agents_md, write_worktree_agents_md,
+    agent_teamwork_section, print_bundle_worktree_agents_summary, upsert_managed_section,
+    write_bundle_worktree_agents_md,
 };
 use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
@@ -68,14 +68,12 @@ pub fn start_bundle(
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             let agents_path = write_agents_md(&root)?;
             let bundle_agents = write_bundle_worktree_agents_md(&active)?;
-            let worktree_agents = write_worktree_agents_md(&active)?;
             println!(
                 "{} {}",
                 out::heading("AGENTS.md:"),
                 out::path(agents_path.display())
             );
             print_bundle_worktree_agents_summary(bundle_agents.as_deref());
-            print_worktree_agents_summary(&worktree_agents);
             return Ok(());
         }
         bail!(
@@ -142,9 +140,7 @@ pub fn start_bundle(
     let bundle: ChangeGroup = read_json(&bundle_path)?;
     let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
     let bundle_agents = write_bundle_worktree_agents_md(&active)?;
-    let worktree_agents = write_worktree_agents_md(&active)?;
     print_bundle_worktree_agents_summary(bundle_agents.as_deref());
-    print_worktree_agents_summary(&worktree_agents);
 
     if let Some(selector) = cd {
         let path = cd_target_dir(&active, selector)?;
