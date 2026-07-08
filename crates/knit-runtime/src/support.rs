@@ -75,6 +75,21 @@ pub(crate) fn canonicalize(path: impl AsRef<Path>) -> std::io::Result<std::path:
     dunce::canonicalize(path)
 }
 
+/// Uppercase a repo or service id into an environment variable suffix,
+/// mapping every non-alphanumeric character to `_` (`gloss-web-ui` ->
+/// `GLOSS_WEB_UI`).
+pub(crate) fn env_var_suffix(id: &str) -> String {
+    id.chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() {
+                character.to_ascii_uppercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn now_iso() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }

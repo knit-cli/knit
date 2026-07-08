@@ -11,11 +11,13 @@
 //! embedding the runtime, a future standalone binary) can do the same.
 
 pub mod config;
+mod eject;
 mod plan;
 mod state;
 mod support;
 mod transform;
 mod up;
+mod yaml;
 
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -56,6 +58,24 @@ pub fn up(
     }
     let plans = plan::build_stack_plans(ctx, runtime, stack_repo_ids)?;
     up::run_up_stacks(ctx, runtime, plans)
+}
+
+/// Materialize each transform-mode stack's lift as an editable
+/// `docker-compose.knit.yml` in its repo checkout — the exit from transform
+/// mode into contract mode, so a stack the automatic lift mishandles becomes
+/// a committed file to fix instead of a knit change. Contract stacks are
+/// skipped; existing files are only overwritten with `force`.
+pub fn eject(
+    ctx: &RuntimeContext,
+    runtime: &config::ProjectRuntime,
+    stack_repo_ids: &[String],
+    force: bool,
+) -> Result<()> {
+    if runtime.kind != "docker-compose" {
+        bail!("Unsupported runtime kind `{}`.", runtime.kind);
+    }
+    let plans = plan::build_stack_plans(ctx, runtime, stack_repo_ids)?;
+    eject::run_eject(ctx, runtime, plans, force)
 }
 
 /// Stop and remove the bundle's stacks, resolved from recorded run state or

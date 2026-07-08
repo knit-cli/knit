@@ -46,27 +46,7 @@ pub fn transform_compose(
     repo_map: &[(PathBuf, PathBuf)],
     allocate: &mut dyn FnMut(u16) -> Result<u16>,
 ) -> Result<(Vec<ServicePort>, Vec<(u16, u16)>)> {
-    if let Some(top) = config.as_object_mut() {
-        top.remove("name");
-        // `docker compose config` fully resolves named volumes and networks to
-        // "<source-project>_<name>" and records it as an explicit `name`. Left
-        // in place, the bundle stack binds the *source* project's volumes and
-        // networks instead of its own — sharing (and corrupting) the canonical
-        // stack's database. Strip the resolved name so the bundle's own compose
-        // project re-derives an isolated "<bundle-project>_<name>". Entries
-        // marked `external` keep their name: the shared reference is deliberate.
-        for key in ["volumes", "networks"] {
-            if let Some(entries) = top.get_mut(key).and_then(Value::as_object_mut) {
-                for entry in entries.values_mut() {
-                    if let Some(entry) = entry.as_object_mut() {
-                        if !is_external(entry) {
-                            entry.remove("name");
-                        }
-                    }
-                }
-            }
-        }
-    }
+    strip_stack_identity(config);
 
     let Some(services) = config
         .get_mut("services")
@@ -209,6 +189,40 @@ pub fn strip_shared_database(
     }
 
     // Drop named volumes only the removed service used.
+    retain_referenced_volumes(config);
+
+    true
+}
+
+/// Strip the identity `docker compose config` bakes into a resolved config so
+/// it can run as a fresh compose project: the top-level `name`, and the
+/// resolved `name` on each named volume and network. Left in place, a bundle
+/// stack binds the *source* project's volumes and networks instead of its own
+/// — sharing (and corrupting) the canonical stack's database. Entries marked
+/// `external` keep their name: the shared reference is deliberate.
+pub(crate) fn strip_stack_identity(config: &mut Value) {
+    if let Some(top) = config.as_object_mut() {
+        top.remove("name");
+        for key in ["volumes", "networks"] {
+            if let Some(entries) = top.get_mut(key).and_then(Value::as_object_mut) {
+                for entry in entries.values_mut() {
+                    if let Some(entry) = entry.as_object_mut() {
+                        if !is_external(entry) {
+                            entry.remove("name");
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Drop top-level named volumes no service references anymore (keeping
+/// `external` ones).
+pub(crate) fn retain_referenced_volumes(config: &mut Value) {
+    let Some(services) = config.get("services").and_then(Value::as_object) else {
+        return;
+    };
     let referenced: std::collections::BTreeSet<String> = services
         .values()
         .filter_map(|entry| entry.get("volumes"))
@@ -233,8 +247,6 @@ pub fn strip_shared_database(
             referenced.contains(name) || entry.as_object().is_some_and(is_external)
         });
     }
-
-    true
 }
 
 pub fn rewrite_extra_port_references(config: &mut Value, port_map: &[(u16, u16)]) {

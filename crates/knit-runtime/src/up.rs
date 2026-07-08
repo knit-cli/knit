@@ -9,7 +9,7 @@ use crate::state::{
     compose_project_name, frontend_port, runtime_run_dir, RuntimeRunState, RuntimeStackState,
     StateDatabase,
 };
-use crate::support::{out, read_json, rev_parse, write_json};
+use crate::support::{env_var_suffix, out, read_json, rev_parse, write_json};
 use crate::transform::{self, ServicePort};
 use crate::RuntimeContext;
 use anyhow::{bail, Context, Result};
@@ -67,11 +67,15 @@ pub(crate) fn run_up_stacks(
         .collect();
 
     // Shared-database reachability gates contract stacks and transform stacks
-    // that strip their db service; check it once.
+    // that strip their db service; check it once. Only an explicitly
+    // configured database gates: the default database block is shared-mode
+    // too, but a project without one has no dev database to reach (its
+    // stacks run whatever db services their compose files define).
+    let database_configured = runtime.database.is_some();
     let database_config = runtime.database.clone().unwrap_or_default();
     let mut shared_db_checked = false;
     if let Some(contract) = plans.iter().find(|plan| plan.mode == RuntimeMode::Contract) {
-        if database_config.mode == DatabaseMode::Shared {
+        if database_configured && database_config.mode == DatabaseMode::Shared {
             ensure_shared_database_reachable(&database_config, &contract.checkout)?;
             shared_db_checked = true;
         }
@@ -134,11 +138,9 @@ pub(crate) fn run_up_stacks(
             RuntimeMode::Contract => {
                 let resolved = resolve_database(&database_config, &ctx.bundle_id, &mut taken);
                 let ports_config = runtime.ports.clone().unwrap_or_default();
-                let service_ports = allocate_service_ports(
-                    &taken,
-                    &ports_config.service_bases(),
-                    ports_config.step.max(1),
-                )?;
+                let bases = contract_port_bases(&plan.compose, runtime.ports.as_ref())?;
+                let service_ports =
+                    allocate_service_ports(&taken, &bases, ports_config.step.max(1))?;
                 taken.extend(service_ports.values().copied());
                 let env = runtime_env(ctx, &plan.project_name, &service_ports, &resolved);
                 let profiles = if resolved.mode == DatabaseMode::Bundle {
@@ -313,8 +315,13 @@ pub(crate) fn run_up_stacks(
             .status()
             .context("failed to run docker compose")?;
         if !status.success() {
+            let hint = if stack.mode == RuntimeMode::Transform {
+                " If the lifted compose shape is wrong for this repo, run `knit run eject` to materialize an editable docker-compose.knit.yml and adjust it."
+            } else {
+                ""
+            };
             bail!(
-                "docker compose exited with status {status}. Clean up partial containers with `knit run down`."
+                "docker compose exited with status {status}. Clean up partial containers with `knit run down`.{hint}"
             );
         }
     }
@@ -392,19 +399,85 @@ fn runtime_env(
     env
 }
 
-/// Uppercase a repo id into an environment variable suffix, mapping every
-/// non-alphanumeric character to `_` (`gloss-web-ui` -> `GLOSS_WEB_UI`).
-fn env_var_suffix(repo_id: &str) -> String {
-    repo_id
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() {
-                character.to_ascii_uppercase()
-            } else {
-                '_'
+/// The port pools a contract stack allocates from: `${KNIT_PORT_*}` variables
+/// scanned from the compose file (each `:-` default is that pool's base),
+/// overlaid by the configured `runtime.ports` pools, which win per service.
+/// This is what lets an ejected compose file — whose services are the repo's,
+/// not knit's — run with no `ports` config at all. A scanned variable with no
+/// default and no configured pool is an error: the allocator would have no
+/// base to start from, and compose would silently interpolate an empty port.
+fn contract_port_bases(
+    compose_file: &Path,
+    ports: Option<&crate::config::ProjectRuntimePorts>,
+) -> Result<BTreeMap<String, u16>> {
+    let text = fs::read_to_string(compose_file)
+        .with_context(|| format!("failed to read {}", compose_file.display()))?;
+    let scanned = scan_port_variables(&text);
+
+    let mut bases: BTreeMap<String, u16> = BTreeMap::new();
+    let mut missing: Vec<String> = Vec::new();
+    for (suffix, default) in &scanned {
+        // Lowercased suffixes are valid service keys that round-trip back to
+        // the same `KNIT_PORT_<suffix>` variable in the env contract.
+        match default {
+            Some(base) => {
+                bases.insert(suffix.to_ascii_lowercase(), *base);
             }
-        })
-        .collect()
+            None => missing.push(suffix.clone()),
+        }
+    }
+    if let Some(ports) = ports {
+        for (service, base) in ports.service_bases() {
+            let key = env_var_suffix(&service).to_ascii_lowercase();
+            missing.retain(|suffix| suffix.to_ascii_lowercase() != key);
+            bases.insert(key, base);
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "{} references KNIT_PORT_{} without a `:-<port>` default or a matching `runtime.ports.services` pool, so no base port is known. Add a default (e.g. `${{KNIT_PORT_{}:-8080}}`) or configure the pool.",
+            compose_file.display(),
+            missing.join(", KNIT_PORT_"),
+            missing[0]
+        );
+    }
+    if bases.is_empty() {
+        bases = crate::config::ProjectRuntimePorts::default().service_bases();
+    }
+    Ok(bases)
+}
+
+/// Every `${KNIT_PORT_<SUFFIX>}` reference in a compose file, with its
+/// `:-<port>` default when one terminates the interpolation. A variable seen
+/// both with and without a default keeps the default.
+fn scan_port_variables(text: &str) -> BTreeMap<String, Option<u16>> {
+    let mut vars: BTreeMap<String, Option<u16>> = BTreeMap::new();
+    const MARKER: &str = "${KNIT_PORT_";
+    let mut rest = text;
+    while let Some(index) = rest.find(MARKER) {
+        rest = &rest[index + MARKER.len()..];
+        let suffix: String = rest
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        if suffix.is_empty() {
+            continue;
+        }
+        let after = &rest[suffix.len()..];
+        let default = after.strip_prefix(":-").and_then(|tail| {
+            let digits: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if tail[digits.len()..].starts_with('}') {
+                digits.parse::<u16>().ok()
+            } else {
+                None
+            }
+        });
+        let entry = vars.entry(suffix).or_insert(None);
+        if default.is_some() {
+            *entry = default;
+        }
+    }
+    vars
 }
 
 fn allocate_service_ports(
@@ -699,6 +772,65 @@ mod tests {
         // A second bundle-db stack in the same run steps past the taken port.
         let second = resolve_database(&database, "venue-capacity", &mut taken);
         assert_eq!(second.host_port, 5438);
+    }
+
+    #[test]
+    fn scan_port_variables_reads_suffixes_and_defaults() {
+        let text = "services:\n  web:\n    ports:\n      - \"${KNIT_PORT_WEB:-8080}:8080\"\n  api:\n    ports:\n      - \"${KNIT_PORT_API}:4000\"\n    environment:\n      SELF: http://localhost:${KNIT_PORT_API:-4001}\n      BAD: ${KNIT_PORT_ODD:-notaport}\n";
+        let vars = scan_port_variables(text);
+        assert_eq!(vars.get("WEB"), Some(&Some(8080)));
+        // Seen with and without a default: the default wins.
+        assert_eq!(vars.get("API"), Some(&Some(4001)));
+        // A non-numeric default is no default.
+        assert_eq!(vars.get("ODD"), Some(&None));
+    }
+
+    #[test]
+    fn contract_port_bases_merges_scanned_and_configured_pools() {
+        let dir = std::env::temp_dir().join(format!(
+            "knit-contract-bases-test-{}-{}",
+            std::process::id(),
+            crate::support::now_iso().replace([':', '.'], "")
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let compose = dir.join("docker-compose.knit.yml");
+
+        // Scanned defaults alone are enough: no ports config needed.
+        std::fs::write(
+            &compose,
+            "services:\n  web:\n    ports: [\"${KNIT_PORT_WEB:-8080}:8080\"]\n  worker:\n    ports: [\"${KNIT_PORT_WORKER:-9000}:9000\"]\n",
+        )
+        .unwrap();
+        let bases = contract_port_bases(&compose, None).unwrap();
+        assert_eq!(bases["web"], 8080);
+        assert_eq!(bases["worker"], 9000);
+
+        // Configured pools win over scanned defaults and cover defaultless
+        // variables.
+        std::fs::write(
+            &compose,
+            "services:\n  web:\n    ports: [\"${KNIT_PORT_WEB:-8080}:8080\"]\n  api:\n    ports: [\"${KNIT_PORT_API}:4000\"]\n",
+        )
+        .unwrap();
+        let ports = crate::config::ProjectRuntimePorts {
+            services: BTreeMap::from([("web".to_string(), 8180u16), ("api".to_string(), 4100u16)]),
+            ..Default::default()
+        };
+        let bases = contract_port_bases(&compose, Some(&ports)).unwrap();
+        assert_eq!(bases["web"], 8180);
+        assert_eq!(bases["api"], 4100);
+
+        // A defaultless variable with no configured pool is an error.
+        let error = contract_port_bases(&compose, None).unwrap_err().to_string();
+        assert!(error.contains("KNIT_PORT_API"), "{error}");
+
+        // No variables and no config: the default backend/frontend pair.
+        std::fs::write(&compose, "services:\n  web:\n    image: nginx\n").unwrap();
+        let bases = contract_port_bases(&compose, None).unwrap();
+        assert_eq!(bases["backend"], 4001);
+        assert_eq!(bases["frontend"], 5174);
+
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
