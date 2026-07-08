@@ -349,6 +349,11 @@ pub struct BundleNode {
     #[serde(rename = "type")]
     pub node_type: String,
     pub created_at: String,
+    /// Opaque identity of the session that produced this node. Agent
+    /// harnesses set KNIT_SESSION per conversation so the ledger records
+    /// which conversation drove the work; absent for plain CLI use.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub session_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -373,13 +378,24 @@ pub struct BundleNode {
     pub repo_changes: Vec<RepoChange>,
 }
 
+/// Ambient session identity for ledger attribution, from KNIT_SESSION.
+fn ambient_session_id() -> Option<String> {
+    std::env::var("KNIT_SESSION")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
 impl BundleNode {
-    pub fn feature_created(feature_id: String, created_at: String, title: String) -> Self {
+    /// Every node starts here so cross-cutting attribution (session id)
+    /// is recorded uniformly regardless of which command created it.
+    fn base(id: String, node_type: &str, created_at: String) -> Self {
         Self {
-            id: feature_id,
-            node_type: "feature.created".to_string(),
+            id,
+            node_type: node_type.to_string(),
             created_at,
-            title: Some(title),
+            session_id: ambient_session_id(),
+            title: None,
             repo_ids: None,
             commit_group_id: None,
             message: None,
@@ -393,60 +409,31 @@ impl BundleNode {
         }
     }
 
+    pub fn feature_created(feature_id: String, created_at: String, title: String) -> Self {
+        Self {
+            title: Some(title),
+            ..Self::base(feature_id, "feature.created", created_at)
+        }
+    }
+
     pub fn repos_added(id: String, created_at: String, repo_ids: Vec<String>) -> Self {
         Self {
-            id,
-            node_type: "repo.added".to_string(),
-            created_at,
-            title: None,
             repo_ids: Some(repo_ids),
-            commit_group_id: None,
-            message: None,
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "repo.added", created_at)
         }
     }
 
     pub fn repos_removed(id: String, created_at: String, repo_ids: Vec<String>) -> Self {
         Self {
-            id,
-            node_type: "repo.removed".to_string(),
-            created_at,
-            title: None,
             repo_ids: Some(repo_ids),
-            commit_group_id: None,
-            message: None,
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "repo.removed", created_at)
         }
     }
 
     pub fn worktrees_materialized(id: String, created_at: String, repo_ids: Vec<String>) -> Self {
         Self {
-            id,
-            node_type: "worktree.materialized".to_string(),
-            created_at,
-            title: None,
             repo_ids: Some(repo_ids),
-            commit_group_id: None,
-            message: None,
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "worktree.materialized", created_at)
         }
     }
 
@@ -458,20 +445,11 @@ impl BundleNode {
         repo_changes: Vec<RepoChange>,
     ) -> Self {
         Self {
-            id: group_id.clone(),
-            node_type: "commit.group".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: Some(group_id),
+            commit_group_id: Some(group_id.clone()),
             message: Some(message),
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
             commits,
             repo_changes,
+            ..Self::base(group_id, "commit.group", created_at)
         }
     }
 
@@ -484,39 +462,19 @@ impl BundleNode {
         repo_changes: Vec<RepoChange>,
     ) -> Self {
         Self {
-            id: group_id.clone(),
-            node_type: "revert.group".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: Some(group_id),
+            commit_group_id: Some(group_id.clone()),
             message: Some(message),
             target_node_id: Some(target_node_id),
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
             commits,
             repo_changes,
+            ..Self::base(group_id, "revert.group", created_at)
         }
     }
 
     pub fn git_observed(id: String, created_at: String, repo_changes: Vec<RepoChange>) -> Self {
         Self {
-            id,
-            node_type: "git.observed".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: None,
-            message: None,
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
             repo_changes,
+            ..Self::base(id, "git.observed", created_at)
         }
     }
 
@@ -527,20 +485,10 @@ impl BundleNode {
         repo_changes: Vec<RepoChange>,
     ) -> Self {
         Self {
-            id,
-            node_type: "land.update".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: None,
             message: Some("updated feature branches from base".to_string()),
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
             provider: Some(provider),
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
             repo_changes,
+            ..Self::base(id, "land.update", created_at)
         }
     }
 
@@ -556,39 +504,17 @@ impl BundleNode {
         pins: Vec<CommitRef>,
     ) -> Self {
         Self {
-            id,
-            node_type: "check.recorded".to_string(),
-            created_at,
             title: Some(name),
-            repo_ids: None,
-            commit_group_id: None,
             message: Some(message),
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
             commits: pins,
-            repo_changes: Vec::new(),
+            ..Self::base(id, "check.recorded", created_at)
         }
     }
 
     pub fn feature_archived(id: String, created_at: String, reason: Option<String>) -> Self {
         Self {
-            id,
-            node_type: "feature.archived".to_string(),
-            created_at,
-            title: None,
-            repo_ids: None,
-            commit_group_id: None,
             message: reason,
-            target_node_id: None,
-            plan_id: None,
-            run_id: None,
-            provider: None,
-            publication_urls: Vec::new(),
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "feature.archived", created_at)
         }
     }
 
@@ -602,20 +528,12 @@ impl BundleNode {
         publication_urls: Vec<String>,
     ) -> Self {
         Self {
-            id,
-            node_type: "feature.landed".to_string(),
-            created_at,
-            title: None,
             repo_ids: Some(repo_ids),
-            commit_group_id: None,
-            message: None,
-            target_node_id: None,
             plan_id: Some(plan_id),
             run_id: Some(run_id),
             provider: Some(provider),
             publication_urls,
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "feature.landed", created_at)
         }
     }
 
@@ -629,20 +547,12 @@ impl BundleNode {
         publication_urls: Vec<String>,
     ) -> Self {
         Self {
-            id,
-            node_type: "pr.revert".to_string(),
-            created_at,
-            title: None,
             repo_ids: Some(repo_ids),
-            commit_group_id: None,
             message: Some(message),
             target_node_id: Some(target_node_id),
-            plan_id: None,
-            run_id: None,
             provider: Some(provider),
             publication_urls,
-            commits: Vec::new(),
-            repo_changes: Vec::new(),
+            ..Self::base(id, "pr.revert", created_at)
         }
     }
 }

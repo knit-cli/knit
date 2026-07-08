@@ -345,6 +345,9 @@ fn print_show_header(node: &BundleNode) {
             out::heading("Message:")
         );
     }
+    if let Some(session_id) = &node.session_id {
+        println!("{} {}", out::heading("Session:"), out::muted(session_id));
+    }
     println!();
 }
 
