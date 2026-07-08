@@ -161,6 +161,8 @@ knit run --repo backend -- docker compose ps
 
 ### Bundle runtimes
 
+For the step-by-step "prepare a new project" walkthrough, see [runtime-setup.md](runtime-setup.md); this section is the behavior reference.
+
 Three more `knit run` verbs start a disposable stack instance per bundle — the same composed shape the repos already run, with different ports and the bundle's code substituted in:
 
 ```sh
