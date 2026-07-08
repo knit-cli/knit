@@ -1,0 +1,19 @@
+[package]
+# The knit bundle runtime: lifts every bundle repo's docker-compose stack into
+# an isolated per-bundle instance. Lives in its own crate so knit's core stays
+# version-control shaped; the CLI compiles it in and adapts bundle state into
+# the crate's RuntimeContext contract.
+name = "knit-runtime"
+version = "0.1.0-alpha.4"
+edition = "2021"
+license = "Apache-2.0"
+description = "Per-bundle docker-compose runtime for knit cross-repo bundles."
+repository = "https://github.com/marc-merino/knit"
+rust-version = "1.74"
+
+[dependencies]
+anyhow = "1"
+chrono = "0.4"
+dunce = "1.0.5"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

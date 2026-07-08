@@ -365,7 +365,7 @@ fn remap_context_relative(
         return None;
     }
     let target =
-        remapped.unwrap_or_else(|| crate::paths::canonicalize(&resolved).unwrap_or(resolved));
+        remapped.unwrap_or_else(|| crate::support::canonicalize(&resolved).unwrap_or(resolved));
     Some(relative_between(express_base, &target).unwrap_or_else(|| target.display().to_string()))
 }
 
@@ -466,7 +466,7 @@ fn rewrite_port_references(values: &mut Map<String, Value>, port_map: &[(u16, u1
 /// Map a path that resolves inside a tracked repo's source checkout to the
 /// same location inside its bundle checkout. Longest source prefix wins.
 fn remap_path(path: &Path, repo_map: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
-    let canonical = crate::paths::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let canonical = crate::support::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
     let mut best: Option<(usize, PathBuf)> = None;
     for (source, checkout) in repo_map {
         if let Ok(suffix) = canonical.strip_prefix(source) {
@@ -487,7 +487,7 @@ fn remap_path(path: &Path, repo_map: &[(PathBuf, PathBuf)]) -> Option<PathBuf> {
 /// Express `target` relative to `base` (both absolute), walking up with `..`
 /// as needed. Returns `None` when the paths share no common root.
 fn relative_between(base: &Path, target: &Path) -> Option<String> {
-    let base = crate::paths::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let base = crate::support::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
     let base_components: Vec<_> = base.components().collect();
     let target_components: Vec<_> = target.components().collect();
 
@@ -601,7 +601,7 @@ mod tests {
             std::fs::create_dir_all(root.join(repo)).unwrap();
         }
         std::fs::create_dir_all(root.join("knithub/priv")).unwrap();
-        crate::paths::canonicalize(&root).unwrap()
+        crate::support::canonicalize(&root).unwrap()
     }
 
     #[test]

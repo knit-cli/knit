@@ -21,8 +21,12 @@ path = "src/lib.rs"
 name = "knit"
 path = "src/main.rs"
 
+[workspace]
+members = [".", "crates/knit-runtime"]
+
 [dependencies]
 anyhow = "1"
+knit-runtime = { version = "0.1.0-alpha.4", path = "crates/knit-runtime" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 dunce = "1.0.5"
