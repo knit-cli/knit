@@ -3,19 +3,15 @@
 //! wiring, host-port allocation across live runtimes, the `KNIT_*`
 //! environment contract, and database resolution.
 
-use super::state::{
+use crate::config::{DatabaseMode, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::plan::StackPlan;
+use crate::state::{
     compose_project_name, frontend_port, runtime_run_dir, RuntimeRunState, RuntimeStackState,
     StateDatabase,
 };
-use super::transform::{self, ServicePort};
-use super::StackPlan;
-use crate::checkout::checkout_dir;
-use crate::git::rev_parse;
-use crate::model::{
-    DatabaseMode, KnitProject, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode,
-};
-use crate::output as out;
-use crate::store::{read_json, write_json, ActiveBundle};
+use crate::support::{out, read_json, rev_parse, write_json};
+use crate::transform::{self, ServicePort};
+use crate::RuntimeContext;
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -51,23 +47,21 @@ struct Ready {
 /// each stack in bundle order. Run state is recorded only after every stack
 /// starts, so a failed `up` leaves no phantom state — `knit run down` still
 /// cleans up by derived project names.
-pub(super) fn run_up_stacks(
-    active: &ActiveBundle,
-    project: Option<&KnitProject>,
+pub(crate) fn run_up_stacks(
+    ctx: &RuntimeContext,
     runtime: &ProjectRuntime,
-    plans: Vec<StackPlan<'_>>,
+    plans: Vec<StackPlan>,
 ) -> Result<()> {
     let multi = plans.len() > 1;
-    let mut taken = load_used_ports(&active.root)?;
+    let mut taken = load_used_ports(&ctx.root)?;
     let step = runtime.ports.clone().unwrap_or_default().step.max(1);
 
-    let repo_map: Vec<(PathBuf, PathBuf)> = active
-        .bundle
+    let repo_map: Vec<(PathBuf, PathBuf)> = ctx
         .repos
         .iter()
         .filter_map(|repo| {
-            let checkout = checkout_dir(active, repo)?;
-            let source = crate::paths::canonicalize(Path::new(&repo.path)).ok()?;
+            let checkout = repo.checkout.clone()?;
+            let source = crate::support::canonicalize(&repo.source_path).ok()?;
             (source != checkout).then_some((source, checkout))
         })
         .collect();
@@ -88,7 +82,7 @@ pub(super) fn run_up_stacks(
     for plan in &plans {
         match plan.mode {
             RuntimeMode::Transform => {
-                let source_dir = PathBuf::from(&plan.repo.path);
+                let source_dir = plan.repo.source_path.clone();
                 let mut config = transform::resolve_compose_config(&plan.compose, &source_dir)?;
                 // Shared database: strip the db service BEFORE port
                 // reallocation, so references to the shared dev port are
@@ -138,7 +132,7 @@ pub(super) fn run_up_stacks(
                 });
             }
             RuntimeMode::Contract => {
-                let resolved = resolve_database(&database_config, &active.bundle.id, &mut taken);
+                let resolved = resolve_database(&database_config, &ctx.bundle_id, &mut taken);
                 let ports_config = runtime.ports.clone().unwrap_or_default();
                 let service_ports = allocate_service_ports(
                     &taken,
@@ -146,13 +140,7 @@ pub(super) fn run_up_stacks(
                     ports_config.step.max(1),
                 )?;
                 taken.extend(service_ports.values().copied());
-                let env = runtime_env(
-                    active,
-                    project,
-                    &plan.project_name,
-                    &service_ports,
-                    &resolved,
-                );
+                let env = runtime_env(ctx, &plan.project_name, &service_ports, &resolved);
                 let profiles = if resolved.mode == DatabaseMode::Bundle {
                     vec![BUNDLE_DB_PROFILE.to_string()]
                 } else {
@@ -228,13 +216,13 @@ pub(super) fn run_up_stacks(
 
     // Phase 3: write generated files, print the full plan, then start every
     // stack in bundle order.
-    let run_dir = runtime_run_dir(&active.root, &active.bundle.id);
+    let run_dir = runtime_run_dir(&ctx.root, &ctx.bundle_id);
     fs::create_dir_all(&run_dir).context("failed to create runtime run directory")?;
 
     println!(
         "{} {}",
         out::heading("Runtime up:"),
-        out::repo(&active.bundle.id)
+        out::repo(&ctx.bundle_id)
     );
     let mut stack_states: Vec<RuntimeStackState> = Vec::new();
     for (plan, entry) in plans.iter().zip(&ready) {
@@ -282,7 +270,7 @@ pub(super) fn run_up_stacks(
             project_name: plan.project_name.clone(),
             mode: plan.mode,
             compose_file: compose_file
-                .strip_prefix(&active.root)
+                .strip_prefix(&ctx.root)
                 .unwrap_or(&compose_file)
                 .display()
                 .to_string(),
@@ -310,7 +298,7 @@ pub(super) fn run_up_stacks(
     for (plan, stack) in plans.iter().zip(&stack_states) {
         let mut command = Command::new("docker");
         command.args(["compose", "-f"]);
-        command.arg(active.root.join(&stack.compose_file));
+        command.arg(ctx.root.join(&stack.compose_file));
         command.args(["-p", &plan.project_name]);
         for profile in &stack.profiles {
             command.args(["--profile", profile]);
@@ -335,7 +323,7 @@ pub(super) fn run_up_stacks(
     // phantom run state.
     let first = &stack_states[0];
     let state = RuntimeRunState {
-        bundle_id: active.bundle.id.clone(),
+        bundle_id: ctx.bundle_id.clone(),
         stack_repo: first.repo.clone(),
         mode: first.mode,
         ports: all_ports,
@@ -344,7 +332,7 @@ pub(super) fn run_up_stacks(
         profiles: first.profiles.clone(),
         env: first.env.clone(),
         profile_path: runtime.profile_path.clone(),
-        started_at: crate::time::now_iso(),
+        started_at: crate::support::now_iso(),
         stacks: stack_states,
     };
     write_json(&run_dir.join("state.json"), &state)?;
@@ -352,15 +340,14 @@ pub(super) fn run_up_stacks(
 }
 
 fn runtime_env(
-    active: &ActiveBundle,
-    project: Option<&KnitProject>,
+    ctx: &RuntimeContext,
     project_name: &str,
     service_ports: &BTreeMap<String, u16>,
     database: &ResolvedDatabase,
 ) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
-    env.insert("KNIT_ROOT".to_string(), active.root.display().to_string());
-    env.insert("KNIT_BUNDLE".to_string(), active.bundle.id.clone());
+    env.insert("KNIT_ROOT".to_string(), ctx.root.display().to_string());
+    env.insert("KNIT_BUNDLE".to_string(), ctx.bundle_id.clone());
     env.insert("COMPOSE_PROJECT_NAME".to_string(), project_name.to_string());
     for (service, port) in service_ports {
         env.insert(
@@ -378,14 +365,12 @@ fn runtime_env(
     );
 
     let mut checkouts: BTreeMap<String, PathBuf> = BTreeMap::new();
-    if let Some(project) = project {
-        for repo in &project.repos {
-            checkouts.insert(repo.id.clone(), PathBuf::from(&repo.path));
-        }
+    for (repo_id, path) in &ctx.extra_checkouts {
+        checkouts.insert(repo_id.clone(), path.clone());
     }
-    for repo in &active.bundle.repos {
-        if let Some(checkout) = checkout_dir(active, repo) {
-            checkouts.insert(repo.id.clone(), checkout);
+    for repo in &ctx.repos {
+        if let Some(checkout) = &repo.checkout {
+            checkouts.insert(repo.id.clone(), checkout.clone());
         }
     }
 
@@ -395,7 +380,7 @@ fn runtime_env(
             format!("KNIT_CHECKOUT_{suffix}"),
             checkout.display().to_string(),
         );
-        if let Ok(relative) = relative_path(&active.root, &checkout) {
+        if let Ok(relative) = relative_path(&ctx.root, &checkout) {
             env.insert(format!("KNIT_SRC_{suffix}"), relative);
         }
         env.insert(
@@ -607,8 +592,8 @@ fn resolve_database(
 }
 
 fn relative_path(base: &Path, target: &Path) -> Result<String> {
-    let base = crate::paths::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
-    let target = crate::paths::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
+    let base = crate::support::canonicalize(base).unwrap_or_else(|_| base.to_path_buf());
+    let target = crate::support::canonicalize(target).unwrap_or_else(|_| target.to_path_buf());
     target
         .strip_prefix(&base)
         .map(|path| path.display().to_string())
@@ -632,9 +617,7 @@ struct ResolvedDatabase {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{ChangeGroup, RepoEntry};
-    use crate::store::ActiveBundle;
-    use crate::time::now_iso;
+    use crate::RuntimeContext;
 
     #[test]
     fn env_var_suffix_uppercases_and_replaces_separators() {
@@ -648,38 +631,21 @@ mod tests {
         let root = std::env::temp_dir().join(format!(
             "knit-runtime-env-test-{}-{}",
             std::process::id(),
-            now_iso().replace([':', '.'], "")
+            crate::support::now_iso().replace([':', '.'], "")
         ));
         std::fs::create_dir_all(root.join("knithub")).unwrap();
         std::fs::create_dir_all(root.join("gloss-web-ui")).unwrap();
 
-        let mut bundle = ChangeGroup::new("demo".to_string(), "demo".to_string(), now_iso());
-        bundle.repos.push(RepoEntry {
-            id: "knithub".to_string(),
-            path: root.join("knithub").display().to_string(),
-            remote: None,
-            base_branch: "main".to_string(),
-            checkout_mode: crate::model::CheckoutMode::InPlace,
-            base_sha: None,
-            feature_branch: Some("knit/demo".to_string()),
-            worktree_path: None,
-            head_sha: None,
-        });
-        let active = ActiveBundle::unlocked(
-            root.clone(),
-            root.join(".knit/bundles/demo.bundle.json"),
-            bundle,
-        );
-
-        let mut project = KnitProject::new("knit-tools".to_string(), now_iso());
-        project.repos.push(crate::model::ProjectRepoEntry {
-            id: "gloss-web-ui".to_string(),
-            path: root.join("gloss-web-ui").display().to_string(),
-            remote: None,
-            base_branch: "main".to_string(),
-            checkout_mode: crate::model::CheckoutMode::Worktree,
-            include_by_default: false,
-        });
+        let ctx = RuntimeContext {
+            root: root.clone(),
+            bundle_id: "demo".to_string(),
+            repos: vec![crate::RuntimeRepo {
+                id: "knithub".to_string(),
+                source_path: root.join("knithub"),
+                checkout: Some(root.join("knithub")),
+            }],
+            extra_checkouts: vec![("gloss-web-ui".to_string(), root.join("gloss-web-ui"))],
+        };
 
         let database = ResolvedDatabase {
             mode: DatabaseMode::Shared,
@@ -693,13 +659,7 @@ mod tests {
             ("backend".to_string(), 4011u16),
             ("frontend".to_string(), 5184u16),
         ]);
-        let env = runtime_env(
-            &active,
-            Some(&project),
-            "knit-run-demo",
-            &service_ports,
-            &database,
-        );
+        let env = runtime_env(&ctx, "knit-run-demo", &service_ports, &database);
 
         assert_eq!(env.get("KNIT_BUNDLE").unwrap(), "demo");
         assert_eq!(env.get("COMPOSE_PROJECT_NAME").unwrap(), "knit-run-demo");
@@ -708,7 +668,7 @@ mod tests {
         assert_eq!(env.get("KNIT_DB_MODE").unwrap(), "shared");
         assert_eq!(env.get("KNIT_DB_NAME").unwrap(), "knithub_dev");
         assert_eq!(env.get("KNIT_DB_HOST_PORT").unwrap(), "5436");
-        // Bundle repo resolves to its checkout; project-only repo to its path.
+        // Bundle repo resolves to its checkout; extra repo to its path.
         assert!(env
             .get("KNIT_CHECKOUT_KNITHUB")
             .unwrap()
