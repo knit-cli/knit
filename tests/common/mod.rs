@@ -308,6 +308,10 @@ pub fn isolated_knit_home() -> String {
         .to_string()
 }
 
+// KNIT_BUNDLE and KNIT_SESSION are removed everywhere: the test process may
+// itself run inside a knit bundle / agent session (dogfooding), and inherited
+// bundle targeting or ledger attribution would break hermetic assertions.
+// Test-provided env is applied after, so a test can still set either.
 pub fn knit<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -318,7 +322,8 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
-        .env_remove("KNIT_BUNDLE");
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION");
     run(command)
 }
 
@@ -332,7 +337,8 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
-        .env_remove("KNIT_BUNDLE");
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION");
     // Test-provided env wins, so a test can still point KNIT_HOME at its own dir.
     for (key, value) in env {
         command.env(key, value);
@@ -350,7 +356,8 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
-        .env_remove("KNIT_BUNDLE");
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION");
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
@@ -370,7 +377,8 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
-        .env_remove("KNIT_BUNDLE");
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION");
     for (key, value) in env {
         command.env(key, value);
     }
@@ -413,6 +421,7 @@ where
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
@@ -456,6 +465,7 @@ where
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
     for (key, value) in env {
