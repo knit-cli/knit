@@ -128,10 +128,10 @@ Three kinds of Knit artifact move between the workspace and KnitHub remotes: bun
 
 This is consolidated into one verb family. `knit sync` keeps its original meaning exactly — a local-only reconcile that records git commits made outside Knit — and gains two subcommands that are the one explicit way to move artifacts:
 
-- `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...`
+- `knit sync push [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...`
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...`
 
-With no target flag, both move every relevant artifact family. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote.
+With no target flag, both move every routine artifact family; the knowledge-graph viz slice is bulky and moves only on an explicit `--kg`. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote.
 
 The absorbed verbs are deleted, not aliased or hidden: `knit bundle push`, `knit history push/pull/sync` (only `history list` and `history refresh` remain), `knit view push/pull`, and `knit land sync` no longer exist. The philosophy is one way per outcome — delete, do not hide.
 

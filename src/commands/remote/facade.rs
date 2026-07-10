@@ -20,7 +20,8 @@ use crate::output as out;
 use anyhow::{bail, Result};
 
 /// Which artifact families a `knit sync push`/`pull` should move. With no flags
-/// passed on the CLI, the resolver below treats that as "everything".
+/// passed on the CLI, the resolver below treats that as "every routine family";
+/// the knowledge-graph viz slice is not routine and moves only on explicit `--kg`.
 #[derive(Clone, Copy, Debug)]
 pub struct SyncTargets {
     pub bundles: bool,
@@ -32,8 +33,12 @@ pub struct SyncTargets {
 
 impl SyncTargets {
     /// Resolve the artifact selection from the CLI flags. Bare invocation (no
-    /// `--bundles/--history/--views/--architecture/--kg/--all`) means everything;
-    /// architecture/kg are no-op-with-note when no artifact has been produced.
+    /// `--bundles/--history/--views/--architecture/--kg/--all`) and `--all` mean
+    /// every routine family. The knowledge-graph viz slice is excluded from both:
+    /// it is a bulky, slowly-changing artifact (often several MB) that has no
+    /// business riding along on every sync, so it moves only when `--kg` is
+    /// passed explicitly. Architecture/kg are no-op-with-note when no artifact
+    /// has been produced.
     pub fn resolve(
         bundles: bool,
         history: bool,
@@ -48,7 +53,7 @@ impl SyncTargets {
                 history: true,
                 views: true,
                 architecture: true,
-                kg: true,
+                kg,
             }
         } else {
             SyncTargets {
@@ -191,5 +196,60 @@ fn finish(failures: Vec<String>, verb: &str) -> Result<()> {
             failures.len(),
             failures.join("\n")
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::SyncTargets;
+
+    #[test]
+    fn bare_invocation_moves_routine_families_but_not_kg() {
+        let targets = SyncTargets::resolve(false, false, false, false, false, false);
+        assert!(targets.bundles);
+        assert!(targets.history);
+        assert!(targets.views);
+        assert!(targets.architecture);
+        assert!(!targets.kg);
+    }
+
+    #[test]
+    fn all_flag_moves_routine_families_but_not_kg() {
+        let targets = SyncTargets::resolve(false, false, false, false, false, true);
+        assert!(targets.bundles);
+        assert!(targets.history);
+        assert!(targets.views);
+        assert!(targets.architecture);
+        assert!(!targets.kg);
+    }
+
+    #[test]
+    fn explicit_kg_flag_moves_only_kg() {
+        let targets = SyncTargets::resolve(false, false, false, false, true, false);
+        assert!(!targets.bundles);
+        assert!(!targets.history);
+        assert!(!targets.views);
+        assert!(!targets.architecture);
+        assert!(targets.kg);
+    }
+
+    #[test]
+    fn all_plus_explicit_kg_moves_everything() {
+        let targets = SyncTargets::resolve(false, false, false, false, true, true);
+        assert!(targets.bundles);
+        assert!(targets.history);
+        assert!(targets.views);
+        assert!(targets.architecture);
+        assert!(targets.kg);
+    }
+
+    #[test]
+    fn explicit_family_selection_is_untouched() {
+        let targets = SyncTargets::resolve(true, false, true, false, false, false);
+        assert!(targets.bundles);
+        assert!(!targets.history);
+        assert!(targets.views);
+        assert!(!targets.architecture);
+        assert!(!targets.kg);
     }
 }
