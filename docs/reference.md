@@ -117,7 +117,7 @@ knit schema print <bundle|project|merge-run|land-plan|land-run|config>
 knit doctor
 knit migrate [--check]
 knit sync                                      # record git commits made outside Knit (local reconcile)
-knit sync push [--bundles] [--history] [--views] [--all] [--remote <name>]...
+knit sync push [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
 knit sync pull [--bundles] [--history] [--views] [--all] [--remote <name>]...
 knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--project <project>]
 knit history refresh [--project <project>]
@@ -504,16 +504,17 @@ When KnitHub sync remotes are configured, `knit publish create` and `knit push` 
 `knit sync` with no subcommand is a local-only reconcile: it records git commits made outside Knit as `git.observed` nodes and never touches the network. Its `push`/`pull` subcommands are the one verb family for moving Knit artifacts (bundles, project history, and saved views) between the workspace and KnitHub remotes:
 
 ```sh
-knit sync push                 # push bundle + history + views for the resolved project/bundle
+knit sync push                 # push bundle + history + views + architecture for the resolved project/bundle
 knit sync push --bundles       # push only the bundle artifact (e.g. after landing)
 knit sync push --history       # push only project history events
 knit sync push --views         # push only your saved views
+knit sync push --kg            # push the knowledge-graph viz slice (explicit only)
 knit sync pull                 # pull bundle + history + views
 knit sync pull --history       # pull only project history events
 knit sync push --remote hosted    # use an explicit remote
 ```
 
-With no target flag (`--bundles`/`--history`/`--views`/`--all`), `knit sync push`/`pull` move every relevant artifact family. Remotes default to the configured sync remotes (`knit config set sync-remotes ...`, then `sync-remote`), falling back to the sole configured remote; override with one or more `--remote <name>`.
+With no target flag (`--bundles`/`--history`/`--views`/`--architecture`/`--all`), `knit sync push`/`pull` move every routine artifact family. The knowledge-graph viz slice (produced by `urdir kg viz`, often several MB) is deliberately excluded from `--all` and bare invocations — push it with an explicit `knit sync push --kg` after regenerating it. Remotes default to the configured sync remotes (`knit config set sync-remotes ...`, then `sync-remote`), falling back to the sole configured remote; override with one or more `--remote <name>`.
 
 The git-shaped verbs keep their git semantics but route through the same internal sync module: `knit push --remote <name>` still pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` still pull recorded bundle state. Landing's automatic artifact sync (when `push-sync` is enabled) goes through the same module too. There is one implementation behind several differently shaped doors.
 
