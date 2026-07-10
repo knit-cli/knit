@@ -375,7 +375,11 @@ fn ledger_nodes_record_ambient_session_identity() {
     // node written by commands run in that session carries it.
     let env = [("KNIT_SESSION", "k3-thread-123")];
     knit_with_env(&workspace, ["bundle", "venue capacity"], &env);
-    knit_with_env(&workspace, ["bundle", "add", backend.to_str().unwrap()], &env);
+    knit_with_env(
+        &workspace,
+        ["bundle", "add", backend.to_str().unwrap()],
+        &env,
+    );
     append_line(
         &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
         "session work",

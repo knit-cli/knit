@@ -81,6 +81,9 @@ pub enum RemoteBundleOutcome {
     /// Diverged ledgers were union-merged into the local artifact; carries the
     /// remote artifact hash that was merged in.
     Merged(String),
+    /// The artifact was already current but local checkouts were materialized
+    /// and/or fast-forwarded; carries a human-readable summary.
+    Refreshed(String),
     /// Nothing to apply; carries a human-readable reason.
     Skipped(String),
 }
@@ -158,14 +161,20 @@ fn reconcile_project_repositories(
         .map(export_repo_local_id)
         .collect();
 
+    // When the server withheld private repos from this export, an absent repo
+    // is indistinguishable from a hidden one — never drop local project repos
+    // on an admittedly incomplete export.
+    let export_complete = export.omitted_repository_count.unwrap_or(0) == 0;
     let mut removed = Vec::new();
-    project.repos.retain(|repo| {
-        let keep = export_ids.contains(&repo.id);
-        if !keep {
-            removed.push(repo.id.clone());
-        }
-        keep
-    });
+    if export_complete {
+        project.repos.retain(|repo| {
+            let keep = export_ids.contains(&repo.id);
+            if !keep {
+                removed.push(repo.id.clone());
+            }
+            keep
+        });
+    }
 
     let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
     let to_add: Vec<&RemoteExportRepository> = export
@@ -240,11 +249,18 @@ fn reconcile_project_repositories(
 /// instead of skipped: the saved artifact records both sides' nodes, and any
 /// feature checkout that cannot fast-forward onto origin is reported for
 /// manual git-level merging without failing the artifact merge.
+/// With `materialize` set (the resolved/active bundle), an artifact that is
+/// already current still gets its feature branches fetched, missing worktrees
+/// created, and checkouts fast-forwarded — `knit fetch` advances the artifact
+/// without touching checkouts, so pull must close that gap or a fetched bundle
+/// never becomes usable. Without `materialize`, only checkouts that already
+/// exist on disk are refreshed; none are created.
 pub fn pull_bundle_remote_state(
     root: &Path,
     context: &RemotePullContext,
     bundle_id: &str,
     merge: bool,
+    materialize: bool,
 ) -> Result<RemoteBundleOutcome> {
     let path = bundle_path(root, bundle_id);
     if !path.exists() {
@@ -273,11 +289,17 @@ pub fn pull_bundle_remote_state(
     };
     let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
     match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
-        LedgerRelation::Equal => return Ok(RemoteBundleOutcome::Skipped("up to date".to_string())),
+        LedgerRelation::Equal => {
+            return refresh_bundle_checkouts(root, path, local, materialize, "up to date")
+        }
         LedgerRelation::LocalAhead => {
-            return Ok(RemoteBundleOutcome::Skipped(
-                "local is ahead of remote".to_string(),
-            ))
+            return refresh_bundle_checkouts(
+                root,
+                path,
+                local,
+                materialize,
+                "local is ahead of remote",
+            )
         }
         LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
@@ -321,12 +343,121 @@ pub fn pull_bundle_remote_state(
     Ok(RemoteBundleOutcome::Pulled(artifact.artifact_hash.clone()))
 }
 
+/// Refresh a bundle whose artifact needs no update. Fetches feature branches,
+/// materializes missing worktrees when `materialize` is set, re-records
+/// checkouts that exist on disk but are missing from the artifact (a
+/// remote-localized artifact carries no worktree paths), and fast-forwards
+/// every checkout onto origin. Returns `Skipped(reason)` when there was
+/// nothing to touch, so callers keep today's quiet no-op behavior.
+fn refresh_bundle_checkouts(
+    root: &Path,
+    path: std::path::PathBuf,
+    bundle: ChangeGroup,
+    materialize: bool,
+    reason: &str,
+) -> Result<RemoteBundleOutcome> {
+    let mut existing_dirs: Vec<(String, std::path::PathBuf)> = Vec::new();
+    let mut unrecorded_on_disk = Vec::new();
+    let mut absent = Vec::new();
+    for repo in &bundle.repos {
+        if repo.feature_branch.is_none() {
+            continue;
+        }
+        if let Some(dir) = recorded_checkout_dir(root, repo) {
+            existing_dirs.push((repo.id.clone(), dir));
+            continue;
+        }
+        // A worktree can exist at the conventional location even though the
+        // artifact does not record it — the state a remote-localized artifact
+        // leaves behind for checkouts created earlier. Re-record it.
+        let conventional = root.join(".knit/worktrees").join(&bundle.id).join(&repo.id);
+        if conventional.exists() {
+            existing_dirs.push((repo.id.clone(), conventional));
+            unrecorded_on_disk.push(repo.id.clone());
+        } else {
+            absent.push(repo.id.clone());
+        }
+    }
+
+    let mut to_materialize = unrecorded_on_disk;
+    if materialize {
+        to_materialize.extend(absent.iter().cloned());
+    }
+    if existing_dirs.is_empty() && to_materialize.is_empty() {
+        return Ok(RemoteBundleOutcome::Skipped(reason.to_string()));
+    }
+
+    let checkout_head = |dir: &Path| crate::git::git_output(dir, ["rev-parse", "HEAD"]).ok();
+    let heads_before: Vec<Option<String>> = existing_dirs
+        .iter()
+        .map(|(_, dir)| checkout_head(dir))
+        .collect();
+    prepare_feature_branches(&bundle)?;
+    let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, bundle);
+    let mut created = 0usize;
+    if !to_materialize.is_empty() {
+        materialize_repos(&mut active, Some(&to_materialize))?;
+        if materialize {
+            created = absent.len();
+        }
+        if created > 0 {
+            crate::commands::agents::write_bundle_worktree_agents_md(&active)?;
+        }
+    }
+    fast_forward_feature_checkouts(&mut active)?;
+
+    let advanced = existing_dirs
+        .iter()
+        .zip(heads_before.iter())
+        .filter(|((_, dir), before)| checkout_head(dir) != **before)
+        .count();
+    let rerecorded = to_materialize.len() - created;
+    if created == 0 && advanced == 0 && rerecorded == 0 {
+        return Ok(RemoteBundleOutcome::Skipped(reason.to_string()));
+    }
+
+    save_active_bundle(&active)?;
+    let mut parts = Vec::new();
+    if created > 0 {
+        parts.push(format!("materialized {created} checkout(s)"));
+    }
+    if advanced > 0 {
+        parts.push(format!("fast-forwarded {advanced} checkout(s)"));
+    }
+    if parts.is_empty() {
+        parts.push("re-recorded existing checkout(s)".to_string());
+    }
+    Ok(RemoteBundleOutcome::Refreshed(parts.join(", ")))
+}
+
+/// The checkout dir (worktree path or in-place) the artifact records, when it
+/// exists on disk.
+fn recorded_checkout_dir(
+    root: &Path,
+    repo: &crate::model::RepoEntry,
+) -> Option<std::path::PathBuf> {
+    if let Some(worktree_path) = &repo.worktree_path {
+        let path = std::path::PathBuf::from(worktree_path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        return path.exists().then_some(path);
+    }
+    if crate::checkout::is_in_place(repo) {
+        let path = std::path::PathBuf::from(&repo.path);
+        return path.exists().then_some(path);
+    }
+    None
+}
+
 pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool, merge: bool) -> Result<()> {
     let Some(context) = prepare_remote_pull(remote_name, skip_remote)? else {
         return Ok(());
     };
     let active = load_active_bundle()?;
-    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id, merge)? {
+    match pull_bundle_remote_state(&active.root, &context, &active.bundle.id, merge, true)? {
         RemoteBundleOutcome::Pulled(hash) => println!(
             "{} {} {}",
             out::movement("pulled"),
@@ -338,6 +469,12 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool, merge: bo
             out::movement("merged ledgers"),
             out::repo(&active.bundle.id),
             out::muted(&hash)
+        ),
+        RemoteBundleOutcome::Refreshed(summary) => println!(
+            "{} {} {}",
+            out::movement("refreshed"),
+            out::repo(&active.bundle.id),
+            out::muted(&summary)
         ),
         RemoteBundleOutcome::Skipped(reason) => println!(
             "{} {}",
@@ -491,6 +628,7 @@ pub fn fetch_bundles_from_remote(
     })?;
 
     let mut fetched_count = 0;
+    let mut quarantined_count = 0;
     for remote_bundle in export.bundles {
         if remote_bundle.lifecycle_state == "deleted" {
             continue;
@@ -501,6 +639,7 @@ pub fn fetch_bundles_from_remote(
 
         let mut bundle = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)
             .with_context(|| format!("failed to decode bundle `{}`", remote_bundle.slug))?;
+        let branch_mapping = bundle_branch_mapping(&bundle);
 
         let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
         // Discovery is for bundles you might act on: a remote bundle with no
@@ -509,6 +648,7 @@ pub fn fetch_bundles_from_remote(
         // and undo `knit bundle prune` on every sync. Existing local
         // artifacts still fast-forward whatever their state, so work landed
         // or archived on another machine is reflected here.
+        let status;
         if !bundle_path.exists() {
             if remote_bundle.lifecycle_state != "open" {
                 continue;
@@ -522,37 +662,70 @@ pub fn fetch_bundles_from_remote(
                 .join(format!("{}.bundle.json", bundle.id))
                 .exists()
             {
+                quarantined_count += 1;
                 continue;
             }
-        }
-        // An existing local artifact is only refreshed when the remote ledger is
-        // strictly ahead (a fast-forward). Equal/local-ahead artifacts are left
-        // untouched; diverged ledgers keep local and warn.
-        if bundle_path.exists() {
+            bundle = localize_bundle(bundle, &local_project)
+                .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
+            crate::store::write_json(&bundle_path, &bundle)
+                .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
+            fetched_count += 1;
+            status = out::movement("new").to_string();
+        } else {
+            // An existing local artifact is only refreshed when the remote
+            // ledger is strictly ahead (a fast-forward). Equal/local-ahead
+            // artifacts are left untouched; diverged ledgers keep local.
             let local: ChangeGroup = read_json(&bundle_path)
                 .with_context(|| format!("failed to read local bundle `{}`", bundle.id))?;
             match ledger_relation(&local.node_id_sequence(), &bundle.node_id_sequence()) {
-                LedgerRelation::Equal | LedgerRelation::LocalAhead => continue,
+                LedgerRelation::Equal => status = out::muted("up to date").to_string(),
+                LedgerRelation::LocalAhead => status = out::muted("local ahead").to_string(),
                 LedgerRelation::Diverged => {
-                    println!(
-                        "{} bundle {}: local and remote ledgers have diverged; keeping local (run `knit pull --merge` to combine them)",
-                        out::warn("warning:"),
-                        out::node(&bundle.id)
-                    );
-                    continue;
+                    status = out::warn(
+                        "diverged; kept local (run `knit pull --merge` to combine the ledgers)",
+                    )
+                    .to_string()
                 }
-                LedgerRelation::RemoteAhead => {}
+                LedgerRelation::RemoteAhead => {
+                    bundle = localize_bundle(bundle, &local_project).with_context(|| {
+                        format!("failed to localize bundle `{}`", remote_bundle.slug)
+                    })?;
+                    // Localizing wipes checkout recordings (they are per
+                    // machine); carry over this workspace's so an artifact
+                    // fast-forward does not orphan existing worktrees.
+                    for repo in &mut bundle.repos {
+                        if repo.worktree_path.is_none() {
+                            repo.worktree_path = local
+                                .repos
+                                .iter()
+                                .find(|local_repo| local_repo.id == repo.id)
+                                .and_then(|local_repo| local_repo.worktree_path.clone());
+                        }
+                    }
+                    crate::store::write_json(&bundle_path, &bundle).with_context(|| {
+                        format!("failed to write bundle `{}`", remote_bundle.slug)
+                    })?;
+                    fetched_count += 1;
+                    status = out::movement("updated").to_string();
+                }
             }
         }
-
-        bundle = localize_bundle(bundle, &local_project)
-            .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
-
-        crate::store::write_json(&bundle_path, &bundle)
-            .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
-        fetched_count += 1;
+        println!(
+            "  {} {} {} [{status}]",
+            out::node(&remote_bundle.slug),
+            out::muted(&remote_bundle.lifecycle_state),
+            branch_mapping
+        );
     }
 
+    if quarantined_count > 0 {
+        println!(
+            "  {}",
+            out::muted(format!(
+                "{quarantined_count} locally deleted bundle(s) left deleted"
+            ))
+        );
+    }
     if fetched_count > 0 {
         println!(
             "{} {} bundle(s) from {}",
@@ -568,4 +741,22 @@ pub fn fetch_bundles_from_remote(
         );
     }
     Ok(())
+}
+
+/// Render a bundle's repo -> feature-branch mapping for fetch/list output, so
+/// discovery answers "which branches does this bundle map to" without opening
+/// the artifact.
+fn bundle_branch_mapping(bundle: &ChangeGroup) -> String {
+    bundle
+        .repos
+        .iter()
+        .map(|repo| {
+            let branch = repo
+                .feature_branch
+                .clone()
+                .unwrap_or_else(|| format!("knit/{}", bundle.id));
+            format!("{} -> {}", out::repo(&repo.id), out::branch(&branch))
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
