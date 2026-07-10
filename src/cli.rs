@@ -424,7 +424,8 @@ pub enum Commands {
 #[derive(Subcommand)]
 pub enum SyncCommand {
     /// Push artifacts to KnitHub. With no target flags, pushes bundle, history,
-    /// and views for the resolved project/bundle.
+    /// views, and architecture for the resolved project/bundle; the
+    /// knowledge-graph viz slice moves only with an explicit `--kg`.
     Push {
         #[command(flatten)]
         targets: SyncTargetArgs,
@@ -457,10 +458,14 @@ pub struct SyncTargetArgs {
     /// Sync the project architecture artifact (produced by `urdir kg architecture`).
     #[arg(long)]
     pub architecture: bool,
-    /// Sync the knowledge-graph viz slice (produced by `urdir kg viz`).
+    /// Sync the knowledge-graph viz slice (produced by `urdir kg viz`). The
+    /// slice is often several MB, so it moves only with this explicit flag —
+    /// never as part of `--all` or a bare invocation.
     #[arg(long)]
     pub kg: bool,
-    /// Sync every artifact family. This is also the default with no target flags.
+    /// Sync every routine artifact family (bundles, history, views,
+    /// architecture). This is also the default with no target flags. The
+    /// knowledge-graph viz slice needs an explicit `--kg`.
     #[arg(long)]
     pub all: bool,
 }
