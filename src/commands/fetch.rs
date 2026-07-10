@@ -1,7 +1,6 @@
 use crate::cli::FetchMode;
 use crate::git::{git_output, git_output_optional};
 use crate::ids::short_sha;
-use crate::model::RepoEntry;
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::load_active_bundle;
@@ -21,23 +20,14 @@ pub fn fetch_repos(
     let mut knit_result = Ok(());
 
     if fetch_git {
-        let active = load_active_bundle()?;
-        if active.bundle.repos.is_empty() {
-            bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
-        }
-
-        let indexes = resolve_repo_indexes(&active, selectors, false)?;
-        let repos: Vec<&RepoEntry> = indexes
-            .iter()
-            .map(|index| &active.bundle.repos[*index])
-            .collect();
+        let targets = resolve_fetch_targets(selectors)?;
 
         let results: Vec<(String, Result<FetchOutcome>)> = std::thread::scope(|scope| {
-            let handles: Vec<_> = repos
+            let handles: Vec<_> = targets
                 .iter()
-                .map(|repo| {
-                    let repo_id = repo.id.clone();
-                    scope.spawn(move || (repo_id, fetch_repo(repo)))
+                .map(|target| {
+                    let repo_id = target.repo_id.clone();
+                    scope.spawn(move || (repo_id, fetch_repo(target)))
                 })
                 .collect();
 
@@ -95,6 +85,63 @@ pub fn fetch_repos(
     Ok(())
 }
 
+struct FetchTarget {
+    repo_id: String,
+    path: String,
+    base_branch: String,
+}
+
+/// Resolve which repos the git side of `knit fetch` updates. Inside a resolved
+/// bundle that is the bundle's repos; when no bundle resolves (a fresh
+/// collaborator workspace, before any bundle exists locally) fall back to the
+/// active project's repos so fetch still refreshes git refs — and the bundle
+/// fetch below still runs — instead of failing outright.
+fn resolve_fetch_targets(selectors: &[String]) -> Result<Vec<FetchTarget>> {
+    let bundle_error = match load_active_bundle() {
+        Ok(active) => {
+            if active.bundle.repos.is_empty() {
+                bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
+            }
+            let indexes = resolve_repo_indexes(&active, selectors, false)?;
+            return Ok(indexes
+                .iter()
+                .map(|index| {
+                    let repo = &active.bundle.repos[*index];
+                    FetchTarget {
+                        repo_id: repo.id.clone(),
+                        path: repo.path.clone(),
+                        base_branch: repo.base_branch.clone(),
+                    }
+                })
+                .collect());
+        }
+        Err(error) => error,
+    };
+
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let Some(root) = crate::store::find_knit_root(&cwd) else {
+        return Err(bundle_error);
+    };
+    let Some(project_id) = crate::store::load_config(&root)?.active_project else {
+        return Err(bundle_error);
+    };
+    let project = crate::commands::project::load_project_by_id(&root, &project_id)?;
+    let targets: Vec<FetchTarget> = project
+        .repos
+        .iter()
+        .filter(|repo| selectors.is_empty() || selectors.iter().any(|s| s == &repo.id))
+        .map(|repo| FetchTarget {
+            repo_id: repo.id.clone(),
+            path: repo.path.clone(),
+            base_branch: repo.base_branch.clone(),
+        })
+        .collect();
+    if targets.is_empty() {
+        return Err(bundle_error);
+    }
+    Ok(targets)
+}
+
 struct FetchOutcome {
     repo_id: String,
     remote_ref: String,
@@ -102,7 +149,7 @@ struct FetchOutcome {
     after: Option<String>,
 }
 
-fn fetch_repo(repo: &RepoEntry) -> Result<FetchOutcome> {
+fn fetch_repo(repo: &FetchTarget) -> Result<FetchOutcome> {
     let cwd = PathBuf::from(&repo.path);
     if !cwd.exists() {
         bail!("original repo path does not exist: {}", cwd.display());
@@ -118,7 +165,7 @@ fn fetch_repo(repo: &RepoEntry) -> Result<FetchOutcome> {
     let after = ref_sha(&cwd, &remote_ref)?;
 
     Ok(FetchOutcome {
-        repo_id: repo.id.clone(),
+        repo_id: repo.repo_id.clone(),
         remote_ref,
         before,
         after,

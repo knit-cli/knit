@@ -304,6 +304,7 @@ enum Outcome {
     Advanced { before: String, after: String },
     Unchanged(String),
     Synced(String),
+    Refreshed(String),
     Skipped(String),
     Failed(String),
 }
@@ -406,9 +407,15 @@ fn aggregate_pull(
                 let context = remote_context.as_ref();
                 let root = root.as_path();
                 let paths = bundle_repo_paths.get(id).cloned().unwrap_or_default();
+                // The workspace's pointed-at bundle gets the deep refresh:
+                // missing worktrees are materialized so `knit fetch` +
+                // `knit switch` + `knit pull` yields a usable checkout. Other
+                // open bundles only refresh checkouts they already have.
+                let materialize = config.active_bundle.as_deref() == Some(id.as_str());
                 scope.spawn(move || {
-                    let outcome =
-                        gate.lock_all(&paths, || pull_one_bundle(root, context, id, merge));
+                    let outcome = gate.lock_all(&paths, || {
+                        pull_one_bundle(root, context, id, merge, materialize)
+                    });
                     (id.clone(), outcome)
                 })
             })
@@ -472,15 +479,17 @@ fn pull_one_bundle(
     context: Option<&RemotePullContext>,
     bundle_id: &str,
     merge: bool,
+    materialize: bool,
 ) -> Outcome {
     let Some(context) = context else {
         return Outcome::Skipped("no KnitHub remote configured".to_string());
     };
-    match pull_bundle_remote_state(root, context, bundle_id, merge) {
+    match pull_bundle_remote_state(root, context, bundle_id, merge, materialize) {
         Ok(RemoteBundleOutcome::Pulled(hash)) => Outcome::Synced(hash),
         Ok(RemoteBundleOutcome::Merged(hash)) => {
             Outcome::Synced(format!("{hash} (merged ledgers)"))
         }
+        Ok(RemoteBundleOutcome::Refreshed(summary)) => Outcome::Refreshed(summary),
         Ok(RemoteBundleOutcome::Skipped(reason)) => Outcome::Skipped(reason),
         Err(error) => Outcome::Failed(condense(&error)),
     }
@@ -530,11 +539,12 @@ fn report(main_results: &[(String, Outcome)], bundle_results: &[(String, Outcome
         return;
     }
     println!(
-        "{} {} advanced, {} unchanged, {} synced, {} skipped, {} failed",
+        "{} {} advanced, {} unchanged, {} synced, {} refreshed, {} skipped, {} failed",
         out::heading("Pulled:"),
         totals.advanced,
         totals.unchanged,
         totals.synced,
+        totals.refreshed,
         totals.skipped,
         totals.failed
     );
@@ -545,6 +555,7 @@ struct Totals {
     advanced: usize,
     unchanged: usize,
     synced: usize,
+    refreshed: usize,
     skipped: usize,
     failed: usize,
 }
@@ -555,6 +566,7 @@ impl Totals {
             Outcome::Advanced { .. } => self.advanced += 1,
             Outcome::Unchanged(_) => self.unchanged += 1,
             Outcome::Synced(_) => self.synced += 1,
+            Outcome::Refreshed(_) => self.refreshed += 1,
             Outcome::Skipped(_) => self.skipped += 1,
             Outcome::Failed(_) => self.failed += 1,
         }
@@ -581,6 +593,12 @@ fn print_outcome(id: &str, outcome: &Outcome) {
             out::repo(id),
             out::movement("pulled"),
             out::muted(hash)
+        ),
+        Outcome::Refreshed(summary) => println!(
+            "  {} {} {}",
+            out::repo(id),
+            out::movement("refreshed"),
+            out::muted(summary)
         ),
         Outcome::Skipped(reason) => println!(
             "  {} {} ({})",
