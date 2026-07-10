@@ -194,6 +194,10 @@ pub fn switch_bundle(bundle_id: &str, workspace: bool) -> Result<()> {
         out::heading("Active bundle:"),
         out::node(&bundle_id)
     );
+    crate::advice::print(
+        &root,
+        format!("run `knit pull` to materialize and update `{bundle_id}`."),
+    );
 
     Ok(())
 }

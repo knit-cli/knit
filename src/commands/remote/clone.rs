@@ -144,6 +144,12 @@ pub fn clone_project_from_remote(
             println!("  {}: {}", out::repo(local_id), out::muted(error));
         }
     }
+    if let Some(omitted) = export.omitted_repository_count.filter(|count| *count > 0) {
+        println!(
+            "{} the export omitted {omitted} private repo(s) this token cannot see; the cloned project is incomplete. Ask a project maintainer for access.",
+            out::warn("Not exported:")
+        );
+    }
     if !skipped_bundles.is_empty() {
         println!(
             "{} {} bundle(s) referencing skipped repo(s): {}",
