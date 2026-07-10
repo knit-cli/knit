@@ -82,6 +82,11 @@ struct RemoteProjectExport {
     bundles: Vec<RemoteExportBundle>,
     #[serde(default)]
     history_events: Vec<HistoryEvent>,
+    /// Repos the server withheld from this export (private repos the caller
+    /// cannot see). Lets clone/pull say "the export is incomplete for you"
+    /// instead of silently presenting a partial project as the whole thing.
+    #[serde(default)]
+    omitted_repository_count: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]

@@ -791,3 +791,191 @@ fn sync_pull_does_not_resurrect_locally_deleted_bundles() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A collaborator workspace with no local bundle at all (fresh `knit init` +
+/// `knit project add`, or every bundle erased) must still be able to run a
+/// bare `knit fetch`: the git side falls back to the project's repos and the
+/// KnitHub side lists each remote bundle with its repo -> branch mapping.
+#[test]
+fn fetch_without_resolvable_bundle_falls_back_to_project_and_lists_remote_bundles() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Author the bundle another machine would have pushed, then erase every
+    // local trace of it: no bundle resolves in this workspace anymore.
+    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    knit(&workspace, ["push", "--set-upstream"]);
+    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::remove_file(&artifact_path).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+    git(&backend, ["worktree", "prune"]);
+    git(&backend, ["branch", "-D", "knit/svartal-made"]);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "svartal-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-1", "payload": payload},
+            }],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["fetch"], &env);
+    assert!(output.contains("origin/main"), "{output}");
+    assert!(output.contains("backend -> knit/svartal-made"), "{output}");
+    assert!(output.contains("fetched"), "{output}");
+    assert!(artifact_path.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `knit fetch` + `knit switch` + `knit pull` is the cross-machine flow: after
+/// fetch localizes a remote bundle's artifact, pointing the workspace at it
+/// and pulling must materialize its worktrees from origin — an artifact that
+/// is "up to date" is not the same as a usable checkout.
+#[test]
+fn pull_materializes_the_pointed_at_bundle_after_fetch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    knit(&workspace, ["push", "--set-upstream"]);
+    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::remove_file(&artifact_path).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+    git(&backend, ["worktree", "prune"]);
+    git(&backend, ["branch", "-D", "knit/svartal-made"]);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "svartal-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-1", "payload": payload},
+            }],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let fetch_output = knit_with_env(&workspace, ["fetch", "--mode", "knit"], &env);
+    assert!(fetch_output.contains("new"), "{fetch_output}");
+    knit(&workspace, ["switch", "svartal-made", "--workspace"]);
+
+    let pull = knit_with_env(&workspace, ["pull"], &env);
+    assert!(pull.contains("materialized 1 checkout(s)"), "{pull}");
+    let text = fs::read_to_string(feature.join("app.txt")).unwrap();
+    assert!(text.contains("work from another machine"), "{text}");
+
+    // A second pull has nothing left to do.
+    let again = knit_with_env(&workspace, ["pull"], &env);
+    assert!(again.contains("up to date"), "{again}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `knit fetch` fast-forwards the bundle artifact without touching checkouts.
+/// The following `knit pull` must still fast-forward the feature checkout onto
+/// origin instead of treating the already-current artifact as "nothing to do".
+#[test]
+fn pull_fast_forwards_checkouts_after_fetch_advanced_the_artifact() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    append_line(&feature.join("app.txt"), "first line");
+    knit(&workspace, ["commit", "--all", "-m", "First"]);
+    knit(&workspace, ["push", "--set-upstream"]);
+    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let artifact_v1 = fs::read_to_string(&artifact_path).unwrap();
+
+    // The second commit plays the collaborator: origin and the remote artifact
+    // advance past the state this workspace is then rewound to.
+    append_line(&feature.join("app.txt"), "second line");
+    knit(&workspace, ["commit", "--all", "-m", "Second"]);
+    knit(&workspace, ["push"]);
+    let payload_v2: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::write(&artifact_path, artifact_v1).unwrap();
+    git(&feature, ["reset", "--hard", "HEAD~1"]);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "svartal-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-2", "payload": payload_v2},
+            }],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let fetch_output = knit_with_env(&workspace, ["fetch", "--mode", "knit"], &env);
+    assert!(fetch_output.contains("updated"), "{fetch_output}");
+    let stale = fs::read_to_string(feature.join("app.txt")).unwrap();
+    assert!(!stale.contains("second line"), "{stale}");
+
+    let pull = knit_with_env(&workspace, ["pull"], &env);
+    assert!(pull.contains("fast-forwarded 1 checkout(s)"), "{pull}");
+    let text = fs::read_to_string(feature.join("app.txt")).unwrap();
+    assert!(text.contains("second line"), "{text}");
+
+    fs::remove_dir_all(root).unwrap();
+}
