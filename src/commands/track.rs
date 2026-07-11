@@ -38,11 +38,14 @@ pub fn track_repos(
     };
     let plans = resolve_repo_plans(repo_paths, base_override, checkout_mode)?;
     apply_repo_plans(&mut active, plans, materialize)?;
+    // Persist the fully materialized artifact before printing the AGENTS.md
+    // summary, so a SIGPIPE on that final write can no longer drop the recorded
+    // worktree metadata.
+    save_active_bundle(&active)?;
     if materialize {
         let bundle_agents = write_bundle_worktree_agents_md(&active)?;
         print_bundle_worktree_agents_summary(bundle_agents.as_deref());
     }
-    save_active_bundle(&active)?;
     Ok(())
 }
 
@@ -73,11 +76,14 @@ pub fn track_repo_selectors(
     }
     ensure_unique_paths(&plans)?;
     apply_repo_plans(&mut active, plans, materialize)?;
+    // Persist the fully materialized artifact before printing the AGENTS.md
+    // summary, so a SIGPIPE on that final write can no longer drop the recorded
+    // worktree metadata.
+    save_active_bundle(&active)?;
     if materialize {
         let bundle_agents = write_bundle_worktree_agents_md(&active)?;
         print_bundle_worktree_agents_summary(bundle_agents.as_deref());
     }
-    save_active_bundle(&active)?;
     Ok(())
 }
 
@@ -151,19 +157,32 @@ fn apply_repo_plans(
         touched_repo_ids.clone(),
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+    active.bundle.updated_at = now_iso();
 
-    if materialize {
-        let materialized_repo_ids = materialize_repos(active, Some(&touched_repo_ids))?;
-        let now = now_iso();
-        active.bundle.nodes.push(BundleNode::worktrees_materialized(
-            node_id("worktree"),
-            now,
-            materialized_repo_ids,
-        ));
-        active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+    if !materialize {
+        return Ok(());
     }
 
+    // Crash-consistency: persist the recorded repo entries before creating any
+    // git side effects. If materialization is interrupted (a SIGPIPE from a
+    // closed output pipe, a Ctrl-C, or a crash), the saved artifact already lists
+    // the repo, so the branch and worktree it creates are never orphaned —
+    // `knit bundle worktree` rematerializes the missing checkout. Saving only
+    // after materialization (the previous order) could leave a branch and
+    // worktree the bundle artifact never recorded, which later commit/publish
+    // then silently skipped.
+    save_active_bundle(active)?;
+
+    let materialized_repo_ids = materialize_repos(active, Some(&touched_repo_ids))?;
+    let now = now_iso();
+    active.bundle.nodes.push(BundleNode::worktrees_materialized(
+        node_id("worktree"),
+        now,
+        materialized_repo_ids,
+    ));
+    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
+
     Ok(())
 }
 
