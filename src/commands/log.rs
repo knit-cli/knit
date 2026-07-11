@@ -348,6 +348,13 @@ fn print_show_header(node: &BundleNode) {
     if let Some(session_id) = &node.session_id {
         println!("{} {}", out::heading("Session:"), out::muted(session_id));
     }
+    if let Some(actor) = &node.actor {
+        let mut who = actor.label.clone().unwrap_or_else(|| actor.session.clone());
+        if let Some(email) = &actor.email {
+            who = format!("{who} <{email}>");
+        }
+        println!("{} {}", out::heading("Actor:"), out::muted(&who));
+    }
     println!();
 }
 

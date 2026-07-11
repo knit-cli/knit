@@ -415,3 +415,79 @@ fn ledger_nodes_record_ambient_session_identity() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ledger_nodes_record_ambient_actor_identity() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    // On a shared environment the server exports the acting human per
+    // provider session alongside KNIT_SESSION; ledger nodes record both.
+    let env = [
+        ("KNIT_SESSION", "k3-thread-456"),
+        ("T3_ACTOR_SESSION", "session-abc"),
+        ("T3_ACTOR_LABEL", "alice"),
+        ("T3_ACTOR_EMAIL", "alice@example.com"),
+    ];
+    knit_with_env(&workspace, ["bundle", "venue capacity"], &env);
+    knit_with_env(
+        &workspace,
+        ["bundle", "add", backend.to_str().unwrap()],
+        &env,
+    );
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "actor work",
+    );
+    knit_with_env(
+        &workspace,
+        ["commit", "--all", "-m", "Actor-attributed work"],
+        &env,
+    );
+
+    let bundle = read_bundle(&workspace);
+    let nodes = bundle["nodes"].as_array().unwrap();
+    assert!(nodes.len() >= 3);
+    for node in nodes {
+        assert_eq!(
+            node["actor"]["session"].as_str(),
+            Some("session-abc"),
+            "node {} missing actor session",
+            node["id"]
+        );
+        assert_eq!(node["actor"]["label"].as_str(), Some("alice"));
+        assert_eq!(node["actor"]["email"].as_str(), Some("alice@example.com"));
+    }
+
+    // Label and email are optional; a bare actor session still records.
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "bare actor work",
+    );
+    knit_with_env(
+        &workspace,
+        ["commit", "--all", "-m", "Bare actor work"],
+        &[("T3_ACTOR_SESSION", "session-bare")],
+    );
+    let bundle = read_bundle(&workspace);
+    let last = bundle["nodes"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["actor"]["session"].as_str(), Some("session-bare"));
+    assert!(last["actor"].get("label").is_none());
+    assert!(last["actor"].get("email").is_none());
+
+    // Plain CLI use stays unattributed.
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "human work",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Unattributed work"]);
+    let bundle = read_bundle(&workspace);
+    let last = bundle["nodes"].as_array().unwrap().last().unwrap().clone();
+    assert_eq!(last["type"].as_str(), Some("commit.group"));
+    assert!(last.get("actor").is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
