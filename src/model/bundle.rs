@@ -295,6 +295,20 @@ pub struct CommitAuthor {
     pub email: String,
 }
 
+/// The acting human behind a ledger node on a shared environment, from the
+/// T3_ACTOR_* variables the environment server exports per provider session.
+/// Distinct from `session_id` (the conversation) and from git authorship
+/// (which records identity per commit): the actor names who drove the turn.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeActor {
+    pub session: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub email: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitRef {
@@ -354,6 +368,10 @@ pub struct BundleNode {
     /// which conversation drove the work; absent for plain CLI use.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
+    /// Acting human on a shared environment, when the harness exports
+    /// T3_ACTOR_*; absent for plain CLI use and single-user setups.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<NodeActor>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -386,6 +404,22 @@ fn ambient_session_id() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+fn non_empty_env(name: &str) -> Option<String> {
+    std::env::var(name)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// Ambient acting-human identity, from the T3_ACTOR_* contract.
+fn ambient_actor() -> Option<NodeActor> {
+    non_empty_env("T3_ACTOR_SESSION").map(|session| NodeActor {
+        session,
+        label: non_empty_env("T3_ACTOR_LABEL"),
+        email: non_empty_env("T3_ACTOR_EMAIL"),
+    })
+}
+
 impl BundleNode {
     /// Every node starts here so cross-cutting attribution (session id)
     /// is recorded uniformly regardless of which command created it.
@@ -395,6 +429,7 @@ impl BundleNode {
             node_type: node_type.to_string(),
             created_at,
             session_id: ambient_session_id(),
+            actor: ambient_actor(),
             title: None,
             repo_ids: None,
             commit_group_id: None,
