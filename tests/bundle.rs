@@ -491,3 +491,67 @@ fn ledger_nodes_record_ambient_actor_identity() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+// Regression: `knit bundle add` must record the repo in the artifact before it
+// creates any git side effects, so an interruption during materialization (a
+// SIGPIPE from `| head`, a Ctrl-C, or a crash) can never leave a branch and
+// worktree the bundle artifact never recorded. We force materialization to fail
+// deterministically by pre-planting a non-git directory where the worktree would
+// go, then assert the repo is already in the artifact even though the command
+// failed — and that `knit bundle worktree` recovers the missing checkout.
+#[test]
+fn bundle_add_records_repo_before_materializing_worktree() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "crash consistency"]);
+
+    // A plain (non-git) directory at the worktree target makes materialization
+    // bail with "exists but is not a git worktree" — a clean stand-in for any
+    // interruption after the artifact-first save but before materialization
+    // finishes.
+    let blocker = workspace.join(".knit/worktrees/crash-consistency/backend");
+    fs::create_dir_all(&blocker).unwrap();
+    fs::write(blocker.join("stray.txt"), "not a worktree\n").unwrap();
+
+    let failure = knit_fails(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    assert!(
+        failure.contains("worktree"),
+        "expected materialization to fail, got: {failure}"
+    );
+
+    // Crash-consistency invariant: the artifact already lists the repo even
+    // though the command died during materialization.
+    assert!(
+        bundle_repo_ids(&workspace, "crash-consistency").contains(&"backend".to_string()),
+        "bundle add must persist the repo entry before materializing worktrees"
+    );
+
+    // The entry is recorded but not yet materialized (recoverable state).
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/crash-consistency.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(
+        bundle["repos"][0]["worktreePath"].is_null(),
+        "unmaterialized repo should have no recorded worktree path"
+    );
+
+    // Recovery: clear the blocker and rematerialize the missing checkout.
+    fs::remove_dir_all(&blocker).unwrap();
+    knit(&workspace, ["bundle", "worktree"]);
+    assert!(blocker.join("app.txt").exists());
+    let recovered: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/crash-consistency.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered["repos"][0]["worktreePath"].as_str(),
+        Some(".knit/worktrees/crash-consistency/backend")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
