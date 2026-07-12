@@ -62,7 +62,8 @@ pub fn start_bundle(
     let bundle_dir = knit_dir.join("bundles");
     let worktree_dir = knit_dir.join("worktrees").join(&bundle_id);
     let bundle_path = stored_bundle_path(&root, &bundle_id);
-    if bundle_path.exists() && !force {
+    let bundle_existed = bundle_path.exists();
+    if bundle_existed && !force {
         if agents && cd.is_none() {
             let bundle: ChangeGroup = read_json(&bundle_path)?;
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
@@ -100,26 +101,49 @@ pub fn start_bundle(
     bundle.project_id = project_id.clone();
     write_json(&bundle_path, &bundle)?;
 
-    config.active_bundle = Some(bundle_id.clone());
-    if let Some(project_id) = &project_id {
-        config.active_project = Some(project_id.clone());
-    }
-    save_config(&root, &config)?;
-
-    if let Some(project_id) = &project_id {
-        let selected = select_project_repos(
-            &root, project_id, repo_ids, all_repos, view, include, exclude,
-        )?;
-        if !selected.is_empty() {
-            let mut active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
-            crate::commands::track::track_project_repos(
-                &mut active,
-                &selected,
-                materialize,
-                in_place,
+    let setup_result = (|| -> Result<()> {
+        if let Some(project_id) = &project_id {
+            let selected = select_project_repos(
+                &root, project_id, repo_ids, all_repos, view, include, exclude,
             )?;
-            save_active_bundle(&active)?;
+            if !selected.is_empty() {
+                let mut active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
+                crate::commands::track::track_project_repos(
+                    &mut active,
+                    &selected,
+                    materialize,
+                    in_place,
+                )?;
+                save_active_bundle(&active)?;
+            }
         }
+
+        // Do not switch the shared workspace fallback until every recoverable
+        // bundle/repo update and requested worktree has been persisted. In
+        // particular, an ENOSPC during materialization must not strand the
+        // workspace on an incomplete bundle and hide the user's prior context.
+        config.active_bundle = Some(bundle_id.clone());
+        if let Some(project_id) = &project_id {
+            config.active_project = Some(project_id.clone());
+        }
+        save_config(&root, &config)?;
+        Ok(())
+    })();
+
+    if let Err(error) = setup_result {
+        if rollback_empty_new_bundle(&bundle_path, &worktree_dir, bundle_existed) {
+            return Err(error).with_context(|| {
+                format!(
+                    "Bundle `{bundle_id}` setup failed before any repos were recorded, so its new artifact was removed. The workspace fallback was not switched. Resolve the error and retry the original bundle command."
+                )
+            });
+        }
+        return Err(error).with_context(|| {
+            format!(
+                "Bundle `{bundle_id}` was recorded at {}, but setup did not complete. The workspace fallback was not switched. Inspect it with `knit --bundle {bundle_id} status`; after resolving the error, run `knit --bundle {bundle_id} bundle worktree` to resume any recorded repos. If no repos were recorded, rerun the original bundle command with `--force`.",
+                bundle_path.display()
+            )
+        });
     }
 
     println!(
@@ -148,6 +172,28 @@ pub fn start_bundle(
     }
 
     Ok(())
+}
+
+fn rollback_empty_new_bundle(
+    bundle_path: &Path,
+    worktree_dir: &Path,
+    bundle_existed: bool,
+) -> bool {
+    if bundle_existed {
+        return false;
+    }
+    let Ok(bundle) = read_json::<ChangeGroup>(bundle_path) else {
+        return false;
+    };
+    if !bundle.repos.is_empty() || fs::remove_file(bundle_path).is_err() {
+        return false;
+    }
+
+    // This only succeeds for the empty container created by start_bundle. A
+    // pre-existing non-empty directory is intentionally preserved for manual
+    // inspection instead of being recursively discarded.
+    let _ = fs::remove_dir(worktree_dir);
+    true
 }
 
 fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
