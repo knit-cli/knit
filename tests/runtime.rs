@@ -52,7 +52,7 @@ fn write_fake_docker(root: &Path) -> (std::path::PathBuf, std::path::PathBuf) {
         r#"#!/bin/sh
 case " $* " in
   *" config "*) cat "$FAKE_DOCKER_DIR/config.json"; exit 0;;
-  *" ls "*) exit 0;;
+  *" ls "*) test ! -f "$FAKE_DOCKER_DIR/projects.log" || cat "$FAKE_DOCKER_DIR/projects.log"; exit 0;;
 esac
 printf '%s\n' "$*" >> "$FAKE_DOCKER_DIR/calls.log"
 env | grep -E '^(KNIT_|COMPOSE_PROJECT_NAME)' >> "$FAKE_DOCKER_DIR/env.log" 2>/dev/null
@@ -314,7 +314,7 @@ case " $* " in
       */beta/*) cat "$FAKE_DOCKER_DIR/config-beta.json";;
     esac
     exit 0;;
-  *" ls "*) exit 0;;
+  *" ls "*) test ! -f "$FAKE_DOCKER_DIR/projects.log" || cat "$FAKE_DOCKER_DIR/projects.log"; exit 0;;
 esac
 printf '%s\n' "$*" >> "$FAKE_DOCKER_DIR/calls.log"
 exit 0
@@ -474,6 +474,41 @@ fn run_up_lifts_every_compose_repo_and_cross_wires_ports() {
     assert_eq!(
         beta_generated["services"]["web"]["environment"]["API_URL"],
         format!("http://localhost:{alpha_port}")
+    );
+
+    // A repeated `up` owns these listeners through the already-running
+    // compose projects. It must replay the bundle's recorded allocations,
+    // not interpret its own ports as conflicts and move both stacks.
+    fs::write(
+        log_dir.join("projects.log"),
+        "knit-run-venue-capacity--alpha\nknit-run-venue-capacity--beta\n",
+    )
+    .unwrap();
+    let _listeners = [alpha_port.as_str(), beta_port.as_str()].map(|port| {
+        std::net::TcpListener::bind(("127.0.0.1", port.parse::<u16>().unwrap())).unwrap()
+    });
+    knit_with_env(
+        &workspace,
+        ["run", "up"],
+        &[
+            ("PATH", path.as_str()),
+            ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+        ],
+    );
+    let alpha_rerun: Value = serde_json::from_str(
+        &fs::read_to_string(run_dir.join("docker-compose.alpha.yml")).unwrap(),
+    )
+    .unwrap();
+    let beta_rerun: Value =
+        serde_json::from_str(&fs::read_to_string(run_dir.join("docker-compose.beta.yml")).unwrap())
+            .unwrap();
+    assert_eq!(
+        alpha_rerun["services"]["api"]["ports"][0]["published"],
+        alpha_port
+    );
+    assert_eq!(
+        beta_rerun["services"]["web"]["ports"][0]["published"],
+        beta_port
     );
 
     // One run state records every stack.
