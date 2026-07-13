@@ -275,7 +275,7 @@ knit run status
 knit run down
 ```
 
-`knit run up` lifts EVERY bundle repo with a compose file into an isolated instance: bundle worktrees substituted for source paths, free host ports allocated, references to sibling stacks' published ports rewired to the bundle instances. One stack runs as compose project `knit-run-{bundle}`; several run as `knit-run-{bundle}--<repo>` each. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs; do not guess ports from an older run.
+`knit run up` lifts EVERY bundle repo with a compose file into an isolated instance: bundle worktrees substituted for source paths, stable per-bundle host ports allocated, references to sibling stacks' published ports rewired to the bundle instances. Repeated `up` calls reuse the recorded ports, including while the bundle is already running. One stack runs as compose project `knit-run-{bundle}`; several run as `knit-run-{bundle}--<repo>` each. A compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected. Run state lands in `.knit/runtime-runs/{bundle}/state.json` after a successful start; `knit run down` cleans up by compose project label even when an `up` failed partway. Use `knit run status` for the live URLs.
 
 If `knit run up` fails or the lifted stack misbehaves, run `knit run eject`: it writes the lift as an editable `docker-compose.knit.yml` in the stack repo checkout, parameterized over the `KNIT_*` contract (documented in the file's header). Fix that file — it is ordinary docker compose with `${{VAR:-default}}` interpolations — and commit it with the bundle; `knit run up` then runs it as-is, and the automatic lift no longer applies to that repo. Do not work around a bad lift by hand-running docker compose.
 
@@ -373,7 +373,7 @@ Runtime behavior:
 - Runs `{compose_file}` from the `{stack_repo}` checkout as isolated compose project `knit-run-<bundle>`; run state is recorded in `.knit/runtime-runs/<bundle>/state.json` after a successful start (`knit run down` cleans up by project label even without it)
 - A plain compose file is lifted automatically: the shape the repos run on `main`, with paths into tracked repos remapped to bundle worktrees and published host ports reallocated; a compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_<service>`, `KNIT_DB_*`); `runtime.mode` in the project config forces a mode
 - Builds the stack from bundle worktrees, not the source checkout on `main`
-- Allocates free host ports (contract mode pools: {port_pools}, step `{step}`)
+- Allocates stable per-bundle host ports, reusing recorded ports on repeated `up` calls (contract mode pools: {port_pools}, step `{step}`)
 - A project command configured as `up`, `down`, or `status` takes precedence over these runtime verbs
 - Database (contract mode): {database_detail}
 - Opens `{profile_path}` on the frontend port after `knit run status`
