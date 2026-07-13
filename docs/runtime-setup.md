@@ -16,7 +16,7 @@ you're done:
 
 ```sh
 knit bundle "my feature" --repo api --cd
-knit run up        # lift the stack: worktree code, fresh ports, isolated volumes
+knit run up        # lift the stack: worktree code, stable ports, isolated volumes
 knit run status    # live service states, ports, URLs
 knit run down      # stop and remove
 ```
@@ -26,8 +26,9 @@ What knit does to the compose shape (transform mode):
 - paths that resolve into tracked repos (build contexts, dockerfiles,
   bind mounts) are remapped to the bundle's worktrees — repos *not* in the
   bundle keep building from their source checkouts on `main`
-- every published host port moves to a free one; textual references to those
-  ports inside `environment:`/build args are rewritten to match
+- every published host port moves to a free bundle port; repeated `up` calls
+  reuse that bundle's recorded ports, and textual references inside
+  `environment:`/build args are rewritten to match
 - the stack runs as compose project `knit-run-<bundle>` with its own networks
   and named volumes, so bundles never collide with your dev stack or each other
 
