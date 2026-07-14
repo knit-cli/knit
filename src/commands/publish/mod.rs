@@ -32,6 +32,7 @@ pub fn create_publications(
     selectors: &[String],
     all: bool,
     draft: bool,
+    renew: bool,
     bases: &[String],
     sync: bool,
     set_upstream: bool,
@@ -77,7 +78,7 @@ pub fn create_publications(
                 scope.spawn(move || {
                     (
                         repo_id,
-                        publish_repo_remote(active, bundle, &job, draft, set_upstream),
+                        publish_repo_remote(active, bundle, &job, draft, renew, set_upstream),
                     )
                 })
             })
@@ -109,6 +110,14 @@ pub fn create_publications(
 
     if bundle_changed {
         save_active_bundle(&active)?;
+        if renew {
+            println!(
+                "{}",
+                out::warn(
+                    "Review publications were renewed. Regenerate and inspect the landing plan with `knit land plan --force` before applying it."
+                )
+            );
+        }
     }
 
     if failures.is_empty() && sync {
@@ -140,6 +149,7 @@ pub fn create_publications_from_artifact(
     selectors: &[String],
     all: bool,
     draft: bool,
+    renew: bool,
     bases: &[String],
     sync: bool,
     push: bool,
@@ -187,7 +197,7 @@ pub fn create_publications_from_artifact(
                 scope.spawn(move || {
                     (
                         repo_id,
-                        publish_repo_remote_from_artifact(cwd, bundle, &job, draft),
+                        publish_repo_remote_from_artifact(cwd, bundle, &job, draft, renew),
                     )
                 })
             })
