@@ -1,5 +1,5 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch, ensure_mutable_checkouts};
-use crate::git::{commit_author, git_output, rev_parse};
+use crate::git::{commit_author, git_output, git_output_optional, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
 use crate::model::{
     BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange, RepoEntry,
@@ -275,7 +275,9 @@ fn scan_staged_changes(
 ) -> Result<Option<CommitTarget>> {
     ensure_expected_branch(repo, worktree_abs)?;
     let short_status = git_output(worktree_abs, ["status", "--short"])?;
-    if !has_staged_changes(&short_status) {
+    let merge_in_progress =
+        git_output_optional(worktree_abs, ["rev-parse", "-q", "--verify", "MERGE_HEAD"])?.is_some();
+    if !has_staged_changes(&short_status) && !merge_in_progress {
         return Ok(None);
     }
     let before_sha = rev_parse(worktree_abs, "HEAD")

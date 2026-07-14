@@ -513,11 +513,24 @@ fn is_open_bundle(bundle: &ChangeGroup) -> bool {
         Some(BundleState::Archived | BundleState::Closed | BundleState::Deleted) => return false,
         _ => {}
     }
-
-    !bundle
+    let explicitly_open = bundle.state == Some(BundleState::Open);
+    if !explicitly_open
+        && bundle
+            .nodes
+            .iter()
+            .any(|node| node.node_type == "feature.closed")
+    {
+        return false;
+    }
+    let has_landed_node = bundle
         .nodes
         .iter()
-        .any(|node| node.node_type == "feature.closed" || node.node_type == "feature.landed")
+        .any(|node| node.node_type == "feature.landed");
+    let has_open_publication = bundle.publications.iter().any(|publication| {
+        !publication.state.eq_ignore_ascii_case("merged")
+            && !publication.state.eq_ignore_ascii_case("closed")
+    });
+    !has_landed_node || has_open_publication
 }
 
 fn ensure_bundle_exists(root: &Path, bundle_id: &str) -> Result<()> {
