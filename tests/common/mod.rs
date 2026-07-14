@@ -607,6 +607,9 @@ if [ "$1" = "api" ]; then
     frontend) number=202 ;;
     *) number=303 ;;
   esac
+  if [ -f "$GH_FAKE_DIR/next-$pr_repo.number" ]; then
+    number="$(cat "$GH_FAKE_DIR/next-$pr_repo.number")"
+  fi
   case "$endpoint_path" in
     repos/acme/*/pulls)
       if [ "$method" = "GET" ]; then
@@ -701,6 +704,9 @@ case "$sub" in
       frontend) number=202 ;;
       *) number=303 ;;
     esac
+    if [ -f "$GH_FAKE_DIR/next-$repo.number" ]; then
+      number="$(cat "$GH_FAKE_DIR/next-$repo.number")"
+    fi
     printf 'https://github.com/acme/%s/pull/%s\n' "$repo" "$number"
     ;;
   view)

@@ -90,7 +90,7 @@ knit run --list
 knit check run <project-command> [--repo <repo>]... [--all]
 knit check record <name> --pass|--fail [--detail <text>]
 knit check status
-knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
@@ -494,6 +494,8 @@ knit publish status
 `knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
+
+When a bundle continues after its recorded reviews were merged or closed, pass `--renew` to start a fresh review round without replacing the bundle. Knit verifies that each recorded review is terminal, refuses open or unverifiable reviews, and refuses renewal when the feature branch still points at the recorded review head. The new review replaces the current per-repo publication projection; the terminal review remains unchanged on its host. Open renewed publications make a previously landed bundle effectively open again. Because an existing landing plan may predate the new repo set, regenerate it with `knit land plan --force` and inspect it before applying.
 
 Hosted services that run Knit from bundle artifacts can set `KNIT_GITHUB_API_TRANSPORT=ipv4` (the historical `curl`/`curl-ipv4` values still work, as do `native`/`api`) to make GitHub artifact-mode publish and landing use Knit's built-in GitHub REST client instead of `gh pr ...` commands. The client resolves hostnames IPv4-first and requires `GH_TOKEN` or `GITHUB_TOKEN` in the environment; no external `curl` is needed. It is intended for non-interactive runtimes where provider CLI prompts, host credential stores, or default IPv6 routing can hang simple GitHub I/O. Local workspace commands keep using the normal provider CLIs unless this environment variable is set. `KNIT_GITHUB_API_BASE` overrides the API base URL (defaults to `https://api.github.com`), mainly for tests.
 
