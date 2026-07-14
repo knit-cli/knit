@@ -934,6 +934,9 @@ pub enum PublishCommand {
         /// Create draft review objects.
         #[arg(long)]
         draft: bool,
+        /// Replace recorded merged/closed review objects with a fresh review round.
+        #[arg(long)]
+        renew: bool,
         /// Explicitly sync cross-links after creation. This is the default.
         #[arg(long, conflicts_with = "no_sync")]
         sync: bool,
