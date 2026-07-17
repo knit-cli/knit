@@ -25,7 +25,7 @@ use crate::providers::{self, github, CheckRun, PrTarget};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     find_knit_root, load_active_bundle, load_active_bundle_for_update, load_config, read_json,
-    save_active_bundle, ActiveBundle,
+    save_active_bundle, ActiveBundle, BundleResolutionSource,
 };
 use crate::time::now_iso;
 use crate::tracking::latest_recorded_head_sha;
@@ -841,43 +841,47 @@ fn push_tags(targets: &[TagTarget], name: &str) -> Result<()> {
     Ok(())
 }
 
-/// Bundle-first with project fallback, mirroring `knit fetch`: the read-only
-/// verbs still work after landing archived the bundle and cleared the
-/// workspace pointer.
+/// Repo set for the read-only verbs. Tags are project-wide facts, so `knit
+/// tag`/`tag list`/`tag show` prefer the active project's full repo set — an
+/// ambient bundle context (workspace fallback or worktree cwd) must not hide
+/// tags living in repos outside that bundle. Deliberate targeting via
+/// `--bundle`/`KNIT_BUNDLE` still scopes to that bundle's repos, and ad-hoc
+/// workspaces without a project fall back to the resolved bundle.
 fn resolve_read_targets() -> Result<(PathBuf, Vec<(String, PathBuf)>)> {
-    let bundle_error = match load_active_bundle() {
-        Ok(active) => {
-            if active.bundle.repos.is_empty() {
-                bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
-            }
-            let targets = active
-                .bundle
-                .repos
-                .iter()
-                .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
-                .collect();
-            return Ok((active.root.clone(), targets));
-        }
-        Err(error) => error,
-    };
+    let resolved = load_active_bundle();
 
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let Some(root) = find_knit_root(&cwd) else {
-        return Err(bundle_error);
-    };
-    let Some(project_id) = load_config(&root)?.active_project else {
-        return Err(bundle_error);
-    };
-    let project = super::project::load_project_by_id(&root, &project_id)?;
-    let targets: Vec<(String, PathBuf)> = project
+    let deliberate = matches!(
+        resolved.as_ref().map(|active| &active.resolution_source),
+        Ok(BundleResolutionSource::Explicit | BundleResolutionSource::Env)
+    );
+    if !deliberate {
+        let cwd = std::env::current_dir().context("failed to read current directory")?;
+        if let Some(root) = find_knit_root(&cwd) {
+            if let Some(project_id) = load_config(&root)?.active_project {
+                let project = super::project::load_project_by_id(&root, &project_id)?;
+                let targets: Vec<(String, PathBuf)> = project
+                    .repos
+                    .iter()
+                    .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
+                    .collect();
+                if !targets.is_empty() {
+                    return Ok((root, targets));
+                }
+            }
+        }
+    }
+
+    let active = resolved?;
+    if active.bundle.repos.is_empty() {
+        bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
+    }
+    let targets = active
+        .bundle
         .repos
         .iter()
         .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
         .collect();
-    if targets.is_empty() {
-        return Err(bundle_error);
-    }
-    Ok((root, targets))
+    Ok((active.root.clone(), targets))
 }
 
 /// Ledger provenance for a tag name, scanned across all bundle artifacts
