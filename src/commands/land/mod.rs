@@ -143,6 +143,13 @@ pub fn apply_land_plan(
     let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
     crate::commands::remote::sync_active_bundle_to_remote_if_enabled(&active, remote, no_remote)?;
     print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
+    advice::print(
+        &active.root,
+        format!(
+            "after verifying main, mark this landed state known-good with `knit tag <name> --bundle {}`.",
+            active.bundle.id
+        ),
+    );
     Ok(())
 }
 

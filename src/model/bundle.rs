@@ -546,6 +546,25 @@ impl BundleNode {
         }
     }
 
+    /// A cross-repo known-good marker. `title` carries the tag name (exported
+    /// as git tag `knit/<title>` in each repo), `message` the full annotation
+    /// text with provenance and evidence, and `commits` the per-repo
+    /// origin-base SHAs the tags point at.
+    pub fn tag_created(
+        id: String,
+        created_at: String,
+        name: String,
+        message: String,
+        pins: Vec<CommitRef>,
+    ) -> Self {
+        Self {
+            title: Some(name),
+            message: Some(message),
+            commits: pins,
+            ..Self::base(id, "tag.created", created_at)
+        }
+    }
+
     pub fn feature_archived(id: String, created_at: String, reason: Option<String>) -> Self {
         Self {
             message: reason,
