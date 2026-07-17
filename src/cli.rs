@@ -911,7 +911,7 @@ pub enum ConfigCommand {
     },
     /// Set a Knit config value.
     Set {
-        /// Config key: advice, stealth, push-sync, sync-remote, or sync-remotes.
+        /// Config key: advice, stealth, auto-tag, push-sync, sync-remote, or sync-remotes.
         key: String,
         /// Config value.
         value: String,
@@ -1098,6 +1098,12 @@ pub enum LandCommand {
         /// Skip the KnitHub bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
+        /// After a successful land, record a cross-repo known-good tag of the resulting main. Optionally name it; defaults to the bundle slug.
+        #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+        tag: Option<String>,
+        /// Do not auto-tag even when the `auto-tag` config default is on.
+        #[arg(long, conflicts_with = "tag")]
+        no_tag: bool,
     },
     /// Create revert PRs for the merge steps a failed landing run completed.
     Rollback {

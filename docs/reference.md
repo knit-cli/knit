@@ -98,7 +98,7 @@ knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
-knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote]
+knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote] [--tag [<name>]] [--no-tag]
 knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
 knit land rollback [--run <path>] [--apply]
 knit land status [--run <path>]
@@ -110,6 +110,7 @@ knit merge --continue
 knit merge --abort
 knit config set advice true|false
 knit config set stealth true|false
+knit config set auto-tag true|false
 knit config set push-sync true|false
 knit config set sync-remote <name>
 knit config set sync-remotes <name>[,<name>...]
@@ -239,6 +240,8 @@ knit tag show v1-launch                     # per-repo local/remote SHAs, subjec
 ```
 
 The intended workflow is land → verify → tag: `knit land apply` merges and deploys, you verify main by whatever you trust (the deploy, CI on main, QA), and then `knit tag` records that the combination was good. Not every land gets tagged — tagging is a deliberate act, which is why it stays a manual verb. Landing archives the bundle and clears the workspace pointer, so tag it explicitly with `--bundle <slug>` (bundle resolution accepts archived bundles).
+
+**Tagging on landing.** When you want the tag every time, let landing do it: `knit land apply --tag [name]` records the tag as part of a successful land (an omitted name defaults to the bundle slug), and `knit config set auto-tag true` makes that the default for every land (`--no-tag` opts out of the default for one run). Landing has already merged and archived by the time the tag runs, so a tag failure is a warning with a retry hint, never a failed land. Tagging on land only works with local checkouts, not `knit land apply --from-artifact`.
 
 **Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **main CI** verdicts — GitHub check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
 

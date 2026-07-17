@@ -441,14 +441,25 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_remote,
                 skip_checks,
                 keep_worktrees,
+                tag,
+                no_tag,
             }) => match from_artifact {
-                Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
+                Some(path) => {
+                    if tag.is_some() || no_tag {
+                        anyhow::bail!(
+                            "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
+                        );
+                    }
+                    commands::apply_land_from_artifact(&path, out.as_deref())
+                }
                 None => commands::apply_land_plan(
                     plan.as_deref(),
                     &remote,
                     no_remote,
                     skip_checks,
                     keep_worktrees,
+                    tag,
+                    no_tag,
                 ),
             },
             Some(LandCommand::Rollback { run, apply }) => {
