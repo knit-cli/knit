@@ -361,6 +361,89 @@ fn tag_records_main_ci_evidence() {
 
 #[cfg(unix)]
 #[test]
+fn land_apply_tag_flag_records_named_tag() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote", "--tag", "rel-2"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("Feature landed"), "{apply}");
+    assert!(apply.contains("Tag:"), "{apply}");
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    assert_eq!(tag_nodes(&bundle, "rel-2").len(), 1);
+    let backend = root.join("backend");
+    assert!(!git(&backend, ["tag", "--list", "knit/rel-2"]).trim().is_empty());
+}
+
+#[cfg(unix)]
+#[test]
+fn land_apply_auto_tag_config_defaults_to_bundle_slug() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    knit(&workspace, ["config", "set", "auto-tag", "true"]);
+    assert!(knit(&workspace, ["config", "show"]).contains("Auto tag: true"));
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("Tag:"), "{apply}");
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(tag_nodes(&bundle, "venue-capacity").len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn land_apply_no_tag_overrides_auto_tag_config() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    knit(&workspace, ["config", "set", "auto-tag", "true"]);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote", "--no-tag"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    // Skipped tagging still leaves the manual-tag advice.
+    assert!(apply.contains("knit tag <name> --bundle venue-capacity"), "{apply}");
+
+    let bundle = read_bundle(&workspace);
+    let tagged: Vec<Value> = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"].as_str() == Some("tag.created"))
+        .cloned()
+        .collect();
+    assert!(tagged.is_empty());
+}
+
+#[test]
+fn land_apply_from_artifact_rejects_tag_flags() {
+    let root = unique_temp_dir();
+    let output = knit_fails(
+        &root,
+        ["land", "apply", "--from-artifact", "bundle.json", "--tag", "v1"],
+    );
+    assert!(output.contains("--tag/--no-tag"), "{output}");
+}
+
+#[cfg(unix)]
+#[test]
 fn land_apply_advises_tag_command() {
     let root = unique_temp_dir();
     let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);

@@ -61,8 +61,27 @@ pub fn create_tag(
     no_push: bool,
     no_git: bool,
 ) -> Result<()> {
-    validate_tag_name(name)?;
     let mut active = load_active_bundle_for_update()?;
+    create_tag_on_active(&mut active, name, selectors, note, no_push, no_git, &[], false)
+}
+
+/// The create/resume entry point for an already-resolved, write-locked bundle.
+/// `knit tag` loads the bundle then calls this; `knit land apply` reuses it to
+/// tag the state it just landed without re-resolving the archived bundle.
+/// `remote`/`no_remote` control the KnitHub artifact sync after a push, so a
+/// land run's explicit `--no-remote` carries into its tag.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn create_tag_on_active(
+    active: &mut ActiveBundle,
+    name: &str,
+    selectors: &[String],
+    note: Option<&str>,
+    no_push: bool,
+    no_git: bool,
+    remote: &[String],
+    no_remote: bool,
+) -> Result<()> {
+    validate_tag_name(name)?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
@@ -78,15 +97,15 @@ pub fn create_tag(
             );
         }
         let node = node.clone();
-        return resume_tag_set(&active, &node, name, no_push);
+        return resume_tag_set(active, &node, name, no_push, remote, no_remote);
     }
 
-    let indexes = resolve_repo_indexes(&active, &expand_repo_selectors(selectors), false)?;
-    create_tag_set_on(&mut active, name, &indexes, note, no_push, no_git)
+    let indexes = resolve_repo_indexes(active, &expand_repo_selectors(selectors), false)?;
+    create_tag_set_on(active, name, &indexes, note, no_push, no_git, remote, no_remote)
 }
 
-/// The create core, factored so a future land auto-tag hook can call it with
-/// an already-loaded bundle.
+/// The create core, operating on an already-loaded bundle.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn create_tag_set_on(
     active: &mut ActiveBundle,
     name: &str,
@@ -94,6 +113,8 @@ pub(crate) fn create_tag_set_on(
     note: Option<&str>,
     no_push: bool,
     no_git: bool,
+    remote: &[String],
+    no_remote: bool,
 ) -> Result<()> {
     let partial = indexes.len() < active.bundle.repos.len();
     if partial {
@@ -164,14 +185,21 @@ pub(crate) fn create_tag_set_on(
     }
 
     push_tags(&targets, name)?;
-    super::remote::maybe_sync_bundle_to_remote(&[], false)?;
+    super::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
     Ok(())
 }
 
 /// Resume an interrupted tag set from its ledger node: recreate missing local
 /// tags at the recorded pins, verify existing ones, push only where origin
 /// lacks the tag. Never appends a second node.
-fn resume_tag_set(active: &ActiveBundle, node: &BundleNode, name: &str, no_push: bool) -> Result<()> {
+fn resume_tag_set(
+    active: &ActiveBundle,
+    node: &BundleNode,
+    name: &str,
+    no_push: bool,
+    remote: &[String],
+    no_remote: bool,
+) -> Result<()> {
     let message = node.message.as_deref().unwrap_or("");
     let mut pushed_any = false;
 
@@ -253,7 +281,7 @@ fn resume_tag_set(active: &ActiveBundle, node: &BundleNode, name: &str, no_push:
     }
 
     if pushed_any {
-        super::remote::maybe_sync_bundle_to_remote(&[], false)?;
+        super::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
     }
     Ok(())
 }
