@@ -297,6 +297,17 @@ fn tag_works_on_archived_bundle_and_list_falls_back_to_project() {
     knit(&workspace, ["commit", "--all", "-m", "Feature change"]);
 
     knit(&workspace, ["tag", "v1"]);
+
+    // The tag lands in the project history ledger as its own event kind, with
+    // the tag name carried in metadata so consumers need not parse the message.
+    let history = fs::read_to_string(workspace.join(".knit/history/demo.history.jsonl")).unwrap();
+    let tag_event = history
+        .lines()
+        .find(|line| line.contains("commit.tagged"))
+        .expect("tag history event");
+    assert!(tag_event.contains("tag.created"), "{tag_event}");
+    assert!(tag_event.contains("\"title\":\"v1\""), "{tag_event}");
+
     knit(&workspace, ["bundle", "archive", "venue-capacity"]);
 
     // No active bundle after archiving: the read-only verbs fall back to the

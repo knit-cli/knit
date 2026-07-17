@@ -169,6 +169,7 @@ fn events_for_bundle(project_id: &str, bundle: &ChangeGroup) -> Vec<HistoryEvent
                 &node.id,
                 &node.node_type,
                 node.commit_group_id.as_deref(),
+                node.title.as_deref(),
                 node.message.as_deref(),
                 &node.created_at,
             ));
@@ -190,6 +191,7 @@ fn events_for_bundle(project_id: &str, bundle: &ChangeGroup) -> Vec<HistoryEvent
                     &node.id,
                     &node.node_type,
                     node.commit_group_id.as_deref(),
+                    node.title.as_deref(),
                     node.message.as_deref(),
                     &node.created_at,
                 ));
@@ -207,6 +209,7 @@ fn events_for_bundle(project_id: &str, bundle: &ChangeGroup) -> Vec<HistoryEvent
                     &node.id,
                     &node.node_type,
                     node.commit_group_id.as_deref(),
+                    node.title.as_deref(),
                     node.message.as_deref(),
                     &node.created_at,
                 ));
@@ -217,6 +220,7 @@ fn events_for_bundle(project_id: &str, bundle: &ChangeGroup) -> Vec<HistoryEvent
     events
 }
 
+#[allow(clippy::too_many_arguments)]
 fn history_event(
     project_id: &str,
     bundle: &ChangeGroup,
@@ -228,6 +232,7 @@ fn history_event(
     node_id: &str,
     node_type: &str,
     commit_group_id: Option<&str>,
+    title: Option<&str>,
     message: Option<&str>,
     occurred_at: &str,
 ) -> HistoryEvent {
@@ -265,7 +270,10 @@ fn history_event(
         occurred_at: Some(occurred_at.to_string()),
         recorded_at: now_iso(),
         recorded_by: "knit".to_string(),
-        metadata: None,
+        // The node title travels with the event so consumers (KnitHub) can
+        // name titled nodes — a tag's name, a check's name — without parsing
+        // the message text.
+        metadata: title.map(|title| serde_json::json!({ "title": title })),
     }
 }
 
@@ -277,6 +285,7 @@ fn event_kind_for_node(node_type: &str, dropped: bool) -> String {
         "git.observed" => "commit.observed",
         "revert.group" => "commit.reverted",
         "land.update" => "commit.integrated",
+        "tag.created" => "commit.tagged",
         _ => "commit.recorded",
     }
     .to_string()
