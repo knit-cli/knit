@@ -238,6 +238,26 @@ pub enum Commands {
         #[command(subcommand)]
         command: CheckCommand,
     },
+    /// Record a cross-repo known-good marker: annotated git tags `knit/<name>` on each repo's origin base.
+    #[command(args_conflicts_with_subcommands = true)]
+    Tag {
+        /// Tag name (creates `knit/<name>` in every tracked repo). With no name and no subcommand, lists tags.
+        name: Option<String>,
+        /// Extra note stored in the tag annotation and ledger node.
+        #[arg(short = 'm', long = "message", value_name = "NOTE")]
+        message: Option<String>,
+        /// Limit tagging to one or more repo ids or paths (weakens the cross-repo claim).
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Create local tags and the ledger node without pushing to origin.
+        #[arg(long)]
+        no_push: bool,
+        /// Record the ledger node only; do not create git tags.
+        #[arg(long, conflicts_with = "no_push")]
+        no_git: bool,
+        #[command(subcommand)]
+        command: Option<TagCommand>,
+    },
     /// Run a project command inside resolved bundle checkouts.
     Run {
         /// Configured project command name. Omit when passing a raw command after --.
@@ -1027,6 +1047,17 @@ pub enum CheckCommand {
     },
     /// Show the latest verdict per check and whether it is still fresh.
     Status,
+}
+
+#[derive(Subcommand)]
+pub enum TagCommand {
+    /// List `knit/*` tags across repos, marking partial sets.
+    List,
+    /// Show per-repo local/remote SHAs, the annotation subject, and ledger provenance.
+    Show {
+        /// Tag name without the `knit/` prefix.
+        name: String,
+    },
 }
 
 #[derive(Subcommand)]

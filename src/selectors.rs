@@ -14,6 +14,7 @@ pub fn is_loggable_node(node: &BundleNode) -> bool {
             | "pr.revert"
             | "revert.group"
             | "repo.removed"
+            | "tag.created"
     )
 }
 

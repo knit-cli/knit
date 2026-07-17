@@ -222,6 +222,27 @@ fn print_node(node: &BundleNode) {
                 );
             }
         }
+        "tag.created" => {
+            let name = node.title.as_deref().unwrap_or("tag");
+            let subject = node
+                .message
+                .as_deref()
+                .and_then(|message| message.lines().next())
+                .unwrap_or("");
+            println!(
+                "{}  {}  {}",
+                out::node(&node.id),
+                out::heading(format!("tag knit/{name}")),
+                out::muted(subject)
+            );
+            for pin in &node.commits {
+                println!(
+                    "  {} {}",
+                    out::repo(&pin.repo_id),
+                    out::sha(short_sha(&pin.sha))
+                );
+            }
+        }
         "feature.closed" => {
             let reason = node.message.as_deref().unwrap_or("closed");
             println!(
@@ -283,7 +304,7 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
     print_show_header(node);
 
     match node.node_type.as_str() {
-        "commit.group" | "revert.group" => show_commit_refs(active, &node.commits),
+        "commit.group" | "revert.group" | "tag.created" => show_commit_refs(active, &node.commits),
         "git.observed" | "land.update" => show_observed_node(active, node),
         "repo.removed" => {
             if let Some(repo_ids) = &node.repo_ids {

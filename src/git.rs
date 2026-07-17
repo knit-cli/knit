@@ -131,6 +131,37 @@ pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
     git_success(cwd, ["merge-base", "--is-ancestor", ancestor, descendant])
 }
 
+/// Commit SHA a reference resolves to (peeling annotated tags); `None` when the
+/// reference does not exist.
+pub fn ref_commit_sha(cwd: &Path, reference: &str) -> Result<Option<String>> {
+    git_output_optional(
+        cwd,
+        ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
+    )
+}
+
+/// Commit SHA a ref points to on `remote` via ls-remote; prefers the peeled
+/// `^{}` line so annotated tags resolve to their commit. `None` when the ref is
+/// absent on the remote; `Err` when the remote is unreachable.
+pub fn remote_ref_sha(cwd: &Path, remote: &str, reference: &str) -> Result<Option<String>> {
+    // The peeled line is only emitted for patterns that explicitly request it,
+    // so ask for both the ref and its `^{}` form.
+    let peeled = format!("{reference}^{{}}");
+    let output = git_output(cwd, ["ls-remote", remote, reference, &peeled])?;
+    let mut plain = None;
+    for line in output.lines() {
+        let mut parts = line.split_whitespace();
+        let (Some(sha), Some(name)) = (parts.next(), parts.next()) else {
+            continue;
+        };
+        if name.ends_with("^{}") {
+            return Ok(Some(sha.to_string()));
+        }
+        plain = Some(sha.to_string());
+    }
+    Ok(plain)
+}
+
 pub fn merge_base(cwd: &Path, left: &str, right: &str) -> Result<Option<String>> {
     git_output_optional(cwd, ["merge-base", left, right])
 }

@@ -228,6 +228,22 @@ functional  green   stale   2026-06-11T22:40:11.402Z knit@9020475
 
 Checks are attestations, not hosted CI: Knit runs one command per check, the exit code is the verdict, and whoever can write the bundle can record one — the same trust model as committing. Knit never schedules, watches, or retries checks.
 
+### Tags
+
+A **tag** is a cross-repo known-good marker: the post-land state of the mains, recorded as one named set. Per repo it pins the commit `origin/<base_branch>` points at after a fresh fetch — the answer a monorepo gets for free from a single SHA. The `tag.created` ledger node is the source of truth; annotated git tags `knit/<name>` in each repo are a default-on export of it, so hosts, CI, deploy scripts, and humans can consume the marker with zero Knit knowledge, and the pinned commits stay protected from garbage collection:
+
+```sh
+knit tag v1-launch --bundle checkout-flow   # tag the mains after landing that bundle
+knit tag                                    # list knit/* tags across repos, marking partial sets
+knit tag show v1-launch                     # per-repo local/remote SHAs, subject, ledger provenance
+```
+
+The intended workflow is land → verify → tag: `knit land apply` merges and deploys, you verify main by whatever you trust (the deploy, CI on main, QA), and then `knit tag` records that the combination was good. Not every land gets tagged — tagging is a deliberate act, which is why it stays a manual verb. Landing archives the bundle and clears the workspace pointer, so tag it explicitly with `--bundle <slug>` (bundle resolution accepts archived bundles).
+
+**Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **main CI** verdicts — GitHub check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
+
+**Immutability and resume.** A tag name can never be reused or moved: creation refuses when `knit/<name>` exists locally or on origin in any targeted repo, and there is no `--force`. Re-running `knit tag <name>` on the bundle that recorded it resumes instead — missing local tags are recreated at the ledger-pinned SHAs, existing ones are verified against the pins (a mismatch is an error naming the repo), and only repos whose origin lacks the tag are pushed. A partially pushed set therefore converges by re-running the same command. `--no-push` stops after local tags and the ledger node; `--no-git` records the ledger node only; `-r/--repo` tags a subset (with a notice, since a partial set weakens the claim).
+
 ### Views
 
 A project's repo list is shared by everyone, with `--observe` marking repos kept out of default bundle starts. A **view** is per-user config layered on top of that shared project: a named "bundle shape" expressed as include/exclude deltas over the project's default repo set. Views are stored per user at `.knit/views/<project-id>.views.json` and never touch the shared project artifact, so a junior member can work against two repos while a staff member keeps several shapes for the same project.
@@ -676,6 +692,7 @@ Typical node types:
 - `pr.revert`
 - `land.update`
 - `check.recorded`
+- `tag.created`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

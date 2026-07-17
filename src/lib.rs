@@ -21,7 +21,7 @@ use anyhow::Result;
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
     ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
-    SyncCommand, ViewCommand,
+    SyncCommand, TagCommand, ViewCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -318,6 +318,28 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::record_check(&name, pass, detail.as_deref())
             }
             CheckCommand::Status => commands::show_check_status(),
+        },
+        Commands::Tag {
+            name,
+            message,
+            repos,
+            no_push,
+            no_git,
+            command,
+        } => match command {
+            Some(TagCommand::List) => commands::list_tags(),
+            Some(TagCommand::Show { name }) => commands::show_tag(&name),
+            None => match name {
+                Some(name) => {
+                    commands::create_tag(&name, &repos, message.as_deref(), no_push, no_git)
+                }
+                None => {
+                    if message.is_some() || !repos.is_empty() || no_push || no_git {
+                        anyhow::bail!("Pass a tag name, for example `knit tag v1-launch`.");
+                    }
+                    commands::list_tags()
+                }
+            },
         },
         Commands::Run {
             name,
