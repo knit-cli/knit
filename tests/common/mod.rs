@@ -1030,3 +1030,113 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
     )?;
     stream.flush()
 }
+
+/// Spawn a fake KnitHub push API: enough routes for `knit sync push --bundles`
+/// and the archive/restore lifecycle sync. Every pushed bundle artifact's
+/// payload state is appended to `<dir>/artifact-<slug>.states`, one state per
+/// line, so tests can assert which lifecycle states reached the remote.
+pub fn spawn_fake_knithub_push_api(dir: &Path) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    fs::create_dir_all(dir).unwrap();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_knithub_push_request(&mut stream, &dir);
+            });
+        }
+    });
+    base_url
+}
+
+fn handle_fake_knithub_push_request(
+    stream: &mut std::net::TcpStream,
+    dir: &Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let body: serde_json::Value = serde_json::from_slice(&body).unwrap_or(serde_json::Value::Null);
+
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string();
+    let segments: Vec<&str> = path.split('/').collect();
+    let (status, response) = match (method.as_str(), segments.as_slice()) {
+        (_, ["api", "v1", "projects", slug]) => (
+            200,
+            format!("{{\"data\":{{\"id\":\"proj-1\",\"slug\":\"{slug}\"}}}}"),
+        ),
+        ("POST", ["api", "v1", "projects"]) => (
+            201,
+            "{\"data\":{\"id\":\"proj-1\",\"slug\":\"demo\"}}".to_string(),
+        ),
+        ("POST", ["api", "v1", "projects", _, "repositories"]) => {
+            (201, "{\"data\":{}}".to_string())
+        }
+        ("POST", ["api", "v1", "projects", _, "history-events"]) => (
+            201,
+            "{\"data\":{\"insertedCount\":0,\"skippedCount\":0}}".to_string(),
+        ),
+        ("POST", ["api", "v1", "projects", _, "bundles"]) => {
+            let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
+            (
+                201,
+                format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"}}}}"),
+            )
+        }
+        ("POST", ["api", "v1", "bundles", bundle_id, "artifacts"]) => {
+            let slug = bundle_id.trim_start_matches("rb-");
+            let state = body["payload"]["state"].as_str().unwrap_or("unset");
+            let record = dir.join(format!("artifact-{slug}.states"));
+            let mut existing = fs::read_to_string(&record).unwrap_or_default();
+            existing.push_str(state);
+            existing.push('\n');
+            fs::write(&record, existing).unwrap();
+            (
+                201,
+                "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string(),
+            )
+        }
+        _ => (
+            404,
+            format!("{{\"errors\":{{\"detail\":\"unexpected endpoint {method} /{path}\"}}}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
+}

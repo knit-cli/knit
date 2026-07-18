@@ -71,7 +71,7 @@ knit bundle list [--all] [--archived] [--deleted]
 knit bundle archive <bundle> [--reason <reason>] [--keep-worktrees] [--force]
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
-knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
+knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles] [--archived]
 knit bundle path
 knit bundle print
 knit bundle validate
@@ -380,6 +380,8 @@ knit bundle prune --no-refresh
 knit bundle prune --apply --worktrees --branches
 knit bundle prune --apply --all
 ```
+
+Landed and archived bundles are finished work, not dead work: their artifacts are the audit record of what shipped, so prune keeps them (and says how many it kept) unless `--archived` opts them into the scan. `--all` deliberately does not imply `--archived`.
 
 A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not delete it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — combine with `--worktrees` (or `--all`) on `--apply` so the untracked files are discarded with the generated checkout. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
 
