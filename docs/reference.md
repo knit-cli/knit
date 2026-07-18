@@ -71,7 +71,7 @@ knit bundle list [--all] [--archived] [--deleted]
 knit bundle archive <bundle> [--reason <reason>] [--keep-worktrees] [--force]
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
-knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles]
+knit bundle prune [--no-refresh] [--apply] [--all] [--worktrees] [--force] [--branches] [--force-branches] [--remote-branches] [--remote-bundles] [--archived]
 knit bundle path
 knit bundle print
 knit bundle validate
@@ -90,7 +90,7 @@ knit run --list
 knit check run <project-command> [--repo <repo>]... [--all]
 knit check record <name> --pass|--fail [--detail <text>]
 knit check status
-knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish create [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
@@ -98,7 +98,7 @@ knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
-knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote]
+knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote] [--tag [<name>]] [--no-tag]
 knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
 knit land rollback [--run <path>] [--apply]
 knit land status [--run <path>]
@@ -110,6 +110,7 @@ knit merge --continue
 knit merge --abort
 knit config set advice true|false
 knit config set stealth true|false
+knit config set auto-tag true|false
 knit config set push-sync true|false
 knit config set sync-remote <name>
 knit config set sync-remotes <name>[,<name>...]
@@ -171,12 +172,12 @@ knit run status    # live service states, ports, and URLs
 knit run down      # stop and remove the bundle stack
 ```
 
-`knit run up` lifts every bundle repo with a compose file — the runtime is "docker compose up in each repo, with the bundle's code" — with zero configuration. `runtime.stacks` narrows the set to explicit repo ids, and the legacy `runtime.stackRepo` forces a single stack. Each stack's compose file is `runtime.composeFile` when set (applying to the configured stack repo), else `docker-compose.knit.yml` when present, else the repo's own `docker-compose.yml`/`compose.yaml`. A single stack runs as compose project `knit-run-<bundle>`; several stacks run as `knit-run-<bundle>--<repo>` each, so networks and named volumes stay isolated per stack. References from one stack's environment to a sibling stack's published host port are rewritten to the sibling's freshly allocated bundle port, so stacks find each other's bundle instances; ports of repos outside the bundle are left alone and keep pointing at the dev instances. `down`/`status` resolve containers by project label, so they keep working even after the worktree is gone. Run state lands in `.knit/runtime-runs/<bundle>/state.json`, recorded only after every stack starts; if `up` fails partway, `knit run down` still cleans up by derived project names. A project command configured with one of these three names takes precedence over the runtime verb.
+`knit run up` lifts every bundle repo with a compose file — the runtime is "docker compose up in each repo, with the bundle's code" — with zero configuration. `runtime.stacks` narrows the set to explicit repo ids, and the legacy `runtime.stackRepo` forces a single stack. Each stack's compose file is `runtime.composeFile` when set (applying to the configured stack repo), else `docker-compose.knit.yml` when present, else the repo's own `docker-compose.yml`/`compose.yaml`. A single stack runs as compose project `knit-run-<bundle>`; several stacks run as `knit-run-<bundle>--<repo>` each, so networks and named volumes stay isolated per stack. References from one stack's environment to a sibling stack's published host port are rewritten to the sibling's bundle port, so stacks find each other's bundle instances; ports of repos outside the bundle are left alone and keep pointing at the dev instances. A repeated `up` reuses that bundle's recorded service and bundle-database ports, including while its compose projects already own the listeners; it reallocates only when the recorded shape no longer matches or a stopped runtime's old port has been claimed. `down`/`status` resolve containers by project label, so they keep working even after the worktree is gone. Run state lands in `.knit/runtime-runs/<bundle>/state.json`, recorded only after every stack starts; if `up` fails partway, `knit run down` still cleans up by derived project names. A project command configured with one of these three names takes precedence over the runtime verb.
 
 **Transform mode (default).** A plain compose file — the one developers already use on `main` — is lifted automatically. Knit resolves it with `docker compose config` against the source repo location, then rewrites the resolved shape:
 
 - every path that resolves inside a tracked repo's source checkout (build contexts, additional contexts, dockerfiles, build args, bind-mount sources) is remapped to that repo's bundle worktree — "main everywhere, except the repos this bundle changes"
-- every published host port is reallocated to a free one (stepping by `ports.step` from the original), container-side ports untouched
+- every published host port is allocated per bundle (stepping by `ports.step` from the original and reusing recorded allocations on later runs), container-side ports untouched
 - textual references to remapped host ports inside environment values and build args are rewritten (`http://localhost:5173` -> `http://localhost:5183`) — heuristic by design, since shifted host ports are otherwise invisible to app config
 - `container_name` and the top-level `name` are stripped so instances cannot collide
 
@@ -189,7 +190,7 @@ knit run down      # stop and remove the bundle stack
 | `KNIT_CHECKOUT_<REPO>` | absolute checkout path (bundle worktree when tracked, source path otherwise) |
 | `KNIT_SRC_<REPO>` | the same path relative to `KNIT_ROOT` |
 | `KNIT_REV_<REPO>` | HEAD revision of that checkout |
-| `KNIT_PORT_<SERVICE>` | one allocated free host port per pool in `ports.services` (service name -> base port), stepping all pools together by `ports.step`; with no `services` map, a backend/frontend pair from `ports.backendBase`/`frontendBase` |
+| `KNIT_PORT_<SERVICE>` | one stable bundle host port per pool in `ports.services` (service name -> base port), stepping all pools together by `ports.step`; with no `services` map, a backend/frontend pair from `ports.backendBase`/`frontendBase` |
 | `KNIT_DB_MODE`, `KNIT_DB_HOST`, `KNIT_DB_PORT`, `KNIT_DB_NAME`, `KNIT_DB_HOST_PORT` | resolved database identity |
 
 Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss-web-ui` -> `KNIT_CHECKOUT_GLOSS_WEB_UI`).
@@ -227,6 +228,26 @@ functional  green   stale   2026-06-11T22:40:11.402Z knit@9020475
 `knit land plan` copies `requireChecks` into the editable per-bundle plan, `knit land check` reports each required check (green/red/stale/missing) and counts anything non-green as blocked, and `knit land apply`/`resume` refuse to execute until every required check is green and fresh — `--skip-checks` is the explicit escape hatch. Re-record after the last commit, land while it is still fresh.
 
 Checks are attestations, not hosted CI: Knit runs one command per check, the exit code is the verdict, and whoever can write the bundle can record one — the same trust model as committing. Knit never schedules, watches, or retries checks.
+
+### Tags
+
+A **tag** is a cross-repo known-good marker: the post-land state of the mains, recorded as one named set. Per repo it pins the commit `origin/<base_branch>` points at after a fresh fetch — the answer a monorepo gets for free from a single SHA. The `tag.created` ledger node is the source of truth; annotated git tags `knit/<name>` in each repo are a default-on export of it, so hosts, CI, deploy scripts, and humans can consume the marker with zero Knit knowledge, and the pinned commits stay protected from garbage collection:
+
+```sh
+knit tag v1-launch --bundle checkout-flow   # tag the mains after landing that bundle
+knit tag                                    # list knit/* tags across repos, marking partial sets
+knit tag show v1-launch                     # per-repo local/remote SHAs, subject, ledger provenance
+```
+
+The intended workflow is land → verify → tag: `knit land apply` merges and deploys, you verify main by whatever you trust (the deploy, CI on main, QA), and then `knit tag` records that the combination was good. Not every land gets tagged — tagging is a deliberate act, which is why it stays a manual verb. Landing archives the bundle and clears the workspace pointer, so tag it explicitly with `--bundle <slug>` (bundle resolution accepts archived bundles).
+
+**Tagging on landing.** When you want the tag every time, let landing do it: `knit land apply --tag [name]` records the tag as part of a successful land (an omitted name defaults to the bundle slug), and `knit config set auto-tag true` makes that the default for every land (`--no-tag` opts out of the default for one run). Landing has already merged and archived by the time the tag runs, so a tag failure is a warning with a retry hint, never a failed land. Tagging on land only works with local checkouts, not `knit land apply --from-artifact`.
+
+**Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **main CI** verdicts — GitHub check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
+
+The read verbs (`knit tag`, `knit tag list`, `knit tag show`) are project-wide: they scan the active project's full repo set regardless of which bundle context they run from, since tags are facts about the whole project, not one bundle. Deliberate targeting with `--bundle`/`KNIT_BUNDLE` scopes them to that bundle's repos, and ad-hoc workspaces without a project use the resolved bundle.
+
+**Immutability and resume.** A tag name can never be reused or moved: creation refuses when `knit/<name>` exists locally or on origin in any targeted repo, and there is no `--force`. Re-running `knit tag <name>` on the bundle that recorded it resumes instead — missing local tags are recreated at the ledger-pinned SHAs, existing ones are verified against the pins (a mismatch is an error naming the repo), and only repos whose origin lacks the tag are pushed. A partially pushed set therefore converges by re-running the same command. `--no-push` stops after local tags and the ledger node; `--no-git` records the ledger node only; `-r/--repo` tags a subset (with a notice, since a partial set weakens the claim).
 
 ### Views
 
@@ -381,6 +402,8 @@ knit bundle prune --apply --worktrees --branches
 knit bundle prune --apply --all
 ```
 
+Landed and archived bundles are finished work, not dead work: their artifacts are the audit record of what shipped, so prune keeps them (and says how many it kept) unless `--archived` opts them into the scan. `--all` deliberately does not imply `--archived`.
+
 A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not delete it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — combine with `--worktrees` (or `--all`) on `--apply` so the untracked files are discarded with the generated checkout. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
 
 `--report` prints every scanned bundle and why it is prunable or kept (open PRs, merged PRs, tracked changes, or untracked-only files), not just the deletable candidates:
@@ -391,7 +414,7 @@ knit bundle prune --untracked
 knit bundle prune --apply --untracked --worktrees
 ```
 
-Remote bundle cleanup uses the configured KnitHub sync remote, requires a token with `bundle:delete`, and marks matching remote bundle records deleted. Use explicit flags instead of `--all` when you want local/Git branch cleanup but want to preserve KnitHub bundle history.
+Remote bundle cleanup uses the configured KnitHub sync remote and archives matching remote bundle records — it never deletes them, because a record whose local artifact is gone is often the last remaining trace of shipped work. Archiving rides the everyday `bundle:push` scope. True remote deletion stays a per-bundle decision via `knit bundle delete --remote-bundles`, which requires a `bundle:delete` token.
 
 With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit bundle prune --apply` could delete a local artifact while leaving its KnitHub record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
 
@@ -494,6 +517,8 @@ knit publish status
 `knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
+
+When a bundle continues after its recorded reviews were merged or closed, pass `--renew` to start a fresh review round without replacing the bundle. Knit verifies that each recorded review is terminal, refuses open or unverifiable reviews, and refuses renewal when the feature branch still points at the recorded review head. The new review replaces the current per-repo publication projection; the terminal review remains unchanged on its host. Open renewed publications make a previously landed bundle effectively open again. Because an existing landing plan may predate the new repo set, regenerate it with `knit land plan --force` and inspect it before applying.
 
 Hosted services that run Knit from bundle artifacts can set `KNIT_GITHUB_API_TRANSPORT=ipv4` (the historical `curl`/`curl-ipv4` values still work, as do `native`/`api`) to make GitHub artifact-mode publish and landing use Knit's built-in GitHub REST client instead of `gh pr ...` commands. The client resolves hostnames IPv4-first and requires `GH_TOKEN` or `GITHUB_TOKEN` in the environment; no external `curl` is needed. It is intended for non-interactive runtimes where provider CLI prompts, host credential stores, or default IPv6 routing can hang simple GitHub I/O. Local workspace commands keep using the normal provider CLIs unless this environment variable is set. `KNIT_GITHUB_API_BASE` overrides the API base URL (defaults to `https://api.github.com`), mainly for tests.
 
@@ -674,6 +699,7 @@ Typical node types:
 - `pr.revert`
 - `land.update`
 - `check.recorded`
+- `tag.created`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

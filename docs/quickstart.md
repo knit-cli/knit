@@ -133,6 +133,14 @@ knit merge my-feature --into main
 
 This merges every repo's `knit/my-feature` branch into its own `main`, recording the run so it can be rolled back. After it succeeds, `backend:main` and `frontend:main` both contain the change.
 
+After landing, once you have verified that main actually works (the deploy, CI, a quick QA pass — whatever you trust), you can record that fact as a cross-repo known-good marker:
+
+```sh
+knit tag v1 --bundle my-feature
+```
+
+This fetches each repo's origin, pins `origin/main` across all repos as one named set on the bundle ledger, and exports annotated git tags `knit/v1` everywhere — the whole-system snapshot a monorepo gets from a single SHA. Tags are immutable and re-running the same command resumes a partially pushed set. `knit tag` lists them; `knit tag show v1` shows per-repo SHAs and provenance.
+
 ## 8. Wrap up
 
 If you used `knit land apply`, the bundle is already archived and its generated worktrees are gone. After a local-only `knit merge`, or when you want to close an unlanded bundle manually, archive it yourself; this removes generated worktrees but keeps branches and the bundle artifact:
@@ -141,7 +149,7 @@ If you used `knit land apply`, the bundle is already archived and its generated 
 knit bundle archive my-feature --reason done
 ```
 
-That is the full loop: project → bundle → cross-repo edit → cross-repo commit → publish/land (or merge) → archive.
+That is the full loop: project → bundle → cross-repo edit → cross-repo commit → publish/land (or merge) → verify → tag → archive.
 
 ## 9. Find related cross-repo work
 

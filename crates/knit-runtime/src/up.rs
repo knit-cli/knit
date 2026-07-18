@@ -42,6 +42,12 @@ struct Ready {
     prepared: Prepared,
 }
 
+#[derive(Clone)]
+struct ReusableStack {
+    ports: Vec<ServicePort>,
+    database: Option<StateDatabase>,
+}
+
 /// Start every planned stack: prepare all of them first (so cross-stack port
 /// wiring sees every port map), print the full plan, then `docker compose up`
 /// each stack in bundle order. Run state is recorded only after every stack
@@ -53,7 +59,16 @@ pub(crate) fn run_up_stacks(
     plans: Vec<StackPlan>,
 ) -> Result<()> {
     let multi = plans.len() > 1;
-    let mut taken = load_used_ports(&ctx.root)?;
+    let running = running_compose_projects();
+    let previous_state = read_json::<RuntimeRunState>(
+        &runtime_run_dir(&ctx.root, &ctx.bundle_id).join("state.json"),
+    )
+    .ok();
+    // Other live bundles reserve their ports. This bundle's recorded ports
+    // are handled separately as preferred allocations: when its compose
+    // project is already running, Docker itself owns those listeners and a
+    // repeated `up` must be allowed to keep them.
+    let mut taken = load_used_ports(&ctx.root, &ctx.bundle_id, &running)?;
     let step = runtime.ports.clone().unwrap_or_default().step.max(1);
 
     let repo_map: Vec<(PathBuf, PathBuf)> = ctx
@@ -84,6 +99,10 @@ pub(crate) fn run_up_stacks(
     // Phase 1: prepare every stack without starting docker.
     let mut ready: Vec<Ready> = Vec::new();
     for plan in &plans {
+        let reusable = previous_state
+            .as_ref()
+            .and_then(|state| reusable_stack(state, plan));
+        let reuse_bound_ports = reusable.is_some() && running.contains(&plan.project_name);
         match plan.mode {
             RuntimeMode::Transform => {
                 let source_dir = plan.repo.source_path.clone();
@@ -114,19 +133,34 @@ pub(crate) fn run_up_stacks(
                         }
                     }
                 }
-                let mut allocate = |old: u16| -> Result<u16> {
-                    let mut candidate = old.saturating_add(step);
-                    loop {
-                        if !taken.contains(&candidate) && port_available(candidate) {
-                            taken.insert(candidate);
-                            return Ok(candidate);
+                let mut preferred = reusable
+                    .as_ref()
+                    .map(|stack| stack.ports.clone())
+                    .unwrap_or_default();
+                let mut allocate =
+                    |service: &str, old: u16, container: Option<u16>| -> Result<u16> {
+                        if let Some(index) = preferred
+                            .iter()
+                            .position(|port| port.service == service && port.container == container)
+                        {
+                            let candidate = preferred.remove(index).host;
+                            if can_reuse_recorded_port(candidate, &taken, reuse_bound_ports) {
+                                taken.insert(candidate);
+                                return Ok(candidate);
+                            }
                         }
-                        candidate = candidate.saturating_add(step);
-                        if candidate > 65000 {
-                            bail!("Could not find a free runtime port for {old}.");
+                        let mut candidate = old.saturating_add(step);
+                        loop {
+                            if !taken.contains(&candidate) && port_available(candidate) {
+                                taken.insert(candidate);
+                                return Ok(candidate);
+                            }
+                            candidate = candidate.saturating_add(step);
+                            if candidate > 65000 {
+                                bail!("Could not find a free runtime port for {old}.");
+                            }
                         }
-                    }
-                };
+                    };
                 let (ports, port_map) =
                     transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
                 ready.push(Ready {
@@ -136,11 +170,36 @@ pub(crate) fn run_up_stacks(
                 });
             }
             RuntimeMode::Contract => {
-                let resolved = resolve_database(&database_config, &ctx.bundle_id, &mut taken);
+                let preferred_database = reusable
+                    .as_ref()
+                    .and_then(|stack| stack.database.as_ref())
+                    .map(|database| database.port);
+                let resolved = resolve_database(
+                    &database_config,
+                    &ctx.bundle_id,
+                    &mut taken,
+                    preferred_database,
+                    reuse_bound_ports,
+                );
                 let ports_config = runtime.ports.clone().unwrap_or_default();
                 let bases = contract_port_bases(&plan.compose, runtime.ports.as_ref())?;
-                let service_ports =
-                    allocate_service_ports(&taken, &bases, ports_config.step.max(1))?;
+                let preferred_ports: BTreeMap<String, u16> = reusable
+                    .as_ref()
+                    .map(|stack| {
+                        stack
+                            .ports
+                            .iter()
+                            .map(|port| (port.service.clone(), port.host))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let service_ports = allocate_service_ports(
+                    &taken,
+                    &bases,
+                    ports_config.step.max(1),
+                    &preferred_ports,
+                    reuse_bound_ports,
+                )?;
                 taken.extend(service_ports.values().copied());
                 let env = runtime_env(ctx, &plan.project_name, &service_ports, &resolved);
                 let profiles = if resolved.mode == DatabaseMode::Bundle {
@@ -480,23 +539,93 @@ fn scan_port_variables(text: &str) -> BTreeMap<String, Option<u16>> {
     vars
 }
 
+fn reusable_stack(state: &RuntimeRunState, plan: &StackPlan) -> Option<ReusableStack> {
+    if !state.stacks.is_empty() {
+        return state
+            .stacks
+            .iter()
+            .find(|stack| {
+                stack.repo == plan.repo.id
+                    && stack.project_name == plan.project_name
+                    && stack.mode == plan.mode
+            })
+            .map(|stack| ReusableStack {
+                ports: stack.ports.clone(),
+                database: stack.database.clone(),
+            });
+    }
+
+    (state.stack_repo == plan.repo.id
+        && state.mode == plan.mode
+        && plan.project_name == compose_project_name(&state.bundle_id))
+    .then(|| ReusableStack {
+        ports: state.ports.clone(),
+        database: state.database.clone(),
+    })
+}
+
+fn can_reuse_recorded_port(
+    port: u16,
+    used_by_other_bundles: &BTreeSet<u16>,
+    current_project_running: bool,
+) -> bool {
+    !used_by_other_bundles.contains(&port) && (current_project_running || port_available(port))
+}
+
 fn allocate_service_ports(
     used: &BTreeSet<u16>,
     bases: &BTreeMap<String, u16>,
     step: u16,
+    preferred: &BTreeMap<String, u16>,
+    reuse_bound_ports: bool,
 ) -> Result<BTreeMap<String, u16>> {
-    allocate_service_ports_with(used, bases, step, port_available)
+    allocate_service_ports_with(
+        used,
+        bases,
+        step,
+        preferred,
+        reuse_bound_ports,
+        port_available,
+    )
 }
 
 fn allocate_service_ports_with(
     used: &BTreeSet<u16>,
     bases: &BTreeMap<String, u16>,
     step: u16,
+    preferred: &BTreeMap<String, u16>,
+    reuse_bound_ports: bool,
     mut available: impl FnMut(u16) -> bool,
 ) -> Result<BTreeMap<String, u16>> {
     if bases.is_empty() {
         bail!("The project runtime defines no service port pools.");
     }
+
+    // Contract pools move together by one offset. Preserve that invariant
+    // when replaying state, and only accept a complete compatible cohort.
+    let reusable = (|| -> Option<BTreeMap<String, u16>> {
+        let mut reused = BTreeMap::new();
+        let mut common_offset: Option<u16> = None;
+        for (service, base) in bases {
+            let port = *preferred.get(service)?;
+            let offset = port.checked_sub(*base)?;
+            if offset % step != 0
+                || common_offset.is_some_and(|current| current != offset)
+                || used.contains(&port)
+                || reused.values().any(|taken| *taken == port)
+                || (!reuse_bound_ports && !available(port))
+            {
+                return None;
+            }
+            common_offset = Some(offset);
+            reused.insert(service.clone(), port);
+        }
+        Some(reused)
+    })();
+    if let Some(reused) = reusable {
+        return Ok(reused);
+    }
+
     let mut offset = 0u16;
     loop {
         let mut allocated = BTreeMap::new();
@@ -524,17 +653,23 @@ fn allocate_service_ports_with(
     }
 }
 
-fn load_used_ports(root: &Path) -> Result<BTreeSet<u16>> {
+fn load_used_ports(
+    root: &Path,
+    current_bundle_id: &str,
+    running: &BTreeSet<String>,
+) -> Result<BTreeSet<u16>> {
     let mut used = BTreeSet::new();
     let runs_dir = root.join(".knit/runtime-runs");
     if !runs_dir.exists() {
         return Ok(used);
     }
 
-    let running = running_compose_projects();
     for entry in fs::read_dir(&runs_dir).context("failed to read runtime runs directory")? {
         let entry = entry?;
         let bundle_id = entry.file_name().to_string_lossy().into_owned();
+        if bundle_id == current_bundle_id {
+            continue;
+        }
         let state_path = entry.path().join("state.json");
         if !state_path.exists() {
             continue;
@@ -632,6 +767,8 @@ fn resolve_database(
     database: &ProjectRuntimeDatabase,
     bundle_id: &str,
     taken: &mut BTreeSet<u16>,
+    preferred_host_port: Option<u16>,
+    reuse_bound_ports: bool,
 ) -> ResolvedDatabase {
     if database.mode == DatabaseMode::Bundle {
         let template = database
@@ -639,10 +776,30 @@ fn resolve_database(
             .as_deref()
             .unwrap_or("app_{bundleId}");
         let name = template.replace("{bundleId}", bundle_id);
+        if let Some(host_port) = preferred_host_port
+            .filter(|port| can_reuse_recorded_port(*port, taken, reuse_bound_ports))
+        {
+            taken.insert(host_port);
+            return ResolvedDatabase {
+                mode: DatabaseMode::Bundle,
+                host: "db".to_string(),
+                port: 5432,
+                name,
+                host_port,
+            };
+        }
+
         // Multiple bundle-db stacks in one run each need their own host port.
+        // A stale recorded port that is now owned by another process is also
+        // skipped instead of being immediately selected again.
         let base = database.port_base.unwrap_or(5437);
         let mut host_port = base;
-        while taken.contains(&host_port) && host_port < 65000 {
+        while (taken.contains(&host_port)
+            || (Some(host_port) == preferred_host_port
+                && !reuse_bound_ports
+                && !port_available(host_port)))
+            && host_port < 65000
+        {
             host_port = host_port.saturating_add(1);
         }
         taken.insert(host_port);
@@ -764,14 +921,27 @@ mod tests {
             ..Default::default()
         };
         let mut taken = BTreeSet::new();
-        let resolved = resolve_database(&database, "venue-capacity", &mut taken);
+        let resolved = resolve_database(&database, "venue-capacity", &mut taken, None, false);
         assert_eq!(resolved.name, "app_venue-capacity");
         assert_eq!(resolved.host, "db");
         assert_eq!(resolved.port, 5432);
         assert_eq!(resolved.host_port, 5437);
         // A second bundle-db stack in the same run steps past the taken port.
-        let second = resolve_database(&database, "venue-capacity", &mut taken);
+        let second = resolve_database(&database, "venue-capacity", &mut taken, None, false);
         assert_eq!(second.host_port, 5438);
+    }
+
+    #[test]
+    fn resolve_database_reuses_live_projects_recorded_port() {
+        let database = ProjectRuntimeDatabase {
+            mode: DatabaseMode::Bundle,
+            ..Default::default()
+        };
+        let mut taken = BTreeSet::new();
+
+        let resolved = resolve_database(&database, "venue-capacity", &mut taken, Some(5447), true);
+
+        assert_eq!(resolved.host_port, 5447);
     }
 
     #[test]
@@ -840,8 +1010,28 @@ mod tests {
             ("frontend".to_string(), 5174u16),
         ]);
         let used = BTreeSet::from([4001u16, 5174u16]);
-        let allocated = allocate_service_ports_with(&used, &bases, 10, |_| true).unwrap();
+        let allocated =
+            allocate_service_ports_with(&used, &bases, 10, &BTreeMap::new(), false, |_| true)
+                .unwrap();
         assert_eq!(allocated["backend"] - 4001, allocated["frontend"] - 5174);
         assert!(allocated["backend"] >= 4011);
+    }
+
+    #[test]
+    fn allocate_service_ports_reuses_live_projects_bound_cohort() {
+        let bases = BTreeMap::from([
+            ("backend".to_string(), 4001u16),
+            ("frontend".to_string(), 5174u16),
+        ]);
+        let preferred = BTreeMap::from([
+            ("backend".to_string(), 4011u16),
+            ("frontend".to_string(), 5184u16),
+        ]);
+
+        let allocated =
+            allocate_service_ports_with(&BTreeSet::new(), &bases, 10, &preferred, true, |_| false)
+                .unwrap();
+
+        assert_eq!(allocated, preferred);
     }
 }

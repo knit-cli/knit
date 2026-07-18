@@ -596,6 +596,14 @@ knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 
 Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. On full success it archives the bundle and removes generated worktrees under `.knit/worktrees/<bundle>/` while preserving local feature branches and the bundle artifact; pass `--keep-worktrees` to keep those checkouts. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured KnitHub remotes; use `knit sync push --bundles` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
+After a landed bundle's main state has been verified (deploy, CI, QA — whatever the user trusts), record it as a cross-repo known-good marker. Landing archives the bundle, so pass `--bundle` explicitly:
+
+```sh
+knit tag v1-launch --bundle <bundle>
+```
+
+`knit tag <name>` fetches each repo's origin, pins `origin/<base_branch>` as one named set on the bundle ledger, and exports annotated git tags `knit/<name>` to every repo and its origin. Tags are immutable (no `--force`); re-running the same `knit tag <name>` resumes a partially pushed set. Do not tag on the user's behalf right after landing — tagging is the user's claim that the landed state was verified; suggest it and let the user decide. A user who wants it automatic can run `knit land apply --tag [name]` or set `knit config set auto-tag true`.
+
 Use `knit merge` for local integration into staging branches or other bundles:
 
 ```sh
@@ -626,16 +634,16 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
 - `knit bundle list` shows workspace bundles.
-- `knit bundle archive <bundle> [--reason "merged"]` marks a bundle done: it records an archive node and removes generated worktrees while preserving local feature branches (`--keep-worktrees` to leave them, `--force` to discard dirty checkouts).
+- `knit bundle archive <bundle> [--reason "merged"]` marks a bundle done: it records an archive node and removes generated worktrees while preserving local feature branches (`--keep-worktrees` to leave them, `--force` to discard dirty checkouts). With push-sync remotes configured, archive and restore also push the updated artifact so KnitHub dashboards flip lifecycle state together with the local ledger.
 - `knit bundle restore <bundle>` reopens an archived bundle; run `knit bundle worktree` afterwards to rematerialize checkouts.
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/` and preserves git state.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
-- `knit bundle prune` refreshes GitHub PR states and lists clean dead-work bundles with no recorded open PRs.
+- `knit bundle prune` refreshes GitHub PR states and lists clean dead-work bundles with no recorded open PRs. Landed and archived bundle artifacts are kept as history unless `--archived` is passed.
 - `knit bundle prune --no-refresh` performs the same scan using cached recorded PR states only.
 - `knit bundle prune --apply --worktrees --branches` is the short form for deleting dead bundle artifacts and their generated local state.
-- `knit bundle prune --apply --all` removes dead bundle artifacts, generated and orphaned worktrees, local feature branches, matching `origin` branches, and matching KnitHub remote bundle records.
-- Remote bundle cleanup uses the configured KnitHub sync remote and requires a token with `bundle:delete`.
+- `knit bundle prune --apply --all` removes dead bundle artifacts, generated and orphaned worktrees, local feature branches, and matching `origin` branches, and archives matching KnitHub remote bundle records.
+- Remote bundle cleanup uses the configured KnitHub sync remote. Orphaned remote records are archived (never deleted) with the everyday `bundle:push` scope; true remote deletion stays per-bundle via `knit bundle delete --remote-bundles` and a `bundle:delete` token.
 - `knit switch <bundle> --workspace` changes the shared workspace fallback bundle (the `--workspace` flag is required so the change is deliberate).
 - `knit project remove <project> --force` removes a reusable project template artifact.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
@@ -647,13 +655,17 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit land` creates or shows the landing plan; `knit land apply` executes it, then archives the bundle and removes generated worktrees on success unless `--keep-worktrees` is passed.
 - `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
 - `knit land resume` continues a failed run; `knit land rollback [--apply]` previews/creates revert PRs for the merge steps a failed run already completed. A landing template or plan can set `onFailure: "rollback"` to do this automatically.
+- `knit tag <name>` records a cross-repo known-good marker: per repo it pins the freshly fetched `origin/<base_branch>` on the bundle ledger and exports annotated git tags `knit/<name>` (`--no-push` local only, `--no-git` ledger only, `-r <repo>` subset).
+- `knit tag` / `knit tag list` shows `knit/*` tags across repos with coverage; `knit tag show <name>` shows per-repo local/remote SHAs and ledger provenance.
+- `knit land apply --tag [name]` tags the landed main as part of the land (name defaults to the bundle slug); `knit config set auto-tag true` makes that the default (`--no-tag` opts out for one run).
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.
+- `knit config set auto-tag true` makes a successful `knit land apply` record a cross-repo known-good tag automatically.
 - `knit config set sync-remotes hosted` makes push-sync upload bundle artifacts to your configured KnitHub remote.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit (local reconcile, no network).
-- `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...` is the one verb family for moving artifacts to KnitHub; with no target flag it pushes bundle, history, and views.
+- `knit sync push [--bundles|--history|--views|--all] [--remote <name>]...` is the one verb family for moving artifacts to KnitHub; with no target flag it pushes bundle, history, and views. Bundle push is project-wide: every local bundle artifact — open, landed, archived — is swept so remote lifecycle state converges on the local ledger.
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...` pulls those same artifacts from KnitHub. Bundle pull is project-wide: open bundles created on other machines (and their recorded PRs) are localized into `.knit/bundles/`, and stale local artifacts fast-forward whatever their state; materialize checkouts for a discovered bundle with `knit --bundle <slug> bundle worktree`.
 - `knit pull --merge` union-merges the bundle ledger when the local and KnitHub artifacts have diverged (two users recorded work concurrently); diverged feature branches still need a git merge in the worktree afterwards.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.

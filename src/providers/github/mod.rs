@@ -21,6 +21,17 @@ const PR_JSON_FIELDS: &str =
 /// GitHub forge adapter, backed by the `gh` CLI.
 pub struct GitHub;
 
+/// CI verdict sources recorded for one commit SHA: GitHub check runs plus
+/// commit statuses. Commit-scoped — unlike `Forge::check_runs`, no pull
+/// request is involved.
+pub fn commit_check_runs(
+    target: &PrTarget,
+    repo_full_name: &str,
+    sha: &str,
+) -> Result<Vec<CheckRun>> {
+    api::commit_check_runs(target, repo_full_name, sha)
+}
+
 impl Forge for GitHub {
     fn id(&self) -> &'static str {
         "github"

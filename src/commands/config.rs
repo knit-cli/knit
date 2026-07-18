@@ -67,6 +67,10 @@ fn apply_config_value(config: &mut KnitConfig, key: &str, value: &str) -> Result
             config.stealth = Some(parse_bool(value)?);
             Ok(())
         }
+        "auto-tag" | "auto_tag" => {
+            config.auto_tag = Some(parse_bool(value)?);
+            Ok(())
+        }
         "push-sync" | "push_sync" => {
             config.push_sync = parse_bool(value)?;
             Ok(())
@@ -94,7 +98,7 @@ fn apply_config_value(config: &mut KnitConfig, key: &str, value: &str) -> Result
             Ok(())
         }
         _ => bail!(
-            "Unknown config key `{key}`. Supported: advice, stealth, push-sync, sync-remote, sync-remotes."
+            "Unknown config key `{key}`. Supported: advice, stealth, auto-tag, push-sync, sync-remote, sync-remotes."
         ),
     }
 }
@@ -167,6 +171,15 @@ fn print_config_section(title: &str, path: &std::path::Path, config: &KnitConfig
         "{} {}",
         out::heading("Stealth:"),
         if config.stealth_enabled() {
+            "true"
+        } else {
+            "false"
+        }
+    );
+    println!(
+        "{} {}",
+        out::heading("Auto tag:"),
+        if config.auto_tag_enabled() {
             "true"
         } else {
             "false"

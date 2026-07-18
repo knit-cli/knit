@@ -695,12 +695,17 @@ fn upsert_bundle(
     )
 }
 
-fn push_bundle_artifact(
+enum ArtifactPushOutcome {
+    Pushed(RemoteArtifact),
+    RemoteAhead,
+}
+
+fn push_bundle_artifact_outcome(
     remote: &KnitRemote,
     token: &str,
     bundle_id: &str,
     bundle: &ChangeGroup,
-) -> Result<RemoteArtifact> {
+) -> Result<ArtifactPushOutcome> {
     let payload = json!({
         "kind": "bundle",
         "schema_version": bundle.schema_version,
@@ -719,12 +724,118 @@ fn push_bundle_artifact(
     // current remote artifact records: another user (or another machine)
     // pushed work this workspace has not seen yet.
     if response.status == 409 {
-        bail!(
+        return Ok(ArtifactPushOutcome::RemoteAhead);
+    }
+    decode_response(response).map(ArtifactPushOutcome::Pushed)
+}
+
+fn push_bundle_artifact(
+    remote: &KnitRemote,
+    token: &str,
+    bundle_id: &str,
+    bundle: &ChangeGroup,
+) -> Result<RemoteArtifact> {
+    match push_bundle_artifact_outcome(remote, token, bundle_id, bundle)? {
+        ArtifactPushOutcome::Pushed(artifact) => Ok(artifact),
+        ArtifactPushOutcome::RemoteAhead => bail!(
             "{}: the KnitHub remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again.",
             bundle.id
+        ),
+    }
+}
+
+/// Push every local bundle artifact — open, landed, and archived alike — to a
+/// KnitHub remote so the remote's lifecycle state converges on the local
+/// ledger. Bundles whose remote ledger is ahead of this workspace are skipped
+/// with a warning (catching up is `knit sync pull`'s job); other per-bundle
+/// failures are collected and fail the sweep at the end.
+pub fn push_all_bundles_to_remote(
+    remote_name: &str,
+    project: Option<&str>,
+    exclude_bundle: Option<&str>,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_effective_config(&root)?;
+    let remote = resolve_remote(&config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(());
+    }
+    let mut paths: Vec<_> = std::fs::read_dir(&dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .filter_map(|entry| entry.ok())
+        .map(|entry| entry.path())
+        .filter(|path| path.extension() == Some(std::ffi::OsStr::new("json")))
+        .collect();
+    paths.sort();
+
+    let mut project_slugs: BTreeMap<String, String> = BTreeMap::new();
+    let mut pushed = 0usize;
+    let mut remote_ahead = Vec::new();
+    let mut failures = Vec::new();
+
+    for path in paths {
+        let bundle: ChangeGroup = match crate::store::read_json(&path) {
+            Ok(bundle) => bundle,
+            Err(error) => {
+                failures.push(format!("{}: {error:#}", path.display()));
+                continue;
+            }
+        };
+        if exclude_bundle == Some(bundle.id.as_str()) {
+            continue;
+        }
+        let Some(project_id) = bundle
+            .project_id
+            .clone()
+            .or_else(|| project.map(slugify))
+            .or_else(|| config.active_project.clone())
+        else {
+            failures.push(format!("{}: no project recorded on the bundle", bundle.id));
+            continue;
+        };
+        let project_slug = match project_slugs.get(&project_id) {
+            Some(slug) => slug.clone(),
+            None => {
+                let local_project = load_project_if_present(&root, &project_id)?;
+                let upserted = upsert_project(remote, &token, &project_id, local_project.as_ref())?;
+                if let Some(local) = local_project.as_ref() {
+                    push_repositories(remote, &token, &upserted.slug, &local.repos)?;
+                }
+                project_slugs.insert(project_id.clone(), upserted.slug.clone());
+                upserted.slug
+            }
+        };
+        let outcome =
+            upsert_bundle(remote, &token, &project_slug, &bundle).and_then(|remote_bundle| {
+                push_bundle_artifact_outcome(remote, &token, &remote_bundle.id, &bundle)
+            });
+        match outcome {
+            Ok(ArtifactPushOutcome::Pushed(_)) => pushed += 1,
+            Ok(ArtifactPushOutcome::RemoteAhead) => remote_ahead.push(bundle.id.clone()),
+            Err(error) => failures.push(format!("{}: {error:#}", bundle.id)),
+        }
+    }
+
+    println!("{} {pushed} bundle artifact(s)", out::movement("pushed"));
+    if !remote_ahead.is_empty() {
+        println!(
+            "{} {}: the remote ledger is ahead; run `knit sync pull --bundles` to fast-forward, then push again",
+            out::warn("Skipped"),
+            remote_ahead.join(", ")
         );
     }
-    decode_response(response)
+    if !failures.is_empty() {
+        bail!(
+            "failed to push {} bundle artifact(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        );
+    }
+    Ok(())
 }
 
 fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {

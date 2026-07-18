@@ -103,6 +103,97 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 }
 
 #[test]
+fn pr_create_renew_replaces_a_merged_review_without_replacing_the_bundle() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "continued review"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/continued-review/backend");
+    append_line(&feature.join("app.txt"), "first review");
+    knit(&workspace, ["commit", "--all", "-m", "First review"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("next-backend.number"), "404").unwrap();
+    append_line(&feature.join("app.txt"), "second review");
+    knit(&workspace, ["commit", "--all", "-m", "Second review"]);
+
+    let renewed = knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--renew", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(renewed.contains("created"));
+    assert!(renewed.contains("#404"));
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/continued-review.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle["id"].as_str(), Some("continued-review"));
+    assert_eq!(
+        bundle["publications"][0]["url"].as_str(),
+        Some("https://github.com/acme/backend/pull/404")
+    );
+    let status = knit(&workspace, ["status"]);
+    assert!(status.contains("State: open"));
+    assert!(status.contains("not landed"));
+    let publication_status = knit(&workspace, ["publish", "status"]);
+    assert!(publication_status.contains("not landed"));
+    assert!(renewed.contains("knit land plan --force"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_renew_refuses_to_replace_an_open_review() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "open review"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/open-review/backend");
+    append_line(&feature.join("app.txt"), "review change");
+    knit(&workspace, ["commit", "--all", "-m", "Review change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--renew", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(failure.contains("is still open"));
+    assert!(!fake_gh_dir.join("next-backend.number").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn artifact_pr_create_uses_github_api_without_checkout_prompt() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");

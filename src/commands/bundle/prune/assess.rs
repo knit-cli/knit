@@ -37,6 +37,7 @@ impl Pending {
 /// prune decision, the `--untracked` relaxation, and the `--report` view.
 pub(super) struct PruneAssessment {
     pub(super) id: String,
+    pub(super) status: crate::commands::bundle::BundleStatus,
     pub(super) repo_count: usize,
     pub(super) saw_publication: bool,
     pub(super) saw_open_publication: bool,
@@ -331,6 +332,7 @@ fn assess_bundle(
 
     Ok(PruneAssessment {
         id: bundle.id.clone(),
+        status: crate::commands::bundle::bundle_state(bundle),
         repo_count: bundle.repos.len(),
         saw_publication,
         saw_open_publication,

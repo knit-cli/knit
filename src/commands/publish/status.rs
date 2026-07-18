@@ -3,7 +3,7 @@
 
 use super::scope::filter_indexes_by_provider;
 use crate::advice;
-use crate::model::ChangeGroup;
+use crate::commands::bundle::{bundle_state, BundleStatus};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo};
 use crate::repo_selectors::resolve_repo_indexes;
@@ -90,7 +90,7 @@ pub fn show_publication_status(
 }
 
 fn print_landing_advice(active: &ActiveBundle) {
-    if active.bundle.publications.is_empty() || has_landed_node(&active.bundle) {
+    if active.bundle.publications.is_empty() || bundle_state(&active.bundle) != BundleStatus::Open {
         return;
     }
     let review_count = active
@@ -112,11 +112,4 @@ fn print_landing_advice(active: &ActiveBundle) {
         &active.root,
         "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection.",
     );
-}
-
-fn has_landed_node(bundle: &ChangeGroup) -> bool {
-    bundle
-        .nodes
-        .iter()
-        .any(|node| node.node_type == "feature.landed")
 }

@@ -9,8 +9,9 @@
 //!   checkout (build contexts, additional contexts, dockerfiles, build args,
 //!   bind-mount sources) to that repo's bundle worktree checkout — "main
 //!   everywhere, except the repos this bundle changes"
-//! - reallocates every published host port to a free one (container side
-//!   untouched) and rewrites textual references to the old host ports inside
+//! - allocates every published host port per bundle (reusing the bundle's
+//!   recorded allocation on later runs), leaves the container side untouched,
+//!   and rewrites textual references to the old host ports inside
 //!   environment values and build args (`localhost:5173` -> `localhost:5183`)
 //! - strips `container_name`, the top-level `name`, and the resolved `name`
 //!   `docker compose config` bakes onto each named volume and network, so the
@@ -37,14 +38,14 @@ pub struct ServicePort {
 
 /// Transform a resolved compose config (the JSON output of `docker compose
 /// config --format json`) in place. `repo_map` maps canonical source repo
-/// paths to bundle checkouts; `allocate` maps an original published host
-/// port to a fresh free one. Returns the published ports and the
+/// paths to bundle checkouts; `allocate` maps a service's original published
+/// host port to its bundle port. Returns the published ports and the
 /// `(old_host, new_host)` map so multi-stack runs can rewire references to
 /// THIS stack's ports inside sibling stacks.
 pub fn transform_compose(
     config: &mut Value,
     repo_map: &[(PathBuf, PathBuf)],
-    allocate: &mut dyn FnMut(u16) -> Result<u16>,
+    allocate: &mut dyn FnMut(&str, u16, Option<u16>) -> Result<u16>,
 ) -> Result<(Vec<ServicePort>, Vec<(u16, u16)>)> {
     strip_stack_identity(config);
 
@@ -76,7 +77,7 @@ pub fn transform_compose(
 
         if let Some(entries) = service.get_mut("ports").and_then(Value::as_array_mut) {
             for entry in entries {
-                if let Some(mapping) = transform_port(entry, allocate)? {
+                if let Some(mapping) = transform_port(service_name, entry, allocate)? {
                     port_map.push((mapping.0, mapping.1));
                     ports.push(ServicePort {
                         service: service_name.clone(),
@@ -411,8 +412,9 @@ fn transform_volume(volume: &mut Value, repo_map: &[(PathBuf, PathBuf)]) {
 /// Reallocate one published port entry. Returns `(old_host, new_host,
 /// container)` when the entry published a host port.
 fn transform_port(
+    service: &str,
     entry: &mut Value,
-    allocate: &mut dyn FnMut(u16) -> Result<u16>,
+    allocate: &mut dyn FnMut(&str, u16, Option<u16>) -> Result<u16>,
 ) -> Result<Option<(u16, u16, Option<u16>)>> {
     match entry {
         Value::Object(port) => {
@@ -427,12 +429,12 @@ fn transform_port(
             let Some(old) = old else {
                 return Ok(None);
             };
-            let new = allocate(old)?;
-            port.insert("published".to_string(), Value::String(new.to_string()));
             let container = port
                 .get("target")
                 .and_then(Value::as_u64)
                 .and_then(|n| u16::try_from(n).ok());
+            let new = allocate(service, old, container)?;
+            port.insert("published".to_string(), Value::String(new.to_string()));
             Ok(Some((old, new, container)))
         }
         Value::String(text) => {
@@ -443,11 +445,11 @@ fn transform_port(
             let Ok(old) = host.parse::<u16>() else {
                 return Ok(None);
             };
-            let new = allocate(old)?;
             let container = rest
                 .split('/')
                 .next()
                 .and_then(|part| part.parse::<u16>().ok());
+            let new = allocate(service, old, container)?;
             *entry = Value::String(format!("{new}:{rest}"));
             Ok(Some((old, new, container)))
         }
@@ -634,7 +636,7 @@ mod tests {
 
         let mut config = knithub_like_config(&root_str);
         let mut next = 0u16;
-        let mut allocate = |old: u16| -> Result<u16> {
+        let mut allocate = |_service: &str, old: u16, _container: Option<u16>| -> Result<u16> {
             next += 1;
             Ok(old + 10 * next)
         };
@@ -756,7 +758,8 @@ mod tests {
                 "shared": {"external": true, "name": "prod_shared"}
             }
         });
-        let mut allocate = |old: u16| -> Result<u16> { Ok(old) };
+        let mut allocate =
+            |_service: &str, old: u16, _container: Option<u16>| -> Result<u16> { Ok(old) };
         transform_compose(&mut config, &[], &mut allocate).unwrap();
 
         // Top-level name gone; resolved volume/network names stripped so the
