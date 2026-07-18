@@ -19,10 +19,10 @@ pub use clone::clone_project_from_remote;
 pub use facade::{sync_pull, sync_push, SyncTargets};
 pub use history::pull_history_from_remote;
 pub use pull::{
-    delete_bundle_from_remote, delete_remote_bundle_by_id, fetch_bundles_from_remote,
-    list_remote_bundles, prepare_remote_pull, pull_bundle_remote_state, pull_remote_state,
-    pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome, RemoteBundleRecord,
-    RemotePullContext,
+    archive_remote_bundle_by_id, delete_bundle_from_remote, delete_remote_bundle_by_id,
+    fetch_bundles_from_remote, list_remote_bundles, prepare_remote_pull, pull_bundle_remote_state,
+    pull_remote_state, pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome,
+    RemoteBundleRecord, RemotePullContext,
 };
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_all_bundles_to_remote,

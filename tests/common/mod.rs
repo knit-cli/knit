@@ -1103,6 +1103,33 @@ fn handle_fake_knithub_push_request(
         .to_string();
     let segments: Vec<&str> = path.split('/').collect();
     let (status, response) = match (method.as_str(), segments.as_slice()) {
+        // Project export: served from `<dir>/export.json` when a test staged
+        // one, so prune's remote-orphan scan sees a configurable bundle list.
+        ("GET", ["api", "v1", "projects", _, "export"]) => {
+            match fs::read_to_string(dir.join("export.json")) {
+                Ok(body) => (200, body),
+                Err(_) => (
+                    404,
+                    "{\"errors\":{\"detail\":\"no export staged\"}}".to_string(),
+                ),
+            }
+        }
+        ("PATCH", ["api", "v1", "bundles", bundle_id, "archive"]) => {
+            fs::write(dir.join(format!("archived-{bundle_id}")), "").unwrap();
+            let slug = bundle_id.trim_start_matches("rb-");
+            (
+                200,
+                format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
+            )
+        }
+        ("DELETE", ["api", "v1", "bundles", bundle_id]) => {
+            fs::write(dir.join(format!("deleted-{bundle_id}")), "").unwrap();
+            let slug = bundle_id.trim_start_matches("rb-");
+            (
+                200,
+                format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
+            )
+        }
         (_, ["api", "v1", "projects", slug]) => (
             200,
             format!("{{\"data\":{{\"id\":\"proj-1\",\"slug\":\"{slug}\"}}}}"),

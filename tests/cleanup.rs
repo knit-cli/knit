@@ -763,3 +763,59 @@ fn bundle_prune_keeps_finished_bundles_unless_archived_flag() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn prune_archives_remote_orphan_records_instead_of_deleting() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Author a bundle with merged PRs, capture its artifact as the remote
+    // record's payload, then erase it locally: the classic orphan — the
+    // KnitHub record is the last remaining trace of this shipped work.
+    knit(&workspace, ["bundle", "shipped old", "--repo", "backend"]);
+    write_bundle_publications(&workspace, "shipped-old", "MERGED");
+    let artifact_path = workspace.join(".knit/bundles/shipped-old.bundle.json");
+    let payload = fs::read_to_string(&artifact_path).unwrap();
+    knit(
+        &workspace,
+        ["bundle", "delete", "shipped-old", "--force", "--worktrees"],
+    );
+    fs::remove_dir_all(workspace.join(".knit/deleted")).ok();
+
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let export = format!(
+        "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-shipped-old\",\"slug\":\"shipped-old\",\"lifecycleState\":\"open\",\"currentArtifact\":{{\"artifactHash\":\"h1\",\"payload\":{payload}}}}}],\"historyEvents\":[]}}}}"
+    );
+    fs::write(fake_dir.join("export.json"), export).unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let pruned = knit_with_env(
+        &workspace,
+        [
+            "bundle",
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--remote-bundles",
+        ],
+        &env,
+    );
+    assert!(pruned.contains("archived remote bundle"), "{pruned}");
+
+    // The record was archived — never deleted.
+    assert!(fake_dir.join("archived-rb-shipped-old").exists());
+    assert!(!fake_dir.join("deleted-rb-shipped-old").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
