@@ -98,7 +98,7 @@ knit land
 knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
-knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote]
+knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote] [--tag [<name>]] [--no-tag]
 knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
 knit land rollback [--run <path>] [--apply]
 knit land status [--run <path>]
@@ -110,6 +110,7 @@ knit merge --continue
 knit merge --abort
 knit config set advice true|false
 knit config set stealth true|false
+knit config set auto-tag true|false
 knit config set push-sync true|false
 knit config set sync-remote <name>
 knit config set sync-remotes <name>[,<name>...]
@@ -227,6 +228,26 @@ functional  green   stale   2026-06-11T22:40:11.402Z knit@9020475
 `knit land plan` copies `requireChecks` into the editable per-bundle plan, `knit land check` reports each required check (green/red/stale/missing) and counts anything non-green as blocked, and `knit land apply`/`resume` refuse to execute until every required check is green and fresh — `--skip-checks` is the explicit escape hatch. Re-record after the last commit, land while it is still fresh.
 
 Checks are attestations, not hosted CI: Knit runs one command per check, the exit code is the verdict, and whoever can write the bundle can record one — the same trust model as committing. Knit never schedules, watches, or retries checks.
+
+### Tags
+
+A **tag** is a cross-repo known-good marker: the post-land state of the mains, recorded as one named set. Per repo it pins the commit `origin/<base_branch>` points at after a fresh fetch — the answer a monorepo gets for free from a single SHA. The `tag.created` ledger node is the source of truth; annotated git tags `knit/<name>` in each repo are a default-on export of it, so hosts, CI, deploy scripts, and humans can consume the marker with zero Knit knowledge, and the pinned commits stay protected from garbage collection:
+
+```sh
+knit tag v1-launch --bundle checkout-flow   # tag the mains after landing that bundle
+knit tag                                    # list knit/* tags across repos, marking partial sets
+knit tag show v1-launch                     # per-repo local/remote SHAs, subject, ledger provenance
+```
+
+The intended workflow is land → verify → tag: `knit land apply` merges and deploys, you verify main by whatever you trust (the deploy, CI on main, QA), and then `knit tag` records that the combination was good. Not every land gets tagged — tagging is a deliberate act, which is why it stays a manual verb. Landing archives the bundle and clears the workspace pointer, so tag it explicitly with `--bundle <slug>` (bundle resolution accepts archived bundles).
+
+**Tagging on landing.** When you want the tag every time, let landing do it: `knit land apply --tag [name]` records the tag as part of a successful land (an omitted name defaults to the bundle slug), and `knit config set auto-tag true` makes that the default for every land (`--no-tag` opts out of the default for one run). Landing has already merged and archived by the time the tag runs, so a tag failure is a warning with a retry hint, never a failed land. Tagging on land only works with local checkouts, not `knit land apply --from-artifact`.
+
+**Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **main CI** verdicts — GitHub check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
+
+The read verbs (`knit tag`, `knit tag list`, `knit tag show`) are project-wide: they scan the active project's full repo set regardless of which bundle context they run from, since tags are facts about the whole project, not one bundle. Deliberate targeting with `--bundle`/`KNIT_BUNDLE` scopes them to that bundle's repos, and ad-hoc workspaces without a project use the resolved bundle.
+
+**Immutability and resume.** A tag name can never be reused or moved: creation refuses when `knit/<name>` exists locally or on origin in any targeted repo, and there is no `--force`. Re-running `knit tag <name>` on the bundle that recorded it resumes instead — missing local tags are recreated at the ledger-pinned SHAs, existing ones are verified against the pins (a mismatch is an error naming the repo), and only repos whose origin lacks the tag are pushed. A partially pushed set therefore converges by re-running the same command. `--no-push` stops after local tags and the ledger node; `--no-git` records the ledger node only; `-r/--repo` tags a subset (with a notice, since a partial set weakens the claim).
 
 ### Views
 
@@ -678,6 +699,7 @@ Typical node types:
 - `pr.revert`
 - `land.update`
 - `check.recorded`
+- `tag.created`
 - `repo.removed`
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.

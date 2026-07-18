@@ -954,10 +954,20 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fs::write(dir.join("api-backend-edit.json"), &body).unwrap();
             (200, fake_github_pr_json(dir, number))
         }
-        ("GET", ["repos", "acme", "backend", "commits", _, "check-runs"]) => {
-            (200, "{\"total_count\":0,\"check_runs\":[]}".to_string())
+        ("GET", ["repos", "acme", repo, "commits", _, "check-runs"]) => {
+            // Marker files opt a repo into non-empty commit CI: `ci-pass-<repo>`
+            // serves one passing run, `ci-fail-<repo>` one failing run. Without
+            // a marker the response stays empty, which land tests rely on.
+            let body = if dir.join(format!("ci-fail-{repo}")).exists() {
+                "{\"total_count\":1,\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"failure\"}]}".to_string()
+            } else if dir.join(format!("ci-pass-{repo}")).exists() {
+                "{\"total_count\":1,\"check_runs\":[{\"name\":\"ci\",\"status\":\"completed\",\"conclusion\":\"success\"}]}".to_string()
+            } else {
+                "{\"total_count\":0,\"check_runs\":[]}".to_string()
+            };
+            (200, body)
         }
-        ("GET", ["repos", "acme", "backend", "commits", _, "status"]) => {
+        ("GET", ["repos", "acme", _, "commits", _, "status"]) => {
             (200, "{\"state\":\"success\",\"statuses\":[]}".to_string())
         }
         _ => (

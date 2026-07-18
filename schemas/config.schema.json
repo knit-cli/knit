@@ -15,6 +15,7 @@
     },
     "advice": { "type": "boolean" },
     "stealth": { "type": "boolean" },
+    "autoTag": { "type": "boolean" },
     "pushSync": { "type": "boolean" },
     "remotes": {
       "type": "object",

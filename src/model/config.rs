@@ -20,6 +20,10 @@ pub struct KnitConfig {
     pub advice: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stealth: Option<bool>,
+    /// When true, a successful `knit land apply` also records a cross-repo
+    /// known-good tag (named after the bundle) without needing `--tag`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_tag: Option<bool>,
     /// When true (default), git-pushing commands also push the bundle artifact to
     /// the configured KnitHub remote. Set false to never sync on push.
     #[serde(default = "default_push_sync")]
@@ -38,6 +42,7 @@ impl KnitConfig {
             sync_remotes: Vec::new(),
             advice: true,
             stealth: None,
+            auto_tag: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
@@ -52,6 +57,7 @@ impl KnitConfig {
             sync_remotes: Vec::new(),
             advice: true,
             stealth: None,
+            auto_tag: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
@@ -66,6 +72,7 @@ impl KnitConfig {
             sync_remotes: Vec::new(),
             advice: true,
             stealth: None,
+            auto_tag: None,
             push_sync: true,
             remotes: BTreeMap::new(),
         }
@@ -73,6 +80,10 @@ impl KnitConfig {
 
     pub fn stealth_enabled(&self) -> bool {
         self.stealth.unwrap_or(false)
+    }
+
+    pub fn auto_tag_enabled(&self) -> bool {
+        self.auto_tag.unwrap_or(false)
     }
 }
 

@@ -234,6 +234,14 @@ pub(super) fn check_runs(
         .filter(|sha| !sha.is_empty())
         .with_context(|| format!("could not determine head SHA for GitHub PR `{selector}`"))?;
 
+    commit_check_runs(target, repo_full_name, sha)
+}
+
+pub(super) fn commit_check_runs(
+    target: &PrTarget,
+    repo_full_name: &str,
+    sha: &str,
+) -> Result<Vec<CheckRun>> {
     let mut runs = Vec::new();
 
     let check_runs_endpoint = format!(

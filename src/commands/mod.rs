@@ -28,6 +28,7 @@ pub mod shape;
 pub mod stage;
 pub mod status;
 pub mod sync;
+pub mod tag;
 pub mod track;
 pub mod view;
 pub mod worktree;
@@ -76,6 +77,7 @@ pub use shape::{bundle_apply_view, bundle_exclude, bundle_include};
 pub use stage::stage_paths;
 pub use status::show_status;
 pub use sync::sync_bundle;
+pub use tag::{create_tag, list_tags, show_tag};
 pub use track::{track_repo_selectors, track_repos};
 pub use view::{
     edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
