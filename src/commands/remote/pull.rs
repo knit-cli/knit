@@ -538,6 +538,24 @@ pub fn list_remote_bundles(
 
 /// Delete a single bundle record from the sync remote by its remote id, returning the
 /// deleted bundle's slug.
+/// Archive a KnitHub bundle record in place. Used by prune's remote-orphan
+/// cleanup: a record whose local artifact is gone is finished history, not
+/// noise, so the remote keeps it (hidden from active views) instead of
+/// tombstoning it. Rides the everyday `bundle:push` scope.
+pub fn archive_remote_bundle_by_id(config: &KnitConfig, remote_id: &str) -> Result<String> {
+    let remote_name = resolve_sync_remote_name(config)?;
+    let remote = resolve_remote(config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let archived: RemoteBundle = request_json(
+        remote,
+        &token,
+        "PATCH",
+        &format!("/bundles/{remote_id}/archive"),
+        None,
+    )?;
+    Ok(archived.slug)
+}
+
 pub fn delete_remote_bundle_by_id(config: &KnitConfig, remote_id: &str) -> Result<String> {
     let remote_name = resolve_sync_remote_name(config)?;
     let remote = resolve_remote(config, &remote_name)?;
