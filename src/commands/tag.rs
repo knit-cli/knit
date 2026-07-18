@@ -62,7 +62,16 @@ pub fn create_tag(
     no_git: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
-    create_tag_on_active(&mut active, name, selectors, note, no_push, no_git, &[], false)
+    create_tag_on_active(
+        &mut active,
+        name,
+        selectors,
+        note,
+        no_push,
+        no_git,
+        &[],
+        false,
+    )
 }
 
 /// The create/resume entry point for an already-resolved, write-locked bundle.
@@ -101,7 +110,9 @@ pub(crate) fn create_tag_on_active(
     }
 
     let indexes = resolve_repo_indexes(active, &expand_repo_selectors(selectors), false)?;
-    create_tag_set_on(active, name, &indexes, note, no_push, no_git, remote, no_remote)
+    create_tag_set_on(
+        active, name, &indexes, note, no_push, no_git, remote, no_remote,
+    )
 }
 
 /// The create core, operating on an already-loaded bundle.
@@ -204,7 +215,12 @@ fn resume_tag_set(
     let mut pushed_any = false;
 
     for pin in &node.commits {
-        let Some(repo) = active.bundle.repos.iter().find(|repo| repo.id == pin.repo_id) else {
+        let Some(repo) = active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| repo.id == pin.repo_id)
+        else {
             bail!(
                 "{}: pinned by tag `{}` but no longer tracked in this bundle.",
                 pin.repo_id,
@@ -213,7 +229,11 @@ fn resume_tag_set(
         };
         let path = PathBuf::from(&repo.path);
         if !path.exists() {
-            bail!("{}: original repo path does not exist: {}", repo.id, path.display());
+            bail!(
+                "{}: original repo path does not exist: {}",
+                repo.id,
+                path.display()
+            );
         }
 
         match ref_commit_sha(&path, &tag_ref(name))? {
@@ -255,7 +275,11 @@ fn resume_tag_set(
             None => {
                 git_output(
                     &path,
-                    [OsString::from("push"), OsString::from("origin"), OsString::from(tag_ref(name))],
+                    [
+                        OsString::from("push"),
+                        OsString::from("origin"),
+                        OsString::from(tag_ref(name)),
+                    ],
                 )
                 .with_context(|| format!("{}: failed to push tag", repo.id))?;
                 pushed_any = true;
@@ -301,7 +325,9 @@ pub fn list_tags() -> Result<()> {
         for line in output.lines() {
             let tag = line.trim();
             if !tag.is_empty() {
-                tags.entry(tag.to_string()).or_default().insert(repo_id.clone());
+                tags.entry(tag.to_string())
+                    .or_default()
+                    .insert(repo_id.clone());
             }
         }
     }
@@ -312,7 +338,11 @@ pub fn list_tags() -> Result<()> {
     }
 
     let width = tags.keys().map(|tag| tag.len()).max().unwrap_or(3).max(3);
-    println!("{}  {}", out::header_field("tag", width), out::heading("repos"));
+    println!(
+        "{}  {}",
+        out::header_field("tag", width),
+        out::heading("repos")
+    );
     for (tag, repos) in &tags {
         let missing: Vec<&str> = targets
             .iter()
@@ -341,7 +371,11 @@ pub fn show_tag(name: &str) -> Result<()> {
     let mut found_git = false;
     let mut subject: Option<String> = None;
 
-    println!("{} {}", out::heading("Tag:"), out::branch(local_tag_name(name)));
+    println!(
+        "{} {}",
+        out::heading("Tag:"),
+        out::branch(local_tag_name(name))
+    );
     for (repo_id, path) in &targets {
         if !path.exists() {
             println!("  {} {}", out::repo(repo_id), out::muted("(missing path)"));
@@ -359,7 +393,12 @@ pub fn show_tag(name: &str) -> Result<()> {
             if subject.is_none() {
                 subject = git_output_optional(
                     path,
-                    ["tag", "--list", "--format=%(subject)", &local_tag_name(name)],
+                    [
+                        "tag",
+                        "--list",
+                        "--format=%(subject)",
+                        &local_tag_name(name),
+                    ],
                 )?;
             }
         }
@@ -503,9 +542,7 @@ fn preflight_collisions(targets: &[TagTarget], name: &str) -> Result<()> {
         let handles: Vec<_> = targets
             .iter()
             .map(|target| {
-                scope.spawn(move || {
-                    (target.repo_id.clone(), preflight_collision(target, name))
-                })
+                scope.spawn(move || (target.repo_id.clone(), preflight_collision(target, name)))
             })
             .collect();
         handles
@@ -652,7 +689,10 @@ fn build_annotation(
         }
     }
 
-    let tagged: Vec<&str> = targets.iter().map(|target| target.repo_id.as_str()).collect();
+    let tagged: Vec<&str> = targets
+        .iter()
+        .map(|target| target.repo_id.as_str())
+        .collect();
     let untagged: Vec<&str> = active
         .bundle
         .repos

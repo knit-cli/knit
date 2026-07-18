@@ -243,21 +243,25 @@ pub fn prune_merged_bundles(
         remove_orphan_worktree(&orphan, force)?;
         removed_orphans += 1;
     }
+    // Remote orphan records are archived, never deleted: a record whose local
+    // artifact is gone is the last remaining trace of shipped work, and the
+    // hosted dashboard is the durable archive of record. True deletion stays a
+    // per-bundle decision via `knit bundle delete --remote-bundles`.
     let mut removed_remote = 0usize;
     if let Some(config) = config.as_ref() {
         for orphan in remote_orphans {
-            match crate::commands::remote::delete_remote_bundle_by_id(config, &orphan.remote_id) {
+            match crate::commands::remote::archive_remote_bundle_by_id(config, &orphan.remote_id) {
                 Ok(slug) => {
                     println!(
                         "{}: {} {}",
                         out::node(&orphan.slug),
-                        out::movement("deleted remote bundle"),
+                        out::movement("archived remote bundle"),
                         out::muted(slug)
                     );
                     removed_remote += 1;
                 }
                 Err(err) => print_prune_warning(format!(
-                    "{}: failed to delete remote bundle record: {err:#}",
+                    "{}: failed to archive remote bundle record: {err:#}",
                     orphan.slug
                 )),
             }
@@ -275,7 +279,7 @@ pub fn prune_merged_bundles(
     if removed_remote > 0 {
         println!(
             "{} {} remote orphan record(s)",
-            out::heading("Removed:"),
+            out::heading("Archived:"),
             removed_remote
         );
     }

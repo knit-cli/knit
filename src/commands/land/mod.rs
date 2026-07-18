@@ -183,7 +183,14 @@ fn tag_landed_bundle(
     };
 
     if let Err(error) = crate::commands::tag::create_tag_on_active(
-        active, &name, &[], None, false, false, remote, no_remote,
+        active,
+        &name,
+        &[],
+        None,
+        false,
+        false,
+        remote,
+        no_remote,
     ) {
         println!(
             "{} land succeeded but tagging failed: {error:#}",
@@ -191,7 +198,10 @@ fn tag_landed_bundle(
         );
         advice::print(
             &active.root,
-            format!("retry the tag with `knit tag {name} --bundle {}`.", active.bundle.id),
+            format!(
+                "retry the tag with `knit tag {name} --bundle {}`.",
+                active.bundle.id
+            ),
         );
     }
 }
