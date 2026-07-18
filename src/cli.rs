@@ -593,6 +593,10 @@ pub enum BundleCommand {
         /// Delete matching KnitHub remote bundle records.
         #[arg(long = "remote-bundles")]
         remote_bundles: bool,
+        /// Also prune finished (landed/archived) bundle artifacts. By default
+        /// finished bundles are history and only open dead work is pruned.
+        #[arg(long)]
+        archived: bool,
     },
     /// Mark a bundle done: archive its artifact and remove generated worktrees, keeping branches.
     Archive {

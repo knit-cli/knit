@@ -1015,3 +1015,70 @@ fn pull_fast_forwards_checkouts_after_fetch_advanced_the_artifact() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn archive_and_restore_sync_lifecycle_state_to_remote() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "quick fix", "--repo", "backend"]);
+    knit_with_env(&workspace, ["bundle", "archive", "quick-fix"], &env);
+
+    let record = fake_dir.join("artifact-quick-fix.states");
+    let states = fs::read_to_string(&record).expect("archive should push the artifact");
+    assert_eq!(states.lines().last(), Some("archived"), "{states}");
+
+    knit_with_env(&workspace, ["bundle", "restore", "quick-fix"], &env);
+    let states = fs::read_to_string(&record).unwrap();
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "alpha work", "--repo", "backend"]);
+    knit(&workspace, ["bundle", "beta work", "--repo", "backend"]);
+    // No token in the environment here, so the archive's own remote sync
+    // warn-skips and the later sweep is what carries the state.
+    knit(&workspace, ["bundle", "archive", "beta-work"]);
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("bundle artifact(s)"), "{output}");
+
+    let alpha = fs::read_to_string(fake_dir.join("artifact-alpha-work.states")).unwrap();
+    assert_eq!(alpha.lines().last(), Some("open"), "{alpha}");
+    let beta = fs::read_to_string(fake_dir.join("artifact-beta-work.states")).unwrap();
+    assert_eq!(beta.lines().last(), Some("archived"), "{beta}");
+
+    fs::remove_dir_all(root).unwrap();
+}

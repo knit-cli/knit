@@ -38,6 +38,7 @@ pub fn prune_merged_bundles(
     force_branches: bool,
     remote_branches: bool,
     remote_bundles: bool,
+    include_finished: bool,
 ) -> Result<()> {
     if force_branches && !branches {
         bail!("Use --branches with --force-branches.");
@@ -70,7 +71,21 @@ pub fn prune_merged_bundles(
 
     let mut candidates = Vec::new();
     let mut blocked_untracked = Vec::new();
+    let mut kept_finished = 0usize;
     for assessment in &assessments {
+        // Landed and archived bundles are finished work, not dead work: their
+        // artifacts are the audit record of what shipped. Only `--archived`
+        // opts them into pruning; open dead work is pruned as before.
+        if !include_finished
+            && matches!(
+                assessment.status,
+                crate::commands::bundle::BundleStatus::Landed
+                    | crate::commands::bundle::BundleStatus::Archived
+            )
+        {
+            kept_finished += 1;
+            continue;
+        }
         if let Some(reason) = assessment.candidate_reason(untracked) {
             candidates.push(PruneCandidate {
                 id: assessment.id.clone(),
@@ -95,6 +110,15 @@ pub fn prune_merged_bundles(
 
     if report {
         print_prune_report(&assessments, untracked);
+    }
+
+    if kept_finished > 0 {
+        println!(
+            "{}",
+            out::muted(format!(
+                "Kept {kept_finished} finished (landed/archived) bundle artifact(s) as history; pass --archived to prune them too."
+            ))
+        );
     }
 
     if candidates.is_empty()
