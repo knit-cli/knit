@@ -705,3 +705,61 @@ fn bundle_prune_keeps_bundles_with_unpublished_commits() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn bundle_prune_keeps_finished_bundles_unless_archived_flag() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    // Finished work: archived with no PRs recorded — history, not dead work.
+    knit(&workspace, ["bundle", "finished work"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    knit(&workspace, ["bundle", "archive", "finished-work"]);
+
+    // Dead work: open bundle whose recorded PRs are all merged.
+    knit(&workspace, ["bundle", "dead work"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    write_bundle_publications(&workspace, "dead-work", "MERGED");
+
+    let preview = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(preview.contains("Kept 1 finished"));
+    assert!(preview.contains("dead-work"));
+    assert!(!preview.contains("finished-work"));
+
+    let pruned = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--apply", "--worktrees"],
+    );
+    assert!(pruned.contains("dead-work"));
+    assert!(workspace
+        .join(".knit/bundles/finished-work.bundle.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/bundles/dead-work.bundle.json")
+        .exists());
+
+    // Explicit opt-in prunes the finished artifact too.
+    let pruned_finished = knit(
+        &workspace,
+        [
+            "bundle",
+            "prune",
+            "--no-refresh",
+            "--archived",
+            "--apply",
+            "--worktrees",
+        ],
+    );
+    assert!(pruned_finished.contains("finished-work"));
+    assert!(!workspace
+        .join(".knit/bundles/finished-work.bundle.json")
+        .exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/finished-work.bundle.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
