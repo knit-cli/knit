@@ -68,7 +68,7 @@ pub fn push_repos(
     }
 
     // After git branches are pushed, also sync the bundle artifact to the
-    // configured KnitHub remote (default on; see `knit config set push-sync`).
+    // configured sync remote (default on; see `knit config set push-sync`).
     crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
 
     Ok(())

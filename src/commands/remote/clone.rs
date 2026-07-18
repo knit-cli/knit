@@ -1,4 +1,4 @@
-//! `knit clone` — import a KnitHub project export into a fresh local workspace:
+//! `knit clone` — import a remote project export into a fresh local workspace:
 //! clone its repositories, write the project and bundle artifacts, and
 //! optionally materialize the active bundle.
 
@@ -180,7 +180,7 @@ fn resolve_remote_for_clone(
         .as_ref()
         .and_then(|config| configured_sync_remote_names(config).into_iter().next());
     let remote_name = requested_name.or(configured_name).with_context(|| {
-        "No KnitHub remote selected. Pass `--remote <name>` with `--url <url>`, or configure a sync remote first."
+        "No remote selected. Pass `--remote <name>` with `--url <url>`, or configure a sync remote first."
     })?;
     let configured = config
         .as_ref()
@@ -195,7 +195,7 @@ fn resolve_remote_for_clone(
         .or(env_url)
         .or_else(|| configured.as_ref().map(|remote| remote.url.clone()))
         .with_context(|| {
-            format!("No KnitHub URL configured for remote `{remote_name}`. Pass --url, set KNIT_REMOTE_URL, or run `knit remote add {remote_name} <url>`.")
+            format!("No URL configured for remote `{remote_name}`. Pass --url, set KNIT_REMOTE_URL, or run `knit remote add {remote_name} <url>`.")
         })?;
     let stored_token = token
         .map(ToString::to_string)
@@ -208,7 +208,7 @@ fn resolve_remote_for_clone(
         .map(ToString::to_string)
         .or_else(|| token_from_env(&remote_name))
         .or_else(|| remote.token.clone())
-        .context("No KnitHub token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, pass --token, or configure a stored remote token.")?;
+        .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, pass --token, or configure a stored remote token.")?;
 
     Ok((remote_name, remote, stored_token, resolved_token))
 }

@@ -129,7 +129,7 @@ pub fn create_publications(
         );
     }
 
-    // Sync the bundle artifact to the configured KnitHub remote alongside the
+    // Sync the bundle artifact to the configured sync remote alongside the
     // host review objects (default on; see `knit config set push-sync`).
     crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
 

@@ -24,7 +24,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle prune --apply --worktrees --branches"));
     assert!(agents.contains("knit bundle prune --apply --all"));
     assert!(agents.contains("--remote-branches"));
-    assert!(agents.contains("matching KnitHub remote bundle records"));
+    assert!(agents.contains("matching remote bundle records"));
     assert!(agents.contains("archived (never deleted) with the everyday `bundle:push` scope"));
     assert!(agents.contains("knit project remove <project> --force"));
     assert!(agents.contains("knit --bundle feature-a commit"));

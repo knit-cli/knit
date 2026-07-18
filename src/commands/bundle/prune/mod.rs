@@ -1,5 +1,5 @@
 //! `knit prune` — find and delete dead-work bundles, orphan worktrees, and
-//! orphaned KnitHub remote bundle records.
+//! orphaned remote bundle records.
 //!
 //! A bundle is "dead work" when it has no open PRs, no uncommitted tracked
 //! changes in any checkout, and — for repos with no recorded review object —
@@ -198,7 +198,7 @@ pub fn prune_merged_bundles(
             println!(
                 "  {} {} ({})",
                 out::node(&orphan.slug),
-                out::muted("KnitHub record with no local bundle"),
+                out::muted("remote record with no local bundle"),
                 out::muted(orphan.reason)
             );
         }

@@ -135,7 +135,7 @@ fn pull_bundles_without_remote_reports_each_bundle_skipped() {
     assert!(report.contains("Bundles:"));
     assert!(report.contains("feature-one"));
     assert!(report.contains("feature-two"));
-    assert!(report.contains("no KnitHub remote configured"));
+    assert!(report.contains("no sync remote available"));
     // --bundles alone does not touch project main repos.
     assert!(!report.contains("Main repos:"));
 
@@ -261,7 +261,7 @@ fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
 
     let push = knit(&workspace, ["push", "backend"]);
     assert!(push.contains("backend"), "{push}");
-    assert!(push.contains("KnitHub sync skipped (svartal):"), "{push}");
+    assert!(push.contains("remote sync skipped (svartal):"), "{push}");
     assert_eq!(
         git(&remote, ["rev-parse", "refs/heads/knit/stale-remote"]),
         sha
@@ -1079,6 +1079,132 @@ fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     assert_eq!(alpha.lines().last(), Some("open"), "{alpha}");
     let beta = fs::read_to_string(fake_dir.join("artifact-beta-work.states")).unwrap();
     assert_eq!(beta.lines().last(), Some("archived"), "{beta}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_walks_sync_remotes_past_unreachable_one() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "feature one", "--repo", "backend"]);
+
+    // With no sync-remotes config, every configured remote is a sync remote.
+    // `dead` sorts first and refuses connections; `live` serves a valid export.
+    let dead_url = unreachable_remote_url();
+    let live_url = spawn_fake_knithub_with_body(
+        "{\"data\":{\"project\":{\"slug\":\"demo\"},\"knitProject\":null,\"repositories\":[],\"bundles\":[],\"historyEvents\":[]}}".to_string(),
+    );
+    knit(&workspace, ["remote", "add", "dead", &dead_url]);
+    knit(&workspace, ["remote", "add", "live", &live_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let report = knit_with_env(&workspace, ["pull", "--main", "--bundles"], &env);
+    assert!(report.contains("remote dead unavailable"), "{report}");
+    assert!(report.contains("Main repos:"), "{report}");
+    assert!(report.contains("feature-one"), "{report}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_continues_when_every_sync_remote_is_unreachable() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "feature one", "--repo", "backend"]);
+    knit(
+        &workspace,
+        ["remote", "add", "dead", &unreachable_remote_url()],
+    );
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    // The offline remote is reported, and the git side still runs.
+    let report = knit_with_env(&workspace, ["pull", "--main", "--bundles"], &env);
+    assert!(report.contains("No sync remote reachable"), "{report}");
+    assert!(report.contains("Main repos:"), "{report}");
+    assert!(report.contains("no sync remote available"), "{report}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_with_explicit_remote_still_fails_hard() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "feature one", "--repo", "backend"]);
+    knit(
+        &workspace,
+        ["remote", "add", "dead", &unreachable_remote_url()],
+    );
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let failure = knit_fails_with_env(
+        &workspace,
+        ["pull", "--main", "--bundles", "--remote", "dead"],
+        &env,
+    );
+    assert!(failure.contains("Remote request failed"), "{failure}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_fans_out_to_every_configured_remote_by_default() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_a = root.join("fake-a");
+    let fake_b = root.join("fake-b");
+    let url_a = spawn_fake_knithub_push_api(&fake_a);
+    let url_b = spawn_fake_knithub_push_api(&fake_b);
+    knit(&workspace, ["remote", "add", "alpha", &url_a]);
+    knit(&workspace, ["remote", "add", "beta", &url_b]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "quick fix", "--repo", "backend"]);
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("alpha"), "{output}");
+    assert!(output.contains("beta"), "{output}");
+
+    let alpha = fs::read_to_string(fake_a.join("artifact-quick-fix.states")).unwrap();
+    assert_eq!(alpha.lines().last(), Some("open"), "{alpha}");
+    let beta = fs::read_to_string(fake_b.join("artifact-quick-fix.states")).unwrap();
+    assert_eq!(beta.lines().last(), Some("open"), "{beta}");
 
     fs::remove_dir_all(root).unwrap();
 }

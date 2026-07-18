@@ -308,6 +308,22 @@ pub fn isolated_knit_home() -> String {
         .to_string()
 }
 
+/// Ambient identity overrides (exported by editor/agent harnesses such as a
+/// T3 Code session) would silently override the per-repo `git config` identity
+/// every fixture sets and inject actor attribution, breaking actor/author
+/// assertions. Test-provided env is applied after, so a test can still set any
+/// of these deliberately.
+fn scrub_ambient_git_identity(command: &mut Command) {
+    command
+        .env_remove("GIT_AUTHOR_NAME")
+        .env_remove("GIT_AUTHOR_EMAIL")
+        .env_remove("GIT_COMMITTER_NAME")
+        .env_remove("GIT_COMMITTER_EMAIL")
+        .env_remove("T3_ACTOR_SESSION")
+        .env_remove("T3_ACTOR_LABEL")
+        .env_remove("T3_ACTOR_EMAIL");
+}
+
 // KNIT_BUNDLE and KNIT_SESSION are removed everywhere: the test process may
 // itself run inside a knit bundle / agent session (dogfooding), and inherited
 // bundle targeting or ledger attribution would break hermetic assertions.
@@ -324,6 +340,7 @@ where
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    scrub_ambient_git_identity(&mut command);
     run(command)
 }
 
@@ -339,6 +356,7 @@ where
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    scrub_ambient_git_identity(&mut command);
     // Test-provided env wins, so a test can still point KNIT_HOME at its own dir.
     for (key, value) in env {
         command.env(key, value);
@@ -358,6 +376,7 @@ where
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    scrub_ambient_git_identity(&mut command);
     let output = command.output().unwrap();
     assert!(!output.status.success());
     format!(
@@ -379,6 +398,7 @@ where
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -424,6 +444,7 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
+    scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -468,6 +489,7 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
+    scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
     }
@@ -487,6 +509,7 @@ where
 {
     let mut command = Command::new("git");
     command.args(args).current_dir(cwd);
+    scrub_ambient_git_identity(&mut command);
     run(command)
 }
 
@@ -497,6 +520,7 @@ where
 {
     let mut command = Command::new("git");
     command.args(args).current_dir(cwd);
+    scrub_ambient_git_identity(&mut command);
     command.stdout(Stdio::null()).stderr(Stdio::null());
     command.status().unwrap().success()
 }
@@ -982,6 +1006,15 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
     )?;
     stream.flush()
 }
+/// Reserve a local port and immediately release it, yielding a base URL that
+/// refuses connections — an unreachable sync remote for resilience tests.
+pub fn unreachable_remote_url() -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    drop(listener);
+    base_url
+}
+
 /// Spawn a minimal fake KnitHub API that answers every request with a project
 /// export containing a single bundle record. Enough for creation-time slug
 /// collision checks against the sync remote.

@@ -1,5 +1,5 @@
 //! Orphan cleanup targets: generated worktree directories whose bundle is
-//! gone, and KnitHub remote bundle records with no local artifact whose PRs
+//! gone, and remote bundle records with no local artifact whose PRs
 //! are all merged or closed (unreachable by the local bundle scan).
 
 use super::assess::{
@@ -23,7 +23,7 @@ pub(super) struct OrphanWorktree {
     pub(super) discards_pending: bool,
 }
 
-/// A bundle that exists on the KnitHub sync remote but has no local artifact and
+/// A bundle that exists on the sync remote but has no local artifact and
 /// whose recorded pull requests are all merged or closed, so prune can never reach
 /// it through the local `.knit/bundles/` scan.
 pub(super) struct RemoteOrphan {
@@ -32,7 +32,7 @@ pub(super) struct RemoteOrphan {
     pub(super) reason: &'static str,
 }
 
-/// Find KnitHub remote bundle records that have no local artifact and whose recorded
+/// Find remote bundle records that have no local artifact and whose recorded
 /// PRs are all merged or closed. These can never be reached by the local `.knit/bundles/`
 /// scan once their local artifact is gone, so prune would otherwise leave them forever.
 pub(super) fn remote_orphan_candidates(
@@ -45,16 +45,14 @@ pub(super) fn remote_orphan_candidates(
         return Vec::new();
     };
     let Some(project_id) = config.active_project.clone() else {
-        print_prune_warning(
-            "no active project configured; skipping KnitHub remote orphan detection",
-        );
+        print_prune_warning("no active project configured; skipping sync remote orphan detection");
         return Vec::new();
     };
     let records = match crate::commands::remote::list_remote_bundles(config, &project_id) {
         Ok(records) => records,
         Err(err) => {
             print_prune_warning(format!(
-                "could not list KnitHub remote bundles ({err:#}); skipping remote orphan detection"
+                "could not list remote bundles ({err:#}); skipping remote orphan detection"
             ));
             return Vec::new();
         }

@@ -1,4 +1,4 @@
-//! KnitHub HTTP client: native HTTP request transport, remote/token/config
+//! Sync remote HTTP client: native HTTP request transport, remote/token/config
 //! resolution, project-export fetching, and localizing remote bundles onto the
 //! local project's repos.
 
@@ -55,16 +55,15 @@ pub(super) fn resolve_project_id(
 
 pub(super) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
     let remote_name = slugify(name);
-    config
-        .remotes
-        .get(&remote_name)
-        .with_context(|| format!("No KnitHub remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first."))
+    config.remotes.get(&remote_name).with_context(|| {
+        format!("No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first.")
+    })
 }
 
 pub(super) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
-        .context("No KnitHub token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")
+        .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")
 }
 
 pub(super) fn token_from_env(name: &str) -> Option<String> {
@@ -87,10 +86,10 @@ pub(super) fn token_from_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
 }
 
-/// Return configured KnitHub sync remotes in priority order. `syncRemotes` is the
-/// multi-target form; `syncRemote` remains the legacy single-target form. If a
-/// config has exactly one remote and no explicit sync remote, that sole remote
-/// is the sync remote by convention.
+/// Return the sync remotes in priority order. By default the remotes list
+/// itself is the sync set: every configured remote participates, names carry no
+/// special meaning. An explicit `syncRemotes` (or legacy `syncRemote`) narrows
+/// that set for configs that want some remotes excluded from routine sync.
 pub fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
     let mut names = Vec::new();
     if !config.sync_remotes.is_empty() {
@@ -103,12 +102,51 @@ pub fn configured_sync_remote_names(config: &KnitConfig) -> Vec<String> {
             push_unique_remote_name(&mut names, name);
         }
     }
-    if names.is_empty() && config.remotes.len() == 1 {
-        if let Some(name) = config.remotes.keys().next() {
+    if names.is_empty() {
+        for name in config.remotes.keys() {
             push_unique_remote_name(&mut names, name);
         }
     }
     names
+}
+
+/// Run `attempt` against each configured sync remote in priority order and
+/// return the first success. An unreachable remote is reported and skipped; the
+/// last candidate's error (or an explicit override's error) propagates, so the
+/// call only fails when no remote could serve it. Read paths (pull, fetch,
+/// history) use this; push paths fan out over every remote instead.
+pub(super) fn with_first_available_remote<T>(
+    config: &KnitConfig,
+    remote_override: Option<&str>,
+    attempt: impl Fn(&str, &KnitRemote, &str) -> Result<T>,
+) -> Result<T> {
+    let candidates: Vec<String> = match remote_override {
+        Some(name) => vec![slugify(name)],
+        None => configured_sync_remote_names(config),
+    };
+    if candidates.is_empty() {
+        bail!("No sync remote configured. Run `knit remote add <name> <url>` first.");
+    }
+    let explicit = remote_override.is_some();
+    let last = candidates.len() - 1;
+    for (index, remote_name) in candidates.iter().enumerate() {
+        let result = resolve_remote(config, remote_name)
+            .and_then(|remote| Ok((remote, resolve_token(remote_name, remote)?)))
+            .and_then(|(remote, token)| attempt(remote_name, remote, &token));
+        match result {
+            Ok(value) => return Ok(value),
+            Err(error) => {
+                if explicit || index == last {
+                    return Err(error);
+                }
+                println!(
+                    "{} {error:#}",
+                    crate::output::warn(format!("remote {remote_name} unavailable, trying next:"))
+                );
+            }
+        }
+    }
+    unreachable!("candidates checked non-empty above")
 }
 
 pub(super) fn explicit_remote_names(remote_overrides: &[String]) -> Vec<String> {
@@ -137,11 +175,12 @@ fn push_unique_remote_name(names: &mut Vec<String>, name: &str) {
     }
 }
 
-/// Resolve the primary KnitHub sync remote, preferring `syncRemotes[0]`, then
-/// legacy `syncRemote`, then the sole configured remote.
+/// Resolve the primary sync remote: the first name `configured_sync_remote_names`
+/// returns. Callers that can address only one remote (per-record deletes,
+/// archive-by-id) use this; fan-out callers iterate the full list instead.
 pub(super) fn resolve_sync_remote_name(config: &KnitConfig) -> Result<String> {
     configured_sync_remote_names(config).into_iter().next().context(
-        "No KnitHub sync remote configured. Run `knit remote add <name> <url>`, `knit config set sync-remote <name>`, or use explicit prune flags instead of --all.",
+        "No sync remote configured. Run `knit remote add <name> <url>`, `knit config set sync-remote <name>`, or use explicit prune flags instead of --all.",
     )
 }
 
@@ -173,7 +212,7 @@ pub(super) fn fetch_project_export(
 /// Split an `owner/slug` clone reference into its parts. A bare identifier (no
 /// `/`) resolves by slug alone, preserving the historical behavior used by
 /// local project ids. Each segment is slugified so it is URL-safe and matches
-/// how KnitHub stores usernames, org slugs, and project slugs.
+/// how the hosted server stores usernames, org slugs, and project slugs.
 pub(super) fn split_project_identifier(identifier: &str) -> (Option<String>, String) {
     match identifier.split_once('/') {
         Some((owner, slug)) if !owner.trim().is_empty() && !slug.trim().is_empty() => {
@@ -404,13 +443,13 @@ pub(super) fn request_json<T: DeserializeOwned>(
 pub(super) fn decode_response<T: DeserializeOwned>(response: HttpResponse) -> Result<T> {
     if !(200..300).contains(&response.status) {
         bail!(
-            "KnitHub remote returned HTTP {}: {}",
+            "Sync remote returned HTTP {}: {}",
             response.status,
             response.body.trim()
         );
     }
     let envelope: ApiEnvelope<T> =
-        serde_json::from_str(&response.body).context("failed to parse KnitHub response")?;
+        serde_json::from_str(&response.body).context("failed to parse remote response")?;
     Ok(envelope.data)
 }
 
@@ -443,13 +482,13 @@ pub(super) fn request(
         // as an HttpResponse so callers keep their status-based error paths.
         Err(ureq::Error::Status(_, response)) => response,
         Err(ureq::Error::Transport(transport)) => {
-            bail!("KnitHub request failed for {url}: {transport}")
+            bail!("Remote request failed for {url}: {transport}")
         }
     };
     let status = response.status();
     let body = response
         .into_string()
-        .context("failed to read KnitHub response body")?;
+        .context("failed to read remote response body")?;
     Ok(HttpResponse { status, body })
 }
 
