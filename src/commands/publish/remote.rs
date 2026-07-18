@@ -50,6 +50,7 @@ pub(super) fn publish_repo_remote(
     bundle: &ChangeGroup,
     job: &PublishJob,
     draft: bool,
+    renew: bool,
     set_upstream: bool,
 ) -> Result<PublishRemoteResult> {
     let repo = &job.repo;
@@ -85,21 +86,34 @@ pub(super) fn publish_repo_remote(
                 out::branch(&existing.base_branch)
             );
         }
-        return Ok(PublishRemoteResult {
-            repo_index: job.repo_index,
-            repo_id: repo.id.clone(),
-            pushed,
-            status: PublishStatus::ExistsRecorded(existing.url.clone()),
-        });
+        if !renew {
+            return Ok(PublishRemoteResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                pushed,
+                status: PublishStatus::ExistsRecorded(existing.url.clone()),
+            });
+        }
+        let summary = forge.view(&target, &existing.url).with_context(|| {
+            format!(
+                "{}: failed to verify recorded review {} before renewal",
+                repo.id, existing.url
+            )
+        })?;
+        ensure_review_can_be_renewed(repo, &summary, Some(&pushed.sha))?;
     }
 
     if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
-        return Ok(PublishRemoteResult {
-            repo_index: job.repo_index,
-            repo_id: repo.id.clone(),
-            pushed,
-            status: PublishStatus::FoundExisting(existing),
-        });
+        if renew && review_is_terminal(&existing) {
+            ensure_review_has_new_head(repo, &existing, Some(&pushed.sha))?;
+        } else {
+            return Ok(PublishRemoteResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                pushed,
+                status: PublishStatus::FoundExisting(existing),
+            });
+        }
     }
 
     let title = format!("{} ({})", bundle.title, repo.id);
@@ -132,6 +146,7 @@ pub(super) fn publish_repo_remote_from_artifact(
     bundle: &ChangeGroup,
     job: &PublishJob,
     draft: bool,
+    renew: bool,
 ) -> Result<ArtifactPublishResult> {
     let repo = &job.repo;
     let base_branch = &job.base_branch;
@@ -161,19 +176,32 @@ pub(super) fn publish_repo_remote_from_artifact(
                 out::branch(&existing.base_branch)
             );
         }
-        return Ok(ArtifactPublishResult {
-            repo_index: job.repo_index,
-            repo_id: repo.id.clone(),
-            status: PublishStatus::ExistsRecorded(existing.url.clone()),
-        });
+        if !renew {
+            return Ok(ArtifactPublishResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                status: PublishStatus::ExistsRecorded(existing.url.clone()),
+            });
+        }
+        let summary = forge.view(&target, &existing.url).with_context(|| {
+            format!(
+                "{}: failed to verify recorded review {} before renewal",
+                repo.id, existing.url
+            )
+        })?;
+        ensure_review_can_be_renewed(repo, &summary, repo.head_sha.as_deref())?;
     }
 
     if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
-        return Ok(ArtifactPublishResult {
-            repo_index: job.repo_index,
-            repo_id: repo.id.clone(),
-            status: PublishStatus::FoundExisting(existing),
-        });
+        if renew && review_is_terminal(&existing) {
+            ensure_review_has_new_head(repo, &existing, repo.head_sha.as_deref())?;
+        } else {
+            return Ok(ArtifactPublishResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                status: PublishStatus::FoundExisting(existing),
+            });
+        }
     }
 
     let title = format!("{} ({})", bundle.title, repo.id);
@@ -248,6 +276,58 @@ pub(super) fn apply_publish_remote_result(
         }
     }
     Ok(changed)
+}
+
+fn ensure_review_can_be_renewed(
+    repo: &RepoEntry,
+    review: &PullRequest,
+    current_head: Option<&str>,
+) -> Result<()> {
+    if review_is_open(review) {
+        bail!(
+            "{}: recorded review {} is still open; --renew only replaces merged or closed reviews.",
+            repo.id,
+            review.url
+        );
+    }
+    if !review_is_terminal(review) {
+        bail!(
+            "{}: recorded review {} has unverifiable state `{}`; refusing to renew it.",
+            repo.id,
+            review.url,
+            review.state.as_deref().unwrap_or("unknown")
+        );
+    }
+    ensure_review_has_new_head(repo, review, current_head)
+}
+
+fn ensure_review_has_new_head(
+    repo: &RepoEntry,
+    review: &PullRequest,
+    current_head: Option<&str>,
+) -> Result<()> {
+    if current_head.is_some() && current_head == review.head_ref_oid.as_deref() {
+        bail!(
+            "{}: review {} already contains the current feature head; add a new commit before --renew.",
+            repo.id,
+            review.url
+        );
+    }
+    Ok(())
+}
+
+fn review_is_open(review: &PullRequest) -> bool {
+    review
+        .state
+        .as_deref()
+        .is_some_and(|state| matches!(state.to_ascii_uppercase().as_str(), "OPEN" | "OPENED"))
+}
+
+fn review_is_terminal(review: &PullRequest) -> bool {
+    review
+        .state
+        .as_deref()
+        .is_some_and(|state| matches!(state.to_ascii_uppercase().as_str(), "MERGED" | "CLOSED"))
 }
 
 pub(super) fn apply_artifact_publish_result(

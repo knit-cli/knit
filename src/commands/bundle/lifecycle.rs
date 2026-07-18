@@ -45,7 +45,21 @@ pub fn archive_bundle(
         "{} local feature branches and the bundle artifact",
         out::heading("Preserved:")
     );
+    sync_lifecycle_state_to_remote(&active);
     Ok(())
+}
+
+/// Mirror an archive/restore onto configured KnitHub remotes by pushing the
+/// updated artifact, so hosted dashboards flip lifecycle state together with
+/// the local ledger. Best-effort: the local transition already succeeded, so
+/// sync failures warn instead of failing the command. A workspace with no
+/// push-sync remotes configured is a silent no-op.
+fn sync_lifecycle_state_to_remote(active: &ActiveBundle) {
+    if let Err(error) =
+        crate::commands::remote::sync_active_bundle_to_remote_if_enabled(active, &[], false)
+    {
+        println!("{} {error:#}", out::warn("KnitHub sync skipped:"));
+    }
 }
 
 pub(crate) fn archive_active_bundle(
@@ -117,6 +131,8 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
         &root,
         format!("run `knit --bundle {bundle_id} bundle worktree` to rematerialize its checkouts."),
     );
+    let active = ActiveBundle::unlocked(root, path, bundle);
+    sync_lifecycle_state_to_remote(&active);
     Ok(())
 }
 

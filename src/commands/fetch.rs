@@ -1,11 +1,11 @@
 use crate::cli::FetchMode;
-use crate::git::{git_output, git_output_optional};
+use crate::git::{git_output, git_output_optional, ref_commit_sha};
 use crate::ids::short_sha;
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::load_active_bundle;
 use anyhow::{bail, Context, Result};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 pub fn fetch_repos(
     selectors: &[String],
@@ -160,9 +160,9 @@ fn fetch_repo(repo: &FetchTarget) -> Result<FetchOutcome> {
         .with_context(|| format!("no `{remote}` remote configured in {}", cwd.display()))?;
 
     let remote_ref = format!("{remote}/{}", repo.base_branch);
-    let before = ref_sha(&cwd, &remote_ref)?;
+    let before = ref_commit_sha(&cwd, &remote_ref)?;
     git_output(&cwd, ["fetch", remote])?;
-    let after = ref_sha(&cwd, &remote_ref)?;
+    let after = ref_commit_sha(&cwd, &remote_ref)?;
 
     Ok(FetchOutcome {
         repo_id: repo.repo_id.clone(),
@@ -170,13 +170,6 @@ fn fetch_repo(repo: &FetchTarget) -> Result<FetchOutcome> {
         before,
         after,
     })
-}
-
-fn ref_sha(cwd: &Path, reference: &str) -> Result<Option<String>> {
-    git_output_optional(
-        cwd,
-        ["rev-parse", "--verify", &format!("{reference}^{{commit}}")],
-    )
 }
 
 fn print_fetch_summary(repo_id: &str, remote_ref: &str, before: Option<&str>, after: Option<&str>) {

@@ -13,8 +13,8 @@ use super::client::{effective_workspace_config, resolve_sync_remote_names};
 use super::history::{pull_history_from_remote, push_history_to_remote};
 use super::pull::pull_views_from_remote;
 use super::push::{
-    push_architecture_to_remote, push_bundle_to_remote, push_kg_graph_to_remote,
-    push_views_to_remote,
+    push_all_bundles_to_remote, push_architecture_to_remote, push_bundle_to_remote,
+    push_kg_graph_to_remote, push_views_to_remote,
 };
 use crate::output as out;
 use anyhow::{bail, Result};
@@ -100,8 +100,30 @@ pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
         // history are requested we let it cover history and avoid a redundant
         // second history push to the same remote.
         if targets.bundles {
-            if let Err(error) = push_bundle_to_remote(remote, None) {
-                failures.push(format!("{remote} bundle: {error:#}"));
+            // Bundle push is project-wide, mirroring bundle pull: the resolved
+            // bundle (when one resolves) gets the rich push including history,
+            // and every other local bundle artifact — open, landed, archived —
+            // is swept as well so remote lifecycle state converges on the
+            // local ledger. From a root with several open bundles nothing
+            // resolves; the sweep covers everything and history is pushed
+            // separately.
+            let active_id = crate::store::load_active_bundle()
+                .ok()
+                .map(|active| active.bundle.id);
+            match &active_id {
+                Some(_) => {
+                    if let Err(error) = push_bundle_to_remote(remote, None) {
+                        failures.push(format!("{remote} bundle: {error:#}"));
+                    }
+                }
+                None => {
+                    if let Err(error) = push_history_to_remote(None, remote) {
+                        failures.push(format!("{remote} history: {error:#}"));
+                    }
+                }
+            }
+            if let Err(error) = push_all_bundles_to_remote(remote, None, active_id.as_deref()) {
+                failures.push(format!("{remote} bundles: {error:#}"));
             }
         } else if targets.history {
             if let Err(error) = push_history_to_remote(None, remote) {

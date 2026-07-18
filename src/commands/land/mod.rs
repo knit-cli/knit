@@ -117,6 +117,8 @@ pub fn apply_land_plan(
     no_remote: bool,
     skip_checks: bool,
     keep_worktrees: bool,
+    tag: Option<String>,
+    no_tag: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_plan_path(&active, plan_path)?;
@@ -143,7 +145,65 @@ pub fn apply_land_plan(
     let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
     crate::commands::remote::sync_active_bundle_to_remote_if_enabled(&active, remote, no_remote)?;
     print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
+    tag_landed_bundle(&mut active, tag, no_tag, remote, no_remote);
     Ok(())
+}
+
+/// Decide whether a just-landed bundle gets a known-good tag. An explicit
+/// `--tag [name]` always tags (empty name defaults to the bundle slug); the
+/// `auto-tag` config default tags unless `--no-tag` overrides. Tagging is
+/// best-effort: the land already merged and archived, so a tag failure warns
+/// and points at a retry rather than failing the whole command. When nothing
+/// is tagged, the usual "you could tag" advice is printed instead.
+fn tag_landed_bundle(
+    active: &mut ActiveBundle,
+    tag: Option<String>,
+    no_tag: bool,
+    remote: &[String],
+    no_remote: bool,
+) {
+    let auto_tag = !no_tag
+        && crate::store::load_effective_config(&active.root)
+            .map(|config| config.auto_tag_enabled())
+            .unwrap_or(false);
+    let name = match tag {
+        Some(name) if !name.is_empty() => name,
+        Some(_) => active.bundle.id.clone(),
+        None if auto_tag => active.bundle.id.clone(),
+        None => {
+            advice::print(
+                &active.root,
+                format!(
+                    "after verifying main, mark this landed state known-good with `knit tag <name> --bundle {}`.",
+                    active.bundle.id
+                ),
+            );
+            return;
+        }
+    };
+
+    if let Err(error) = crate::commands::tag::create_tag_on_active(
+        active,
+        &name,
+        &[],
+        None,
+        false,
+        false,
+        remote,
+        no_remote,
+    ) {
+        println!(
+            "{} land succeeded but tagging failed: {error:#}",
+            out::warn("warning:")
+        );
+        advice::print(
+            &active.root,
+            format!(
+                "retry the tag with `knit tag {name} --bundle {}`.",
+                active.bundle.id
+            ),
+        );
+    }
 }
 
 pub fn resume_land_run(
