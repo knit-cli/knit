@@ -74,7 +74,10 @@ fn tag_creates_annotated_tags_pins_origin_base_and_records_node() {
     }
 
     // The bare origin has the tag, peeling to the freshly fetched origin base.
-    let remote_pin = git(&backend_remote, ["rev-parse", "refs/tags/knit/v1-launch^{commit}"]);
+    let remote_pin = git(
+        &backend_remote,
+        ["rev-parse", "refs/tags/knit/v1-launch^{commit}"],
+    );
     let origin_main = git(&backend, ["rev-parse", "origin/main"]);
     assert_eq!(remote_pin.trim(), origin_main.trim());
 
@@ -184,8 +187,7 @@ fn tag_show_reports_shas_subject_and_provenance() {
 #[test]
 fn tag_refuses_existing_tags_and_invalid_names() {
     let root = unique_temp_dir();
-    let (workspace, _backend, frontend, _backend_remote, collaborator) =
-        setup_remote_bundle(&root);
+    let (workspace, _backend, frontend, _backend_remote, collaborator) = setup_remote_bundle(&root);
 
     // A colliding tag pushed by someone else: refused, and nothing is created
     // anywhere (a same-bundle rerun would be the resume path instead).
@@ -211,8 +213,13 @@ fn tag_no_push_then_rerun_resumes_and_pushes_once() {
 
     let first = knit(&workspace, ["tag", "v3", "--no-push"]);
     assert!(first.contains("tagged"), "{first}");
-    assert!(!git(&backend, ["tag", "--list", "knit/v3"]).trim().is_empty());
-    assert_eq!(git(&backend_remote, ["tag", "--list", "knit/v3"]).trim(), "");
+    assert!(!git(&backend, ["tag", "--list", "knit/v3"])
+        .trim()
+        .is_empty());
+    assert_eq!(
+        git(&backend_remote, ["tag", "--list", "knit/v3"]).trim(),
+        ""
+    );
 
     let rerun = knit(&workspace, ["tag", "v3"]);
     assert!(rerun.contains("pushed"), "{rerun}");
@@ -390,7 +397,9 @@ fn land_apply_tag_flag_records_named_tag() {
     assert_eq!(bundle["state"].as_str(), Some("archived"));
     assert_eq!(tag_nodes(&bundle, "rel-2").len(), 1);
     let backend = root.join("backend");
-    assert!(!git(&backend, ["tag", "--list", "knit/rel-2"]).trim().is_empty());
+    assert!(!git(&backend, ["tag", "--list", "knit/rel-2"])
+        .trim()
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -430,7 +439,10 @@ fn land_apply_no_tag_overrides_auto_tag_config() {
         &fake_gh_dir,
     );
     // Skipped tagging still leaves the manual-tag advice.
-    assert!(apply.contains("knit tag <name> --bundle venue-capacity"), "{apply}");
+    assert!(
+        apply.contains("knit tag <name> --bundle venue-capacity"),
+        "{apply}"
+    );
 
     let bundle = read_bundle(&workspace);
     let tagged: Vec<Value> = bundle["nodes"]
@@ -448,7 +460,14 @@ fn land_apply_from_artifact_rejects_tag_flags() {
     let root = unique_temp_dir();
     let output = knit_fails(
         &root,
-        ["land", "apply", "--from-artifact", "bundle.json", "--tag", "v1"],
+        [
+            "land",
+            "apply",
+            "--from-artifact",
+            "bundle.json",
+            "--tag",
+            "v1",
+        ],
     );
     assert!(output.contains("--tag/--no-tag"), "{output}");
 }
@@ -466,7 +485,10 @@ fn land_apply_advises_tag_command() {
         &fake_bin,
         &fake_gh_dir,
     );
-    assert!(apply.contains("knit tag <name> --bundle venue-capacity"), "{apply}");
+    assert!(
+        apply.contains("knit tag <name> --bundle venue-capacity"),
+        "{apply}"
+    );
 
     // Following the advice records the land run in the tag's provenance.
     let tagged = knit(&workspace, ["--bundle", "venue-capacity", "tag", "rel-1"]);
