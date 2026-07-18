@@ -25,7 +25,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle prune --apply --all"));
     assert!(agents.contains("--remote-branches"));
     assert!(agents.contains("matching KnitHub remote bundle records"));
-    assert!(agents.contains("requires a token with `bundle:delete`"));
+    assert!(agents.contains("archived (never deleted) with the everyday `bundle:push` scope"));
     assert!(agents.contains("knit project remove <project> --force"));
     assert!(agents.contains("knit --bundle feature-a commit"));
     assert!(agents.contains("knit --bundle feature-a commit --all"));
@@ -121,6 +121,92 @@ fn project_default_repos_start_bundle_without_track() {
 
     let list = knit(&workspace, ["bundle", "list"]);
     assert!(list.contains("project-feature"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn failed_project_bundle_start_preserves_fallback_and_can_resume() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "previous work",
+            "--repo",
+            "backend",
+            "--no-worktree",
+        ],
+    );
+
+    // A non-worktree directory at the generated target deterministically
+    // stands in for a checkout interrupted by ENOSPC or another I/O failure.
+    let blocker = workspace.join(".knit/worktrees/failed-start/backend");
+    fs::create_dir_all(&blocker).unwrap();
+    fs::write(blocker.join("partial.txt"), "partial checkout\n").unwrap();
+
+    let failure = knit_fails(&workspace, ["bundle", "failed start", "--repo", "backend"]);
+    assert!(failure.contains("setup did not complete"), "{failure}");
+    assert!(
+        failure.contains("workspace fallback was not switched"),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("knit --bundle failed-start bundle worktree"),
+        "{failure}"
+    );
+
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["activeBundle"].as_str(), Some("previous-work"));
+    assert_eq!(bundle_repo_ids(&workspace, "failed-start"), vec!["backend"]);
+
+    let failed: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/failed-start.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(failed["repos"][0]["worktreePath"].is_null());
+
+    fs::remove_dir_all(&blocker).unwrap();
+    knit(
+        &workspace,
+        ["--bundle", "failed-start", "bundle", "worktree"],
+    );
+    assert!(blocker.join("app.txt").exists());
+
+    let recovered: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/failed-start.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        recovered["repos"][0]["worktreePath"].as_str(),
+        Some(".knit/worktrees/failed-start/backend")
+    );
+
+    let empty_failure = knit_fails(
+        &workspace,
+        ["bundle", "empty failure", "--repo", "missing-repo"],
+    );
+    assert!(
+        empty_failure.contains("before any repos were recorded"),
+        "{empty_failure}"
+    );
+    assert!(
+        empty_failure.contains("artifact was removed"),
+        "{empty_failure}"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/empty-failure.bundle.json")
+        .exists());
+
+    let config: Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["activeBundle"].as_str(), Some("previous-work"));
 
     fs::remove_dir_all(root).unwrap();
 }
