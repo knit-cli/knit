@@ -265,7 +265,7 @@ fn print_pull_summary(repo_id: &str, before: &str, after: &str) {
 /// Entry point for `knit pull`. Decides what to update from context and flags:
 /// - `--main` / `--bundles` (or both) run the aggregate, best-effort report.
 /// - With no target flags: inside a resolved bundle, pull that bundle's feature
-///   worktrees plus its KnitHub artifact; at the workspace base (the shared
+///   worktrees plus its remote artifact; at the workspace base (the shared
 ///   fallback) pull everything (project main repos + every open bundle).
 #[allow(clippy::too_many_arguments)]
 pub fn pull(
@@ -294,7 +294,7 @@ pub fn pull(
         }
     }
 
-    // A specific bundle is in context: pull its repos (and its KnitHub artifact).
+    // A specific bundle is in context: pull its repos (and its remote artifact).
     pull_repos(selectors, all, rebase, force, feature)?;
     pull_remote_state(remote, no_remote, merge)
 }
@@ -482,7 +482,7 @@ fn pull_one_bundle(
     materialize: bool,
 ) -> Outcome {
     let Some(context) = context else {
-        return Outcome::Skipped("no KnitHub remote configured".to_string());
+        return Outcome::Skipped("no sync remote available".to_string());
     };
     match pull_bundle_remote_state(root, context, bundle_id, merge, materialize) {
         Ok(RemoteBundleOutcome::Pulled(hash)) => Outcome::Synced(hash),

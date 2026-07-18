@@ -25,7 +25,7 @@ pub struct KnitConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_tag: Option<bool>,
     /// When true (default), git-pushing commands also push the bundle artifact to
-    /// the configured KnitHub remote. Set false to never sync on push.
+    /// the configured sync remote. Set false to never sync on push.
     #[serde(default = "default_push_sync")]
     pub push_sync: bool,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]

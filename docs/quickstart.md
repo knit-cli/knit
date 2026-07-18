@@ -178,7 +178,7 @@ Related in same scope:
 
 The file you queried lived in one repo; the answer tells you which commit in a
 *different* repo must be read alongside it. Pass `--pull` to refresh the
-history ledger from a KnitHub remote first.
+history ledger from a sync remote first.
 
 ## 10. Host it on KnitHub (optional)
 

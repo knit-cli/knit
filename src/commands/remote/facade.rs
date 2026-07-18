@@ -1,4 +1,4 @@
-//! The single internal entry point for explicit artifact sync with KnitHub.
+//! The single internal entry point for explicit artifact sync with the configured remotes.
 //!
 //! `knit sync push` / `knit sync pull` (and the git-shaped `knit push --remote`,
 //! `knit fetch --knit`, `knit pull --remote`, plus landing's automatic sync) all
@@ -75,13 +75,13 @@ fn resolve_remotes(remote_overrides: &[String]) -> Result<Vec<String>> {
     let remotes = resolve_sync_remote_names(&config, remote_overrides);
     if remotes.is_empty() {
         bail!(
-            "No KnitHub remote configured. Run `knit remote add --global <name> <url>`, `knit remote add <name> <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
+            "No sync remote configured. Run `knit remote add --global <name> <url>`, `knit remote add <name> <url>`, or `knit config set sync-remotes <name>[,<name>...]` first."
         );
     }
     Ok(remotes)
 }
 
-/// Push selected artifact families to KnitHub for the resolved project/bundle.
+/// Push selected artifact families to the sync remotes for the resolved project/bundle.
 ///
 /// `knit sync push` and `knit sync push --bundles/--history/--views` route here,
 /// as does `knit push --remote` (bundles only). Failures across remotes are
@@ -150,7 +150,7 @@ pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
     finish(failures, "push")
 }
 
-/// Pull selected artifact families from KnitHub for the resolved project/bundle.
+/// Pull selected artifact families from the sync remotes for the resolved project/bundle.
 ///
 /// `knit sync pull` and `knit sync pull --bundles/--history/--views` route here,
 /// as does `knit pull --remote`/`knit fetch --knit` (bundles only). Bundle pull
@@ -214,7 +214,7 @@ fn finish(failures: Vec<String>, verb: &str) -> Result<()> {
         Ok(())
     } else {
         bail!(
-            "KnitHub {verb} failed for {} target(s):\n{}",
+            "Sync {verb} failed for {} target(s):\n{}",
             failures.len(),
             failures.join("\n")
         )

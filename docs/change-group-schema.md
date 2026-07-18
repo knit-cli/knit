@@ -162,7 +162,7 @@ The `baseBranch` field is the review target recorded by the provider. `knit land
 
 Project history events are metadata-only records derived from bundle ledgers. They include fields such as `eventId`, `projectId`, `kind`, `bundleId`, `repoId`, `branch`, `commit`, `beforeSha`, `afterSha`, `nodeId`, `nodeType`, `commitGroupId`, `occurredAt`, and `recordedAt`.
 
-Knit uses deterministic event ids so local JSONL history and KnitHub history can be merged idempotently. `knit related` joins Git path history to these events by commit SHA, then expands the result to the related bundle and commit-group context.
+Knit uses deterministic event ids so local JSONL history and remote history can be merged idempotently. `knit related` joins Git path history to these events by commit SHA, then expands the result to the related bundle and commit-group context.
 
 ## Merge Runs
 

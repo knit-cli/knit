@@ -2,7 +2,7 @@
 //! include/exclude deltas on top of the project's `includeByDefault` repo set.
 //!
 //! Views are user-local config, stored at `.knit/views/<project-id>.views.json`
-//! and synced to KnitHub as the user's own configuration. They never live inside
+//! and synced to the sync remotes as the user's own configuration. They never live inside
 //! the shared project artifact.
 
 use super::SCHEMA_VERSION;

@@ -15,7 +15,7 @@ src/
     land/             landing plan/check/execute/update/validate/display
     merge/            local integration runs and reports
     publish/          publish workflow: scope/remote/sync/status phases plus PR body generation
-    remote/           KnitHub transport: client, facade, per-artifact push/pull/history, clone
+    remote/           sync-remote transport: client, facade, per-artifact push/pull/history, clone
     agents.rs         generated AGENTS.md guidance
     cherrypick.rs     move recorded commits between bundles
     clean.rs
@@ -86,7 +86,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `commands/publish/` owns the user-facing publish workflow. It resolves a `providers::Forge` per repo from the repo's remote and calls through the trait; it does not hard-code a host.
 - `commands/land/` owns landing plan/run orchestration. It reads publication metadata and project landing templates, writes `.knit/land-plans/` and `.knit/land-runs/`, manages deployment checkouts under `.knit/land-worktrees/`, and appends `feature.landed` only after every step succeeds.
 - `commands/merge/` owns local bundle/ref integration into target branches or other bundles. It writes `.knit/merge-runs/`, uses managed branch checkouts under `.knit/merge-worktrees/`, rolls back failed non-manual runs to their pre-run SHAs, and records target-bundle merges as `git.observed`.
-- `commands/remote/` owns all KnitHub artifact transport. `facade.rs` selects artifact families and remotes; the per-artifact helpers in `push.rs`/`pull.rs`/`history.rs` own transport. Every door (`knit sync push/pull`, `knit push --remote`, `knit fetch`/`pull --bundles`, post-land auto-sync) routes through it.
+- `commands/remote/` owns all sync-remote artifact transport. `facade.rs` selects artifact families and remotes; the per-artifact helpers in `push.rs`/`pull.rs`/`history.rs` own transport. Every door (`knit sync push/pull`, `knit push --remote`, `knit fetch`/`pull --bundles`, post-land auto-sync) routes through it.
 - The runtime itself lives in the `crates/knit-runtime` workspace crate, kept version-control agnostic on purpose: it consumes a `RuntimeContext` (workspace root, bundle id, repos with source and checkout paths) plus the `runtime` config block, and knows nothing about ledgers, git, or bundle resolution. `commands/runtime/mod.rs` is the CLI adapter — it resolves the bundle/project, applies `stacks`/`stackRepo` narrowing and repo-id slugging, and calls the crate. Inside the crate, `plan.rs` picks each stack's compose file and mode (explicit `runtime.mode`, the `docker-compose.knit.yml` filename, or `${KNIT_*}` references select contract mode; everything else is transformed), `transform.rs` rewrites resolved compose JSON (paths into tracked repos to bundle worktrees, published ports to free ports, textual port references, shared-database stripping), `up.rs` orchestrates multi-stack starts with cross-stack port rewiring, and `state.rs` owns run state under `.knit/runtime-runs/<bundle>/` (recorded only after every stack starts; `down`/`status` resolve containers by compose project label so they survive missing state and torn-down worktrees). Docker is reached only through `docker compose` subprocesses, and a project command named `up`/`down`/`status` always wins over the runtime verbs. Transform heuristics must not grow: a stack the transform cannot lift commits a contract compose file instead. This boundary is what would let the runtime ship as its own binary or embed elsewhere later without a redesign.
 - `commands/doctor.rs` owns workspace validation and additive JSON migrations. `commands/schema.rs` prints bundled JSON Schemas for Knit artifacts.
 - `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. Each adapter (`github.rs`/`gitlab.rs`/`forgejo.rs`) maps its CLI's JSON onto the canonical types. GitLab and Codeberg/Forgejo are detected from the remote host; every other remote defaults to GitHub. Provider modules expose small operations; command modules decide workflow policy.
@@ -100,7 +100,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 
 Cheap pure behavior lives in small integration tests (`tests/ids.rs`, `tests/status.rs`, `tests/model.rs`).
 
-End-to-end git behavior is automated: `tests/common/` builds temporary toy repos and a workspace with an isolated `KNIT_HOME` (tests must never read the real `~/.config/knit` or reach a live KnitHub), and the flow tests (`tests/feature_flow.rs`, `tests/bundle.rs`, `tests/land.rs`, `tests/merge.rs`, `tests/publish.rs`, `tests/sync.rs`, `tests/project.rs`, `tests/config.rs`, `tests/cleanup.rs`) drive the real binary against them. [manual-test.md](manual-test.md) remains as a hands-on walkthrough.
+End-to-end git behavior is automated: `tests/common/` builds temporary toy repos and a workspace with an isolated `KNIT_HOME` (tests must never read the real `~/.config/knit` or reach a live sync remote), and the flow tests (`tests/feature_flow.rs`, `tests/bundle.rs`, `tests/land.rs`, `tests/merge.rs`, `tests/publish.rs`, `tests/sync.rs`, `tests/project.rs`, `tests/config.rs`, `tests/cleanup.rs`) drive the real binary against them. [manual-test.md](manual-test.md) remains as a hands-on walkthrough.
 
 ## Bundle Ledger
 
@@ -122,9 +122,9 @@ History events are pointers, not patches. They record the project, bundle, repo,
 
 This split enables related-work queries without duplicating Git. `knit related` first asks Git which commits touched a path, then joins those SHAs to Knit history to recover the bundle and cross-repo commit context. If a commit was made wholly outside Knit and never recorded into a bundle, Git can still report it for the path, but Knit history has no bundle context for it.
 
-## KnitHub Artifact Sync
+## Remote Artifact Sync
 
-Three kinds of Knit artifact move between the workspace and KnitHub remotes: bundle artifacts, project history events, and per-user saved views. Historically these were reached through eight overlapping doors: `knit push --remote`, `knit bundle push`, `knit fetch --bundles`, `knit pull --bundles`, `knit history push/pull/sync`, `knit view push/pull`, `knit land sync`, and the automatic push-sync-on-land driven by the `push-sync`/`sync-remote`/`sync-remotes` config keys. Several verbs did the same thing under different names, and the command surface gave no single place to learn "how do I move artifacts to KnitHub".
+Three kinds of Knit artifact move between the workspace and sync remotes: bundle artifacts, project history events, and per-user saved views. Historically these were reached through eight overlapping doors: `knit push --remote`, `knit bundle push`, `knit fetch --bundles`, `knit pull --bundles`, `knit history push/pull/sync`, `knit view push/pull`, `knit land sync`, and the automatic push-sync-on-land driven by the `push-sync`/`sync-remote`/`sync-remotes` config keys. Several verbs did the same thing under different names, and the command surface gave no single place to learn "how do I move artifacts to a remote".
 
 This is consolidated into one verb family. `knit sync` keeps its original meaning exactly — a local-only reconcile that records git commits made outside Knit — and gains two subcommands that are the one explicit way to move artifacts:
 

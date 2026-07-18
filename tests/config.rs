@@ -174,15 +174,15 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
     // The fix: clone must consult the global config outside a workspace, so it
     // never reports a missing URL or token; it should reach the network step.
     assert!(
-        !output.contains("No KnitHub URL configured"),
+        !output.contains("No URL configured"),
         "global URL should be used outside a workspace: {output}"
     );
     assert!(
-        !output.contains("No KnitHub token configured"),
+        !output.contains("No remote token configured"),
         "global token should be used outside a workspace: {output}"
     );
     assert!(
-        output.contains("KnitHub request failed"),
+        output.contains("Remote request failed"),
         "clone should fail at the request step, not resolution: {output}"
     );
 
@@ -227,10 +227,7 @@ fn config_can_target_multiple_knithub_sync_remotes() {
     assert_eq!(list.matches("sync").count(), 2, "{list}");
 
     let missing = knit_fails(&workspace, ["config", "set", "sync-remotes", "missing"]);
-    assert!(
-        missing.contains("No KnitHub remote named `missing`"),
-        "{missing}"
-    );
+    assert!(missing.contains("No remote named `missing`"), "{missing}");
 
     knit(&workspace, ["remote", "remove", "local"]);
     let config: Value =
@@ -280,6 +277,35 @@ fn workspace_scoped_tokens_warn_about_shared_config() {
         &env,
     );
     assert!(!global_store.contains("warning:"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn every_configured_remote_is_a_sync_remote_by_default() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "default sync set"]);
+    knit(
+        &workspace,
+        ["remote", "add", "alpha", "http://localhost:4000"],
+    );
+    knit(
+        &workspace,
+        ["remote", "add", "beta", "https://beta.example.invalid"],
+    );
+
+    // No sync-remotes config: the remotes list itself is the sync set.
+    let list = knit(&workspace, ["remote", "list"]);
+    assert!(!list.contains("not sync"), "{list}");
+    assert_eq!(list.matches("sync").count(), 2, "{list}");
+
+    // An explicit sync-remotes narrows the set.
+    knit(&workspace, ["config", "set", "sync-remotes", "beta"]);
+    let list = knit(&workspace, ["remote", "list"]);
+    assert!(list.contains("not sync"), "{list}");
 
     fs::remove_dir_all(root).unwrap();
 }
