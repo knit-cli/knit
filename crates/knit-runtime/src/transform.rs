@@ -17,6 +17,9 @@
 //!   `docker compose config` bakes onto each named volume and network, so the
 //!   result runs as an isolated compose project with its own (freshly named)
 //!   networks and volumes rather than binding the source stack's
+//! - keeps `env_file:` values as references instead of the copies `docker
+//!   compose config` inlines, so secrets stay in the repo's env files rather
+//!   than in the generated artifact (see the `envfile` module)
 //!
 //! The result is the same composed shape with different ports and the new
 //! code. Repos that need precise control can instead commit a compose file
@@ -34,6 +37,13 @@ pub struct ServicePort {
     pub host: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub container: Option<u16>,
+    /// The host port the source stack published (transform mode) or the
+    /// configured allocation base (contract mode). Surfaced so users can see
+    /// which dev port each bundle port replaced — the transform rewrites
+    /// references declared in the compose file, but ports hardcoded in app
+    /// source keep pointing here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_host: Option<u16>,
 }
 
 /// Transform a resolved compose config (the JSON output of `docker compose
@@ -83,6 +93,7 @@ pub fn transform_compose(
                         service: service_name.clone(),
                         host: mapping.1,
                         container: mapping.2,
+                        source_host: Some(mapping.0),
                     });
                 }
             }
@@ -529,12 +540,36 @@ fn relative_between(base: &Path, target: &Path) -> Option<String> {
 /// Resolve the compose file via `docker compose config --format json`,
 /// anchored at the source repo so relative paths resolve in source-space.
 pub fn resolve_compose_config(compose_file: &Path, project_directory: &Path) -> Result<Value> {
-    let output = std::process::Command::new("docker")
+    run_compose_config(compose_file, project_directory, false)
+}
+
+/// Like [`resolve_compose_config`], but with `--no-env-resolution`, so
+/// `env_file:` entries survive as references instead of being copied into
+/// each service's environment. Fails on compose releases predating the flag;
+/// callers fall back to the fully resolved shape.
+pub fn resolve_compose_config_no_env(
+    compose_file: &Path,
+    project_directory: &Path,
+) -> Result<Value> {
+    run_compose_config(compose_file, project_directory, true)
+}
+
+fn run_compose_config(
+    compose_file: &Path,
+    project_directory: &Path,
+    no_env_resolution: bool,
+) -> Result<Value> {
+    let mut command = std::process::Command::new("docker");
+    command
         .args(["compose", "-f"])
         .arg(compose_file)
         .arg("--project-directory")
         .arg(project_directory)
-        .args(["config", "--format", "json"])
+        .args(["config", "--format", "json"]);
+    if no_env_resolution {
+        command.arg("--no-env-resolution");
+    }
+    let output = command
         .output()
         .context("failed to run docker compose config")?;
     if !output.status.success() {
@@ -712,6 +747,14 @@ mod tests {
         assert_eq!(by_service["frontend"].1, Some(5173));
         assert_ne!(by_service["backend"].0, 4000);
         assert_ne!(by_service["frontend"].0, 5173);
+        // The source port each allocation replaced is recorded.
+        let sources: std::collections::BTreeMap<_, _> = ports
+            .iter()
+            .map(|port| (port.service.clone(), port.source_host))
+            .collect();
+        assert_eq!(sources["db"], Some(5436));
+        assert_eq!(sources["backend"], Some(4000));
+        assert_eq!(sources["frontend"], Some(5173));
 
         // Environment references to old host ports are rewritten, including
         // cross-service references; container-side ports stay.
