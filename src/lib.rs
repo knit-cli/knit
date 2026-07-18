@@ -208,6 +208,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 force_branches,
                 remote_branches,
                 remote_bundles,
+                archived,
             }) => {
                 let refresh = refresh || !no_refresh;
                 let worktrees = all || worktrees;
@@ -227,6 +228,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     force_branches,
                     remote_branches,
                     remote_bundles,
+                    archived,
                 )
             }
             Some(BundleCommand::Archive {
