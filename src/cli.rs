@@ -238,6 +238,26 @@ pub enum Commands {
         #[command(subcommand)]
         command: CheckCommand,
     },
+    /// Record a cross-repo known-good marker: annotated git tags `knit/<name>` on each repo's origin base.
+    #[command(args_conflicts_with_subcommands = true)]
+    Tag {
+        /// Tag name (creates `knit/<name>` in every tracked repo). With no name and no subcommand, lists tags.
+        name: Option<String>,
+        /// Extra note stored in the tag annotation and ledger node.
+        #[arg(short = 'm', long = "message", value_name = "NOTE")]
+        message: Option<String>,
+        /// Limit tagging to one or more repo ids or paths (weakens the cross-repo claim).
+        #[arg(short = 'r', long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Create local tags and the ledger node without pushing to origin.
+        #[arg(long)]
+        no_push: bool,
+        /// Record the ledger node only; do not create git tags.
+        #[arg(long, conflicts_with = "no_push")]
+        no_git: bool,
+        #[command(subcommand)]
+        command: Option<TagCommand>,
+    },
     /// Run a project command inside resolved bundle checkouts.
     Run {
         /// Configured project command name. Omit when passing a raw command after --.
@@ -895,7 +915,7 @@ pub enum ConfigCommand {
     },
     /// Set a Knit config value.
     Set {
-        /// Config key: advice, stealth, push-sync, sync-remote, or sync-remotes.
+        /// Config key: advice, stealth, auto-tag, push-sync, sync-remote, or sync-remotes.
         key: String,
         /// Config value.
         value: String,
@@ -1034,6 +1054,17 @@ pub enum CheckCommand {
 }
 
 #[derive(Subcommand)]
+pub enum TagCommand {
+    /// List `knit/*` tags across repos, marking partial sets.
+    List,
+    /// Show per-repo local/remote SHAs, the annotation subject, and ledger provenance.
+    Show {
+        /// Tag name without the `knit/` prefix.
+        name: String,
+    },
+}
+
+#[derive(Subcommand)]
 pub enum LandCommand {
     /// Generate an editable landing plan from recorded publications.
     Plan {
@@ -1071,6 +1102,12 @@ pub enum LandCommand {
         /// Skip the KnitHub bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
+        /// After a successful land, record a cross-repo known-good tag of the resulting main. Optionally name it; defaults to the bundle slug.
+        #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+        tag: Option<String>,
+        /// Do not auto-tag even when the `auto-tag` config default is on.
+        #[arg(long, conflicts_with = "tag")]
+        no_tag: bool,
     },
     /// Create revert PRs for the merge steps a failed landing run completed.
     Rollback {

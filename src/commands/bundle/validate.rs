@@ -193,7 +193,7 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record message", node.id));
             }
         }
-        "check.recorded" => {
+        "check.recorded" | "tag.created" => {
             if node.title.as_deref().unwrap_or("").trim().is_empty() {
                 errors.push(format!("node `{}` must record title", node.id));
             }

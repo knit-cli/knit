@@ -21,7 +21,7 @@ use anyhow::Result;
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
     ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
-    SyncCommand, ViewCommand,
+    SyncCommand, TagCommand, ViewCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -321,6 +321,28 @@ pub fn run(cli: Cli) -> Result<()> {
             }
             CheckCommand::Status => commands::show_check_status(),
         },
+        Commands::Tag {
+            name,
+            message,
+            repos,
+            no_push,
+            no_git,
+            command,
+        } => match command {
+            Some(TagCommand::List) => commands::list_tags(),
+            Some(TagCommand::Show { name }) => commands::show_tag(&name),
+            None => match name {
+                Some(name) => {
+                    commands::create_tag(&name, &repos, message.as_deref(), no_push, no_git)
+                }
+                None => {
+                    if message.is_some() || !repos.is_empty() || no_push || no_git {
+                        anyhow::bail!("Pass a tag name, for example `knit tag v1-launch`.");
+                    }
+                    commands::list_tags()
+                }
+            },
+        },
         Commands::Run {
             name,
             repos,
@@ -421,14 +443,25 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_remote,
                 skip_checks,
                 keep_worktrees,
+                tag,
+                no_tag,
             }) => match from_artifact {
-                Some(path) => commands::apply_land_from_artifact(&path, out.as_deref()),
+                Some(path) => {
+                    if tag.is_some() || no_tag {
+                        anyhow::bail!(
+                            "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
+                        );
+                    }
+                    commands::apply_land_from_artifact(&path, out.as_deref())
+                }
                 None => commands::apply_land_plan(
                     plan.as_deref(),
                     &remote,
                     no_remote,
                     skip_checks,
                     keep_worktrees,
+                    tag,
+                    no_tag,
                 ),
             },
             Some(LandCommand::Rollback { run, apply }) => {

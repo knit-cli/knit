@@ -100,8 +100,9 @@ Current node types:
 - `feature.closed`
 - `repo.removed`
 - `check.recorded`
+- `tag.created`
 
-`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`. `pr.revert` nodes include `targetNodeId`, `provider`, `repoIds`, and the newly created revert PR `publicationUrls`. `feature.closed` nodes include an optional `reason`. `check.recorded` nodes carry the check name in `title`, the verdict in `message` (a machine-parsable `pass`/`fail` prefix followed by detail), and the per-repo head pins the verdict applies to in `commits`.
+`commit.group` nodes include `commitGroupId`, `message`, `commits`, and `repoChanges`. `revert.group` nodes include the same fields plus `targetNodeId`, pointing at the bundle node that was reverted. `git.observed` nodes include `repoChanges`. `land.update` nodes include `provider` and `repoChanges` for feature-branch updates performed during landing preparation. Repo/worktree nodes include `repoIds`. `feature.landed` nodes include `planId`, `runId`, `provider`, `repoIds`, and `publicationUrls`. `pr.revert` nodes include `targetNodeId`, `provider`, `repoIds`, and the newly created revert PR `publicationUrls`. `feature.closed` nodes include an optional `reason`. `check.recorded` nodes carry the check name in `title`, the verdict in `message` (a machine-parsable `pass`/`fail` prefix followed by detail), and the per-repo head pins the verdict applies to in `commits`. `tag.created` nodes carry the tag name in `title` (exported as git tag `knit/<title>` in each repo), the full annotation text in `message`, and the per-repo tagged origin-base SHAs in `commits`.
 
 `repoChanges` records how a repo moved:
 
