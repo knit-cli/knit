@@ -69,6 +69,24 @@ pub(crate) fn run_down(ctx: &RuntimeContext) -> Result<()> {
         out::heading("Runtime down:"),
         out::repo(&ctx.bundle_id)
     );
+
+    // The generated compose files carry resolved app configuration; a
+    // finished run has no reason to keep them around.
+    let run_dir = runtime_run_dir(&ctx.root, &ctx.bundle_id);
+    if run_dir.exists() {
+        match std::fs::remove_dir_all(&run_dir) {
+            Ok(()) => println!(
+                "{} {}",
+                out::muted("Removed:"),
+                out::path(run_dir.display())
+            ),
+            Err(error) => println!(
+                "{} could not remove {}: {error}",
+                out::warn("Warn:"),
+                run_dir.display()
+            ),
+        }
+    }
     Ok(())
 }
 
@@ -125,12 +143,21 @@ pub(crate) fn run_status(ctx: &RuntimeContext) -> Result<()> {
     };
 
     for port in &state.ports {
-        println!(
-            "{} {} localhost:{}",
-            out::muted("Port:"),
-            port.service,
-            port.host
-        );
+        match port.source_host.filter(|source| *source != port.host) {
+            Some(source) => println!(
+                "{} {} localhost:{} {}",
+                out::muted("Port:"),
+                port.service,
+                port.host,
+                out::muted(format!("(source {source})"))
+            ),
+            None => println!(
+                "{} {} localhost:{}",
+                out::muted("Port:"),
+                port.service,
+                port.host
+            ),
+        }
     }
     if let Some(database) = &state.database {
         println!(
@@ -359,11 +386,13 @@ mod tests {
                 service: "db".into(),
                 host: 5446,
                 container: Some(5432),
+                source_host: None,
             },
             ServicePort {
                 service: "web-frontend".into(),
                 host: 5184,
                 container: Some(5173),
+                source_host: None,
             },
         ];
         assert_eq!(frontend_port(&ports), Some(5184));

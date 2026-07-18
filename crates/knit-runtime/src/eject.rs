@@ -20,6 +20,7 @@
 //! stops applying to that repo.
 
 use crate::config::{ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::envfile;
 use crate::plan::{StackPlan, CONTRACT_COMPOSE_CANDIDATES};
 use crate::support::{self, env_var_suffix, out};
 use crate::transform;
@@ -57,7 +58,33 @@ pub(crate) fn run_eject(
         }
 
         let mut config = transform::resolve_compose_config(&plan.compose, &plan.repo.source_path)?;
+        let env_files = match transform::resolve_compose_config_no_env(
+            &plan.compose,
+            &plan.repo.source_path,
+        ) {
+            Ok(unresolved) => envfile::service_env_files(&unresolved),
+            Err(_) => {
+                println!(
+                    "{}",
+                    out::muted(
+                        "Env files: inlined (this docker compose lacks --no-env-resolution) — check the generated file for secrets before committing."
+                    )
+                );
+                Default::default()
+            }
+        };
         let summary = eject_compose(&mut config, &inputs)?;
+        // The ejected file is committed: env values the repo's env files
+        // provide stay references, so secrets never land in git. Paths are
+        // expressed against ${KNIT_ROOT} where possible — the env file lives
+        // in the source checkout (typically untracked, so worktrees lack it)
+        // and the interpolation keeps the committed file per-user portable.
+        envfile::detach_env_files(&mut config, &env_files, &|path| match path
+            .strip_prefix(&inputs.root)
+        {
+            Ok(suffix) => join_var("KNIT_ROOT", suffix),
+            Err(_) => path.display().to_string(),
+        });
         let text = format!(
             "{}{}",
             header(&plan.compose, summary.database_service.as_deref()),
