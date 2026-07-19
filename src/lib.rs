@@ -39,7 +39,13 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
-            ProjectCommand::Remove { name, force } => commands::remove_project(&name, force),
+            ProjectCommand::Remove { name, repos, force } => {
+                if repos.is_empty() {
+                    commands::remove_project(&name, force)
+                } else {
+                    commands::remove_project_repos(&name, &repos)
+                }
+            }
             ProjectCommand::Push { name, remote } => {
                 commands::push_project_to_remote(name.as_deref(), remote.as_deref())
             }

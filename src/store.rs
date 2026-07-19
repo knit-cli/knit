@@ -511,6 +511,12 @@ fn open_bundle_ids(root: &Path) -> Result<Vec<String>> {
     Ok(ids)
 }
 
+/// Whether a bundle artifact is still open (not archived/closed/deleted, and
+/// not landed without an open publication). Shared with project bookkeeping.
+pub fn bundle_is_open(bundle: &ChangeGroup) -> bool {
+    is_open_bundle(bundle)
+}
+
 fn is_open_bundle(bundle: &ChangeGroup) -> bool {
     match bundle.state {
         Some(BundleState::Archived | BundleState::Closed | BundleState::Deleted) => return false,
