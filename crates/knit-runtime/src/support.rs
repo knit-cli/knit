@@ -20,6 +20,7 @@ pub(crate) mod out {
         Bold,
         Dim,
         CyanBold,
+        Yellow,
     }
 
     pub fn heading(text: impl Display) -> String {
@@ -38,6 +39,10 @@ pub(crate) mod out {
         paint(text, Style::CyanBold)
     }
 
+    pub fn warn(text: impl Display) -> String {
+        paint(text, Style::Yellow)
+    }
+
     fn paint(text: impl Display, style: Style) -> String {
         let text = text.to_string();
         if !should_color() {
@@ -47,6 +52,7 @@ pub(crate) mod out {
             Style::Bold => "\x1b[1m",
             Style::Dim => "\x1b[2m",
             Style::CyanBold => "\x1b[1;36m",
+            Style::Yellow => "\x1b[33m",
         };
         format!("{code}{text}\x1b[0m")
     }

@@ -12,6 +12,7 @@
 
 pub mod config;
 mod eject;
+mod envfile;
 mod plan;
 mod state;
 mod support;
