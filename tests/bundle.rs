@@ -5,6 +5,47 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
+fn doctor_ignores_missing_recorded_worktree_only_for_archived_bundles() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "archived checkout"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    knit(
+        &workspace,
+        ["bundle", "archive", "archived-checkout", "--keep-worktrees"],
+    );
+
+    let bundle_path = workspace.join(".knit/bundles/archived-checkout.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    let missing_worktree = ".knit/worktrees/archived-checkout/missing";
+    bundle["repos"][0]["worktreePath"] = json!(missing_worktree);
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+
+    assert!(knit(&workspace, ["doctor"]).contains("Knit doctor: ok"));
+
+    bundle["state"] = json!("open");
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+    let open_doctor = knit_fails(&workspace, ["doctor"]);
+    assert!(open_doctor.contains("worktree missing"), "{open_doctor}");
+    assert!(open_doctor.contains(missing_worktree), "{open_doctor}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_start_and_add_support_ad_hoc_work() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
