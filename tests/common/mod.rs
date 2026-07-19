@@ -1210,3 +1210,186 @@ fn handle_fake_knithub_push_request(
     )?;
     stream.flush()
 }
+
+/// Run knit capturing stdout and stderr separately: `--json` commands put the
+/// machine-readable document alone on stdout with human lines on stderr, which
+/// the combined-output helpers cannot assert. Ambient remote credentials and
+/// git config are scrubbed so a developer's real setup never leaks in;
+/// test-provided env is applied last and wins.
+pub fn knit_split_output(
+    cwd: &Path,
+    args: &[&str],
+    env: &[(&str, &str)],
+) -> (String, String, bool) {
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION")
+        .env_remove("KNIT_REMOTE_URL")
+        .env_remove("KNITHUB_URL")
+        .env_remove("KNIT_REMOTE_TOKEN")
+        .env_remove("KNITHUB_TOKEN")
+        .env_remove("KNIT_REMOTE_HOSTED_TOKEN");
+    scrub_ambient_git_identity(&mut command);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    let output = command.output().unwrap();
+    (
+        String::from_utf8_lossy(&output.stdout).to_string(),
+        String::from_utf8_lossy(&output.stderr).to_string(),
+        output.status.success(),
+    )
+}
+
+/// Basic-auth header the fake remote git host expects: the vended credential
+/// `x-access-token:vended-pass`.
+pub const FAKE_REMOTE_GIT_AUTH: &str = "Basic eC1hY2Nlc3MtdG9rZW46dmVuZGVkLXBhc3M=";
+
+/// Spawn a fake sync-remote API covering project export/views, git-credential
+/// vending, and dumb-HTTP git serving (with basic auth) for repo directories
+/// under `<dir>/git/`.
+///
+/// Behavior markers in `dir`:
+/// - `vend-409`: git-credential responds 409 `noCredential`
+///
+/// Captures in `dir`:
+/// - `vend-requests.txt`: one `path<SP>authorization` line per vend call
+pub fn spawn_fake_remote_api(dir: &Path, export_body: String) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    fs::create_dir_all(dir).unwrap();
+    fs::write(dir.join("export.json"), export_body).unwrap();
+    let dir = dir.to_path_buf();
+    let base = base_url.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            let base = base.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_remote_request(&mut stream, &dir, &base);
+            });
+        }
+    });
+    base_url
+}
+
+fn handle_fake_remote_request(
+    stream: &mut std::net::TcpStream,
+    dir: &Path,
+    base_url: &str,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+
+    let mut content_length = 0usize;
+    let mut authorization = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                "authorization" => authorization = value.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0u8; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let body = String::from_utf8_lossy(&body).to_string();
+
+    let path = target.split('?').next().unwrap_or_default().to_string();
+
+    // Dumb-HTTP git hosting: serve files from `<dir>/git/...` behind basic
+    // auth so a plain clone fails and the askpass retry succeeds.
+    if path.starts_with("/git/") {
+        if authorization != FAKE_REMOTE_GIT_AUTH {
+            let body = b"auth required";
+            write!(
+                stream,
+                "HTTP/1.1 401 Unauthorized\r\nwww-authenticate: Basic realm=\"fake-remote\"\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                body.len()
+            )?;
+            stream.write_all(body)?;
+            return stream.flush();
+        }
+        let file_path = dir.join(path.trim_start_matches('/'));
+        return match fs::read(&file_path) {
+            Ok(bytes) => {
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\ncontent-type: application/octet-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                    bytes.len()
+                )?;
+                stream.write_all(&bytes)?;
+                stream.flush()
+            }
+            Err(_) => {
+                write!(
+                    stream,
+                    "HTTP/1.1 404 Not Found\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                )?;
+                stream.flush()
+            }
+        };
+    }
+
+    let (status, response) = match (method.as_str(), path.as_str()) {
+        ("POST", path)
+            if path.starts_with("/api/v1/projects/")
+                && path.contains("/repositories/")
+                && path.ends_with("/git-credential") =>
+        {
+            let mut log = fs::read_to_string(dir.join("vend-requests.txt")).unwrap_or_default();
+            log.push_str(&format!("{path} {authorization}\n"));
+            fs::write(dir.join("vend-requests.txt"), log).unwrap();
+            if dir.join("vend-409").exists() {
+                (
+                    409,
+                    "{\"error\":{\"kind\":\"noCredential\",\"message\":\"no project member has GitHub connected\"}}"
+                        .to_string(),
+                )
+            } else {
+                (
+                    200,
+                    "{\"data\":{\"username\":\"x-access-token\",\"password\":\"vended-pass\",\"provider\":\"github\",\"actsAs\":\"marc\"}}"
+                        .to_string(),
+                )
+            }
+        }
+        ("GET", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/export") => {
+            let export = fs::read_to_string(dir.join("export.json")).unwrap_or_default();
+            (200, export)
+        }
+        ("GET", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/view") => {
+            (200, "{\"data\":{\"views\":{}}}".to_string())
+        }
+        _ => (
+            404,
+            format!("{{\"error\":{{\"kind\":\"notFound\",\"message\":\"unexpected {method} {path}\"}}}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
+}
