@@ -718,11 +718,15 @@ pub enum ProjectCommand {
         /// Project name. Defaults to the active project.
         name: Option<String>,
     },
-    /// Remove a project template JSON artifact.
+    /// Remove a project template JSON artifact, or specific repos from it.
     Remove {
         /// Project name.
         name: String,
-        /// Required to remove the project artifact.
+        /// Remove only these repo ids from the project, leaving the template.
+        /// Repeat for several. Required unless `--force` removes the template.
+        #[arg(long = "repo", value_name = "REPO")]
+        repos: Vec<String>,
+        /// Required to remove the whole project artifact (ignored with --repo).
         #[arg(long)]
         force: bool,
     },
@@ -733,6 +737,10 @@ pub enum ProjectCommand {
         /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
+        /// Delete remote repository records whose id is no longer in the local
+        /// project shape, so the remote converges on the local repo set.
+        #[arg(long)]
+        prune: bool,
     },
     /// Write or refresh project-specific AGENTS.md guidance.
     Agents {

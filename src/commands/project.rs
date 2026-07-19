@@ -205,6 +205,86 @@ pub fn remove_project(name: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
+/// Remove specific repo ids from a project template, leaving the template and
+/// every repo checkout on disk in place. This is bookkeeping only: it stops the
+/// repo appearing in future bundle starts and lets `knit project push --prune`
+/// drop it from the sync remote. Refuses any repo that an open bundle tracks.
+pub fn remove_project_repos(name: &str, repos: &[String]) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let project_id = slugify(name);
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    if !path.exists() {
+        bail!("No Knit project named `{project_id}` found.");
+    }
+    let mut project: KnitProject = read_json(&path)?;
+
+    let targets: Vec<String> = repos.iter().map(|repo| slugify(repo)).collect();
+    for target in &targets {
+        if !project.repos.iter().any(|repo| &repo.id == target) {
+            bail!("Project `{project_id}` has no repo `{target}`.");
+        }
+    }
+
+    // An open bundle that tracks the repo still needs it; archived, closed, and
+    // deleted bundles do not block removal.
+    let blocking = open_bundles_tracking_repos(&root, &targets)?;
+    if !blocking.is_empty() {
+        bail!(
+            "Cannot remove repo(s) tracked by open bundle(s):\n{}",
+            blocking
+                .iter()
+                .map(|(bundle, repo)| format!("  {repo} tracked by {bundle}"))
+                .collect::<Vec<_>>()
+                .join("\n")
+        );
+    }
+
+    project.repos.retain(|repo| !targets.contains(&repo.id));
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+
+    for target in &targets {
+        println!(
+            "{} {} {}",
+            out::heading("Removed repo:"),
+            out::repo(target),
+            out::muted(format!("from project {project_id}"))
+        );
+    }
+    Ok(())
+}
+
+/// Pairs of `(bundle_id, repo_id)` for every open bundle that tracks one of the
+/// given repo ids.
+fn open_bundles_tracking_repos(root: &Path, repos: &[String]) -> Result<Vec<(String, String)>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+    let mut blocking = Vec::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read bundle directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let bundle: crate::model::ChangeGroup = read_json(&path)?;
+        if !crate::store::bundle_is_open(&bundle) {
+            continue;
+        }
+        for repo in &bundle.repos {
+            if repos.contains(&repo.id) {
+                blocking.push((bundle.id.clone(), repo.id.clone()));
+            }
+        }
+    }
+    blocking.sort();
+    Ok(blocking)
+}
+
 pub fn set_project_run_command(
     name: &str,
     repos: &[String],
