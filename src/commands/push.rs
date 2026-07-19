@@ -39,6 +39,20 @@ impl PushForce {
             Self::Unconditional => Some("--force"),
         }
     }
+
+    /// Whether this mode forces at all. Shared by the git plane and the
+    /// bundle-artifact plane: the same flag pair covers both, so one
+    /// `knit push --force-with-lease` moves rewritten branches and the
+    /// rewritten ledger together.
+    pub fn is_force(self) -> bool {
+        !matches!(self, Self::No)
+    }
+
+    /// Whether the force is guarded by a lease: the overwrite must only be
+    /// accepted if the remote still holds the state this client last saw.
+    pub fn wants_lease(self) -> bool {
+        matches!(self, Self::WithLease)
+    }
 }
 
 pub fn push_repos(
@@ -97,7 +111,9 @@ pub fn push_repos(
 
     // After git branches are pushed, also sync the bundle artifact to the
     // configured sync remote (default on; see `knit config set push-sync`).
-    crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
+    // The force mode carries over: a forced branch push implies the ledger
+    // rewrite must be forced onto the sync remote too.
+    crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote, force)?;
 
     Ok(())
 }
@@ -178,4 +194,26 @@ fn read_upstream(cwd: &Path) -> Option<String> {
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
     .ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::PushForce;
+
+    #[test]
+    fn from_flags_maps_the_flag_pair() {
+        assert_eq!(PushForce::from_flags(false, false), PushForce::No);
+        assert_eq!(PushForce::from_flags(true, false), PushForce::WithLease);
+        assert_eq!(PushForce::from_flags(false, true), PushForce::Unconditional);
+    }
+
+    #[test]
+    fn force_and_lease_predicates() {
+        assert!(!PushForce::No.is_force());
+        assert!(PushForce::WithLease.is_force());
+        assert!(PushForce::Unconditional.is_force());
+        assert!(PushForce::WithLease.wants_lease());
+        assert!(!PushForce::Unconditional.wants_lease());
+        assert!(!PushForce::No.wants_lease());
+    }
 }

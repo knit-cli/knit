@@ -1077,7 +1077,18 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
 /// Spawn a fake KnitHub push API: enough routes for `knit sync push --bundles`
 /// and the archive/restore lifecycle sync. Every pushed bundle artifact's
 /// payload state is appended to `<dir>/artifact-<slug>.states`, one state per
-/// line, so tests can assert which lifecycle states reached the remote.
+/// line, so tests can assert which lifecycle states reached the remote. The
+/// full POSTed body of each artifact push is appended as one JSON line to
+/// `<dir>/artifact-<slug>.bodies`, so tests can assert the force/lease fields.
+///
+/// Behavior markers in `dir`:
+/// - `current-artifact-hash`: `GET /bundles/:id/artifacts` reports one artifact
+///   with this hash (absent: empty list, i.e. no current artifact)
+/// - `post-current-artifact-hash`: the hash the POST compare-and-swap checks a
+///   supplied `expectedArtifactHash` against (defaults to `current-artifact-hash`;
+///   set both differently to simulate a concurrent push between GET and POST)
+/// - `enforce-fast-forward`: POSTs without `force: true` are refused with a
+///   plain 409, like a remote whose ledger is ahead
 pub fn spawn_fake_knithub_push_api(dir: &Path) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1185,6 +1196,18 @@ fn handle_fake_knithub_push_request(
                 format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"}}}}"),
             )
         }
+        ("GET", ["api", "v1", "bundles", _, "artifacts"]) => {
+            match fs::read_to_string(dir.join("current-artifact-hash")) {
+                Ok(hash) => (
+                    200,
+                    format!(
+                        "{{\"data\":[{{\"id\":\"art-0\",\"artifactHash\":\"{}\"}}]}}",
+                        hash.trim()
+                    ),
+                ),
+                Err(_) => (200, "{\"data\":[]}".to_string()),
+            }
+        }
         ("POST", ["api", "v1", "bundles", bundle_id, "artifacts"]) => {
             let slug = bundle_id.trim_start_matches("rb-");
             let state = body["payload"]["state"].as_str().unwrap_or("unset");
@@ -1193,10 +1216,45 @@ fn handle_fake_knithub_push_request(
             existing.push_str(state);
             existing.push('\n');
             fs::write(&record, existing).unwrap();
-            (
-                201,
-                "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string(),
-            )
+            let bodies = dir.join(format!("artifact-{slug}.bodies"));
+            let mut recorded = fs::read_to_string(&bodies).unwrap_or_default();
+            recorded.push_str(&serde_json::to_string(&body).unwrap());
+            recorded.push('\n');
+            fs::write(&bodies, recorded).unwrap();
+
+            let force = body["force"].as_bool().unwrap_or(false);
+            let expected = body["expectedArtifactHash"].as_str();
+            let server_hash = fs::read_to_string(dir.join("post-current-artifact-hash"))
+                .or_else(|_| fs::read_to_string(dir.join("current-artifact-hash")))
+                .ok()
+                .map(|hash| hash.trim().to_string());
+            let accepted =
+                "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string();
+            if let Some(expected) = expected {
+                // Compare-and-swap: accept only when the lease matches the
+                // hash this server currently holds.
+                if force && server_hash.as_deref() == Some(expected) {
+                    (201, accepted)
+                } else {
+                    let current = server_hash
+                        .map(|hash| format!("\"{hash}\""))
+                        .unwrap_or_else(|| "null".to_string());
+                    (
+                        409,
+                        format!(
+                            "{{\"error\":{{\"kind\":\"leaseMismatch\",\"message\":\"the bundle's current artifact is not the leased one\",\"currentArtifactHash\":{current}}}}}"
+                        ),
+                    )
+                }
+            } else if !force && dir.join("enforce-fast-forward").exists() {
+                (
+                    409,
+                    "{\"error\":{\"kind\":\"conflict\",\"message\":\"artifact is not a fast-forward of the current ledger\"}}"
+                        .to_string(),
+                )
+            } else {
+                (201, accepted)
+            }
         }
         _ => (
             404,

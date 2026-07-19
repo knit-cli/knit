@@ -196,7 +196,7 @@ pub(crate) fn create_tag_set_on(
     }
 
     push_tags(&targets, name)?;
-    super::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
+    super::remote::maybe_sync_bundle_to_remote(remote, no_remote, super::push::PushForce::No)?;
     Ok(())
 }
 
@@ -305,7 +305,7 @@ fn resume_tag_set(
     }
 
     if pushed_any {
-        super::remote::maybe_sync_bundle_to_remote(remote, no_remote)?;
+        super::remote::maybe_sync_bundle_to_remote(remote, no_remote, super::push::PushForce::No)?;
     }
     Ok(())
 }

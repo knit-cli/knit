@@ -463,6 +463,13 @@ pub enum SyncCommand {
         /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
+        /// Force-push bundle artifacts, overwriting the remote ledger only when it
+        /// still matches the state fetched for the lease. Applies to bundle targets only.
+        #[arg(long)]
+        force_with_lease: bool,
+        /// Force-push bundle artifacts unconditionally. Prefer --force-with-lease.
+        #[arg(long, conflicts_with = "force_with_lease")]
+        force: bool,
     },
     /// Pull artifacts from the sync remotes. With no target flags, pulls bundle, history,
     /// and views for the resolved project/bundle.
