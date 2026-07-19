@@ -471,6 +471,89 @@ fn project_remove_deletes_template_and_clears_active_project() {
 }
 
 #[test]
+fn project_remove_repo_drops_entry_but_keeps_template() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let removed = knit(
+        &workspace,
+        ["project", "remove", "demo", "--repo", "frontend"],
+    );
+    assert!(removed.contains("Removed repo"));
+    assert!(removed.contains("frontend"));
+
+    // Template still exists; only the repo entry is gone. The checkout stays.
+    assert!(project_path.exists());
+    let project: Value = serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let ids: Vec<&str> = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["backend"]);
+    assert!(frontend.exists());
+
+    // Removing an unknown repo is an error.
+    let missing = knit_fails(
+        &workspace,
+        ["project", "remove", "demo", "--repo", "frontend"],
+    );
+    assert!(missing.contains("no repo"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_remove_repo_refuses_when_open_bundle_tracks_it() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    // An open bundle tracking backend must block its removal.
+    knit(&workspace, ["bundle", "feature one", "--repo", "backend"]);
+
+    let refused = knit_fails(
+        &workspace,
+        ["project", "remove", "demo", "--repo", "backend"],
+    );
+    assert!(refused.contains("open bundle"), "{refused}");
+    assert!(refused.contains("backend"), "{refused}");
+
+    // The repo entry is untouched.
+    let project: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"].as_array().unwrap().len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn cherrypick_moves_source_commits_into_destination_bundle() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
