@@ -72,6 +72,10 @@ pub enum Commands {
         /// Only write project and bundle JSON; do not create feature worktrees.
         #[arg(long)]
         no_worktree: bool,
+        /// Print a machine-readable clone result document to stdout. Progress
+        /// lines move to stderr.
+        #[arg(long)]
+        json: bool,
     },
     /// Stage file changes inside tracked checkouts, like git add.
     Add {
@@ -519,6 +523,16 @@ pub enum HistoryCommand {
 pub enum BundleCommand {
     /// Materialize per-repo worktrees for the resolved bundle.
     Worktree,
+    /// Pull one bundle from the sync remote: refresh its artifact, fetch its
+    /// feature branches, and materialize fast-forwarded worktrees.
+    Pull {
+        /// Remote bundle slug to pull.
+        slug: String,
+        /// Print a machine-readable JSON document to stdout. Progress lines
+        /// move to stderr.
+        #[arg(long)]
+        json: bool,
+    },
     /// Add repos or project repo ids to the current bundle.
     Add {
         /// Paths to local git repositories or project repo ids.
@@ -889,6 +903,15 @@ pub enum RemoteCommand {
         /// Remove the user-level remote instead of the workspace remote.
         #[arg(long)]
         global: bool,
+    },
+    /// List the remote projects visible to the resolved remote token.
+    Projects {
+        /// Named sync remote. Defaults to the configured sync remote.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Print a machine-readable JSON document to stdout.
+        #[arg(long)]
+        json: bool,
     },
     /// Store or clear a token for a remote.
     Token {
