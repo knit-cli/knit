@@ -1,6 +1,33 @@
 use std::env;
 use std::fmt::Display;
 use std::io::IsTerminal;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+/// When set, `human!` lines go to stderr instead of stdout. A `--json` command
+/// flips this once at startup so stdout carries only its machine-readable
+/// document while progress lines stay visible on stderr.
+static HUMAN_LINES_TO_STDERR: AtomicBool = AtomicBool::new(false);
+
+pub fn route_human_lines_to_stderr() {
+    HUMAN_LINES_TO_STDERR.store(true, Ordering::Relaxed);
+}
+
+pub fn human_lines_to_stderr() -> bool {
+    HUMAN_LINES_TO_STDERR.load(Ordering::Relaxed)
+}
+
+/// Print a human progress/status line: stdout normally, stderr when a `--json`
+/// command has claimed stdout for its machine-readable document.
+#[macro_export]
+macro_rules! human {
+    ($($arg:tt)*) => {{
+        if $crate::output::human_lines_to_stderr() {
+            eprintln!($($arg)*);
+        } else {
+            println!($($arg)*);
+        }
+    }};
+}
 
 #[derive(Clone, Copy)]
 enum Style {

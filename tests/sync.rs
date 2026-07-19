@@ -231,6 +231,65 @@ fn push_sends_feature_branch_and_can_set_upstream() {
 }
 
 #[test]
+fn push_force_with_lease_updates_rewritten_feature_branch() {
+    let root = unique_temp_dir();
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+
+    append_line(&feature.join("app.txt"), "feature push");
+    knit(&workspace, ["commit", "--all", "-m", "Feature push"]);
+    knit(&workspace, ["push", "--set-upstream", "backend"]);
+
+    // Rewrite the pushed history: a plain push must be rejected, the leased
+    // force push must move the remote branch to the new head.
+    git(
+        &feature,
+        ["commit", "--amend", "-m", "Feature push, reworded"],
+    );
+    let rewritten_sha = git(&feature, ["rev-parse", "HEAD"]);
+
+    let plain = knit_fails(&workspace, ["push", "backend"]);
+    assert!(plain.contains("push failed"), "{plain}");
+
+    let forced = knit(&workspace, ["push", "--force-with-lease", "backend"]);
+    assert!(forced.contains(&rewritten_sha[..7]), "{forced}");
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        rewritten_sha
+    );
+
+    // The two force flags are mutually exclusive.
+    let conflict = knit_fails(
+        &workspace,
+        ["push", "--force-with-lease", "--force", "backend"],
+    );
+    assert!(conflict.contains("--force"), "{conflict}");
+
+    // Rewrite again and verify the unconditional flag also works.
+    git(
+        &feature,
+        ["commit", "--amend", "-m", "Feature push, reworded again"],
+    );
+    let rewritten_again = git(&feature, ["rev-parse", "HEAD"]);
+    let forced_unconditional = knit(&workspace, ["push", "--force", "backend"]);
+    assert!(
+        forced_unconditional.contains(&rewritten_again[..7]),
+        "{forced_unconditional}"
+    );
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        rewritten_again
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
     let root = unique_temp_dir();
     let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");

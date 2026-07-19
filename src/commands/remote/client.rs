@@ -259,7 +259,10 @@ pub(super) fn localize_bundle(
     Ok(bundle)
 }
 
-pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
+pub(super) fn prepare_feature_branches(
+    bundle: &ChangeGroup,
+    vend: Option<&super::credentials::GitCredentialSource>,
+) -> Result<()> {
     for repo in &bundle.repos {
         let Some(branch) = repo.feature_branch.as_deref() else {
             continue;
@@ -269,8 +272,26 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
             continue;
         }
 
-        git_output(&repo_path, ["fetch", "origin", branch])
-            .with_context(|| format!("{}: failed to fetch origin/{branch}", repo.id))?;
+        // A failed fetch of a non-public repo is retried once with a vended
+        // credential when the caller supplied a source (clone, bundle pull).
+        let fetch =
+            super::credentials::with_vended_credential_retry(vend, &repo.id, |credential| {
+                match credential {
+                    None => git_output(&repo_path, ["fetch", "origin", branch]),
+                    Some(credential) => super::credentials::git_with_vended_credential(
+                        &repo_path,
+                        ["fetch", "origin", branch],
+                        credential,
+                    ),
+                }
+            });
+        match fetch {
+            super::credentials::CredentialedOutcome::Plain(_)
+            | super::credentials::CredentialedOutcome::Vended(_) => {}
+            super::credentials::CredentialedOutcome::Failed(error) => {
+                return Err(error.context(format!("{}: failed to fetch origin/{branch}", repo.id)));
+            }
+        }
         let remote_ref = format!("origin/{branch}");
         if !ref_exists(&repo_path, &remote_ref) {
             bail!("{}: fetched branch {remote_ref} was not found.", repo.id);

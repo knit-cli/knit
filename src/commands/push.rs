@@ -14,10 +14,38 @@ struct PushSuccess {
     sha: String,
 }
 
+/// How `git push` may move the remote branch. Mirrors git's own flags:
+/// `WithLease` refuses when the remote moved since the last fetch.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PushForce {
+    No,
+    WithLease,
+    Unconditional,
+}
+
+impl PushForce {
+    pub fn from_flags(force_with_lease: bool, force: bool) -> Self {
+        match (force_with_lease, force) {
+            (true, _) => Self::WithLease,
+            (_, true) => Self::Unconditional,
+            _ => Self::No,
+        }
+    }
+
+    fn git_arg(self) -> Option<&'static str> {
+        match self {
+            Self::No => None,
+            Self::WithLease => Some("--force-with-lease"),
+            Self::Unconditional => Some("--force"),
+        }
+    }
+}
+
 pub fn push_repos(
     selectors: &[String],
     all: bool,
     set_upstream: bool,
+    force: PushForce,
     remote: &[String],
     no_remote: bool,
 ) -> Result<()> {
@@ -34,7 +62,7 @@ pub fn push_repos(
                 let active = &active;
                 let repo = &active.bundle.repos[index];
                 let repo_id = repo.id.clone();
-                scope.spawn(move || (repo_id, push_repo(active, repo, set_upstream)))
+                scope.spawn(move || (repo_id, push_repo(active, repo, set_upstream, force)))
             })
             .collect();
 
@@ -74,7 +102,12 @@ pub fn push_repos(
     Ok(())
 }
 
-fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Result<PushSuccess> {
+fn push_repo(
+    active: &ActiveBundle,
+    repo: &RepoEntry,
+    set_upstream: bool,
+    force: PushForce,
+) -> Result<PushSuccess> {
     let branch = repo.feature_branch.as_deref().with_context(|| {
         format!(
             "{}: no feature branch recorded. Run `knit bundle worktree`.",
@@ -89,7 +122,7 @@ fn push_repo(active: &ActiveBundle, repo: &RepoEntry, set_upstream: bool) -> Res
 
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream)
+    run_push(&cwd, branch, set_upstream, force)
         .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
 
     let upstream = if set_upstream {
@@ -124,10 +157,13 @@ fn ensure_origin(repo: &RepoEntry, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_push(cwd: &Path, branch: &str, set_upstream: bool) -> Result<()> {
+fn run_push(cwd: &Path, branch: &str, set_upstream: bool, force: PushForce) -> Result<()> {
     let mut args = vec![OsString::from("push")];
     if set_upstream {
         args.push(OsString::from("--set-upstream"));
+    }
+    if let Some(force_arg) = force.git_arg() {
+        args.push(OsString::from(force_arg));
     }
     args.push(OsString::from("origin"));
     args.push(OsString::from(branch));

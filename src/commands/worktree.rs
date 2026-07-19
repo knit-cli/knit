@@ -95,7 +95,7 @@ pub fn materialize_repos(
                 materialized_repo_ids.push(repo_id);
             }
             Err(error) => {
-                println!(
+                crate::human!(
                     "{}: {}",
                     out::repo(&repo_id),
                     out::danger("worktree failed")
@@ -167,7 +167,7 @@ fn apply_materialize_result(repo: &mut RepoEntry, update: &MaterializeResult) {
 
 fn print_materialize_result(update: &MaterializeResult) {
     match &update.log {
-        MaterializeLog::InPlace => println!(
+        MaterializeLog::InPlace => crate::human!(
             "{}: using in-place checkout at {}",
             out::repo(&update.repo_id),
             out::path(
@@ -177,23 +177,23 @@ fn print_materialize_result(update: &MaterializeResult) {
                     .unwrap_or(update.repo_id.as_str())
             )
         ),
-        MaterializeLog::WorktreeExists(worktree_path) => println!(
+        MaterializeLog::WorktreeExists(worktree_path) => crate::human!(
             "{}: worktree already present at {}",
             out::repo(&update.repo_id),
             out::path(worktree_path)
         ),
-        MaterializeLog::WorktreeFromBranch => println!(
+        MaterializeLog::WorktreeFromBranch => crate::human!(
             "{}: {} worktree from existing branch",
             out::repo(&update.repo_id),
             out::movement("created")
         ),
-        MaterializeLog::WorktreeFromOrigin(remote_ref) => println!(
+        MaterializeLog::WorktreeFromOrigin(remote_ref) => crate::human!(
             "{}: {} worktree from {}",
             out::repo(&update.repo_id),
             out::movement("created"),
             out::branch(remote_ref)
         ),
-        MaterializeLog::WorktreeCreated(feature_branch) => println!(
+        MaterializeLog::WorktreeCreated(feature_branch) => crate::human!(
             "{}: {} {}",
             out::repo(&update.repo_id),
             out::movement("created"),
