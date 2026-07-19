@@ -313,7 +313,7 @@ fn bundle_creation_refuses_slug_taken_on_sync_remote() {
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     let refused = knit_fails_with_env(&workspace, ["bundle", "payment flow"], &env);
-    assert!(refused.contains("already exists on the KnitHub sync remote"));
+    assert!(refused.contains("already exists on the sync remote"));
     assert!(!workspace
         .join(".knit/bundles/payment-flow.bundle.json")
         .exists());

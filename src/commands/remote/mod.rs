@@ -1,9 +1,9 @@
-//! `knit remote` and KnitHub sync. This root holds the shared remote response
+//! `knit remote` and sync-remote transport. This root holds the shared remote response
 //! DTOs; the work is split across submodules:
 //!
 //! - [`client`] HTTP transport, remote/token resolution, and bundle localization
 //! - [`push`] remote config CRUD plus pushing projects/bundles and sync-on-push
-//! - [`clone`] cloning a KnitHub project export into a fresh workspace
+//! - [`clone`] cloning a remote project export into a fresh workspace
 //! - [`pull`] pulling/fetching recorded bundle state and remote bundle cleanup
 //! - [`history`] project history event sync
 

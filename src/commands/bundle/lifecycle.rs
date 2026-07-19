@@ -49,7 +49,7 @@ pub fn archive_bundle(
     Ok(())
 }
 
-/// Mirror an archive/restore onto configured KnitHub remotes by pushing the
+/// Mirror an archive/restore onto configured sync remotes by pushing the
 /// updated artifact, so hosted dashboards flip lifecycle state together with
 /// the local ledger. Best-effort: the local transition already succeeded, so
 /// sync failures warn instead of failing the command. A workspace with no
@@ -58,7 +58,7 @@ fn sync_lifecycle_state_to_remote(active: &ActiveBundle) {
     if let Err(error) =
         crate::commands::remote::sync_active_bundle_to_remote_if_enabled(active, &[], false)
     {
-        println!("{} {error:#}", out::warn("KnitHub sync skipped:"));
+        println!("{} {error:#}", out::warn("remote sync skipped:"));
     }
 }
 

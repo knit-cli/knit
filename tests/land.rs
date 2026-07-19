@@ -235,7 +235,7 @@ fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
         &workspace,
         ["--bundle", "venue-capacity", "sync", "push", "--bundles"],
     );
-    assert!(sync_error.contains("No KnitHub remote configured"));
+    assert!(sync_error.contains("No sync remote configured"));
 
     let revert_plan = knit_with_fake_gh(
         &workspace,

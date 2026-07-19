@@ -224,7 +224,7 @@ fn ensure_sync_remotes_exist(root: &std::path::Path, config: &KnitConfig) -> Res
 fn ensure_sync_remotes_in_config(config: &KnitConfig) -> Result<()> {
     for remote_name in configured_sync_remote_names(config) {
         if !config.remotes.contains_key(&remote_name) {
-            bail!("No KnitHub remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` or `knit remote add --global {remote_name} <url>` first.");
+            bail!("No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` or `knit remote add --global {remote_name} <url>` first.");
         }
     }
     Ok(())

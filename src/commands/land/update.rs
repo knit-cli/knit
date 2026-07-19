@@ -97,7 +97,7 @@ pub(super) fn run_branch_update(
         push_update_targets(&targets, set_upstream)?;
         refresh_update_publications(&mut active, &targets)?;
         save_active_bundle(&active)?;
-        // Mirror the pushed feature branches into the KnitHub remote bundle
+        // Mirror the pushed feature branches into the sync remote bundle
         // (default on; see `knit config set push-sync`).
         crate::commands::remote::maybe_sync_bundle_to_remote(&[], false)?;
     }
