@@ -737,6 +737,10 @@ pub enum ProjectCommand {
         /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
+        /// Delete remote repository records whose id is no longer in the local
+        /// project shape, so the remote converges on the local repo set.
+        #[arg(long)]
+        prune: bool,
     },
     /// Write or refresh project-specific AGENTS.md guidance.
     Agents {

@@ -17,6 +17,7 @@ use crate::store::{
     save_config, save_global_config, ActiveBundle,
 };
 use anyhow::{bail, Context, Result};
+use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -219,7 +220,11 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
     Ok(())
 }
 
-pub fn push_project_to_remote(name: Option<&str>, remote_name: Option<&str>) -> Result<()> {
+pub fn push_project_to_remote(
+    name: Option<&str>,
+    remote_name: Option<&str>,
+    prune: bool,
+) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
     let remote_names = match remote_name {
@@ -236,9 +241,14 @@ pub fn push_project_to_remote(name: Option<&str>, remote_name: Option<&str>) -> 
         if multiple {
             println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
         }
-        if let Err(error) =
-            push_project_to_one_remote(&config, remote_name, &root, &project_id, project.as_ref())
-        {
+        if let Err(error) = push_project_to_one_remote(
+            &config,
+            remote_name,
+            &root,
+            &project_id,
+            project.as_ref(),
+            prune,
+        ) {
             println!(
                 "{} {error:#}",
                 out::warn(format!("push failed ({remote_name}):"))
@@ -261,6 +271,7 @@ fn push_project_to_one_remote(
     root: &Path,
     project_id: &str,
     project: Option<&KnitProject>,
+    prune: bool,
 ) -> Result<()> {
     let remote = resolve_remote(config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
@@ -277,6 +288,14 @@ fn push_project_to_one_remote(
         out::muted(&pushed.id),
         out::muted(format!("{repo_count} repo(s)"))
     );
+
+    // After the upsert, drop remote repo records the local shape no longer has.
+    if prune {
+        let keep_ids: Vec<String> = project
+            .map(|project| project.repos.iter().map(|repo| repo.id.clone()).collect())
+            .unwrap_or_default();
+        prune_remote_repositories(remote, &token, &pushed.slug, &keep_ids)?;
+    }
 
     // Best-effort: also upload the user's saved views for this project. A server
     // without the views endpoint must not fail the project push.
@@ -699,6 +718,95 @@ pub(super) fn upsert_project_for_history(
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
     upsert_project(remote, token, project_id, project)
+}
+
+/// A repository record as the sync remote lists it. `local_id` is the id the
+/// local project shape uses; the server may carry it top-level, in metadata, or
+/// fall back to the repo name (mirroring its own `local_repo_id`).
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteRepositoryRecord {
+    id: String,
+    #[serde(default)]
+    local_id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    metadata: Value,
+}
+
+impl RemoteRepositoryRecord {
+    fn local_id(&self) -> Option<String> {
+        self.local_id
+            .clone()
+            .or_else(|| {
+                self.metadata
+                    .get("localId")
+                    .and_then(Value::as_str)
+                    .map(str::to_string)
+            })
+            .or_else(|| self.name.clone())
+    }
+}
+
+/// Delete remote repository records whose local id is not in `keep_ids`, so the
+/// remote repo set converges on the local project shape. Per-repo delete
+/// failures are collected and reported; the sweep fails only if any delete did.
+fn prune_remote_repositories(
+    remote: &KnitRemote,
+    token: &str,
+    project_slug: &str,
+    keep_ids: &[String],
+) -> Result<()> {
+    let records: Vec<RemoteRepositoryRecord> = request_json(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project_slug}/repositories"),
+        None,
+    )?;
+
+    let mut failures = Vec::new();
+    for record in &records {
+        let local_id = record.local_id();
+        if local_id
+            .as_deref()
+            .is_some_and(|id| keep_ids.iter().any(|keep| keep == id))
+        {
+            continue;
+        }
+        let label = local_id.as_deref().unwrap_or(&record.id);
+        match request(
+            remote,
+            token,
+            "DELETE",
+            &format!("/projects/{project_slug}/repositories/{}", record.id),
+            None,
+        ) {
+            Ok(response) if (200..300).contains(&response.status) || response.status == 404 => {
+                println!(
+                    "{} {} {}",
+                    out::movement("pruned"),
+                    out::repo(label),
+                    out::muted(&record.id)
+                );
+            }
+            Ok(response) => failures.push(format!(
+                "{label}: HTTP {} {}",
+                response.status,
+                response.body.trim()
+            )),
+            Err(error) => failures.push(format!("{label}: {error:#}")),
+        }
+    }
+
+    if !failures.is_empty() {
+        bail!(
+            "failed to prune remote repositories:\n{}",
+            failures.join("\n")
+        );
+    }
+    Ok(())
 }
 
 fn push_repositories(
