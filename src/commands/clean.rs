@@ -131,7 +131,32 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
     }
 
     remove_bundle_worktree_container(&active.root, &active.bundle.id);
+    remove_runtime_run_dir(&active.root, &active.bundle.id);
     Ok(removed)
+}
+
+/// Remove the bundle's `.knit/runtime-runs/<bundle>/` artifacts (generated
+/// compose files and run state). They describe stacks built from the
+/// worktrees being torn down, and the generated files carry resolved app
+/// configuration; `knit run down` still works without them by resolving
+/// containers via compose project labels.
+fn remove_runtime_run_dir(root: &Path, bundle_id: &str) {
+    let run_dir = root.join(".knit/runtime-runs").join(bundle_id);
+    if !run_dir.exists() {
+        return;
+    }
+    match std::fs::remove_dir_all(&run_dir) {
+        Ok(()) => println!(
+            "{} {}",
+            out::movement("removed"),
+            out::path(run_dir.display())
+        ),
+        Err(error) => println!(
+            "{} could not remove {}: {error:#}",
+            out::warn("Warn:"),
+            run_dir.display()
+        ),
+    }
 }
 
 /// Tear down a single repo's generated worktree, clearing its recorded

@@ -4,6 +4,7 @@
 //! environment contract, and database resolution.
 
 use crate::config::{DatabaseMode, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::envfile;
 use crate::plan::StackPlan;
 use crate::state::{
     compose_project_name, frontend_port, runtime_run_dir, RuntimeRunState, RuntimeStackState,
@@ -29,6 +30,11 @@ enum Prepared {
     Transform {
         config: Value,
         port_map: Vec<(u16, u16)>,
+        /// Per-service `env_file` references from the `--no-env-resolution`
+        /// pass, used to keep env-file values (secrets included) out of the
+        /// generated file. `None` when the local compose lacks the flag —
+        /// values then stay inlined, as before.
+        env_files: Option<BTreeMap<String, Vec<envfile::EnvFileRef>>>,
     },
     Contract {
         profiles: Vec<String>,
@@ -107,6 +113,13 @@ pub(crate) fn run_up_stacks(
             RuntimeMode::Transform => {
                 let source_dir = plan.repo.source_path.clone();
                 let mut config = transform::resolve_compose_config(&plan.compose, &source_dir)?;
+                // A second, unresolved pass records which environment values
+                // come from env files, so the generated file can reference
+                // them in place instead of carrying copies.
+                let env_files =
+                    transform::resolve_compose_config_no_env(&plan.compose, &source_dir)
+                        .map(|unresolved| envfile::service_env_files(&unresolved))
+                        .ok();
                 // Shared database: strip the db service BEFORE port
                 // reallocation, so references to the shared dev port are
                 // never rewritten away from it.
@@ -166,7 +179,11 @@ pub(crate) fn run_up_stacks(
                 ready.push(Ready {
                     ports,
                     database,
-                    prepared: Prepared::Transform { config, port_map },
+                    prepared: Prepared::Transform {
+                        config,
+                        port_map,
+                        env_files,
+                    },
                 });
             }
             RuntimeMode::Contract => {
@@ -213,6 +230,7 @@ pub(crate) fn run_up_stacks(
                         service: service.clone(),
                         host: *port,
                         container: None,
+                        source_host: bases.get(service).copied(),
                     })
                     .collect();
                 if resolved.mode == DatabaseMode::Bundle {
@@ -220,6 +238,7 @@ pub(crate) fn run_up_stacks(
                         service: "db".to_string(),
                         host: resolved.host_port,
                         container: Some(5432),
+                        source_host: None,
                     });
                 }
                 let database = Some(StateDatabase {
@@ -250,7 +269,10 @@ pub(crate) fn run_up_stacks(
             })
             .collect();
         for (index, entry) in ready.iter_mut().enumerate() {
-            let Prepared::Transform { config, port_map } = &mut entry.prepared else {
+            let Prepared::Transform {
+                config, port_map, ..
+            } = &mut entry.prepared
+            else {
                 continue;
             };
             let own: BTreeSet<u16> = port_map.iter().map(|(old, _)| *old).collect();
@@ -286,9 +308,35 @@ pub(crate) fn run_up_stacks(
         out::repo(&ctx.bundle_id)
     );
     let mut stack_states: Vec<RuntimeStackState> = Vec::new();
-    for (plan, entry) in plans.iter().zip(&ready) {
-        let compose_file: PathBuf = match &entry.prepared {
-            Prepared::Transform { config, .. } => {
+    let mut any_transform_remap = false;
+    for (plan, entry) in plans.iter().zip(ready.iter_mut()) {
+        let mut env_notes: Vec<String> = Vec::new();
+        let compose_file: PathBuf = match &mut entry.prepared {
+            Prepared::Transform {
+                config, env_files, ..
+            } => {
+                // Env-file values are referenced in place, not copied: the
+                // resolved config would otherwise persist secrets from the
+                // repo's env files inside this generated artifact.
+                match env_files {
+                    Some(refs) => {
+                        envfile::detach_env_files(config, refs, &|path| path.display().to_string());
+                        let mut seen = BTreeSet::new();
+                        for reference in refs.values().flatten() {
+                            if seen.insert(reference.path.clone()) {
+                                env_notes.push(format!(
+                                    "{} {} {}",
+                                    out::muted("Env file:"),
+                                    out::path(reference.path.display()),
+                                    out::muted("(referenced, not copied)")
+                                ));
+                            }
+                        }
+                    }
+                    None => env_notes.push(out::muted(
+                        "Env files: inlined (this docker compose lacks --no-env-resolution)",
+                    )),
+                }
                 // JSON is valid YAML, so the generated file stays a compose file.
                 let generated = if multi {
                     run_dir.join(format!("docker-compose.{}.yml", plan.repo.id))
@@ -297,6 +345,14 @@ pub(crate) fn run_up_stacks(
                 };
                 fs::write(&generated, serde_json::to_string_pretty(config)?)
                     .context("failed to write generated compose file")?;
+                // Values the detach could not prove came from an env file
+                // (and knit's own rewrites of env-file values) may still be
+                // sensitive: keep the artifact owner-only.
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = fs::set_permissions(&generated, fs::Permissions::from_mode(0o600));
+                }
                 generated
             }
             Prepared::Contract { .. } => plan.compose.clone(),
@@ -314,13 +370,30 @@ pub(crate) fn run_up_stacks(
             out::muted("Compose:"),
             out::path(compose_file.display())
         );
+        for note in &env_notes {
+            println!("{note}");
+        }
         for port in &entry.ports {
-            println!(
-                "{} {} localhost:{}",
-                out::muted("Port:"),
-                port.service,
-                port.host
-            );
+            match port.source_host.filter(|source| *source != port.host) {
+                Some(source) => {
+                    if plan.mode == RuntimeMode::Transform {
+                        any_transform_remap = true;
+                    }
+                    println!(
+                        "{} {} localhost:{} {}",
+                        out::muted("Port:"),
+                        port.service,
+                        port.host,
+                        out::muted(format!("(source {source})"))
+                    );
+                }
+                None => println!(
+                    "{} {} localhost:{}",
+                    out::muted("Port:"),
+                    port.service,
+                    port.host
+                ),
+            }
         }
         let (profiles, env) = match &entry.prepared {
             Prepared::Contract { profiles, env } => (profiles.clone(), env.clone()),
@@ -340,6 +413,14 @@ pub(crate) fn run_up_stacks(
             env,
             database: entry.database.clone(),
         });
+    }
+    if any_transform_remap {
+        println!(
+            "{}",
+            out::muted(
+                "Note: port references declared in the compose files were rewritten to the bundle ports; ports hardcoded in app source still point at the source ports."
+            )
+        );
     }
     let all_ports: Vec<ServicePort> = stack_states
         .iter()
@@ -383,6 +464,36 @@ pub(crate) fn run_up_stacks(
                 "docker compose exited with status {status}. Clean up partial containers with `knit run down`.{hint}"
             );
         }
+    }
+
+    // App code that hardcodes a source port fails silently against a dead
+    // port — or reaches the dev stack when it is still running. Surface the
+    // source ports something is actually listening on.
+    let mut busy: BTreeMap<u16, String> = BTreeMap::new();
+    for stack in &stack_states {
+        if stack.mode != RuntimeMode::Transform {
+            continue;
+        }
+        for port in &stack.ports {
+            let Some(source) = port.source_host.filter(|source| *source != port.host) else {
+                continue;
+            };
+            if !busy.contains_key(&source)
+                && TcpStream::connect_timeout(
+                    &std::net::SocketAddr::from(([127, 0, 0, 1], source)),
+                    Duration::from_millis(250),
+                )
+                .is_ok()
+            {
+                busy.insert(source, port.service.clone());
+            }
+        }
+    }
+    for (source, service) in &busy {
+        println!(
+            "{} source port {source} ({service}) is in use by another process — app code that hardcodes it reaches that stack, not this bundle",
+            out::warn("Warn:")
+        );
     }
 
     // Recorded only after every stack starts so a failed `up` does not leave
