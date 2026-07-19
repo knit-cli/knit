@@ -270,7 +270,7 @@ fn history_event(
         occurred_at: Some(occurred_at.to_string()),
         recorded_at: now_iso(),
         recorded_by: "knit".to_string(),
-        // The node title travels with the event so consumers (KnitHub) can
+        // The node title travels with the event so consumers (hosted dashboards) can
         // name titled nodes — a tag's name, a check's name — without parsing
         // the message text.
         metadata: title.map(|title| serde_json::json!({ "title": title })),

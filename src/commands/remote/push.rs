@@ -1,12 +1,11 @@
 //! Remote configuration commands (add/list/show/remove/token) and pushing the
-//! local project and bundle artifact to a KnitHub remote, including the implicit
+//! local project and bundle artifact to a sync remote, including the implicit
 //! sync-on-push.
 
 use super::client::{
     configured_sync_remote_names, decode_response, effective_workspace_config,
     load_project_if_present, normalize_base_url, request, request_json, resolve_project_id,
-    resolve_remote, resolve_sync_remote_name, resolve_sync_remote_names, resolve_token,
-    token_from_env, workspace_config,
+    resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::ids::slugify;
@@ -74,7 +73,7 @@ fn warn_workspace_scoped_token(remote_name: &str) {
 pub fn list_remotes(global: bool) -> Result<()> {
     let (config, sources) = remote_listing(global)?;
     if config.remotes.is_empty() {
-        println!("{}", out::muted("No KnitHub remotes configured."));
+        println!("{}", out::muted("No remotes configured."));
         return Ok(());
     }
 
@@ -113,7 +112,7 @@ pub fn show_remote(name: &str, global: bool) -> Result<()> {
     let remote = config
         .remotes
         .get(&remote_name)
-        .with_context(|| format!("No KnitHub remote named `{remote_name}`."))?;
+        .with_context(|| format!("No remote named `{remote_name}`."))?;
     let sync_remotes = configured_sync_remote_names(&config);
     println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
     println!("{} {}", out::heading("URL:"), remote.url);
@@ -157,7 +156,7 @@ pub fn remove_remote(name: &str, global: bool) -> Result<()> {
     };
     let remote_name = slugify(name);
     if config.remotes.remove(&remote_name).is_none() {
-        bail!("No KnitHub remote named `{remote_name}`.");
+        bail!("No remote named `{remote_name}`.");
     }
     config
         .sync_remotes
@@ -197,7 +196,7 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
     let remote = config
         .remotes
         .get_mut(&remote_name)
-        .with_context(|| format!("No KnitHub remote named `{remote_name}`."))?;
+        .with_context(|| format!("No remote named `{remote_name}`."))?;
 
     if clear {
         remote.token = None;
@@ -222,15 +221,50 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
 pub fn push_project_to_remote(name: Option<&str>, remote_name: Option<&str>) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
-    let remote_name = match remote_name {
-        Some(remote_name) => slugify(remote_name),
-        None => resolve_sync_remote_name(&config)?,
+    let remote_names = match remote_name {
+        Some(remote_name) => vec![slugify(remote_name)],
+        None => configured_sync_remote_names(&config),
     };
-    let remote = resolve_remote(&config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
+    if remote_names.is_empty() {
+        bail!("No sync remote configured. Run `knit remote add <name> <url>` first.");
+    }
     let project = load_project_if_present(&root, &project_id)?;
-    let pushed = upsert_project(remote, &token, &project_id, project.as_ref())?;
-    let repo_count = match project.as_ref() {
+    let multiple = remote_names.len() > 1;
+    let mut failures = Vec::new();
+    for remote_name in &remote_names {
+        if multiple {
+            println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
+        }
+        if let Err(error) =
+            push_project_to_one_remote(&config, remote_name, &root, &project_id, project.as_ref())
+        {
+            println!(
+                "{} {error:#}",
+                out::warn(format!("push failed ({remote_name}):"))
+            );
+            failures.push(remote_name.clone());
+        }
+    }
+    if failures.len() == remote_names.len() {
+        bail!(
+            "project push failed for every remote: {}",
+            failures.join(", ")
+        );
+    }
+    Ok(())
+}
+
+fn push_project_to_one_remote(
+    config: &KnitConfig,
+    remote_name: &str,
+    root: &Path,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<()> {
+    let remote = resolve_remote(config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    let pushed = upsert_project(remote, &token, project_id, project)?;
+    let repo_count = match project {
         Some(project) => push_repositories(remote, &token, &pushed.slug, &project.repos)?,
         None => 0,
     };
@@ -245,7 +279,7 @@ pub fn push_project_to_remote(name: Option<&str>, remote_name: Option<&str>) -> 
 
     // Best-effort: also upload the user's saved views for this project. A server
     // without the views endpoint must not fail the project push.
-    if let Err(error) = upload_views(remote, &token, &root, &pushed.slug) {
+    if let Err(error) = upload_views(remote, &token, root, &pushed.slug) {
         println!("{} {error:#}", out::warn("views not synced:"));
     }
     Ok(())
@@ -271,7 +305,7 @@ fn upload_views(remote: &KnitRemote, token: &str, root: &Path, project_slug: &st
     Ok(())
 }
 
-/// Push the current user's saved views for a project to the KnitHub remote.
+/// Push the current user's saved views for a project to the sync remote.
 pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
@@ -299,7 +333,7 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
 }
 
 /// Push the project architecture artifact (repo-level rollup produced by
-/// `urdir kg architecture`) to a KnitHub remote. Reads the conventional
+/// `urdir kg architecture`) to a sync remote. Reads the conventional
 /// `.urdir/kg/<slug>/architecture.json`; a missing file is a soft skip with a
 /// hint, not an error, so `knit sync push` (everything) stays safe.
 pub fn push_architecture_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
@@ -347,7 +381,7 @@ pub fn push_architecture_to_remote(name: Option<&str>, remote_name: &str) -> Res
 }
 
 /// Push the knowledge-graph viz slice (produced by `urdir kg viz`) to a
-/// KnitHub remote. Reads `.urdir/kg/<slug>/viz.json`; missing file is a soft
+/// sync remote. Reads `.urdir/kg/<slug>/viz.json`; missing file is a soft
 /// skip with a hint.
 pub fn push_kg_graph_to_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
@@ -472,7 +506,7 @@ fn push_active_bundle_to_remote(
     Ok(())
 }
 
-/// Push the resolved bundle artifact to configured KnitHub remote(s) alongside a
+/// Push the resolved bundle artifact to configured sync remote(s) alongside a
 /// git push, when enabled.
 ///
 /// Resolution order for remotes: repeated explicit `--remote`, then
@@ -507,7 +541,7 @@ pub fn maybe_sync_bundle_to_remote(remote_overrides: &[String], no_remote: bool)
             }
             println!(
                 "{} {error:#}",
-                out::warn(format!("KnitHub sync skipped ({remote_name}):"))
+                out::warn(format!("remote sync skipped ({remote_name}):"))
             );
             continue;
         }
@@ -517,14 +551,14 @@ pub fn maybe_sync_bundle_to_remote(remote_overrides: &[String], no_remote: bool)
         if let Err(error) = push_bundle_to_remote(&remote_name, None) {
             println!(
                 "{} {error:#}",
-                out::warn(format!("KnitHub sync skipped ({remote_name}):"))
+                out::warn(format!("remote sync skipped ({remote_name}):"))
             );
         }
     }
     Ok(())
 }
 
-/// Push the resolved bundle artifact to KnitHub when push-sync is enabled.
+/// Push the resolved bundle artifact to the sync remotes when push-sync is enabled.
 ///
 /// Unlike `maybe_sync_bundle_to_remote`, sync failures are returned to the
 /// caller. This is used after landing so a stale remote lifecycle state is
@@ -589,7 +623,7 @@ fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> 
         Ok(())
     } else {
         bail!(
-            "KnitHub sync failed for {} remote(s):\n{}",
+            "Sync failed for {} remote(s):\n{}",
             failures.len(),
             failures.join("\n")
         )
@@ -619,7 +653,7 @@ fn sync_active_bundle_to_remote_names(
         Ok(())
     } else {
         bail!(
-            "KnitHub sync failed for {} remote(s):\n{}",
+            "Sync failed for {} remote(s):\n{}",
             failures.len(),
             failures.join("\n")
         )
@@ -738,14 +772,14 @@ fn push_bundle_artifact(
     match push_bundle_artifact_outcome(remote, token, bundle_id, bundle)? {
         ArtifactPushOutcome::Pushed(artifact) => Ok(artifact),
         ArtifactPushOutcome::RemoteAhead => bail!(
-            "{}: the KnitHub remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again.",
+            "{}: the remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again.",
             bundle.id
         ),
     }
 }
 
 /// Push every local bundle artifact — open, landed, and archived alike — to a
-/// KnitHub remote so the remote's lifecycle state converges on the local
+/// sync remote so the remote's lifecycle state converges on the local
 /// ledger. Bundles whose remote ledger is ahead of this workspace are skipped
 /// with a warning (catching up is `knit sync pull`'s job); other per-bundle
 /// failures are collected and fail the sweep at the end.

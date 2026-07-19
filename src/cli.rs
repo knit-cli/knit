@@ -44,12 +44,12 @@ pub enum Commands {
         #[command(subcommand)]
         command: ViewCommand,
     },
-    /// Manage KnitHub API remotes.
+    /// Manage sync remotes.
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
     },
-    /// Clone a KnitHub project export into a local Knit workspace.
+    /// Clone a remote project export into a local Knit workspace.
     Clone {
         /// Project to clone: `owner/slug`, a bare slug, or a project id. Use the
         /// `owner/slug` form (owner is a username or org slug) when a slug is not
@@ -57,13 +57,13 @@ pub enum Commands {
         project: String,
         /// Directory to create. Defaults to the project slug.
         target: Option<PathBuf>,
-        /// Named KnitHub remote. Defaults to the configured sync remote.
+        /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
-        /// KnitHub base URL. Required when the remote is not configured.
+        /// Remote base URL. Required when the remote is not configured.
         #[arg(long)]
         url: Option<String>,
-        /// KnitHub token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.
+        /// Remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.
         #[arg(long)]
         token: Option<String>,
         /// Bundle to make active after clone. Defaults to the latest open exported bundle.
@@ -174,10 +174,10 @@ pub enum Commands {
         /// Fetch mode: --all (default), --git only, --knit only.
         #[arg(long, default_value = "all", value_name = "MODE")]
         mode: FetchMode,
-        /// Named KnitHub remote for knit fetch. Defaults to the configured sync remote.
+        /// Named sync remote for knit fetch. Defaults to the configured sync remote.
         #[arg(long, value_name = "REMOTE")]
         remote: Option<String>,
-        /// (Deprecated, use --git) Skip KnitHub remote sync.
+        /// (Deprecated, use --git) Skip sync remote sync.
         #[arg(long, hide = true)]
         no_remote: bool,
     },
@@ -202,13 +202,13 @@ pub enum Commands {
         /// Update the active project's repos (their source checkouts, current branch, fast-forward only).
         #[arg(long)]
         main: bool,
-        /// Update every open bundle's checkouts from its KnitHub artifact. Combine with --main.
+        /// Update every open bundle's checkouts from its remote artifact. Combine with --main.
         #[arg(long)]
         bundles: bool,
-        /// Also pull the current bundle artifact from a named KnitHub remote.
+        /// Also pull the current bundle artifact from a named sync remote.
         #[arg(long, value_name = "REMOTE")]
         remote: Option<String>,
-        /// Skip configured KnitHub remote sync for this pull.
+        /// Skip configured sync remote sync for this pull.
         #[arg(long)]
         no_remote: bool,
         /// Union-merge the bundle ledger when the local and remote artifacts
@@ -226,10 +226,10 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
-        /// Also push the bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
+        /// Also push the bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
-        /// Skip the KnitHub bundle sync for this push.
+        /// Skip the remote bundle sync for this push.
         #[arg(long)]
         no_remote: bool,
     },
@@ -337,11 +337,11 @@ pub enum Commands {
         #[arg(long)]
         dry_run: bool,
     },
-    /// Reconcile local Knit state, or sync artifacts with KnitHub.
+    /// Reconcile local Knit state, or sync artifacts with the configured remotes.
     ///
     /// Bare `knit sync` records git commits made outside Knit into the bundle
     /// ledger (a local-only reconcile). The `push`/`pull` subcommands are the one
-    /// way to move bundle, history, and view artifacts to and from KnitHub.
+    /// way to move bundle, history, and view artifacts to and from the sync remotes.
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommand>,
@@ -371,7 +371,7 @@ pub enum Commands {
         /// Pull Knit history from a remote before querying.
         #[arg(long)]
         pull: bool,
-        /// Named KnitHub remote used with --pull.
+        /// Named sync remote used with --pull.
         #[arg(long)]
         remote: Option<String>,
     },
@@ -443,22 +443,22 @@ pub enum Commands {
 
 #[derive(Subcommand)]
 pub enum SyncCommand {
-    /// Push artifacts to KnitHub. With no target flags, pushes bundle, history,
+    /// Push artifacts to the sync remotes. With no target flags, pushes bundle, history,
     /// views, and architecture for the resolved project/bundle; the
     /// knowledge-graph viz slice moves only with an explicit `--kg`.
     Push {
         #[command(flatten)]
         targets: SyncTargetArgs,
-        /// Named KnitHub remote(s). Repeat for several. Defaults to configured sync remotes.
+        /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
     },
-    /// Pull artifacts from KnitHub. With no target flags, pulls bundle, history,
+    /// Pull artifacts from the sync remotes. With no target flags, pulls bundle, history,
     /// and views for the resolved project/bundle.
     Pull {
         #[command(flatten)]
         targets: SyncTargetArgs,
-        /// Named KnitHub remote(s). Repeat for several. Defaults to configured sync remotes.
+        /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
     },
@@ -592,7 +592,7 @@ pub enum BundleCommand {
         /// Report every bundle's prune status, including ones that are kept.
         #[arg(long)]
         report: bool,
-        /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and KnitHub remote bundle records.
+        /// Remove all cleanup targets: worktrees, local branches, forced local branch deletion, origin branches, and remote bundle records.
         #[arg(long)]
         all: bool,
         /// Remove generated worktrees for each pruned bundle and orphaned worktree dirs.
@@ -610,7 +610,7 @@ pub enum BundleCommand {
         /// Delete matching feature branches from origin.
         #[arg(long = "remote-branches", requires = "branches")]
         remote_branches: bool,
-        /// Delete matching KnitHub remote bundle records.
+        /// Delete matching remote bundle records.
         #[arg(long = "remote-bundles")]
         remote_bundles: bool,
         /// Also prune finished (landed/archived) bundle artifacts. By default
@@ -698,11 +698,11 @@ pub enum ProjectCommand {
         #[arg(long)]
         force: bool,
     },
-    /// Push the project JSON shape and repositories to a KnitHub remote.
+    /// Push the project JSON shape and repositories to a sync remote.
     Push {
         /// Project name. Defaults to the active project.
         name: Option<String>,
-        /// Named KnitHub remote. Defaults to the configured sync remote.
+        /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
     },
@@ -855,13 +855,13 @@ pub enum ViewCommand {
 
 #[derive(Subcommand)]
 pub enum RemoteCommand {
-    /// Add or replace a named KnitHub API remote.
+    /// Add or replace a named sync remote.
     Add {
         /// Remote name, for example `hosted`.
         name: String,
-        /// KnitHub base URL, for example `http://localhost:4000` or `https://host.example`.
+        /// Remote base URL, for example `http://localhost:4000` or `https://host.example`.
         url: String,
-        /// Optional KnitHub token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
+        /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
         /// Store this remote in the user-level Knit config instead of the workspace.
@@ -970,10 +970,10 @@ pub enum PublishCommand {
         /// Set each feature branch's upstream to origin/<branch> while pushing.
         #[arg(long)]
         set_upstream: bool,
-        /// Also push the bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
+        /// Also push the bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
-        /// Skip the KnitHub bundle sync for this publish.
+        /// Skip the remote bundle sync for this publish.
         #[arg(long)]
         no_remote: bool,
         /// Limit publishing to repos hosted on this provider (github, gitlab, forgejo). Default: every repo's own host.
@@ -1096,10 +1096,10 @@ pub enum LandCommand {
         /// When omitted, the updated artifact is printed to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Also push the landed bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
+        /// Also push the landed bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
-        /// Skip the KnitHub bundle sync after landing.
+        /// Skip the remote bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
         /// After a successful land, record a cross-repo known-good tag of the resulting main. Optionally name it; defaults to the bundle slug.
@@ -1126,10 +1126,10 @@ pub enum LandCommand {
         /// Run file to resume. Defaults to the latest run.
         #[arg(long)]
         run: Option<PathBuf>,
-        /// Also push the landed bundle artifact to these KnitHub remotes. Repeat to push to multiple remotes and override push-sync config.
+        /// Also push the landed bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
-        /// Skip the KnitHub bundle sync after landing.
+        /// Skip the remote bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
     },

@@ -77,7 +77,7 @@ pub fn create_tag(
 /// The create/resume entry point for an already-resolved, write-locked bundle.
 /// `knit tag` loads the bundle then calls this; `knit land apply` reuses it to
 /// tag the state it just landed without re-resolving the archived bundle.
-/// `remote`/`no_remote` control the KnitHub artifact sync after a push, so a
+/// `remote`/`no_remote` control the remote artifact sync after a push, so a
 /// land run's explicit `--no-remote` carries into its tag.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn create_tag_on_active(

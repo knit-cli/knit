@@ -1,4 +1,4 @@
-//! Pull recorded bundle state from a KnitHub remote (one bundle or workspace
+//! Pull recorded bundle state from a sync remote (one bundle or workspace
 //! wide), list/fetch remote bundles, and delete remote bundle records.
 
 use super::client::{
@@ -6,6 +6,7 @@ use super::client::{
     ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts, fetch_project_export,
     load_project_if_present, localize_bundle, prepare_feature_branches, request_json,
     resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
+    with_first_available_remote,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
@@ -27,7 +28,7 @@ use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
 
-/// Pull the current user's saved views for a project from the KnitHub remote,
+/// Pull the current user's saved views for a project from the sync remote,
 /// replacing the local views artifact.
 pub fn pull_views_from_remote(name: Option<&str>, remote_name: &str) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
@@ -88,7 +89,7 @@ pub enum RemoteBundleOutcome {
     Skipped(String),
 }
 
-/// A bundle as it exists on the configured KnitHub sync remote, with its current
+/// A bundle as it exists on the configured sync remote, with its current
 /// artifact payload decoded into a `ChangeGroup` when one is present.
 pub struct RemoteBundleRecord {
     pub remote_id: String,
@@ -97,11 +98,14 @@ pub struct RemoteBundleRecord {
     pub payload: Option<ChangeGroup>,
 }
 
-/// Resolve the configured KnitHub remote and fetch the project export a single
-/// time. Returns `None` when the pull opts out (`--no-remote`) or no remote is
-/// configured, so callers can skip the artifact step without it being an error.
-/// Remote resolution matches the primary push-sync remote: explicit override,
-/// then `syncRemotes[0]`/`sync_remote`, then the sole configured remote.
+/// Resolve a sync remote and fetch the project export a single time. Returns
+/// `None` when the pull opts out (`--no-remote`), no remote is configured, or
+/// no configured remote is reachable, so callers can skip the artifact step
+/// without it being an error — the git side of a pull never depends on a
+/// remote answering. Implicit resolution walks the configured sync remotes in
+/// order and uses the first one that responds; each unreachable remote is
+/// reported and skipped. An explicit `--remote` override still fails hard,
+/// because the caller named exactly the remote they wanted.
 pub fn prepare_remote_pull(
     remote_override: Option<&str>,
     skip_remote: bool,
@@ -110,38 +114,50 @@ pub fn prepare_remote_pull(
         return Ok(None);
     }
     let (root, config) = effective_workspace_config()?;
-    let Some(remote_name) = remote_override
-        .map(crate::ids::slugify)
-        .or_else(|| configured_sync_remote_names(&config).into_iter().next())
-    else {
+    let candidates: Vec<String> = match remote_override {
+        Some(name) => vec![crate::ids::slugify(name)],
+        None => configured_sync_remote_names(&config),
+    };
+    if candidates.is_empty() {
         return Ok(None);
-    };
-    let remote = match resolve_remote(&config, &remote_name) {
-        Ok(remote) => remote,
-        Err(error) => {
-            // An explicitly requested remote that is missing is an error; an
-            // implicit fallback that is missing is simply skipped.
-            if remote_override.is_some() {
-                return Err(error);
-            }
-            return Ok(None);
-        }
-    };
-    let token = resolve_token(&remote_name, remote)?;
+    }
+    let explicit = remote_override.is_some();
     let project_id = config
         .active_project
         .clone()
         .context("No active project selected for remote pull. Run `knit init <name>`.")?;
     let mut project = load_project_if_present(&root, &project_id)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
-    let export = fetch_project_export(remote, &token, &project_id)?;
-    crate::history::append_history_events(&root, &project_id, &export.history_events)?;
-    reconcile_project_repositories(&root, &mut project, &export)?;
-    Ok(Some(RemotePullContext { project, export }))
+    for remote_name in candidates {
+        let attempt = resolve_remote(&config, &remote_name)
+            .and_then(|remote| Ok((remote, resolve_token(&remote_name, remote)?)))
+            .and_then(|(remote, token)| fetch_project_export(remote, &token, &project_id));
+        match attempt {
+            Ok(export) => {
+                crate::history::append_history_events(&root, &project_id, &export.history_events)?;
+                reconcile_project_repositories(&root, &mut project, &export)?;
+                return Ok(Some(RemotePullContext { project, export }));
+            }
+            Err(error) => {
+                if explicit {
+                    return Err(error);
+                }
+                println!(
+                    "{} {error:#}",
+                    out::warn(format!("remote {remote_name} unavailable, skipping:"))
+                );
+            }
+        }
+    }
+    println!(
+        "{}",
+        out::warn("No sync remote reachable; continuing without remote sync.")
+    );
+    Ok(None)
 }
 
 /// Reconcile the local project's tracked repositories with the remote export so
-/// that repositories added or removed on KnitHub flow into an existing
+/// that repositories added or removed on the remote flow into an existing
 /// workspace, not just a fresh `knit clone`. Removals drop the project repo
 /// entry (the checkout on disk is left in place); additions clone the repo into
 /// the workspace and record it. A degenerate export with no repositories is
@@ -478,7 +494,7 @@ pub fn pull_remote_state(remote_name: Option<&str>, skip_remote: bool, merge: bo
         ),
         RemoteBundleOutcome::Skipped(reason) => println!(
             "{} {}",
-            out::warn("KnitHub pull skipped:"),
+            out::warn("remote pull skipped:"),
             out::muted(reason)
         ),
     }
@@ -495,17 +511,26 @@ pub fn remote_bundle_lifecycle(
     project_id: &str,
     bundle_id: &str,
 ) -> Result<Option<String>> {
-    let Some(remote_name) = configured_sync_remote_names(config).into_iter().next() else {
-        return Ok(None);
-    };
-    let remote = resolve_remote(config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
-    let export = fetch_project_export(remote, &token, project_id)?;
-    Ok(export
-        .bundles
-        .into_iter()
-        .find(|bundle| bundle.slug == bundle_id && bundle.lifecycle_state != "deleted")
-        .map(|bundle| bundle.lifecycle_state))
+    let mut last_error: Option<anyhow::Error> = None;
+    for remote_name in configured_sync_remote_names(config) {
+        let attempt = resolve_remote(config, &remote_name)
+            .and_then(|remote| Ok((remote, resolve_token(&remote_name, remote)?)))
+            .and_then(|(remote, token)| fetch_project_export(remote, &token, project_id));
+        match attempt {
+            Ok(export) => {
+                return Ok(export
+                    .bundles
+                    .into_iter()
+                    .find(|bundle| bundle.slug == bundle_id && bundle.lifecycle_state != "deleted")
+                    .map(|bundle| bundle.lifecycle_state));
+            }
+            Err(error) => last_error = Some(error),
+        }
+    }
+    match last_error {
+        Some(error) => Err(error),
+        None => Ok(None),
+    }
 }
 
 /// List the bundle records the sync remote holds for `project_id`, decoding each
@@ -514,10 +539,9 @@ pub fn list_remote_bundles(
     config: &KnitConfig,
     project_id: &str,
 ) -> Result<Vec<RemoteBundleRecord>> {
-    let remote_name = resolve_sync_remote_name(config)?;
-    let remote = resolve_remote(config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
-    let export = fetch_project_export(remote, &token, project_id)?;
+    let export = with_first_available_remote(config, None, |_, remote, token| {
+        fetch_project_export(remote, token, project_id)
+    })?;
     Ok(export
         .bundles
         .into_iter()
@@ -538,7 +562,7 @@ pub fn list_remote_bundles(
 
 /// Delete a single bundle record from the sync remote by its remote id, returning the
 /// deleted bundle's slug.
-/// Archive a KnitHub bundle record in place. Used by prune's remote-orphan
+/// Archive a remote bundle record in place. Used by prune's remote-orphan
 /// cleanup: a record whose local artifact is gone is finished history, not
 /// noise, so the remote keeps it (hidden from active views) instead of
 /// tombstoning it. Rides the everyday `bundle:push` scope.
@@ -616,21 +640,18 @@ pub fn fetch_bundles_from_remote(
     config: &KnitConfig,
     remote_name: Option<&str>,
 ) -> Result<()> {
-    let remote_name = remote_name
-        .map(crate::ids::slugify)
-        .or_else(|| configured_sync_remote_names(config).into_iter().next())
-        .with_context(|| {
-            "No remote configured for bundle fetch. Configure a remote with `knit remote add` or set sync-remotes."
-        })?;
-    let remote = resolve_remote(config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
-
     let project_id = config
         .active_project
         .clone()
         .context("Bundle fetch requires active_project. Set with `knit init <name>`.")?;
 
-    let export = fetch_project_export(remote, &token, &project_id)?;
+    let (remote_name, export) =
+        with_first_available_remote(config, remote_name, |name, remote, token| {
+            Ok((
+                name.to_string(),
+                fetch_project_export(remote, token, &project_id)?,
+            ))
+        })?;
     crate::history::append_history_events(root, &project_id, &export.history_events)?;
 
     let Some(local_project) = load_project_if_present(root, &project_id)? else {

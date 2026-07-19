@@ -471,7 +471,7 @@ knit related <repo-id>/path/inside/repo
 knit related --repo <repo-id> path/inside/repo --pull
 ```
 
-Use `--pull` when you want to refresh the local history ledger from KnitHub first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.
+Use `--pull` when you want to refresh the local history ledger from the sync remote first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.
 {teamwork_section}{runtime_section}{landing_section}
 {end}
 "#,
