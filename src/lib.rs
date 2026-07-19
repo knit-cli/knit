@@ -46,9 +46,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_repos(&name, &repos)
                 }
             }
-            ProjectCommand::Push { name, remote } => {
-                commands::push_project_to_remote(name.as_deref(), remote.as_deref())
-            }
+            ProjectCommand::Push {
+                name,
+                remote,
+                prune,
+            } => commands::push_project_to_remote(name.as_deref(), remote.as_deref(), prune),
             ProjectCommand::Agents { name } => commands::refresh_project_agents(name.as_deref()),
             ProjectCommand::Pull { name, repo, agents } => {
                 commands::pull_project_config(name.as_deref(), &repo, agents)

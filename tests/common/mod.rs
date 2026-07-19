@@ -1185,6 +1185,24 @@ fn handle_fake_knithub_push_request(
         ("POST", ["api", "v1", "projects", _, "repositories"]) => {
             (201, "{\"data\":{}}".to_string())
         }
+        // Repository listing for `project push --prune`: served from a staged
+        // `repositories.json` (the `data` array) so a test can present remote
+        // orphans; empty when none staged.
+        ("GET", ["api", "v1", "projects", _, "repositories"]) => {
+            match fs::read_to_string(dir.join("repositories.json")) {
+                Ok(body) => (200, body),
+                Err(_) => (200, "{\"data\":[]}".to_string()),
+            }
+        }
+        // Repository delete: record each pruned repository id, one per line.
+        ("DELETE", ["api", "v1", "projects", _, "repositories", repo_id]) => {
+            let record = dir.join("deleted-repositories.txt");
+            let mut existing = fs::read_to_string(&record).unwrap_or_default();
+            existing.push_str(repo_id);
+            existing.push('\n');
+            fs::write(&record, existing).unwrap();
+            (200, format!("{{\"data\":{{\"id\":\"{repo_id}\"}}}}"))
+        }
         ("POST", ["api", "v1", "projects", _, "history-events"]) => (
             201,
             "{\"data\":{\"insertedCount\":0,\"skippedCount\":0}}".to_string(),

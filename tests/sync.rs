@@ -1300,6 +1300,55 @@ fn force_push_scaffold(
 }
 
 #[test]
+fn project_push_prune_deletes_remote_repos_absent_from_local_shape() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+
+    // Remote lists backend (kept) plus two orphan records absent locally: one
+    // carrying localId in metadata, one only a name.
+    fs::write(
+        fake_dir.join("repositories.json"),
+        "{\"data\":[\
+           {\"id\":\"uuid-backend\",\"localId\":\"backend\",\"name\":\"backend\",\"metadata\":{}},\
+           {\"id\":\"uuid-oldrepo\",\"localId\":null,\"name\":\"oldrepo\",\"metadata\":{\"localId\":\"oldrepo\"}},\
+           {\"id\":\"uuid-legacy\",\"localId\":null,\"name\":\"legacy\",\"metadata\":{}}]}",
+    )
+    .unwrap();
+
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    let output = knit_with_env(&workspace, ["project", "push", "--prune"], &env);
+    assert!(output.contains("pruned"), "{output}");
+    assert!(output.contains("oldrepo"), "{output}");
+    assert!(output.contains("legacy"), "{output}");
+
+    let deleted = fs::read_to_string(fake_dir.join("deleted-repositories.txt")).unwrap();
+    let mut deleted_ids: Vec<&str> = deleted.lines().collect();
+    deleted_ids.sort();
+    assert_eq!(deleted_ids, vec!["uuid-legacy", "uuid-oldrepo"]);
+    // backend is in the local shape, so it must never be deleted.
+    assert!(!deleted.contains("uuid-backend"), "{deleted}");
+
+    // Without --prune, no deletes happen.
+    let _ = fs::remove_file(fake_dir.join("deleted-repositories.txt"));
+    knit_with_env(&workspace, ["project", "push"], &env);
+    assert!(!fake_dir.join("deleted-repositories.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn sync_push_without_force_hits_409_and_hints_at_force_with_lease() {
     let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
