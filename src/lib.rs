@@ -530,7 +530,12 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::cherrypick_from_bundle(&from_bundle, &targets, &repos, dry_run),
         Commands::Sync { command } => match command {
             None => commands::sync_bundle(),
-            Some(SyncCommand::Push { targets, remote }) => {
+            Some(SyncCommand::Push {
+                targets,
+                remote,
+                force_with_lease,
+                force,
+            }) => {
                 let targets = commands::remote::SyncTargets::resolve(
                     targets.bundles,
                     targets.history,
@@ -539,7 +544,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.kg,
                     targets.all,
                 );
-                commands::remote::sync_push(targets, &remote)
+                commands::remote::sync_push(
+                    targets,
+                    &remote,
+                    PushForce::from_flags(force_with_lease, force),
+                )
             }
             Some(SyncCommand::Pull { targets, remote }) => {
                 let targets = commands::remote::SyncTargets::resolve(
