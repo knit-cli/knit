@@ -94,12 +94,13 @@ pub(super) fn fetch_project_history_events(
     token: &str,
     project_identifier: &str,
 ) -> Result<Vec<HistoryEvent>> {
-    request_json(
+    let raw: Vec<serde_json::Value> = request_json(
         remote,
         token,
         "GET",
         &format!("/projects/{project_identifier}/history-events"),
         None,
     )
-    .with_context(|| format!("failed to fetch history for project `{project_identifier}`"))
+    .with_context(|| format!("failed to fetch history for project `{project_identifier}`"))?;
+    Ok(super::decode_history_events(&raw, project_identifier))
 }
