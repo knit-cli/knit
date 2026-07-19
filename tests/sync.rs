@@ -1267,3 +1267,192 @@ fn sync_push_fans_out_to_every_configured_remote_by_default() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The last artifact body the fake sync remote received for a bundle slug.
+fn last_artifact_body(dir: &std::path::Path, slug: &str) -> serde_json::Value {
+    let raw = fs::read_to_string(dir.join(format!("artifact-{slug}.bodies"))).unwrap();
+    serde_json::from_str(raw.lines().last().unwrap()).unwrap()
+}
+
+/// Scaffold a workspace with one project repo and a fake sync remote, ready
+/// for artifact force-push tests. Returns (root, workspace, fake_dir).
+fn force_push_scaffold(
+    with_bundles: &[&str],
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    for title in with_bundles {
+        knit(&workspace, ["bundle", title, "--repo", "backend"]);
+    }
+    (root, workspace, fake_dir)
+}
+
+#[test]
+fn sync_push_without_force_hits_409_and_hints_at_force_with_lease() {
+    let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    fs::write(fake_dir.join("enforce-fast-forward"), "").unwrap();
+
+    let failure = knit_fails_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(
+        failure.contains("knit sync push --bundles --force-with-lease"),
+        "{failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_force_overwrites_remote_ledger_unconditionally() {
+    let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    // A remote whose ledger is ahead refuses every non-forced push.
+    fs::write(fake_dir.join("enforce-fast-forward"), "").unwrap();
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles", "--force"], &env);
+    assert!(output.contains("pushed (forced)"), "{output}");
+
+    let body = last_artifact_body(&fake_dir, "quick-fix");
+    assert_eq!(body["force"], serde_json::json!(true), "{body}");
+    assert!(body.get("expectedArtifactHash").is_none(), "{body}");
+    assert_eq!(body["kind"], serde_json::json!("bundle"), "{body}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_force_with_lease_fetches_hash_and_cas_accepts() {
+    let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    fs::write(fake_dir.join("enforce-fast-forward"), "").unwrap();
+    fs::write(fake_dir.join("current-artifact-hash"), "lease-hash-1").unwrap();
+
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "push", "--bundles", "--force-with-lease"],
+        &env,
+    );
+    assert!(output.contains("pushed (forced)"), "{output}");
+
+    let body = last_artifact_body(&fake_dir, "quick-fix");
+    assert_eq!(body["force"], serde_json::json!(true), "{body}");
+    assert_eq!(
+        body["expectedArtifactHash"],
+        serde_json::json!("lease-hash-1"),
+        "{body}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_force_with_lease_mismatch_fails_each_bundle() {
+    // Two open bundles from the workspace root: no active bundle resolves and
+    // the project-wide sweep carries both, so the per-bundle lease failures
+    // are collected instead of aborting the run at the first one.
+    let (root, workspace, fake_dir) = force_push_scaffold(&["alpha work", "beta work"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    // The GET for the lease sees hash-a; by the time the POST lands the
+    // remote is on hash-b — a concurrent push in the window.
+    fs::write(fake_dir.join("current-artifact-hash"), "hash-a").unwrap();
+    fs::write(fake_dir.join("post-current-artifact-hash"), "hash-b").unwrap();
+
+    let failure = knit_fails_with_env(
+        &workspace,
+        ["sync", "push", "--bundles", "--force-with-lease"],
+        &env,
+    );
+    assert!(
+        failure.contains("alpha-work: remote artifact changed since fetch"),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("beta-work: remote artifact changed since fetch"),
+        "{failure}"
+    );
+    assert!(failure.contains("hash-b"), "{failure}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_force_flags_conflict() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let failure = knit_fails(
+        &workspace,
+        ["sync", "push", "--bundles", "--force", "--force-with-lease"],
+    );
+    assert!(failure.contains("cannot be used with"), "{failure}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_force_requires_a_bundle_target() {
+    let (root, workspace, _fake_dir) = force_push_scaffold(&["quick fix"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let failure = knit_fails_with_env(&workspace, ["sync", "push", "--views", "--force"], &env);
+    assert!(
+        failure.contains("apply only to bundle artifacts"),
+        "{failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn push_force_with_lease_propagates_into_the_artifact_sync() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-knithub");
+    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "quick fix", "--repo", "backend"]);
+
+    // A plain push sends a plain artifact body: no force fields.
+    knit_with_env(&workspace, ["push", "--set-upstream"], &env);
+    let body = last_artifact_body(&fake_dir, "quick-fix");
+    assert!(body.get("force").is_none(), "{body}");
+    assert!(body.get("expectedArtifactHash").is_none(), "{body}");
+
+    // A forced branch push carries the same force mode into the artifact
+    // sync: lease hash fetched from the sync remote, then compare-and-swap.
+    fs::write(fake_dir.join("current-artifact-hash"), "lease-hash-9").unwrap();
+    let output = knit_with_env(&workspace, ["push", "--force-with-lease"], &env);
+    assert!(output.contains("pushed (forced)"), "{output}");
+    let body = last_artifact_body(&fake_dir, "quick-fix");
+    assert_eq!(body["force"], serde_json::json!(true), "{body}");
+    assert_eq!(
+        body["expectedArtifactHash"],
+        serde_json::json!("lease-hash-9"),
+        "{body}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
