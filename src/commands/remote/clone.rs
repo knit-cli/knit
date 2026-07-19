@@ -217,8 +217,11 @@ fn clone_fetched_export(
     for bundle in &bundles {
         write_json(&bundle_path(&target_root, &bundle.id), bundle)?;
     }
-    let history_count =
-        crate::history::append_history_events(&target_root, &project.id, &export.history_events)?;
+    let history_count = crate::history::append_history_events(
+        &target_root,
+        &project.id,
+        &export.decoded_history_events(&project.id),
+    )?;
 
     let selected_bundle_id = select_active_bundle(&bundles, active_bundle)?;
     let mut remotes = BTreeMap::new();

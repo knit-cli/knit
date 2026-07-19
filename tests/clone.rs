@@ -514,3 +514,54 @@ fn walk_contains(root: &Path, needle: &str) -> Vec<std::path::PathBuf> {
     }
     hits
 }
+
+#[test]
+fn clone_survives_history_events_missing_project_id() {
+    let root = unique_temp_dir();
+    let (mut export, _source) = partial_export(&root);
+    // A native server-side event without projectId (real production shape)
+    // plus an unreadable one: the clone must succeed, repair the former, and
+    // skip the latter with a warning.
+    export["data"]["historyEvents"] = serde_json::json!([
+        {
+            "schemaVersion": "knit.history.event.v1",
+            "eventId": "review-decision:prod-shape",
+            "kind": "review.approved",
+            "bundleId": "feature-a",
+            "recordedAt": "2026-07-18T15:53:42Z",
+            "recordedBy": "native",
+        },
+        {"eventId": 42},
+    ]);
+    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "secret-token",
+            "--no-worktree",
+        ],
+        &[],
+    );
+
+    assert!(success, "{stderr}");
+    // Without --json, human lines (including the skip warning) stay on stdout.
+    assert!(
+        _stdout.contains("skipped 1 unreadable remote history event"),
+        "stdout: {_stdout}\nstderr: {stderr}"
+    );
+    let history = std::fs::read_to_string(target.join(".knit/history/demo.history.jsonl")).unwrap();
+    assert!(history.contains("review-decision:prod-shape"), "{history}");
+    assert!(history.contains("\"projectId\":\"demo\""), "{history}");
+
+    fs::remove_dir_all(root).unwrap();
+}
