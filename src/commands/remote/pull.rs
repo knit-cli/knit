@@ -141,7 +141,11 @@ pub fn prepare_remote_pull(
             .and_then(|(remote, token)| fetch_project_export(remote, &token, &project_id));
         match attempt {
             Ok(export) => {
-                crate::history::append_history_events(&root, &project_id, &export.history_events)?;
+                crate::history::append_history_events(
+                    &root,
+                    &project_id,
+                    &export.decoded_history_events(&project_id),
+                )?;
                 reconcile_project_repositories(&root, &mut project, &export)?;
                 return Ok(Some(RemotePullContext { project, export }));
             }
@@ -659,7 +663,11 @@ pub fn fetch_bundles_from_remote(
                 fetch_project_export(remote, token, &project_id)?,
             ))
         })?;
-    crate::history::append_history_events(root, &project_id, &export.history_events)?;
+    crate::history::append_history_events(
+        root,
+        &project_id,
+        &export.decoded_history_events(&project_id),
+    )?;
 
     let Some(local_project) = load_project_if_present(root, &project_id)? else {
         bail!("No local project `{project_id}` found. Cannot localize bundles.");
@@ -856,8 +864,12 @@ fn pull_bundle_by_slug_classified(
             ))
         })
         .map_err(|error| (RemoteErrorKind::Http, error))?;
-    crate::history::append_history_events(&root, &project_id, &export.history_events)
-        .map_err(other)?;
+    crate::history::append_history_events(
+        &root,
+        &project_id,
+        &export.decoded_history_events(&project_id),
+    )
+    .map_err(other)?;
     let local_project = load_project_if_present(&root, &project_id)
         .map_err(other)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))
