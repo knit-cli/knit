@@ -230,6 +230,13 @@ pub enum Commands {
         /// Set each feature branch's upstream to origin/<branch>.
         #[arg(long)]
         set_upstream: bool,
+        /// Force push, refusing when the remote branch moved since the last
+        /// fetch. The safe way to push rewritten feature-branch history.
+        #[arg(long)]
+        force_with_lease: bool,
+        /// Force push unconditionally. Prefer --force-with-lease.
+        #[arg(long, conflicts_with = "force_with_lease")]
+        force: bool,
         /// Also push the bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
