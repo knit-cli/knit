@@ -199,6 +199,45 @@ where
     );
 }
 
+/// Like `git_output`, but with extra environment variables set for the child
+/// git process only. Used to inject vended credentials via a GIT_ASKPASS shim
+/// so they never appear in argv, the URL, or any on-disk git config.
+pub fn git_output_with_env<I, S>(cwd: &Path, args: I, envs: &[(&str, &str)]) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    let args = collect_args(args);
+    let mut command = Command::new("git");
+    command.args(&args).current_dir(cwd);
+    for (key, value) in envs {
+        command.env(key, value);
+    }
+    let output = command
+        .output()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+
+    if output.status.success() {
+        return Ok(String::from_utf8_lossy(&output.stdout)
+            .trim_end()
+            .to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    bail!(
+        "git {} failed in {}: {}",
+        display_args(&args),
+        cwd.display(),
+        detail
+    );
+}
+
 pub fn git_output_optional<I, S>(cwd: &Path, args: I) -> Result<Option<String>>
 where
     I: IntoIterator<Item = S>,

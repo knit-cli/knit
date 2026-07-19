@@ -63,7 +63,7 @@ pub(crate) fn write_bundle_worktree_agents_md(active: &ActiveBundle) -> Result<O
 
 pub(crate) fn print_bundle_worktree_agents_summary(path: Option<&Path>) {
     if let Some(path) = path {
-        println!(
+        crate::human!(
             "{} {}",
             out::heading("Bundle AGENTS.md:"),
             out::path(path.display())
