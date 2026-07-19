@@ -64,7 +64,7 @@ pub use publish::{
     sync_publications, sync_publications_from_artifact,
 };
 pub use pull::{pull, pull_repos};
-pub use push::push_repos;
+pub use push::{push_repos, PushForce};
 pub use remote::{
     add_remote, clone_project_from_remote, fetch_bundles_from_remote, list_remote_projects,
     list_remotes, pull_bundle_by_slug, push_project_to_remote, remove_remote, set_remote_token,

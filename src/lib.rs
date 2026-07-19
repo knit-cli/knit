@@ -17,6 +17,7 @@ pub mod time;
 pub mod tracking;
 
 use anyhow::Result;
+use commands::PushForce;
 
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
@@ -309,9 +310,18 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             all,
             set_upstream,
+            force_with_lease,
+            force,
             remote,
             no_remote,
-        } => commands::push_repos(&repos, all, set_upstream, &remote, no_remote),
+        } => commands::push_repos(
+            &repos,
+            all,
+            set_upstream,
+            PushForce::from_flags(force_with_lease, force),
+            &remote,
+            no_remote,
+        ),
         Commands::Check { command } => match command {
             CheckCommand::Run { name, repos, all } => commands::run_check(&name, &repos, all),
             CheckCommand::Record {
