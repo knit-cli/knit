@@ -107,6 +107,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 global,
             } => commands::add_remote(&name, &url, token.as_deref(), global),
             RemoteCommand::List { global } => commands::list_remotes(global),
+            RemoteCommand::Projects { remote, json } => {
+                commands::list_remote_projects(remote.as_deref(), json)
+            }
             RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
             RemoteCommand::Remove { name, global } => commands::remove_remote(&name, global),
             RemoteCommand::Token {
@@ -124,6 +127,7 @@ pub fn run(cli: Cli) -> Result<()> {
             token,
             active_bundle,
             no_worktree,
+            json,
         } => commands::clone_project_from_remote(
             &project,
             target.as_deref(),
@@ -132,6 +136,7 @@ pub fn run(cli: Cli) -> Result<()> {
             token.as_deref(),
             active_bundle.as_deref(),
             !no_worktree,
+            json,
         ),
         Commands::Add {
             repos,
@@ -172,6 +177,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 None => commands::show_current_bundle(),
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
+            Some(BundleCommand::Pull { slug, json }) => commands::pull_bundle_by_slug(&slug, json),
             Some(BundleCommand::Add {
                 repos,
                 base,
