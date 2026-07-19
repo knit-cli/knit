@@ -16,6 +16,7 @@ use super::push::{
     push_all_bundles_to_remote, push_architecture_to_remote, push_bundle_to_remote,
     push_kg_graph_to_remote, push_views_to_remote,
 };
+use crate::commands::push::PushForce;
 use crate::output as out;
 use anyhow::{bail, Result};
 
@@ -86,7 +87,19 @@ fn resolve_remotes(remote_overrides: &[String]) -> Result<Vec<String>> {
 /// `knit sync push` and `knit sync push --bundles/--history/--views` route here,
 /// as does `knit push --remote` (bundles only). Failures across remotes are
 /// collected so one bad remote does not silently swallow the others.
-pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()> {
+pub fn sync_push(
+    targets: SyncTargets,
+    remote_overrides: &[String],
+    force: PushForce,
+) -> Result<()> {
+    // Force is an artifact-ledger concept: it overwrites the remote bundle
+    // ledger, nothing else. A selection without a bundle component has no
+    // ledger to force, so passing the flag there is a mistake worth stopping.
+    if force.is_force() && !targets.bundles {
+        bail!(
+            "--force/--force-with-lease apply only to bundle artifacts. Add --bundles to the target selection."
+        );
+    }
     let remotes = resolve_remotes(remote_overrides)?;
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
@@ -112,7 +125,7 @@ pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
                 .map(|active| active.bundle.id);
             match &active_id {
                 Some(_) => {
-                    if let Err(error) = push_bundle_to_remote(remote, None) {
+                    if let Err(error) = push_bundle_to_remote(remote, None, force) {
                         failures.push(format!("{remote} bundle: {error:#}"));
                     }
                 }
@@ -122,7 +135,9 @@ pub fn sync_push(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
                     }
                 }
             }
-            if let Err(error) = push_all_bundles_to_remote(remote, None, active_id.as_deref()) {
+            if let Err(error) =
+                push_all_bundles_to_remote(remote, None, active_id.as_deref(), force)
+            {
                 failures.push(format!("{remote} bundles: {error:#}"));
             }
         } else if targets.history {
