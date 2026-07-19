@@ -9,10 +9,16 @@ use super::client::{
     with_first_available_remote,
 };
 use super::clone::{
-    clone_export_repositories, export_repo_local_id, project_repo_entry_from_export,
+    clone_export_repositories, export_repo_local_id, materialize_imported_bundle,
+    project_repo_entry_from_export,
 };
-use super::{RemoteBundle, RemoteExportRepository, RemoteProjectExport, RemoteViews};
+use super::credentials::GitCredentialSource;
+use super::{
+    print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportRepository,
+    RemoteProjectExport, RemoteViews,
+};
 use crate::commands::worktree::materialize_repos;
+use crate::ids::slugify;
 use crate::model::{
     ledger_relation, merge_ledgers, ChangeGroup, KnitConfig, KnitProject, KnitProjectViews,
     KnitRemote, LedgerRelation,
@@ -23,7 +29,8 @@ use crate::store::{
     save_active_bundle, write_json, ActiveBundle,
 };
 use crate::time::now_iso;
-use anyhow::{bail, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
+use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
@@ -203,7 +210,7 @@ fn reconcile_project_repositories(
     let mut failed = Vec::new();
     for repository in to_add {
         let local_id = export_repo_local_id(repository);
-        match clone_export_repositories(root, std::slice::from_ref(repository)) {
+        match clone_export_repositories(root, std::slice::from_ref(repository), None) {
             Ok(paths) => {
                 if let Some(repo_path) = paths.get(&local_id) {
                     project
@@ -324,7 +331,7 @@ pub fn pull_bundle_remote_state(
         }
         LedgerRelation::Diverged => {
             let localized = localize_bundle(remote_payload, &context.project)?;
-            prepare_feature_branches(&localized)?;
+            prepare_feature_branches(&localized, None)?;
             let merged = merge_ledgers(&local, &localized, now_iso());
             let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
             materialize_repos(&mut active, None)?;
@@ -350,7 +357,7 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::RemoteAhead => {}
     }
     let localized = localize_bundle(remote_payload, &context.project)?;
-    prepare_feature_branches(&localized)?;
+    prepare_feature_branches(&localized, None)?;
     ensure_remote_bundle_fast_forward(&local, &localized)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, localized);
     materialize_repos(&mut active, None)?;
@@ -408,7 +415,7 @@ fn refresh_bundle_checkouts(
         .iter()
         .map(|(_, dir)| checkout_head(dir))
         .collect();
-    prepare_feature_branches(&bundle)?;
+    prepare_feature_branches(&bundle, None)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, bundle);
     let mut created = 0usize;
     if !to_materialize.is_empty() {
@@ -780,6 +787,206 @@ pub fn fetch_bundles_from_remote(
         );
     }
     Ok(())
+}
+
+/// Machine-readable `knit bundle pull --json` result document. The shape is a
+/// contract with external drivers (ivaldi); change it only deliberately.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundlePullDocument {
+    bundle: String,
+    repos: Vec<BundlePullRepo>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundlePullRepo {
+    id: String,
+    feature_branch: Option<String>,
+    head_sha: Option<String>,
+    status: &'static str,
+    worktree_path: Option<String>,
+}
+
+/// `knit bundle pull <slug>`: one verb that refreshes a single bundle's
+/// artifact from the sync remote, fetches its feature branches (vended
+/// credentials apply), and materializes fast-forwarded worktrees.
+pub fn pull_bundle_by_slug(slug: &str, json: bool) -> Result<()> {
+    if json {
+        crate::output::route_human_lines_to_stderr();
+    }
+    match pull_bundle_by_slug_classified(slug) {
+        Ok(document) => {
+            if json {
+                println!(
+                    "{}",
+                    serde_json::to_string_pretty(&document)
+                        .context("failed to serialize bundle pull document")?
+                );
+            }
+            Ok(())
+        }
+        Err((kind, error)) => {
+            if json {
+                print_json_error_envelope(kind, &error);
+            }
+            Err(error)
+        }
+    }
+}
+
+fn pull_bundle_by_slug_classified(
+    slug: &str,
+) -> std::result::Result<BundlePullDocument, (RemoteErrorKind, anyhow::Error)> {
+    let other = |error: anyhow::Error| (RemoteErrorKind::Other, error);
+    let slug = slugify(slug);
+
+    let (root, config) = effective_workspace_config().map_err(other)?;
+    let project_id = config
+        .active_project
+        .clone()
+        .context("Bundle pull requires an active project. Run `knit init <name>` or clone one.")
+        .map_err(other)?;
+    let (remote, token, export) =
+        with_first_available_remote(&config, None, |_name, remote, token| {
+            Ok((
+                remote.clone(),
+                token.to_string(),
+                fetch_project_export(remote, token, &project_id)?,
+            ))
+        })
+        .map_err(|error| (RemoteErrorKind::Http, error))?;
+    crate::history::append_history_events(&root, &project_id, &export.history_events)
+        .map_err(other)?;
+    let local_project = load_project_if_present(&root, &project_id)
+        .map_err(other)?
+        .with_context(|| format!("No local Knit project named `{project_id}`."))
+        .map_err(other)?;
+
+    let Some(remote_bundle) = export
+        .bundles
+        .iter()
+        .find(|bundle| bundle.slug == slug && bundle.lifecycle_state != "deleted")
+    else {
+        return Err((
+            RemoteErrorKind::NotFound,
+            anyhow!("Remote has no bundle named `{slug}`."),
+        ));
+    };
+    let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
+        return Err((
+            RemoteErrorKind::NotFound,
+            anyhow!("Remote bundle `{slug}` has no artifact to pull."),
+        ));
+    };
+    let mut bundle =
+        decode_bundle_payload(&artifact.payload, &remote_bundle.slug).map_err(other)?;
+    let bundle_id = bundle.id.clone();
+    if root
+        .join(".knit/deleted/bundles")
+        .join(format!("{bundle_id}.bundle.json"))
+        .exists()
+    {
+        return Err((
+            RemoteErrorKind::Other,
+            anyhow!("Bundle `{bundle_id}` was deleted locally; restore it before pulling."),
+        ));
+    }
+
+    let path = bundle_path(&root, &bundle_id);
+    {
+        let _lock = acquire_named_lock(&root, &bundle_id).map_err(other)?;
+        if !path.exists() {
+            bundle = localize_bundle(bundle, &local_project).map_err(other)?;
+            write_json(&path, &bundle).map_err(other)?;
+            crate::human!(
+                "{} {} {}",
+                out::node(&bundle_id),
+                out::movement("fetched"),
+                out::muted("bundle artifact")
+            );
+        } else {
+            let local: ChangeGroup = read_json(&path).map_err(other)?;
+            match ledger_relation(&local.node_id_sequence(), &bundle.node_id_sequence()) {
+                LedgerRelation::Equal | LedgerRelation::LocalAhead => {
+                    crate::human!(
+                        "{} {}",
+                        out::node(&bundle_id),
+                        out::muted("artifact already current")
+                    );
+                }
+                LedgerRelation::Diverged => {
+                    crate::human!(
+                        "{} {}",
+                        out::node(&bundle_id),
+                        out::warn(
+                            "local and remote ledgers have diverged; kept local (run `knit pull --merge` to combine them)"
+                        )
+                    );
+                }
+                LedgerRelation::RemoteAhead => {
+                    let mut localized = localize_bundle(bundle, &local_project).map_err(other)?;
+                    // Localizing wipes per-machine checkout recordings; carry
+                    // this workspace's over so the refresh does not orphan
+                    // existing worktrees.
+                    for repo in &mut localized.repos {
+                        if repo.worktree_path.is_none() {
+                            repo.worktree_path = local
+                                .repos
+                                .iter()
+                                .find(|local_repo| local_repo.id == repo.id)
+                                .and_then(|local_repo| local_repo.worktree_path.clone());
+                        }
+                    }
+                    write_json(&path, &localized).map_err(other)?;
+                    crate::human!(
+                        "{} {} {}",
+                        out::node(&bundle_id),
+                        out::movement("advanced"),
+                        out::muted("bundle artifact")
+                    );
+                }
+            }
+        }
+    }
+
+    // Fetch feature branches, create missing worktrees, fast-forward to the
+    // recorded heads — the same machinery a clone-time materialize uses, with
+    // vended credentials available for non-public repos.
+    let vend = GitCredentialSource::from_export(&remote, &token, &export);
+    materialize_imported_bundle(&root, &bundle_id, Some(&vend)).map_err(other)?;
+
+    let saved: ChangeGroup = read_json(&path).map_err(other)?;
+    let repos = saved
+        .repos
+        .iter()
+        .map(|repo| BundlePullRepo {
+            id: repo.id.clone(),
+            feature_branch: repo.feature_branch.clone(),
+            head_sha: repo.head_sha.clone(),
+            status: "pulled",
+            worktree_path: repo.worktree_path.as_ref().map(|worktree_path| {
+                let candidate = std::path::PathBuf::from(worktree_path);
+                if candidate.is_absolute() {
+                    candidate.display().to_string()
+                } else {
+                    root.join(candidate).display().to_string()
+                }
+            }),
+        })
+        .collect::<Vec<_>>();
+
+    crate::human!(
+        "{} {} {} repo(s) ready",
+        out::movement("pulled"),
+        out::node(&bundle_id),
+        repos.len()
+    );
+
+    Ok(BundlePullDocument {
+        bundle: bundle_id,
+        repos,
+    })
 }
 
 /// Render a bundle's repo -> feature-branch mapping for fetch/list output, so
