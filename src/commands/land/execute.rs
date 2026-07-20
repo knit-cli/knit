@@ -735,7 +735,7 @@ fn prepare_deployment_checkout(
     } else {
         fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
         // FETCH_HEAD belongs to the worktree where fetch ran. Resolve it before
-        // operating in an existing deployment worktree during `land resume`.
+        // operating in a managed deployment worktree that already exists.
         rev_parse(&repo_root, "FETCH_HEAD")?
     };
 

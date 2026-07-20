@@ -566,6 +566,22 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
         Some("merge-frontend")
     );
 
+    // Reproduce a checkout left by an earlier landing. The source clone has
+    // not fetched the collaborator's base update yet, so apply must fetch it
+    // and move this existing worktree to the fetched commit before deploying.
+    let managed_checkout = workspace.join(".knit/land-worktrees/venue-capacity/backend/main");
+    fs::create_dir_all(managed_checkout.parent().unwrap()).unwrap();
+    git(
+        &backend,
+        [
+            "worktree",
+            "add",
+            "--detach",
+            managed_checkout.to_str().unwrap(),
+            "HEAD",
+        ],
+    );
+
     let apply = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(apply.contains("deploy-backend"));
     fs::write(&deploy_ready, "ready\n").unwrap();
