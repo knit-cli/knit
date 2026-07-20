@@ -17,6 +17,7 @@ mod check;
 mod display;
 mod execute;
 mod plan;
+mod process;
 mod rollback;
 mod types;
 mod update;
@@ -25,6 +26,7 @@ mod validate;
 pub use artifact::apply_land_from_artifact;
 pub use check::check_landing;
 pub(crate) use check::{assess_landing_readiness, print_readiness_row};
+pub(crate) use process::DEFAULT_COMMAND_TIMEOUT_SECONDS;
 pub use rollback::rollback_land_run;
 
 use crate::advice;

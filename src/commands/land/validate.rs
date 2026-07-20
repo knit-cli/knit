@@ -37,6 +37,12 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
     ordered_step_ids(&plan.steps)?;
 
     for step in &plan.steps {
+        if step.timeout_seconds == Some(0) {
+            bail!(
+                "land step `{}` timeoutSeconds must be greater than zero",
+                step.id
+            );
+        }
         match step.step_type {
             LandStepKind::MergePr => {
                 required_repo_id(step)?;
