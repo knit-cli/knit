@@ -503,6 +503,7 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
                 "id": "deploy-backend",
                 "repoId": "backend",
                 "checkout": { "branch": "main", "remote": "origin", "update": "pull" },
+                "timeoutSeconds": 120,
                 "command": ["sh", "-c", deploy_script]
             },
             {
@@ -551,11 +552,13 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     assert_eq!(steps[1]["id"].as_str(), Some("merge-backend"));
     assert_eq!(steps[2]["type"].as_str(), Some("deploy"));
     assert_eq!(steps[2]["id"].as_str(), Some("deploy-backend"));
+    assert_eq!(steps[2]["timeoutSeconds"].as_u64(), Some(120));
     assert_eq!(
         steps[2]["needs"].as_array().unwrap()[0].as_str(),
         Some("merge-backend")
     );
     assert_eq!(steps[3]["id"].as_str(), Some("deploy-frontend"));
+    assert!(steps[3].get("timeoutSeconds").is_none());
     assert_eq!(
         steps[3]["needs"].as_array().unwrap()[0].as_str(),
         Some("merge-frontend")
@@ -573,6 +576,185 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
         .unwrap()
         .contains(".knit/land-worktrees/venue-capacity/backend/main"));
     assert_eq!(fs::read_to_string(&deploy_branch).unwrap().trim(), "HEAD");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn command_deployment_timeout_is_recorded_and_terminates_descendants() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    let child_pid_path = root.join("deploy-child.pid");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-backend",
+            "repoId": "backend",
+            "timeoutSeconds": 1,
+            "command": [
+                "sh",
+                "-c",
+                "printf 'deploy started\\n'; sleep 20 & echo $! > \"$KNIT_TEST_PID_FILE\"; wait"
+            ],
+            "env": { "KNIT_TEST_PID_FILE": child_pid_path }
+        }]
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "timed deploy"]);
+    knit(&workspace, ["land", "plan"]);
+    let plan_path = workspace.join(".knit/land-plans/timed-deploy.land.json");
+    let plan: Value = serde_json::from_str(&fs::read_to_string(plan_path).unwrap()).unwrap();
+    assert_eq!(plan["steps"][0]["timeoutSeconds"].as_u64(), Some(1));
+
+    let failed = knit_fails(&workspace, ["land", "apply"]);
+    assert!(failed.contains("deploy started"), "{failed}");
+    assert!(failed.contains("timed out after 1 seconds"), "{failed}");
+
+    let (_, run) = latest_land_run(&workspace);
+    assert_eq!(run["status"].as_str(), Some("failed"));
+    assert_eq!(run["steps"][0]["status"].as_str(), Some("failed"));
+    assert!(run["steps"][0]["stdout"]
+        .as_str()
+        .unwrap()
+        .contains("deploy started"));
+    assert!(run["steps"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("timed out after 1 seconds"));
+
+    let child_pid = fs::read_to_string(&child_pid_path)
+        .unwrap()
+        .trim()
+        .to_string();
+    let child_alive = std::process::Command::new("kill")
+        .args(["-0", &child_pid])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !child_alive,
+        "timed-out deployment child {child_pid} survived"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn terminating_knit_cancels_deployment_tree_and_records_failure() {
+    use std::process::{Command, Stdio};
+    use std::thread;
+    use std::time::{Duration, Instant};
+
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    let child_pid_path = root.join("cancelled-deploy-child.pid");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-backend",
+            "repoId": "backend",
+            "timeoutSeconds": 60,
+            "command": [
+                "sh",
+                "-c",
+                "printf 'deploy started\\n'; sleep 20 & echo $! > \"$KNIT_TEST_PID_FILE\"; wait"
+            ],
+            "env": { "KNIT_TEST_PID_FILE": child_pid_path }
+        }]
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "cancelled deploy"]);
+    knit(&workspace, ["land", "plan"]);
+    let child = Command::new(env!("CARGO_BIN_EXE_knit"))
+        .args(["land", "apply"])
+        .current_dir(&workspace)
+        .env("KNIT_HOME", isolated_knit_home())
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION")
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+
+    let marker_deadline = Instant::now() + Duration::from_secs(5);
+    while !child_pid_path.exists() && Instant::now() < marker_deadline {
+        thread::sleep(Duration::from_millis(25));
+    }
+    assert!(child_pid_path.exists(), "deployment command did not start");
+    // SAFETY: the pid is from the live Child handle and SIGTERM is handled by
+    // Knit to cancel registered landing subprocesses before returning.
+    assert_eq!(unsafe { libc::kill(child.id() as i32, libc::SIGTERM) }, 0);
+    let output = child.wait_with_output().unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!output.status.success());
+    assert!(combined.contains("deploy `sh -c"), "{combined}");
+    assert!(combined.contains("cancelled"), "{combined}");
+
+    let (_, run) = latest_land_run(&workspace);
+    assert_eq!(run["status"].as_str(), Some("failed"));
+    assert_eq!(run["steps"][0]["status"].as_str(), Some("failed"));
+    assert!(run["steps"][0]["detail"]
+        .as_str()
+        .unwrap()
+        .contains("cancelled"));
+
+    let descendant_pid = fs::read_to_string(&child_pid_path)
+        .unwrap()
+        .trim()
+        .to_string();
+    let descendant_alive = Command::new("kill")
+        .args(["-0", &descendant_pid])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .unwrap()
+        .success();
+    assert!(
+        !descendant_alive,
+        "cancelled deployment child {descendant_pid} survived"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

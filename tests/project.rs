@@ -685,6 +685,7 @@ fn project_agents_are_generated_from_project_json() {
                 "id": "deploy-backend",
                 "repoId": "backend",
                 "checkout": { "branch": "main", "remote": "origin", "update": "pull" },
+                "timeoutSeconds": 900,
                 "command": ["fly", "deploy"]
             },
             {
@@ -711,6 +712,7 @@ fn project_agents_are_generated_from_project_json() {
         landing_agents.contains("Merge defaults: method `squash`, required checks only `true`.")
     );
     assert!(landing_agents.contains("`deploy-backend` repo `backend` uses `command` from `origin/main` with `pull`: `fly deploy`"));
+    assert!(landing_agents.contains("timeout: 900s"));
     assert!(landing_agents.contains("`deploy-frontend` repo `frontend` uses `push`"));
     assert!(landing_agents.contains("Do not use `gh pr merge` for Knit-owned bundles."));
 

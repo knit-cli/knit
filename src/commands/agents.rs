@@ -548,8 +548,18 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
                 } else {
                     format!(": `{}`", deployment.command.join(" "))
                 };
+                let timeout = if mode == crate::model::DeployMode::Command {
+                    format!(
+                        " (timeout: {}s)",
+                        deployment
+                            .timeout_seconds
+                            .unwrap_or(crate::commands::land::DEFAULT_COMMAND_TIMEOUT_SECONDS)
+                    )
+                } else {
+                    String::new()
+                };
                 format!(
-                    "- `{id}`{repo} uses `{mode}`{checkout}{command}",
+                    "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}",
                     id = deployment.id
                 )
             })

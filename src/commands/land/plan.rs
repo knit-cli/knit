@@ -1,6 +1,7 @@
 //! Builds the default land plan from the resolved bundle and its project's
 //! landing template: one merge step per recorded PR plus any project deployments.
 
+use super::process::DEFAULT_COMMAND_TIMEOUT_SECONDS;
 use super::{
     ensure_provider, LandCheckout, LandPlan, LandStep, LandStepKind, DEFAULT_LAND_PROVIDER,
     LAND_PLAN_KIND,
@@ -221,7 +222,11 @@ fn append_project_deployments(
             required_checks_only: None,
             delete_branch: None,
             required_only: None,
-            timeout_seconds: None,
+            timeout_seconds: (mode == DeployMode::Command).then_some(
+                deployment
+                    .timeout_seconds
+                    .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS),
+            ),
             interval_seconds: None,
             cwd: deployment.cwd.clone(),
             command: deployment.command.clone(),
