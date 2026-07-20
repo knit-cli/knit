@@ -481,10 +481,12 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
 
     let deploy_pwd = root.join("deploy-pwd.txt");
     let deploy_branch = root.join("deploy-branch.txt");
+    let deploy_ready = root.join("deploy-ready");
     let deploy_script = format!(
-        "pwd > '{}' && git rev-parse --abbrev-ref HEAD > '{}' && test -f base.txt",
+        "pwd > '{}' && git rev-parse --abbrev-ref HEAD > '{}' && test -f base.txt && test -f '{}'",
         deploy_pwd.display(),
-        deploy_branch.display()
+        deploy_branch.display(),
+        deploy_ready.display()
     );
     let project_path = workspace.join(".knit/projects/demo.project.json");
     let mut project: Value =
@@ -564,9 +566,11 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
         Some("merge-frontend")
     );
 
-    let apply = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    let apply = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(apply.contains("deploy-backend"));
-    assert!(apply.contains("deploy-frontend"));
+    fs::write(&deploy_ready, "ready\n").unwrap();
+    let resume = knit_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
+    assert!(resume.contains("Feature landed"));
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
     assert_eq!(
         order.lines().collect::<Vec<_>>(),
