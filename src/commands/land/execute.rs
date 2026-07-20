@@ -2,6 +2,7 @@
 //! (merge PR, wait for checks, run command, deploy), and records progress into
 //! the land run file and bundle ledger.
 
+use super::process::{begin_execution, cancellation_requested, run_streamed};
 use super::{
     display_path_for_storage, ensure_open_and_ready, non_empty, repo_context, required_repo_id,
     resolve_stored_path, resolve_subdir, run_step, safe_timestamp, state_is_merged, LandCheckout,
@@ -31,6 +32,7 @@ pub(super) fn execute_run(
     run: &mut LandRun,
     run_path: &Path,
 ) -> Result<()> {
+    begin_execution()?;
     let waves = step_waves(&plan.steps, order)?;
 
     for wave in &waves {
@@ -405,6 +407,9 @@ pub(super) fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec
 }
 
 fn execute_step(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Result<StepOutcome> {
+    if cancellation_requested() {
+        bail!("landing cancelled before step `{}`", step.id);
+    }
     match step.step_type {
         LandStepKind::MergePr => execute_merge_pr(active, plan, step),
         LandStepKind::WaitChecks => execute_wait_checks(active, step),
@@ -522,23 +527,34 @@ fn execute_run_command(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
         .as_deref()
         .map(|cwd| resolve_stored_path(&active.root, cwd))
         .unwrap_or_else(|| active.root.clone());
-    let output = Command::new(&step.command[0])
-        .args(&step.command[1..])
-        .current_dir(&cwd)
-        .envs(&step.env)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run `{}` in {}",
-                step.command.join(" "),
-                cwd.display()
-            )
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output = run_streamed(
+        Command::new(&step.command[0])
+            .args(&step.command[1..])
+            .current_dir(&cwd)
+            .envs(&step.env),
+        step.timeout_seconds,
+    )
+    .with_context(|| {
+        format!(
+            "failed to run `{}` in {}",
+            step.command.join(" "),
+            cwd.display()
+        )
+    })?;
+    let stdout = output.stdout;
+    let stderr = output.stderr;
     let exit_code = output.status.code();
-    let success = output.status.success();
-    let detail = if success {
+    let success = output.status.success() && !output.timed_out && !output.cancelled;
+    let detail = if output.cancelled {
+        format!("`{}` cancelled", step.command.join(" "))
+    } else if output.timed_out {
+        format!(
+            "`{}` timed out after {} seconds",
+            step.command.join(" "),
+            step.timeout_seconds
+                .unwrap_or(super::process::DEFAULT_COMMAND_TIMEOUT_SECONDS)
+        )
+    } else if success {
         format!("ran `{}`", step.command.join(" "))
     } else {
         format!(
@@ -595,27 +611,38 @@ fn execute_deployment(active: &ActiveBundle, step: &LandStep) -> Result<StepOutc
     }
 
     let (cwd, checkout_detail) = deployment_cwd(active, repo_id, step)?;
-    let output = Command::new(&step.command[0])
-        .args(&step.command[1..])
-        .current_dir(&cwd)
-        .envs(&step.env)
-        .env("KNIT_ROOT", &active.root)
-        .env("KNIT_BUNDLE", &active.bundle.id)
-        .env("KNIT_REPO", repo_id)
-        .env("KNIT_DEPLOY_CHECKOUT", &cwd)
-        .output()
-        .with_context(|| {
-            format!(
-                "failed to run deploy `{}` in {}",
-                step.command.join(" "),
-                cwd.display()
-            )
-        })?;
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let output = run_streamed(
+        Command::new(&step.command[0])
+            .args(&step.command[1..])
+            .current_dir(&cwd)
+            .envs(&step.env)
+            .env("KNIT_ROOT", &active.root)
+            .env("KNIT_BUNDLE", &active.bundle.id)
+            .env("KNIT_REPO", repo_id)
+            .env("KNIT_DEPLOY_CHECKOUT", &cwd),
+        step.timeout_seconds,
+    )
+    .with_context(|| {
+        format!(
+            "failed to run deploy `{}` in {}",
+            step.command.join(" "),
+            cwd.display()
+        )
+    })?;
+    let stdout = output.stdout;
+    let stderr = output.stderr;
     let exit_code = output.status.code();
-    let success = output.status.success();
-    let detail = if success {
+    let success = output.status.success() && !output.timed_out && !output.cancelled;
+    let detail = if output.cancelled {
+        format!("deploy `{}` cancelled", step.command.join(" "))
+    } else if output.timed_out {
+        format!(
+            "deploy `{}` timed out after {} seconds",
+            step.command.join(" "),
+            step.timeout_seconds
+                .unwrap_or(super::process::DEFAULT_COMMAND_TIMEOUT_SECONDS)
+        )
+    } else if success {
         format!("deployed {repo_id} from {checkout_detail}")
     } else {
         format!(
