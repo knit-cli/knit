@@ -134,6 +134,7 @@
                 "additionalProperties": false
               },
               "cwd": { "type": "string" },
+              "timeoutSeconds": { "type": "integer", "minimum": 1 },
               "command": {
                 "type": "array",
                 "items": { "type": "string" },

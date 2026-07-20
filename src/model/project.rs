@@ -128,6 +128,10 @@ pub struct ProjectLandingDeployment {
     pub checkout: Option<ProjectLandingCheckout>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
+    /// Maximum time a command deployment may run before Knit terminates its
+    /// process tree. Defaults to 30 minutes when omitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
