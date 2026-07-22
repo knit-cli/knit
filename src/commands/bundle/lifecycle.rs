@@ -3,7 +3,9 @@
 
 use super::{bundle_state, current_root, load_existing_bundle, BundleStatus};
 use crate::checkout::is_in_place;
-use crate::git::{branch_exists, current_branch, git_output, git_output_optional, ref_exists};
+use crate::git::{
+    branch_exists, current_branch, git_output, git_output_optional, ref_exists, rev_parse,
+};
 use crate::model::{BundleNode, BundleState, ChangeGroup};
 use crate::output as out;
 use crate::store::{
@@ -242,7 +244,18 @@ pub(crate) fn delete_repo_feature_branch(
         );
         return Ok(());
     }
-    let delete_flag = if force { "-D" } else { "-d" };
+    // `git branch -d` judges safety relative to the source checkout's current
+    // branch. A newly created Knit branch can therefore look "unmerged" even
+    // when it has never moved from its pinned bundle base (for example while
+    // correcting a project base from master to stable). Equality with baseSha
+    // proves there is no feature work to lose, so deleting it is safe.
+    let untouched = repo
+        .base_sha
+        .as_deref()
+        .map(|base| rev_parse(&repo_root, branch).map(|head| head == base))
+        .transpose()?
+        .unwrap_or(false);
+    let delete_flag = if force || untouched { "-D" } else { "-d" };
     git_output(
         &repo_root,
         [

@@ -81,6 +81,7 @@ pub fn track_repo_selectors(
         }
     }
     ensure_unique_paths(&plans)?;
+    reject_already_tracked_paths(&active, &plans)?;
     apply_repo_plans(&mut active, plans, materialize)?;
     // Persist the fully materialized artifact before printing the AGENTS.md
     // summary, so a SIGPIPE on that final write can no longer drop the recorded
@@ -238,7 +239,7 @@ fn resolve_repo_plan(
     let remote = git_output_optional(&repo_root, ["remote", "get-url", "origin"])?;
     let base_branch = match base_override {
         Some(base) => base.to_string(),
-        None => infer_base_branch(&repo_root, current_branch.as_deref())?,
+        None => infer_base_branch(&repo_root, current_branch.as_deref())?.branch,
     };
     let base_sha = snapshot_base(&repo_root, &base_branch, base_mode)?.sha;
 
@@ -312,6 +313,27 @@ fn ensure_unique_paths(plans: &[RepoPlan]) -> Result<()> {
             .any(|existing| same_path(&existing.path, &plan.path))
         {
             bail!("Repo {} was provided more than once.", plan.path);
+        }
+    }
+    Ok(())
+}
+
+fn reject_already_tracked_paths(
+    active: &crate::store::ActiveBundle,
+    plans: &[RepoPlan],
+) -> Result<()> {
+    for plan in plans {
+        if let Some(existing) = active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| same_path(&repo.path, &plan.path))
+        {
+            bail!(
+                "Repo {} is already tracked in bundle {}. `knit bundle add` will not rewrite its recorded base; use `knit project set-base` for future bundle additions.",
+                out::repo(&existing.id),
+                out::node(&active.bundle.id)
+            );
         }
     }
     Ok(())

@@ -473,6 +473,7 @@ knit init my-project
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
+knit project set-base backend stable
 knit project command set dev --repo frontend -- docker compose up
 knit bundle "feature title"
 ```
@@ -639,7 +640,8 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
-- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip).
+- `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
+- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
 - `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.

@@ -223,6 +223,8 @@ in the same page.
 
 **Project.** A reusable repo template, created once with `knit init <name>` (like `git init`, but for a set of repos). Add repos with `knit project add <id> <path>`; mark a repo `--observe` to keep it available but out of default bundle starts. Projects can also define commands (`knit project command set …`) and a default landing template. Projects are optional — you can also `knit bundle add <path>` repos directly into an ad-hoc bundle.
 
+Knit infers each repo's base from Git's remote-default metadata when available, including nonstandard names such as `stable`. Use `knit project set-base <repo-id> <branch>` to correct only that setting; existing bundles remain pinned and are reported rather than silently rewritten.
+
 **Bundle.** The branch-like feature unit and the cross-repo analogue of a git branch. `knit bundle "<title>"` creates one; bare `knit bundle` shows the resolved one. The same source repo can appear in many bundles at once, each on its own `knit/<bundle>` feature branch and worktree (`.knit/worktrees/fix-a/backend`, `.knit/worktrees/fix-b/backend`), so parallel features never collide. Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then the generated worktree path, then the workspace fallback. The bundle's `.bundle.json` is the source of truth for the feature.
 
 **Worktrees.** Each tracked repo gets a generated checkout under `.knit/worktrees/<bundle>/<repo>/`. Make all changes there. Everyday VCS verbs operate across every tracked checkout at once: `knit add`, `knit status`, `knit diff`, `knit commit`, `knit push`, `knit log`. For one repo, target it by id or path (`knit diff backend`). `knit git <args>` passes through to git in each checkout.
