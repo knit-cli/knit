@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod base;
 pub mod bundle;
 pub mod check;
 pub mod cherrypick;
@@ -31,8 +32,10 @@ pub mod sync;
 pub mod tag;
 pub mod track;
 pub mod view;
+pub mod workspace;
 pub mod worktree;
 
+pub use base::BundleBaseMode;
 pub use bundle::{
     archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
     restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
@@ -57,7 +60,7 @@ pub use merge::merge_command;
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects, pull_project_config,
     refresh_project_agents, remove_project, remove_project_repos, remove_project_run_command,
-    set_project_run_command, show_project,
+    set_project_repo_base, set_project_run_command, show_project,
 };
 pub use publish::{
     create_publications, create_publications_from_artifact, show_publication_status,
@@ -84,4 +87,5 @@ pub use view::{
     edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
     view_include, view_unset,
 };
+pub use workspace::show_workspace_status;
 pub use worktree::create_worktrees;

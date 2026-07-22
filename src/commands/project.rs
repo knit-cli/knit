@@ -1,6 +1,7 @@
 use crate::commands::agents::write_project_agents_md;
+use crate::commands::base::validate_configured_base;
 use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
-use crate::ids::slugify;
+use crate::ids::{short_sha, slugify};
 use crate::model::{
     CheckoutMode, KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
 };
@@ -84,8 +85,9 @@ pub fn add_project_repo(
     let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
     let path = project_path(&root, project_id);
     let mut project: KnitProject = read_json(&path)?;
-    let repo = resolve_project_repo(repo_id, repo_path, base, observe)?;
+    let (repo, base_source) = resolve_project_repo(repo_id, repo_path, base, observe)?;
 
+    let resolved_base = repo.base_branch.clone();
     if let Some(existing) = project
         .repos
         .iter_mut()
@@ -100,12 +102,87 @@ pub fn add_project_repo(
 
     project.updated_at = now_iso();
     write_json(&path, &project)?;
+    println!(
+        "{} {} ({})",
+        out::heading("Base branch:"),
+        out::branch(&resolved_base),
+        out::muted(base_source)
+    );
     if agents {
         let agents_path = write_project_agents_md(&root, &project)?;
         println!(
             "{} {}",
             out::heading("Project AGENTS.md:"),
             out::path(agents_path.display())
+        );
+    }
+    Ok(())
+}
+
+/// Change only one project repo's configured base. Existing bundles retain
+/// their pinned baseBranch/baseSha and are reported so the user can migrate an
+/// untouched checkout deliberately instead of silently rewriting its diff and
+/// review target.
+pub fn set_project_repo_base(
+    project_name: Option<&str>,
+    repo_id: &str,
+    base_branch: &str,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+    let project_id = project_name
+        .map(slugify)
+        .or(config.active_project)
+        .context("No project selected. Pass --project <name> or run `knit init <name>`.")?;
+    let repo_id = slugify(repo_id);
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    let mut project: KnitProject = read_json(&path)?;
+    let repo = project
+        .repos
+        .iter_mut()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("Project `{project_id}` has no repo `{repo_id}`."))?;
+
+    let validation = validate_configured_base(Path::new(&repo.path), base_branch)
+        .with_context(|| format!("{repo_id}: cannot use `{base_branch}` as its configured base"))?;
+    let previous = repo.base_branch.clone();
+    let pinned = open_bundles_tracking_repo(&root, &project_id, &repo_id)?;
+    repo.base_branch = base_branch.trim().to_string();
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+
+    let movement = format!("-> {}", base_branch.trim());
+    println!(
+        "{} {} {} {} ({}, {})",
+        out::heading("Project base:"),
+        out::repo(&repo_id),
+        out::branch(&previous),
+        out::movement(&movement),
+        out::muted(validation.source_ref),
+        out::sha(short_sha(&validation.sha))
+    );
+
+    if !pinned.is_empty() {
+        println!(
+            "{} existing bundles remain pinned to their recorded bases:",
+            out::warn("Note:")
+        );
+        for (bundle_id, base, sha) in &pinned {
+            println!(
+                "  {} {} {}",
+                out::node(bundle_id),
+                out::branch(base),
+                sha.as_deref()
+                    .map(short_sha)
+                    .map(out::sha)
+                    .unwrap_or_else(|| out::muted("unrecorded"))
+            );
+        }
+        println!(
+            "  For an untouched repo checkout, recreate it safely with `knit --bundle <bundle> bundle remove {} --delete-branch`, then `knit --bundle <bundle> bundle add {}`.",
+            repo_id, repo_id
         );
     }
     Ok(())
@@ -283,6 +360,42 @@ fn open_bundles_tracking_repos(root: &Path, repos: &[String]) -> Result<Vec<(Str
     }
     blocking.sort();
     Ok(blocking)
+}
+
+fn open_bundles_tracking_repo(
+    root: &Path,
+    project_id: &str,
+    repo_id: &str,
+) -> Result<Vec<(String, String, Option<String>)>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(Vec::new());
+    }
+
+    let mut pinned = Vec::new();
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read bundle directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let bundle: crate::model::ChangeGroup = read_json(&path)?;
+        if !crate::store::bundle_is_open(&bundle)
+            || bundle.project_id.as_deref() != Some(project_id)
+        {
+            continue;
+        }
+        if let Some(repo) = bundle.repos.iter().find(|repo| repo.id == repo_id) {
+            pinned.push((
+                bundle.id.clone(),
+                repo.base_branch.clone(),
+                repo.base_sha.clone(),
+            ));
+        }
+    }
+    pinned.sort_by(|left, right| left.0.cmp(&right.0));
+    Ok(pinned)
 }
 
 pub fn set_project_run_command(
@@ -475,21 +588,40 @@ fn resolve_project_repo(
     repo_path: &Path,
     base_override: Option<&str>,
     observe: bool,
-) -> Result<ProjectRepoEntry> {
+) -> Result<(ProjectRepoEntry, String)> {
     let repo_root = git_root(repo_path)?;
     let current_branch = current_branch(&repo_root)?;
     let remote = git_output_optional(&repo_root, ["remote", "get-url", "origin"])?;
-    let base_branch = match base_override {
-        Some(base) => base.to_string(),
-        None => infer_base_branch(&repo_root, current_branch.as_deref())?,
+    let (base_branch, base_source) = match base_override {
+        Some(base) => {
+            let validation = validate_configured_base(&repo_root, base)?;
+            (
+                base.trim().to_string(),
+                format!(
+                    "explicit; verified at {} {}",
+                    validation.source_ref,
+                    short_sha(&validation.sha)
+                ),
+            )
+        }
+        None => {
+            let inference = infer_base_branch(&repo_root, current_branch.as_deref())?;
+            (
+                inference.branch,
+                format!("inferred from {}", inference.source),
+            )
+        }
     };
 
-    Ok(ProjectRepoEntry {
-        id: slugify(repo_id),
-        path: repo_root.to_string_lossy().to_string(),
-        remote,
-        base_branch,
-        checkout_mode: CheckoutMode::Worktree,
-        include_by_default: !observe,
-    })
+    Ok((
+        ProjectRepoEntry {
+            id: slugify(repo_id),
+            path: repo_root.to_string_lossy().to_string(),
+            remote,
+            base_branch,
+            checkout_mode: CheckoutMode::Worktree,
+            include_by_default: !observe,
+        },
+        base_source,
+    ))
 }

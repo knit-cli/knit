@@ -56,7 +56,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 ## Concepts in one breath
 
 - **Project** — reusable template of repos that belong together (`knit init`, `knit project add`).
-- **Bundle** — the branch-like feature unit; `.bundle.json` is its source of truth.
+- **Bundle** — the branch-like feature unit; it snapshots freshly fetched configured bases and records them in `.bundle.json` as its source of truth.
 - **Worktrees** — generated per-repo checkouts under `.knit/worktrees/<bundle>/`; all edits happen there.
 - **Ledger** — append-only node chain inside the bundle; undo is `knit revert`, outside commits fold in via `knit sync`.
 - **Publish/land vs merge** — PRs landed as a set when you have a code host; direct local branch integration when you don't.

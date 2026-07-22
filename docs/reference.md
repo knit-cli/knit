@@ -44,6 +44,7 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 ```sh
 knit init <name> [--agents]
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
+knit project set-base <repo-id> <branch> [--project <name>]
 knit project agents [name]
 knit project command set <name> [--repo <repo>]... [--cwd <path>] [--env KEY=VALUE]... -- <command> [args...]
 knit project command list
@@ -62,8 +63,8 @@ knit view rm <name> [--project <name>]
 knit view edit [--project <name>]
 knit bundle                          # show the resolved bundle
 knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
-knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
-knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--in-place] [--no-worktree]
+knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--offline|--from-local-base] [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
+knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--offline|--from-local-base] [--in-place] [--no-worktree]
 knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
 knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
@@ -79,9 +80,10 @@ knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status
+knit workspace status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--all] [repo-id-or-path...]
-knit pull [--main] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
+knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
@@ -306,7 +308,7 @@ Projects can define a default landing template. `knit land plan` expands it into
 
 Deployment entries are first-class landing steps. Command deployments run without a shell unless the command explicitly invokes one, stream their output live while retaining only a bounded tail in the run artifact, and time out after `timeoutSeconds` (30 minutes by default). A deployment checkout uses a managed `.knit/land-worktrees/<bundle>/<repo>/<branch>/` checkout so the feature worktree is not switched away from its Knit branch. `update: "pull"` and `update: "fetch"` both refresh the managed checkout from the configured remote branch before running the command.
 
-Default project repos are included by `knit bundle`; observed repos are available by id but are not branched or tracked until added explicitly:
+Default project repos are included by `knit bundle`; observed repos are available by id but are not branched or tracked until added explicitly. Before recording any selected repo, Knit fetches its configured `origin/<baseBranch>`, snapshots the exact fetched commit in `baseSha`, and creates the feature branch from that commit. Source checkouts are not switched or moved, and dirty source files do not affect the snapshot. Base fetches are an all-or-nothing preflight: if any selected remote base cannot be fetched, no repos or feature branches are recorded.
 
 ```sh
 knit bundle "venue capacity"
@@ -349,7 +351,7 @@ knit cherrypick --from feature-x HEAD~1
 
 `knit cherrypick` records the resulting destination commits as observed git movement.
 
-`knit bundle add` accepts one or more repo paths or project repo ids. It resolves all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
+`knit bundle add` accepts one or more repo paths or project repo ids. It resolves and fetches all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, exact base SHA, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration. It refuses repos already tracked in the bundle so an add cannot silently rewrite a live baseline.
 
 Generated worktrees get local `AGENTS.md` guidance by default: one bundle-wide guide at `.knit/worktrees/<bundle>/AGENTS.md`, the parent directory of every repo checkout. Knit never writes `AGENTS.md` inside a repo checkout — a repo that tracks its own `AGENTS.md` would commit the bundle-specific section and conflict on every publish. The bundle guide assumes the agent opened the generated worktree folder directly, so its examples rely on cwd and do not include `--bundle`.
 
@@ -357,7 +359,11 @@ Use `knit bundle "<title>" --agents` when you want Knit to write an `AGENTS.md` 
 
 Use `knit bundle add --in-place` or `knit bundle add --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
-Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right.
+Base inference first uses cached `origin/HEAD`, then best-effort live remote default metadata. Without either, a clean current branch that tracks its same-named origin branch is preferred; Knit uses `main` or `master` only when the choice is unambiguous, and otherwise requires `--base`. This supports repositories whose real base is named `stable` without relying on a host-specific CLI.
+
+Use `knit project set-base <repo-id> <branch>` to change only a project repo's configured base. Knit validates the branch from a fresh origin ref when available, then cached origin or local refs; it preserves the repo's path, checkout mode, and default/observed status. Existing bundles remain pinned to their recorded `baseBranch` and `baseSha` because rewriting those values would change their diff and review target. The command lists affected open bundles and the safe remove-with-`--delete-branch`/add workflow for untouched feature checkouts.
+
+Fresh remote bases are the default. `--offline` skips network access and prefers a cached `origin/<base>` before falling back to the local base; `--from-local-base` deliberately snapshots the local base branch.
 
 `knit bundle worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 
@@ -476,16 +482,19 @@ knit fetch --all
 
 Target flags drive the aggregate, best-effort report directly and may be combined:
 
-- `--main` updates each active-project repo's *source checkout* on its current branch with `git pull --ff-only`.
+- `--base` fetches each configured `origin/<baseBranch>` and safely fast-forwards the matching local base branch without switching the source checkout. A checked-out dirty base, local-only commits, or divergence is reported as a failure and makes the command exit nonzero.
+- `--current` updates each active-project repo's *source checkout* on its current branch with `git pull --ff-only`. The old hidden `--main` spelling remains as a compatibility alias.
 - `--bundles` updates every open bundle's feature checkouts from its remote artifact.
 
-Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and never abort on the first problem: a dirty tree or non-fast-forward is reported (`skipped`/`failed`) while the rest proceed. The remote artifact side is just as tolerant: Knit walks the configured sync remotes in order and uses the first one that responds, reporting and skipping each unreachable remote. When no remote answers, the pull says so and the git work still runs — an offline sync remote never blocks updating checkouts. An explicit `--remote <name>` still fails hard, because you named the remote you wanted.
+Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and report every target instead of stopping at the first problem. Current-checkout and bundle targets remain best-effort. Explicit `--base` is a preparation gate, so any failed base update makes the command exit nonzero after printing the full report. The remote artifact side is tolerant: Knit walks the configured sync remotes in order and uses the first one that responds, reporting and skipping each unreachable remote. When no remote answers, the pull says so and the git work still runs — an offline sync remote never blocks updating checkouts. An explicit `--remote <name>` still fails hard, because you named the remote you wanted.
 
 ```sh
-knit pull                 # at the base: project main repos + every open bundle, reported
-knit pull --main          # update all project repos' current branch (fast-forward only)
+knit workspace status     # show current checkout, configured base, divergence, dirt, and open bundles
+knit pull                 # at the base: current source checkouts + every open bundle, reported
+knit pull --base          # fetch and fast-forward configured stable/base branches
+knit pull --current       # update source checkouts' current branches (fast-forward only)
 knit pull --bundles       # fast-forward every open bundle's checkouts from the sync remote
-knit pull --main --bundles
+knit pull --base --current --bundles
 knit pull backend         # single-bundle: pull a specific tracked repo's base checkout
 knit pull --rebase frontend
 ```

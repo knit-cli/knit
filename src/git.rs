@@ -22,22 +22,113 @@ pub fn current_branch(repo: &Path) -> Result<Option<String>> {
     }
 }
 
-pub fn infer_base_branch(repo: &Path, current_branch: Option<&str>) -> Result<String> {
-    let clean = git_output(repo, ["status", "--short"])?.trim().is_empty();
-    if clean {
-        if matches!(current_branch, Some("main" | "master")) {
-            return Ok(current_branch.unwrap().to_string());
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseBranchInference {
+    pub branch: String,
+    pub source: String,
+}
+
+pub fn infer_base_branch(repo: &Path, current_branch: Option<&str>) -> Result<BaseBranchInference> {
+    if let Some(remote_head) = git_output_optional(
+        repo,
+        [
+            "symbolic-ref",
+            "--quiet",
+            "--short",
+            "refs/remotes/origin/HEAD",
+        ],
+    )? {
+        if let Some(branch) = remote_head.trim().strip_prefix("origin/") {
+            if !branch.is_empty() && ref_exists(repo, &remote_head) {
+                return Ok(BaseBranchInference {
+                    branch: branch.to_string(),
+                    source: "cached origin/HEAD".to_string(),
+                });
+            }
         }
     }
 
-    if ref_exists(repo, "main") || ref_exists(repo, "origin/main") {
-        return Ok("main".to_string());
+    if git_output_optional(repo, ["remote", "get-url", "origin"])?.is_some() {
+        if let Ok(remote_head) = git_output_with_env(
+            repo,
+            ["ls-remote", "--symref", "origin", "HEAD"],
+            &[("GIT_TERMINAL_PROMPT", "0")],
+        ) {
+            if let Some(branch) = parse_remote_head(&remote_head) {
+                return Ok(BaseBranchInference {
+                    branch,
+                    source: "origin's default branch".to_string(),
+                });
+            }
+        }
     }
-    if ref_exists(repo, "master") || ref_exists(repo, "origin/master") {
-        return Ok("master".to_string());
+
+    let clean = git_output(repo, ["status", "--short"])?.trim().is_empty();
+    if clean {
+        if let Some(current) = current_branch {
+            let upstream = git_output_optional(
+                repo,
+                [
+                    "rev-parse",
+                    "--abbrev-ref",
+                    "--symbolic-full-name",
+                    "@{upstream}",
+                ],
+            )?;
+            if upstream.as_deref() == Some(format!("origin/{current}").as_str()) {
+                return Ok(BaseBranchInference {
+                    branch: current.to_string(),
+                    source: format!("current branch tracking origin/{current}"),
+                });
+            }
+        }
+    }
+
+    let conventional = ["main", "master"]
+        .into_iter()
+        .filter(|branch| ref_exists(repo, branch) || ref_exists(repo, &format!("origin/{branch}")))
+        .collect::<Vec<_>>();
+
+    if clean {
+        if let Some(current) = current_branch {
+            if !matches!(current, "main" | "master") {
+                if conventional.is_empty() {
+                    return Ok(BaseBranchInference {
+                        branch: current.to_string(),
+                        source: "only plausible clean current branch".to_string(),
+                    });
+                }
+                bail!(
+                    "Could not infer a base branch safely: clean current branch `{current}` conflicts with existing `{}`. Pass --base <branch>.",
+                    conventional.join("` and `")
+                );
+            }
+        }
+    }
+
+    if conventional.len() == 1 {
+        return Ok(BaseBranchInference {
+            branch: conventional[0].to_string(),
+            source: "only conventional branch".to_string(),
+        });
+    }
+    if conventional.len() > 1 {
+        bail!(
+            "Could not infer a base branch safely: both `main` and `master` exist. Pass --base <branch>."
+        );
     }
 
     bail!("Could not infer a base branch. Pass --base <branch>.");
+}
+
+fn parse_remote_head(output: &str) -> Option<String> {
+    output.lines().find_map(|line| {
+        let line = line.trim();
+        let branch = line
+            .strip_prefix("ref: refs/heads/")?
+            .strip_suffix("\tHEAD")?;
+        (!branch.is_empty()).then(|| branch.to_string())
+    })
 }
 
 pub fn resolve_base_ref(repo: &Path, base_branch: &str) -> String {
