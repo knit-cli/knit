@@ -55,7 +55,7 @@ fn pull_updates_original_base_checkout_and_bundle_base_sha() {
 }
 
 #[test]
-fn pull_main_fast_forwards_project_repos_and_reports() {
+fn pull_current_fast_forwards_project_repos_and_reports() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, backend_collab) = init_remote_repo(&root, "backend");
     let (_frontend_remote, frontend, _frontend_collab) = init_remote_repo(&root, "frontend");
@@ -80,8 +80,8 @@ fn pull_main_fast_forwards_project_repos_and_reports() {
     let backend_sha = git(&backend_collab, ["rev-parse", "HEAD"]);
     append_line(&frontend.join("app.txt"), "local uncommitted edit");
 
-    let report = knit(&workspace, ["pull", "--main"]);
-    assert!(report.contains("Main repos:"));
+    let report = knit(&workspace, ["pull", "--current"]);
+    assert!(report.contains("Current checkouts:"));
     assert!(report.contains("backend"));
     assert!(report.contains(&backend_sha[..7]));
     assert!(report.contains("frontend"));
@@ -89,6 +89,106 @@ fn pull_main_fast_forwards_project_repos_and_reports() {
 
     // Backend's source checkout fast-forwarded; the dirty repo was left alone.
     assert_eq!(git(&backend, ["rev-parse", "HEAD"]), backend_sha);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_base_updates_configured_base_without_switching_current_checkout() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    git(&backend, ["checkout", "-b", "topic"]);
+    let topic_head = git(&backend, ["rev-parse", "HEAD"]);
+
+    append_line(&collaborator.join("app.txt"), "remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_head = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let report = knit(&workspace, ["pull", "--base"]);
+    assert!(report.contains("Base branches:"), "{report}");
+    assert!(report.contains("backend"), "{report}");
+    assert_eq!(git(&backend, ["branch", "--show-current"]).trim(), "topic");
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), topic_head);
+    assert_eq!(git(&backend, ["rev-parse", "main"]), remote_head);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_base_refuses_to_discard_divergent_local_base_commits() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    append_line(&backend.join("app.txt"), "local base commit");
+    git(&backend, ["add", "app.txt"]);
+    git(&backend, ["commit", "-m", "Local base commit"]);
+    let local_base = git(&backend, ["rev-parse", "main"]);
+    git(&backend, ["checkout", "-b", "topic"]);
+    let topic_head = git(&backend, ["rev-parse", "HEAD"]);
+
+    append_line(&collaborator.join("app.txt"), "remote base commit");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base commit"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    let remote_base = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    let report = knit_fails(&workspace, ["pull", "--base"]);
+    assert!(report.contains("Base branches:"), "{report}");
+    assert!(report.contains("has diverged"), "{report}");
+    assert_eq!(git(&backend, ["rev-parse", "main"]), local_base);
+    assert_eq!(git(&backend, ["rev-parse", "origin/main"]), remote_base);
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), topic_head);
+    assert_eq!(git(&backend, ["branch", "--show-current"]).trim(), "topic");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn workspace_status_distinguishes_current_checkout_from_configured_base() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    git(&backend, ["checkout", "-b", "topic"]);
+    append_line(&backend.join("app.txt"), "dirty topic checkout");
+
+    append_line(&collaborator.join("app.txt"), "remote base update");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Remote base update"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    git(&backend, ["fetch", "origin", "main"]);
+
+    let status = knit(&workspace, ["workspace", "status"]);
+    assert!(status.contains("Project: demo"), "{status}");
+    assert!(status.contains("backend"), "{status}");
+    assert!(status.contains("current=topic"), "{status}");
+    assert!(status.contains("base=main"), "{status}");
+    assert!(status.contains("behind=1"), "{status}");
+    assert!(status.contains("dirty"), "{status}");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -113,7 +213,7 @@ fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
 
     let report = knit(&workspace, ["pull"]);
     assert!(!report.contains("Refusing"));
-    assert!(report.contains("Main repos:"));
+    assert!(report.contains("Current checkouts:"));
     assert!(report.contains("Bundles:"));
     assert!(report.contains("feature-one"));
     assert!(report.contains("feature-two"));
@@ -137,7 +237,7 @@ fn pull_bundles_without_remote_reports_each_bundle_skipped() {
     assert!(report.contains("feature-two"));
     assert!(report.contains("no sync remote available"));
     // --bundles alone does not touch project main repos.
-    assert!(!report.contains("Main repos:"));
+    assert!(!report.contains("Current checkouts:"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1169,7 +1269,7 @@ fn pull_walks_sync_remotes_past_unreachable_one() {
 
     let report = knit_with_env(&workspace, ["pull", "--main", "--bundles"], &env);
     assert!(report.contains("remote dead unavailable"), "{report}");
-    assert!(report.contains("Main repos:"), "{report}");
+    assert!(report.contains("Current checkouts:"), "{report}");
     assert!(report.contains("feature-one"), "{report}");
 
     fs::remove_dir_all(root).unwrap();
@@ -1198,7 +1298,7 @@ fn pull_continues_when_every_sync_remote_is_unreachable() {
     // The offline remote is reported, and the git side still runs.
     let report = knit_with_env(&workspace, ["pull", "--main", "--bundles"], &env);
     assert!(report.contains("No sync remote reachable"), "{report}");
-    assert!(report.contains("Main repos:"), "{report}");
+    assert!(report.contains("Current checkouts:"), "{report}");
     assert!(report.contains("no sync remote available"), "{report}");
 
     fs::remove_dir_all(root).unwrap();

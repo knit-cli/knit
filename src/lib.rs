@@ -22,7 +22,7 @@ use commands::PushForce;
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
     ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
-    SyncCommand, TagCommand, ViewCommand,
+    SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -70,6 +70,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
+        },
+        Commands::Workspace { command } => match command {
+            WorkspaceCommand::Status => commands::show_workspace_status(),
         },
         Commands::View { command } => match command {
             ViewCommand::List { project } => commands::list_views(project.as_deref()),
@@ -163,6 +166,8 @@ pub fn run(cli: Cli) -> Result<()> {
             exclude,
             no_worktree,
             in_place,
+            offline,
+            from_local_base,
             force,
             agents,
             cd,
@@ -179,6 +184,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     &exclude,
                     !no_worktree,
                     in_place,
+                    bundle_base_mode(offline, from_local_base),
                     force,
                     agents,
                     cd.as_deref(),
@@ -191,8 +197,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 repos,
                 base,
                 in_place,
+                offline,
+                from_local_base,
                 no_worktree,
-            }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
+            }) => commands::track_repo_selectors(
+                &repos,
+                base.as_deref(),
+                !no_worktree,
+                in_place,
+                bundle_base_mode(offline, from_local_base),
+            ),
             Some(BundleCommand::Remove {
                 repos,
                 keep_worktree,
@@ -298,6 +312,8 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             feature,
             main,
+            base,
+            current,
             bundles,
             remote,
             no_remote,
@@ -309,6 +325,8 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             feature,
             main,
+            base,
+            current,
             bundles,
             remote.as_deref(),
             no_remote,
@@ -627,6 +645,16 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         Commands::Doctor => commands::doctor_workspace(),
         Commands::Migrate { check } => commands::migrate_workspace(check),
+    }
+}
+
+fn bundle_base_mode(offline: bool, from_local_base: bool) -> commands::BundleBaseMode {
+    if from_local_base {
+        commands::BundleBaseMode::Local
+    } else if offline {
+        commands::BundleBaseMode::CachedRemote
+    } else {
+        commands::BundleBaseMode::FreshRemote
     }
 }
 

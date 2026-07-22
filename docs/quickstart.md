@@ -55,6 +55,13 @@ default). From that directory you can simply run `claude`, `opencode`, or any
 other coding agent — it wakes up inside an isolated checkout whose context
 resolves automatically, with guidance already on disk.
 
+For repos with an `origin`, bundle creation first fetches each project's
+configured base branch and records the exact remote commit before creating any
+feature branch. Dirty or differently checked-out source repos are left alone.
+Local-only repos use their local configured base. Use `knit workspace status`
+to compare current checkouts with configured bases; `--offline` uses cached
+remote refs and `--from-local-base` deliberately starts from local bases.
+
 If your tool opens the *source* folder instead — Cursor, Codex, or any
 agent rooted at the workspace — that works too: the agent can create a bundle
 and commit into it from there with `knit --bundle my-feature …`. Opening the
