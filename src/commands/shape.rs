@@ -5,6 +5,7 @@
 //! the local feature branch). `apply-view` diffs the bundle against a saved view
 //! and applies both directions.
 
+use crate::commands::base::BundleBaseMode;
 use crate::commands::bundle::delete_repo_feature_branch;
 use crate::commands::clean::remove_repo_worktree;
 use crate::commands::init::{resolve_active_view, resolve_view_repos};
@@ -44,7 +45,13 @@ pub fn bundle_include(repos: &[String], materialize: bool, in_place: bool) -> Re
         selected.push(entry.clone());
     }
 
-    track_project_repos(&mut active, &selected, materialize, in_place)?;
+    track_project_repos(
+        &mut active,
+        &selected,
+        materialize,
+        in_place,
+        BundleBaseMode::FreshRemote,
+    )?;
     save_active_bundle(&active)?;
     Ok(())
 }

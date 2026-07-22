@@ -1,5 +1,5 @@
 use crate::checkout::{checkout_dir, checkout_display_path};
-use crate::git::{git_output, resolve_base_ref};
+use crate::git::{current_branch, git_output, resolve_base_ref};
 use crate::ids::short_sha;
 use crate::model::RepoEntry;
 use crate::output as out;
@@ -42,6 +42,7 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
                 continue;
             }
             println!("{}: {}", out::repo(&repo.id), out::muted("no diff"));
+            print_no_diff_context(repo, &checkout)?;
             continue;
         }
 
@@ -68,6 +69,53 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
         );
     }
 
+    Ok(())
+}
+
+fn print_no_diff_context(repo: &RepoEntry, checkout: &Path) -> Result<()> {
+    println!(
+        "  {} {}",
+        out::muted("bundle checkout:"),
+        out::path(checkout.display())
+    );
+
+    let checkout_status = git_output(checkout, ["status", "--short"])?;
+    if checkout_status.lines().any(|line| line.starts_with("??")) {
+        println!(
+            "  {} bundle checkout has untracked files; `knit diff` follows `git diff` and does not include them",
+            out::warn("Note:")
+        );
+    }
+
+    let source = PathBuf::from(&repo.path);
+    if canonical(&source) == canonical(checkout) {
+        return Ok(());
+    }
+
+    let source_status = git_output(&source, ["status", "--short"])?;
+    let source_head = git_output(&source, ["rev-parse", "HEAD"])?;
+    let checkout_head = git_output(checkout, ["rev-parse", "HEAD"])?;
+    if source_status.trim().is_empty() && source_head == checkout_head {
+        return Ok(());
+    }
+
+    let source_branch = current_branch(&source)?.unwrap_or_else(|| "detached".to_string());
+    let checkout_branch = current_branch(checkout)?.unwrap_or_else(|| "detached".to_string());
+    let source_state = if source_status.trim().is_empty() {
+        "clean"
+    } else {
+        "modified"
+    };
+    println!(
+        "  {} source checkout {} is {} on {} at {}; bundle checkout is on {} at {}",
+        out::warn("Note:"),
+        out::path(source.display()),
+        source_state,
+        out::branch(source_branch),
+        out::sha(short_sha(&source_head)),
+        out::branch(checkout_branch),
+        out::sha(short_sha(&checkout_head))
+    );
     Ok(())
 }
 
