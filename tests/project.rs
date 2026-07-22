@@ -18,6 +18,10 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit status"));
     assert!(agents.contains("knit init"));
     assert!(agents.contains("knit bundle \""));
+    assert!(agents.contains("fetches each selected repo's configured `origin/<baseBranch>`"));
+    assert!(agents.contains("knit workspace status"));
+    assert!(agents.contains("knit pull --base"));
+    assert!(agents.contains("knit pull --current"));
     assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit bundle remove <repo>"));
     assert!(agents.contains("knit bundle prune"));
@@ -121,6 +125,148 @@ fn project_default_repos_start_bundle_without_track() {
 
     let list = knit(&workspace, ["bundle", "list"]);
     assert!(list.contains("project-feature"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_bundle_starts_from_fresh_remote_base_without_moving_dirty_source_checkout() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let stale_local = git(&backend, ["rev-parse", "main"]);
+
+    append_line(&collaborator.join("app.txt"), "fresh remote base");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Fresh remote base"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    git(&backend, ["fetch", "origin", "main"]);
+
+    // A configured base may be intentionally rewritten. The bundle should
+    // mirror the fresh remote-tracking state without moving the local base.
+    git(&collaborator, ["reset", "--hard", stale_local.trim()]);
+    append_line(&collaborator.join("app.txt"), "rewritten remote base");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Rewrite remote base"]);
+    git(&collaborator, ["push", "--force", "origin", "main"]);
+    let remote_head = git(&collaborator, ["rev-parse", "HEAD"]);
+
+    // Source checkout state is independent from the bundle base snapshot.
+    append_line(&backend.join("app.txt"), "dirty local source checkout");
+    knit(&workspace, ["bundle", "fresh feature"]);
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/fresh-feature.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["repos"][0]["baseSha"].as_str(),
+        Some(remote_head.trim())
+    );
+    assert_eq!(
+        git(
+            &workspace.join(".knit/worktrees/fresh-feature/backend"),
+            ["rev-parse", "HEAD"]
+        ),
+        remote_head
+    );
+    assert_eq!(git(&backend, ["rev-parse", "main"]), stale_local);
+    assert!(!git(&backend, ["status", "--short"]).trim().is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_base_source_can_be_cached_remote_or_explicit_local_branch() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let local_head = git(&backend, ["rev-parse", "main"]);
+
+    append_line(&collaborator.join("app.txt"), "cached remote base");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Cached remote base"]);
+    git(&collaborator, ["push", "origin", "main"]);
+    git(&backend, ["fetch", "origin", "main"]);
+    let cached_head = git(&backend, ["rev-parse", "origin/main"]);
+
+    append_line(&collaborator.join("app.txt"), "not cached yet");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Uncached remote base"]);
+    git(&collaborator, ["push", "origin", "main"]);
+
+    knit(&workspace, ["bundle", "offline feature", "--offline"]);
+    assert_eq!(
+        git(
+            &workspace.join(".knit/worktrees/offline-feature/backend"),
+            ["rev-parse", "HEAD"]
+        ),
+        cached_head
+    );
+
+    knit(&workspace, ["bundle", "local feature", "--from-local-base"]);
+    assert_eq!(
+        git(
+            &workspace.join(".knit/worktrees/local-feature/backend"),
+            ["rev-parse", "HEAD"]
+        ),
+        local_head
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn fresh_base_preflight_records_no_repos_or_branches_when_any_fetch_fails() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    fs::remove_dir_all(&backend_remote).unwrap();
+
+    let failure = knit_fails(&workspace, ["bundle", "atomic fresh bases"]);
+    assert!(
+        failure.contains("before any repos were recorded"),
+        "{failure}"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/atomic-fresh-bases.bundle.json")
+        .exists());
+    assert!(
+        git(&backend, ["branch", "--list", "knit/atomic-fresh-bases"])
+            .trim()
+            .is_empty()
+    );
+    assert!(
+        git(&frontend, ["branch", "--list", "knit/atomic-fresh-bases"])
+            .trim()
+            .is_empty()
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

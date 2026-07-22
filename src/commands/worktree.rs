@@ -218,15 +218,13 @@ fn materialize_one_repo(
 
     let worktree_path = format!(".knit/worktrees/{bundle_id}/{}", repo.id);
     let worktree_abs = root.join(&worktree_path);
-    let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
-    let base_sha = rev_parse(&repo_root, &base_ref)
-        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    let base_sha = materialization_base(&repo_root, repo)?;
 
     let mut update = MaterializeResult {
         repo_index,
         repo_id: repo.id.clone(),
         base_sha: if repo.base_sha.is_none() {
-            Some(base_sha)
+            Some(base_sha.clone())
         } else {
             None
         },
@@ -314,7 +312,7 @@ fn materialize_one_repo(
             OsString::from("-b"),
             OsString::from(&feature_branch),
             worktree_abs.as_os_str().to_os_string(),
-            OsString::from(base_ref),
+            OsString::from(&base_sha),
         ],
     )
     .with_context(|| format!("failed to create branch/worktree for {}", repo.id))?;
@@ -346,9 +344,7 @@ fn materialize_in_place(
     repo_root: &Path,
     feature_branch: &str,
 ) -> Result<MaterializeResult> {
-    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
-    let base_sha = rev_parse(repo_root, &base_ref)
-        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    let base_sha = materialization_base(repo_root, repo)?;
 
     let current = current_branch(repo_root)?;
     if current.as_deref() != Some(feature_branch) {
@@ -389,7 +385,7 @@ fn materialize_in_place(
                     OsString::from("checkout"),
                     OsString::from("-b"),
                     OsString::from(feature_branch),
-                    OsString::from(base_ref),
+                    OsString::from(&base_sha),
                 ],
             )
             .with_context(|| format!("{}: failed to create {feature_branch}", repo.id))?;
@@ -412,4 +408,20 @@ fn materialize_in_place(
         ),
         log: MaterializeLog::InPlace,
     })
+}
+
+fn materialization_base(repo_root: &Path, repo: &RepoEntry) -> Result<String> {
+    if let Some(base_sha) = &repo.base_sha {
+        // Verify the recorded object is available before creating a branch.
+        rev_parse(repo_root, base_sha).with_context(|| {
+            format!(
+                "{}: recorded base commit {base_sha} is not available locally",
+                repo.id
+            )
+        })?;
+        return Ok(base_sha.clone());
+    }
+    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
+    rev_parse(repo_root, &base_ref)
+        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))
 }
