@@ -37,6 +37,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 observe,
                 agents,
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
+            ProjectCommand::SetBase {
+                repo_id,
+                branch,
+                project,
+            } => commands::set_project_repo_base(project.as_deref(), &repo_id, &branch),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
             ProjectCommand::Remove { name, repos, force } => {

@@ -60,7 +60,7 @@ pub use merge::merge_command;
 pub use project::{
     add_project_repo, init_project, list_project_run_commands, list_projects, pull_project_config,
     refresh_project_agents, remove_project, remove_project_repos, remove_project_run_command,
-    set_project_run_command, show_project,
+    set_project_repo_base, set_project_run_command, show_project,
 };
 pub use publish::{
     create_publications, create_publications_from_artifact, show_publication_status,

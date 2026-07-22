@@ -740,6 +740,16 @@ pub enum ProjectCommand {
         #[arg(long)]
         agents: bool,
     },
+    /// Change only a project repo's configured base branch.
+    SetBase {
+        /// Stable repo id inside the project.
+        repo_id: String,
+        /// New configured base branch.
+        branch: String,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// List projects in this workspace.
     List,
     /// Print a project JSON artifact.

@@ -39,6 +39,62 @@ pub struct BaseAdvance {
     pub after: String,
 }
 
+/// Validate an explicitly configured base without making network availability
+/// a requirement. Prefer a freshly fetched remote branch, then cached remote
+/// metadata, then a local branch.
+pub fn validate_configured_base(repo_path: &Path, base_branch: &str) -> Result<BaseSnapshot> {
+    let base_branch = base_branch.trim();
+    if base_branch.is_empty() {
+        bail!("Base branch cannot be empty.");
+    }
+
+    let repo_root = git_root(repo_path)?;
+    if git_output_optional(&repo_root, ["check-ref-format", "--branch", base_branch])?.is_none() {
+        bail!("`{base_branch}` is not a valid branch name.");
+    }
+    let remote_ref = format!("origin/{base_branch}");
+    let has_origin = git_output_optional(&repo_root, ["remote", "get-url", "origin"])?.is_some();
+    let mut fetch_error = None;
+
+    if has_origin {
+        match fetch_base(&repo_root, base_branch) {
+            Ok(()) => {
+                if let Some(sha) = ref_commit_sha(&repo_root, &remote_ref)? {
+                    return Ok(BaseSnapshot {
+                        sha,
+                        source_ref: remote_ref,
+                    });
+                }
+            }
+            Err(error) => fetch_error = Some(error),
+        }
+
+        if let Some(sha) = ref_commit_sha(&repo_root, &remote_ref)? {
+            return Ok(BaseSnapshot {
+                sha,
+                source_ref: format!("cached {remote_ref}"),
+            });
+        }
+    }
+
+    if let Some(sha) = ref_commit_sha(&repo_root, &format!("refs/heads/{base_branch}"))? {
+        return Ok(BaseSnapshot {
+            sha,
+            source_ref: format!("local {base_branch}"),
+        });
+    }
+
+    if let Some(error) = fetch_error {
+        bail!(
+            "Base branch `{base_branch}` was not found locally or in cached origin refs, and refreshing origin failed: {error:#}"
+        );
+    }
+    bail!(
+        "Base branch `{base_branch}` was not found locally{}.",
+        if has_origin { " or on origin" } else { "" }
+    );
+}
+
 pub fn snapshot_base(
     repo_path: &Path,
     base_branch: &str,

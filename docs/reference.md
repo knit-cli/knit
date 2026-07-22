@@ -44,6 +44,7 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 ```sh
 knit init <name> [--agents]
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
+knit project set-base <repo-id> <branch> [--project <name>]
 knit project agents [name]
 knit project command set <name> [--repo <repo>]... [--cwd <path>] [--env KEY=VALUE]... -- <command> [args...]
 knit project command list
@@ -350,7 +351,7 @@ knit cherrypick --from feature-x HEAD~1
 
 `knit cherrypick` records the resulting destination commits as observed git movement.
 
-`knit bundle add` accepts one or more repo paths or project repo ids. It resolves and fetches all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, exact base SHA, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration.
+`knit bundle add` accepts one or more repo paths or project repo ids. It resolves and fetches all inputs before writing the bundle, then stores each absolute git repo path, repo id, origin remote when available, inferred base branch, exact base SHA, and checkout mode. By default it creates the `knit/<bundle-id>` branch and a generated worktree for each tracked repo. Use `--no-worktree` for metadata-only registration. It refuses repos already tracked in the bundle so an add cannot silently rewrite a live baseline.
 
 Generated worktrees get local `AGENTS.md` guidance by default: one bundle-wide guide at `.knit/worktrees/<bundle>/AGENTS.md`, the parent directory of every repo checkout. Knit never writes `AGENTS.md` inside a repo checkout — a repo that tracks its own `AGENTS.md` would commit the bundle-specific section and conflict on every publish. The bundle guide assumes the agent opened the generated worktree folder directly, so its examples rely on cwd and do not include `--bundle`.
 
@@ -358,7 +359,11 @@ Use `knit bundle "<title>" --agents` when you want Knit to write an `AGENTS.md` 
 
 Use `knit bundle add --in-place` or `knit bundle add --in-place` to make Knit operate directly in the original repo checkout instead of creating `.knit/worktrees/<bundle>/<repo>`. Knit will create or check out the `knit/<bundle-id>` branch in that repo. The original checkout must be clean before Knit switches branches. Later mutating commands refuse to operate if the in-place repo is no longer on the expected feature branch.
 
-Base inference prefers the current branch only when it is clean and named `main` or `master`; otherwise it looks for `main`, then `master`. Use `--base` when that is not right. Fresh remote bases are the default. `--offline` skips network access and prefers a cached `origin/<base>` before falling back to the local base; `--from-local-base` deliberately snapshots the local base branch.
+Base inference first uses cached `origin/HEAD`, then best-effort live remote default metadata. Without either, a clean current branch that tracks its same-named origin branch is preferred; Knit uses `main` or `master` only when the choice is unambiguous, and otherwise requires `--base`. This supports repositories whose real base is named `stable` without relying on a host-specific CLI.
+
+Use `knit project set-base <repo-id> <branch>` to change only a project repo's configured base. Knit validates the branch from a fresh origin ref when available, then cached origin or local refs; it preserves the repo's path, checkout mode, and default/observed status. Existing bundles remain pinned to their recorded `baseBranch` and `baseSha` because rewriting those values would change their diff and review target. The command lists affected open bundles and the safe remove-with-`--delete-branch`/add workflow for untouched feature checkouts.
+
+Fresh remote bases are the default. `--offline` skips network access and prefers a cached `origin/<base>` before falling back to the local base; `--from-local-base` deliberately snapshots the local base branch.
 
 `knit bundle worktree` is still available as an idempotent repair/rerun command. It creates missing `knit/<bundle-id>` branches and worktrees under `.knit/worktrees/<bundle-id>/<repo-id>`. Existing branches or worktrees are reported and reused where possible.
 

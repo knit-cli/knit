@@ -22,6 +22,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit workspace status"));
     assert!(agents.contains("knit pull --base"));
     assert!(agents.contains("knit pull --current"));
+    assert!(agents.contains("knit project set-base"));
     assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit bundle remove <repo>"));
     assert!(agents.contains("knit bundle prune"));
@@ -125,6 +126,173 @@ fn project_default_repos_start_bundle_without_track() {
 
     let list = knit(&workspace, ["bundle", "list"]);
     assert!(list.contains("project-feature"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_add_infers_nonstandard_cached_remote_default() {
+    let root = unique_temp_dir();
+    let (remote, movida, _collaborator) = init_remote_repo(&root, "movida");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    git(&movida, ["branch", "master"]);
+    git(&movida, ["checkout", "-b", "stable"]);
+    git(&movida, ["push", "--set-upstream", "origin", "stable"]);
+    git(&remote, ["symbolic-ref", "HEAD", "refs/heads/stable"]);
+    git(&movida, ["remote", "set-head", "origin", "-a"]);
+
+    knit(&workspace, ["init", "demo"]);
+    let added = knit(
+        &workspace,
+        ["project", "add", "movida", movida.to_str().unwrap()],
+    );
+    assert!(added.contains("stable"), "{added}");
+    assert!(added.contains("origin/HEAD"), "{added}");
+
+    let project: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"][0]["baseBranch"].as_str(), Some("stable"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_add_queries_live_remote_default_when_origin_head_is_not_cached() {
+    let root = unique_temp_dir();
+    let (remote, movida, _collaborator) = init_remote_repo(&root, "movida");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    git(&movida, ["checkout", "-b", "stable"]);
+    git(&movida, ["push", "--set-upstream", "origin", "stable"]);
+    git(&remote, ["symbolic-ref", "HEAD", "refs/heads/stable"]);
+    git(
+        &movida,
+        ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"],
+    );
+
+    knit(&workspace, ["init", "demo"]);
+    let added = knit(
+        &workspace,
+        ["project", "add", "movida", movida.to_str().unwrap()],
+    );
+    assert!(added.contains("stable"), "{added}");
+    assert!(added.contains("origin's default branch"), "{added}");
+
+    let project: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"][0]["baseBranch"].as_str(), Some("stable"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_set_base_preserves_repo_settings_and_keeps_open_bundles_pinned() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    git(&backend, ["checkout", "-b", "stable"]);
+    git(&backend, ["push", "--set-upstream", "origin", "stable"]);
+    git(&backend, ["checkout", "main"]);
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        [
+            "project",
+            "add",
+            "backend",
+            backend.to_str().unwrap(),
+            "--observe",
+        ],
+    );
+    knit(
+        &workspace,
+        ["bundle", "existing feature", "--repo", "backend"],
+    );
+
+    let changed = knit(&workspace, ["project", "set-base", "backend", "stable"]);
+    assert!(changed.contains("main"), "{changed}");
+    assert!(changed.contains("stable"), "{changed}");
+    assert!(
+        changed.contains("existing bundles remain pinned"),
+        "{changed}"
+    );
+    assert!(changed.contains("existing-feature"), "{changed}");
+
+    let project: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"][0]["baseBranch"].as_str(), Some("stable"));
+    assert_eq!(
+        project["repos"][0]["includeByDefault"].as_bool(),
+        Some(false)
+    );
+
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/existing-feature.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(bundle["repos"][0]["baseBranch"].as_str(), Some("main"));
+
+    let invalid = knit_fails(
+        &workspace,
+        ["project", "set-base", "backend", "does-not-exist"],
+    );
+    assert!(invalid.contains("was not found"), "{invalid}");
+    let unchanged: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(unchanged["repos"][0]["baseBranch"].as_str(), Some("stable"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn untouched_bundle_repo_can_be_recreated_on_a_corrected_unrelated_base() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "corrected base"]);
+    let old_base = git(&backend, ["rev-parse", "main"]);
+
+    git(&backend, ["checkout", "--orphan", "stable"]);
+    fs::write(backend.join("app.txt"), "unrelated stable root\n").unwrap();
+    git(&backend, ["add", "--all"]);
+    git(&backend, ["commit", "-m", "Stable root"]);
+    let stable = git(&backend, ["rev-parse", "stable"]);
+
+    knit(&workspace, ["project", "set-base", "backend", "stable"]);
+    knit(
+        &workspace,
+        ["bundle", "remove", "backend", "--delete-branch"],
+    );
+    assert!(git(&backend, ["branch", "--list", "knit/corrected-base"])
+        .trim()
+        .is_empty());
+
+    knit(&workspace, ["bundle", "add", "backend"]);
+    let checkout = workspace.join(".knit/worktrees/corrected-base/backend");
+    assert_eq!(git(&checkout, ["rev-parse", "HEAD"]), stable);
+    assert_ne!(git(&checkout, ["rev-parse", "HEAD"]), old_base);
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -491,6 +659,86 @@ fn bundle_include_and_exclude_manage_worktrees() {
         .contains("knit/live-feature"),
         "feature branch should be deleted with --delete-branch"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_remove_and_readd_preserves_committed_diff() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["bundle", "readd feature", "--repo", "backend"]);
+    let checkout = workspace.join(".knit/worktrees/readd-feature/backend");
+    append_line(&checkout.join("app.txt"), "preserved bundle work");
+    knit(&workspace, ["commit", "--all", "-m", "Preserve this work"]);
+
+    knit(&workspace, ["bundle", "remove", "backend"]);
+    assert!(!checkout.exists());
+    let readded = knit(&workspace, ["bundle", "add", "backend"]);
+    assert!(readded.contains("existing branch"), "{readded}");
+
+    let diff = knit(&workspace, ["diff", "backend"]);
+    assert!(diff.contains("preserved bundle work"), "{diff}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_add_rejects_duplicate_instead_of_rewriting_recorded_base() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(&workspace, ["bundle", "duplicate add", "--repo", "backend"]);
+    let bundle_path = workspace.join(".knit/bundles/duplicate-add.bundle.json");
+    let before: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+
+    let duplicate = knit_fails(&workspace, ["bundle", "add", "backend"]);
+    assert!(duplicate.contains("already tracked"), "{duplicate}");
+    assert!(
+        duplicate.contains("will not rewrite its recorded base"),
+        "{duplicate}"
+    );
+
+    let after: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(after["repos"][0]["baseSha"], before["repos"][0]["baseSha"]);
+    assert_eq!(
+        after["repos"][0]["baseBranch"],
+        before["repos"][0]["baseBranch"]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn explicit_no_diff_explains_bundle_source_and_untracked_state() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "diagnostic diff"]);
+    let checkout = workspace.join(".knit/worktrees/diagnostic-diff/backend");
+
+    append_line(&backend.join("app.txt"), "edited in source checkout");
+    let source_only = knit(&workspace, ["diff", "backend"]);
+    assert!(source_only.contains("no diff"), "{source_only}");
+    assert!(source_only.contains("bundle checkout:"), "{source_only}");
+    assert!(source_only.contains("source checkout"), "{source_only}");
+    assert!(source_only.contains("modified"), "{source_only}");
+
+    fs::write(checkout.join("untracked.txt"), "not tracked\n").unwrap();
+    let untracked = knit(&workspace, ["diff", "backend"]);
+    assert!(untracked.contains("untracked files"), "{untracked}");
+    assert!(untracked.contains("does not include them"), "{untracked}");
 
     fs::remove_dir_all(root).unwrap();
 }
