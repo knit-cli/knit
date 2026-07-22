@@ -855,9 +855,10 @@ fn pull_bundle_by_slug_classified(
         .clone()
         .context("Bundle pull requires an active project. Run `knit init <name>` or clone one.")
         .map_err(other)?;
-    let (remote, token, export) =
-        with_first_available_remote(&config, None, |_name, remote, token| {
+    let (remote_name, remote, token, export) =
+        with_first_available_remote(&config, None, |name, remote, token| {
             Ok((
+                name.to_string(),
                 remote.clone(),
                 token.to_string(),
                 fetch_project_export(remote, token, &project_id)?,
@@ -965,7 +966,7 @@ fn pull_bundle_by_slug_classified(
     // Fetch feature branches, create missing worktrees, fast-forward to the
     // recorded heads — the same machinery a clone-time materialize uses, with
     // vended credentials available for non-public repos.
-    let vend = GitCredentialSource::from_export(&remote, &token, &export);
+    let vend = GitCredentialSource::from_export(&remote_name, &remote, &token, &export);
     materialize_imported_bundle(&root, &bundle_id, Some(&vend)).map_err(other)?;
 
     let saved: ChangeGroup = read_json(&path).map_err(other)?;
