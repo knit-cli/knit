@@ -311,11 +311,11 @@ fn remote_projects_json_error_envelopes() {
     fs::remove_dir_all(root).unwrap();
 }
 
-/// End to end vended-credential clone: the repo is served over dumb HTTP
-/// behind basic auth, so the plain clone fails, knit vends the credential from
-/// the fake server, and the askpass retry clones successfully.
+/// Forge credentials are never offered to an HTTP Git host. This used to be a
+/// raw-token askpass test; the secure helper must now fail closed before any
+/// credential request for this transport.
 #[test]
-fn clone_retries_private_repo_with_vended_credential() {
+fn clone_does_not_forward_forge_credentials_to_http_git_hosts() {
     let root = unique_temp_dir();
     let fake_dir = root.join("fake");
     fs::create_dir_all(&fake_dir).unwrap();
@@ -376,8 +376,8 @@ fn clone_retries_private_repo_with_vended_credential() {
             "--json",
         ],
         &[
-            // Neutralize ambient git credential helpers/prompts so the plain
-            // attempt fails deterministically and the retry uses only askpass.
+            // Neutralize ambient helpers so an unrelated host credential
+            // cannot make this unsupported HTTP clone succeed.
             ("HOME", git_home.to_str().unwrap()),
             ("XDG_CONFIG_HOME", git_home.to_str().unwrap()),
             ("GIT_CONFIG_NOSYSTEM", "1"),
@@ -385,22 +385,15 @@ fn clone_retries_private_repo_with_vended_credential() {
         ],
     );
 
-    assert!(success, "vended clone should succeed: {stderr}");
-    let document: serde_json::Value = serde_json::from_str(&stdout)
-        .unwrap_or_else(|error| panic!("stdout must be pure JSON ({error}): {stdout}"));
-    assert_eq!(
-        document["repos"],
-        serde_json::json!([
-            {"id": "backend", "status": "cloned", "credential": "remote-vended"},
-        ])
-    );
-    assert!(target.join("backend/.git").exists());
-
-    // The vend endpoint was called with the export's server ids and the API token.
-    let vends = fs::read_to_string(fake_dir.join("vend-requests.txt")).unwrap();
+    assert!(!success, "HTTP forge clone must fail closed: {stdout}");
     assert!(
-        vends.contains("/api/v1/projects/p-1/repositories/r-1/git-credential Bearer test-token"),
-        "vend request should carry ids and bearer token: {vends}"
+        stderr.contains("failed to clone"),
+        "unexpected error: {stderr}"
+    );
+    assert!(!target.join("backend/.git").exists());
+    assert!(
+        !fake_dir.join("vend-requests.txt").exists(),
+        "an unsupported transport must never trigger credential vending"
     );
 
     // The credential never reached disk: no askpass shim or credential text
@@ -409,88 +402,6 @@ fn clone_retries_private_repo_with_vended_credential() {
     assert!(leaked.is_empty(), "credential leaked into: {leaked:?}");
 
     fs::remove_dir_all(root).unwrap();
-}
-
-/// A vend answered with 409 noCredential keeps the repo failed and appends the
-/// contract hint to the error, in both the human and JSON outputs.
-#[test]
-fn clone_vend_409_keeps_repo_failed_with_hint() {
-    let root = unique_temp_dir();
-    let fake_dir = root.join("fake");
-    fs::create_dir_all(&fake_dir).unwrap();
-    fs::write(fake_dir.join("vend-409"), "").unwrap();
-
-    let base_url = spawn_fake_remote_api(&fake_dir, String::new());
-    let export = serde_json::json!({
-        "data": {
-            "project": {"id": "p-1", "slug": "demo"},
-            "knitProject": null,
-            "repositories": [
-                {
-                    "id": "r-1",
-                    "localId": "backend",
-                    "name": "backend",
-                    "defaultBranch": null,
-                    "remoteUrl": root.join("no-such-repo").to_string_lossy(),
-                    "visibility": "private",
-                    "metadata": {},
-                },
-                {
-                    "id": "r-2",
-                    "localId": "docs",
-                    "name": "docs",
-                    "defaultBranch": null,
-                    "remoteUrl": docs_source(&root).to_string_lossy(),
-                    "visibility": "public",
-                    "metadata": {},
-                },
-            ],
-            "omittedRepositoryCount": 0,
-            "bundles": [],
-            "historyEvents": [],
-        }
-    });
-    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
-
-    let target = root.join("workspace");
-    let (stdout, stderr, success) = knit_split_output(
-        &root,
-        &[
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-            "--json",
-        ],
-        &[],
-    );
-
-    assert!(success, "partial clone should still succeed: {stderr}");
-    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
-    assert_eq!(document["repos"][0]["id"], "backend");
-    assert_eq!(document["repos"][0]["status"], "failed");
-    let error = document["repos"][0]["error"].as_str().unwrap();
-    assert!(
-        error.contains("no git access: configure SSH keys or ask a project member to connect GitHub on the sync remote"),
-        "409 vend must append the hint: {error}"
-    );
-    assert!(stderr.contains("no git access"), "hint in human output too");
-
-    fs::remove_dir_all(root).unwrap();
-}
-
-fn docs_source(root: &Path) -> std::path::PathBuf {
-    let source = root.join("docs-source");
-    if !source.exists() {
-        init_repo(&source, "docs");
-    }
-    source
 }
 
 /// Recursively list files under `root` whose content contains `needle`.

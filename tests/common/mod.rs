@@ -1321,44 +1321,30 @@ pub fn knit_split_output(
     )
 }
 
-/// Basic-auth header the fake remote git host expects: the vended credential
-/// `x-access-token:vended-pass`.
+/// Basic-auth header accepted by the legacy dumb-HTTP fixture.
 pub const FAKE_REMOTE_GIT_AUTH: &str = "Basic eC1hY2Nlc3MtdG9rZW46dmVuZGVkLXBhc3M=";
 
-/// Spawn a fake sync-remote API covering project export/views, git-credential
-/// vending, and dumb-HTTP git serving (with basic auth) for repo directories
-/// under `<dir>/git/`.
-///
-/// Behavior markers in `dir`:
-/// - `vend-409`: git-credential responds 409 `noCredential`
-///
-/// Captures in `dir`:
-/// - `vend-requests.txt`: one `path<SP>authorization` line per vend call
+/// Spawn a fake sync-remote API covering project export/views, the generic
+/// forge credential endpoint, and legacy dumb-HTTP fixture files.
 pub fn spawn_fake_remote_api(dir: &Path, export_body: String) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     fs::create_dir_all(dir).unwrap();
     fs::write(dir.join("export.json"), export_body).unwrap();
     let dir = dir.to_path_buf();
-    let base = base_url.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
             let Ok(mut stream) = stream else { continue };
             let dir = dir.clone();
-            let base = base.clone();
             std::thread::spawn(move || {
-                let _ = handle_fake_remote_request(&mut stream, &dir, &base);
+                let _ = handle_fake_remote_request(&mut stream, &dir);
             });
         }
     });
     base_url
 }
 
-fn handle_fake_remote_request(
-    stream: &mut std::net::TcpStream,
-    dir: &Path,
-    base_url: &str,
-) -> std::io::Result<()> {
+fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Read, Write};
 
     let mut reader = BufReader::new(stream.try_clone()?);
@@ -1393,8 +1379,8 @@ fn handle_fake_remote_request(
 
     let path = target.split('?').next().unwrap_or_default().to_string();
 
-    // Dumb-HTTP git hosting: serve files from `<dir>/git/...` behind basic
-    // auth so a plain clone fails and the askpass retry succeeds.
+    // Dumb-HTTP git fixture. Secure forge helpers deliberately never service
+    // this transport.
     if path.starts_with("/git/") {
         if authorization != FAKE_REMOTE_GIT_AUTH {
             let body = b"auth required";
@@ -1428,24 +1414,22 @@ fn handle_fake_remote_request(
     }
 
     let (status, response) = match (method.as_str(), path.as_str()) {
-        ("POST", path)
-            if path.starts_with("/api/v1/projects/")
-                && path.contains("/repositories/")
-                && path.ends_with("/git-credential") =>
-        {
+        ("POST", "/api/v1/me/forge-credentials/git") => {
             let mut log = fs::read_to_string(dir.join("vend-requests.txt")).unwrap_or_default();
-            log.push_str(&format!("{path} {authorization}\n"));
+            log.push_str(&format!("{body}\n"));
             fs::write(dir.join("vend-requests.txt"), log).unwrap();
-            if dir.join("vend-409").exists() {
+            if body.contains("\"protocol\":\"https\"")
+                && body.contains("\"host\":\"code.example.test\"")
+            {
                 (
-                    409,
-                    "{\"error\":{\"kind\":\"noCredential\",\"message\":\"no project member has GitHub connected\"}}"
+                    200,
+                    "{\"data\":{\"username\":\"forge-user\",\"password\":\"forge-secret\",\"forge\":\"test-forge\",\"actsAs\":\"alice\"}}"
                         .to_string(),
                 )
             } else {
                 (
-                    200,
-                    "{\"data\":{\"username\":\"x-access-token\",\"password\":\"vended-pass\",\"provider\":\"github\",\"actsAs\":\"marc\"}}"
+                    404,
+                    "{\"error\":{\"kind\":\"unsupportedForgeHost\",\"message\":\"unsupported host\"}}"
                         .to_string(),
                 )
             }

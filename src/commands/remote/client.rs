@@ -278,10 +278,10 @@ pub(super) fn prepare_feature_branches(
             super::credentials::with_vended_credential_retry(vend, &repo.id, |credential| {
                 match credential {
                     None => git_output(&repo_path, ["fetch", "origin", branch]),
-                    Some(credential) => super::credentials::git_with_vended_credential(
+                    Some(helper) => super::credentials::git_with_brokered_credential(
                         &repo_path,
                         ["fetch", "origin", branch],
-                        credential,
+                        helper,
                     ),
                 }
             });
