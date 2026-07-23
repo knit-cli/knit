@@ -82,7 +82,14 @@ pub fn eject(
 /// Stop and remove the bundle's stacks, resolved from recorded run state or
 /// by derived compose project names when a failed `up` never recorded state.
 pub fn down(ctx: &RuntimeContext) -> Result<()> {
-    state::run_down(ctx)
+    state::run_down(ctx, false)
+}
+
+/// Stop the bundle's stacks and remove their project-owned volumes and local
+/// Compose build images. External volumes and explicitly tagged images remain
+/// outside Knit's lifecycle.
+pub fn purge(ctx: &RuntimeContext) -> Result<()> {
+    state::run_down(ctx, true)
 }
 
 /// Report live service states, ports, and URLs for the bundle's stacks.
