@@ -71,4 +71,3 @@ fn read_input() -> Result<BTreeMap<String, String>> {
     }
     Ok(fields)
 }
-

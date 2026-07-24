@@ -21,7 +21,6 @@ pub use client::configured_sync_remote_names;
 pub(crate) use client::{resolve_remote, resolve_token};
 pub use clone::clone_project_from_remote;
 pub(crate) use credentials::{normalize_git_target, request_forge_credential, VendAttempt};
-pub use push::sync_remote_helpers_command;
 pub use facade::{sync_pull, sync_push, SyncTargets};
 pub use history::pull_history_from_remote;
 pub use projects::list_remote_projects;
@@ -31,6 +30,7 @@ pub use pull::{
     pull_bundle_remote_state, pull_remote_state, pull_views_from_remote, remote_bundle_lifecycle,
     RemoteBundleOutcome, RemoteBundleRecord, RemotePullContext,
 };
+pub use push::sync_remote_helpers_command;
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_all_bundles_to_remote,
     push_bundle_to_remote, push_project_to_remote, push_views_to_remote, remote_auth_status,

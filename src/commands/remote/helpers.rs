@@ -89,9 +89,7 @@ pub(crate) fn ensure_helpers_for_git(remote_name: &str) {
         Err(error) => {
             crate::human!(
                 "{}",
-                crate::output::muted(format!(
-                    "credential helper setup skipped: {error:#}"
-                ))
+                crate::output::muted(format!("credential helper setup skipped: {error:#}"))
             );
         }
     }
@@ -193,7 +191,10 @@ fn read_helper_entries() -> Result<BTreeMap<String, Vec<String>>> {
             Some((key, value)) => (key, value),
             None => (record, ""),
         };
-        entries.entry(key.to_string()).or_default().push(value.to_string());
+        entries
+            .entry(key.to_string())
+            .or_default()
+            .push(value.to_string());
     }
     Ok(entries)
 }
