@@ -3,7 +3,9 @@ use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
 use std::env;
 use std::fs::{self, OpenOptions};
+use std::io::Write;
 use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 
 static BUNDLE_OVERRIDE: Mutex<Option<String>> = Mutex::new(None);
@@ -151,8 +153,67 @@ pub fn save_global_config(config: &KnitConfig) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(parent, fs::Permissions::from_mode(0o700)).with_context(|| {
+                format!("failed to restrict global config dir {}", parent.display())
+            })?;
+        }
     }
-    write_json(&path, config)
+    write_private_json(&path, config)
+}
+
+fn write_private_json<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    static COUNTER: AtomicU32 = AtomicU32::new(0);
+    let text = serde_json::to_string_pretty(value).context("failed to serialize JSON")?;
+    let file_name = path
+        .file_name()
+        .map(|name| name.to_string_lossy().to_string())
+        .unwrap_or_else(|| "knit".to_string());
+    let temp_path = path.with_file_name(format!(
+        ".{file_name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut options = OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let mut file = options
+        .open(&temp_path)
+        .with_context(|| format!("failed to create private config {}", temp_path.display()))?;
+    if let Err(error) = file.write_all(format!("{text}\n").as_bytes()) {
+        let _ = fs::remove_file(&temp_path);
+        return Err(error).with_context(|| format!("failed to write {}", temp_path.display()));
+    }
+    drop(file);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(error) = fs::set_permissions(&temp_path, fs::Permissions::from_mode(0o600)) {
+            let _ = fs::remove_file(&temp_path);
+            return Err(error).with_context(|| {
+                format!("failed to restrict global config {}", temp_path.display())
+            });
+        }
+    }
+    match fs::rename(&temp_path, path) {
+        Ok(()) => Ok(()),
+        Err(_) if cfg!(windows) && path.exists() => {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to replace {}", path.display()))?;
+            fs::rename(&temp_path, path)
+                .with_context(|| format!("failed to write {}", path.display()))
+        }
+        Err(error) => {
+            let _ = fs::remove_file(&temp_path);
+            Err(error).with_context(|| format!("failed to write {}", path.display()))
+        }
+    }
 }
 
 /// Merge user-global config with workspace config. Workspace remotes override global

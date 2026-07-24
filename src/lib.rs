@@ -121,14 +121,20 @@ pub fn run(cli: Cli) -> Result<()> {
                 name,
                 url,
                 token,
+                token_stdin,
                 global,
-            } => commands::add_remote(&name, &url, token.as_deref(), global),
+            } => commands::add_remote(&name, &url, token.as_deref(), token_stdin, global),
             RemoteCommand::List { global } => commands::list_remotes(global),
             RemoteCommand::Projects { remote, json } => {
                 commands::list_remote_projects(remote.as_deref(), json)
             }
+            RemoteCommand::AuthStatus { name, json } => commands::remote_auth_status(&name, json),
             RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
-            RemoteCommand::Remove { name, global } => commands::remove_remote(&name, global),
+            RemoteCommand::Remove {
+                name,
+                global,
+                revoke,
+            } => commands::remove_remote(&name, global, revoke),
             RemoteCommand::Token {
                 name,
                 token,
@@ -136,6 +142,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 global,
             } => commands::set_remote_token(&name, token.as_deref(), clear, global),
         },
+        Commands::GitCredential { remote, operation } => {
+            commands::run_git_credential_helper(&remote, operation)
+        }
         Commands::Clone {
             project,
             target,

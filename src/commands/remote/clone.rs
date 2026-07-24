@@ -8,7 +8,7 @@ use super::client::{
     token_from_env,
 };
 use super::credentials::{
-    git_with_vended_credential, with_vended_credential_retry, CredentialedOutcome,
+    git_with_brokered_credential, with_vended_credential_retry, CredentialedOutcome,
     GitCredentialSource, VENDED_CREDENTIAL_LABEL,
 };
 use super::{
@@ -197,7 +197,7 @@ fn clone_fetched_export(
         )
     })?;
 
-    let vend_source = GitCredentialSource::from_export(&remote, &token, &export);
+    let vend_source = GitCredentialSource::from_export(&remote_name, &remote, &token, &export);
     let (repo_paths, failed_repos, vended_repos) = clone_export_repositories_collecting(
         &target_root,
         &export.repositories,
@@ -549,13 +549,13 @@ fn clone_one_export_repository(
     ];
     let outcome = with_vended_credential_retry(vend, &local_id, |credential| match credential {
         None => git_output(target_root, clone_args.clone()),
-        Some(credential) => {
+        Some(helper) => {
             // A failed clone can leave a partial target dir behind; clear it so
             // the credentialed retry starts clean.
             if repo_path.exists() {
                 let _ = fs::remove_dir_all(&repo_path);
             }
-            git_with_vended_credential(target_root, clone_args.clone(), credential)
+            git_with_brokered_credential(target_root, clone_args.clone(), helper)
         }
     });
     let vended = match outcome {
@@ -841,7 +841,6 @@ mod tests {
 
     fn export_repo(name: &str, remote_url: &str) -> RemoteExportRepository {
         RemoteExportRepository {
-            id: None,
             local_id: Some(name.to_string()),
             name: name.to_string(),
             default_branch: None,

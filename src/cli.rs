@@ -24,6 +24,13 @@ pub enum FetchMode {
     Knit,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum GitCredentialOperation {
+    Get,
+    Store,
+    Erase,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a reusable project repo template (like `git init`, for a project).
@@ -53,6 +60,14 @@ pub enum Commands {
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
+    },
+    /// Act as a provider-neutral Git credential helper backed by a named remote.
+    GitCredential {
+        /// Named remote whose authenticated API brokers connected forge accounts.
+        #[arg(long)]
+        remote: String,
+        /// Git credential-helper operation. Git appends this argument automatically.
+        operation: GitCredentialOperation,
     },
     /// Clone a remote project export into a local Knit workspace.
     Clone {
@@ -939,6 +954,9 @@ pub enum RemoteCommand {
         /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
+        /// Read the remote token from stdin instead of command arguments.
+        #[arg(long, conflicts_with = "token")]
+        token_stdin: bool,
         /// Store this remote in the user-level Knit config instead of the workspace.
         #[arg(long)]
         global: bool,
@@ -964,6 +982,9 @@ pub enum RemoteCommand {
         /// Remove the user-level remote instead of the workspace remote.
         #[arg(long)]
         global: bool,
+        /// Revoke the configured bearer token on the remote before removing it locally.
+        #[arg(long, requires = "global")]
+        revoke: bool,
     },
     /// List the remote projects visible to the resolved remote token.
     Projects {
@@ -971,6 +992,14 @@ pub enum RemoteCommand {
         #[arg(long)]
         remote: Option<String>,
         /// Print a machine-readable JSON document to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect the current remote token without exposing its secret.
+    AuthStatus {
+        /// Remote name.
+        name: String,
+        /// Print the server response as JSON.
         #[arg(long)]
         json: bool,
     },

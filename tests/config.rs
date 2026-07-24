@@ -3,6 +3,8 @@ mod common;
 use common::*;
 use serde_json::Value;
 use std::fs;
+use std::io::Write;
+use std::process::{Command, Stdio};
 
 #[test]
 fn bundle_lifecycle_clean_schema_migrate_doctor_and_advice_work() {
@@ -140,6 +142,136 @@ fn remote_config_supports_global_fallback_and_workspace_override() {
     assert!(show.contains("Global config"));
     assert!(show.contains("Effective config"));
     assert!(show.contains("https://remote.example.invalid"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn environment_token_uses_stdin_and_private_global_config_with_arbitrary_remote_name() {
+    let root = unique_temp_dir();
+    let outside = root.join("outside");
+    let knit_home = root.join("knit-home");
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&outside).unwrap();
+    let remote_url = spawn_fake_remote_api(&fake_dir, String::new());
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_knit"))
+        .args([
+            "remote",
+            "add",
+            "moonbase",
+            remote_url.as_str(),
+            "--global",
+            "--token-stdin",
+        ])
+        .current_dir(&outside)
+        .env("KNIT_HOME", &knit_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"environment-bound-secret\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(!String::from_utf8_lossy(&output.stdout).contains("environment-bound-secret"));
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("environment-bound-secret"));
+
+    let config_path = knit_home.join("config.json");
+    let config: Value = serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    assert_eq!(
+        config["remotes"]["moonbase"]["token"].as_str(),
+        Some("environment-bound-secret")
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        assert_eq!(
+            fs::metadata(&knit_home).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        assert_eq!(
+            fs::metadata(&config_path).unwrap().permissions().mode() & 0o777,
+            0o600
+        );
+    }
+
+    let mut unsupported = Command::new(env!("CARGO_BIN_EXE_knit"))
+        .args(["git-credential", "--remote", "moonbase", "get"])
+        .current_dir(&outside)
+        .env("KNIT_HOME", &knit_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    unsupported
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"protocol=http\nhost=knit.example.test\n\n")
+        .unwrap();
+    let unsupported = unsupported.wait_with_output().unwrap();
+    assert!(unsupported.status.success());
+    assert!(unsupported.stdout.is_empty());
+
+    // A checkout is untrusted input to the credential helper. Even a local
+    // remote with the same name must not replace the private global endpoint.
+    let knit_home_value = knit_home.to_string_lossy().to_string();
+    let private_env = [("KNIT_HOME", knit_home_value.as_str())];
+    knit_with_env(&outside, ["bundle", "hostile workspace"], &private_env);
+    knit_with_env(
+        &outside,
+        [
+            "remote",
+            "add",
+            "moonbase",
+            "http://127.0.0.1:1",
+            "--token",
+            "workspace-controlled-token",
+        ],
+        &private_env,
+    );
+
+    let mut supported = Command::new(env!("CARGO_BIN_EXE_knit"))
+        .args(["git-credential", "--remote", "moonbase", "get"])
+        .current_dir(&outside)
+        .env("KNIT_HOME", &knit_home)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    supported
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"protocol=https\nhost=code.example.test\npath=alice/project.git\n\n")
+        .unwrap();
+    let supported = supported.wait_with_output().unwrap();
+    assert!(
+        supported.status.success(),
+        "{}",
+        String::from_utf8_lossy(&supported.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&supported.stdout),
+        "username=forge-user\npassword=forge-secret\n\n"
+    );
+    let requests = fs::read_to_string(fake_dir.join("vend-requests.txt")).unwrap();
+    assert!(requests.contains("\"host\":\"code.example.test\""));
+    assert!(!requests.contains("environment-bound-secret"));
+    assert!(!requests.contains("forge-secret"));
 
     fs::remove_dir_all(root).unwrap();
 }
