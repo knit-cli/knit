@@ -12,7 +12,6 @@ use super::clone::{
     clone_export_repositories, export_repo_local_id, materialize_imported_bundle,
     project_repo_entry_from_export,
 };
-use super::credentials::GitCredentialSource;
 use super::{
     print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportRepository,
     RemoteProjectExport, RemoteViews,
@@ -214,7 +213,7 @@ fn reconcile_project_repositories(
     let mut failed = Vec::new();
     for repository in to_add {
         let local_id = export_repo_local_id(repository);
-        match clone_export_repositories(root, std::slice::from_ref(repository), None) {
+        match clone_export_repositories(root, std::slice::from_ref(repository)) {
             Ok(paths) => {
                 if let Some(repo_path) = paths.get(&local_id) {
                     project
@@ -335,7 +334,7 @@ pub fn pull_bundle_remote_state(
         }
         LedgerRelation::Diverged => {
             let localized = localize_bundle(remote_payload, &context.project)?;
-            prepare_feature_branches(&localized, None)?;
+            prepare_feature_branches(&localized)?;
             let merged = merge_ledgers(&local, &localized, now_iso());
             let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
             materialize_repos(&mut active, None)?;
@@ -361,7 +360,7 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::RemoteAhead => {}
     }
     let localized = localize_bundle(remote_payload, &context.project)?;
-    prepare_feature_branches(&localized, None)?;
+    prepare_feature_branches(&localized)?;
     ensure_remote_bundle_fast_forward(&local, &localized)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, localized);
     materialize_repos(&mut active, None)?;
@@ -419,7 +418,7 @@ fn refresh_bundle_checkouts(
         .iter()
         .map(|(_, dir)| checkout_head(dir))
         .collect();
-    prepare_feature_branches(&bundle, None)?;
+    prepare_feature_branches(&bundle)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, bundle);
     let mut created = 0usize;
     if !to_materialize.is_empty() {
@@ -817,8 +816,8 @@ struct BundlePullRepo {
 }
 
 /// `knit bundle pull <slug>`: one verb that refreshes a single bundle's
-/// artifact from the sync remote, fetches its feature branches (vended
-/// credentials apply), and materializes fast-forwarded worktrees.
+/// artifact from the sync remote, fetches its feature branches (the installed
+/// credential helpers apply), and materializes fast-forwarded worktrees.
 pub fn pull_bundle_by_slug(slug: &str, json: bool) -> Result<()> {
     if json {
         crate::output::route_human_lines_to_stderr();
@@ -855,12 +854,10 @@ fn pull_bundle_by_slug_classified(
         .clone()
         .context("Bundle pull requires an active project. Run `knit init <name>` or clone one.")
         .map_err(other)?;
-    let (remote_name, remote, token, export) =
+    let (remote_name, export) =
         with_first_available_remote(&config, None, |name, remote, token| {
             Ok((
                 name.to_string(),
-                remote.clone(),
-                token.to_string(),
                 fetch_project_export(remote, token, &project_id)?,
             ))
         })
@@ -964,10 +961,10 @@ fn pull_bundle_by_slug_classified(
     }
 
     // Fetch feature branches, create missing worktrees, fast-forward to the
-    // recorded heads — the same machinery a clone-time materialize uses, with
-    // vended credentials available for non-public repos.
-    let vend = GitCredentialSource::from_export(&remote_name, &remote, &token, &export);
-    materialize_imported_bundle(&root, &bundle_id, Some(&vend)).map_err(other)?;
+    // recorded heads — the same machinery a clone-time materialize uses. The
+    // installed exact-host credential helpers carry non-public repo access.
+    super::helpers::ensure_helpers_for_git(&remote_name);
+    materialize_imported_bundle(&root, &bundle_id).map_err(other)?;
 
     let saved: ChangeGroup = read_json(&path).map_err(other)?;
     let repos = saved

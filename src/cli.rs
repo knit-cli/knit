@@ -1003,6 +1003,12 @@ pub enum RemoteCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Install exact-host Git credential helpers for the remote's connected
+    /// forges into the global Git config, removing stale knit entries.
+    SyncHelpers {
+        /// Remote name (must be configured in the user-level Knit config).
+        name: String,
+    },
     /// Store or clear a token for a remote.
     Token {
         /// Remote name.

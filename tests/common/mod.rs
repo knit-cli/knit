@@ -308,6 +308,15 @@ pub fn isolated_knit_home() -> String {
         .to_string()
 }
 
+
+/// Isolated global Git config for the binary under test: `knit remote
+/// sync-helpers` and clone-time helper installation write `git config
+/// --global`, which must never touch the running user's real gitconfig.
+pub fn isolated_git_config_global() -> String {
+    let dir = std::path::PathBuf::from(isolated_knit_home());
+    dir.join("gitconfig").to_string_lossy().to_string()
+}
+
 /// Ambient identity overrides (exported by editor/agent harnesses such as a
 /// T3 Code session) would silently override the per-repo `git config` identity
 /// every fixture sets and inject actor attribution, breaking actor/author
@@ -338,6 +347,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
     scrub_ambient_git_identity(&mut command);
@@ -354,6 +364,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
     scrub_ambient_git_identity(&mut command);
@@ -374,6 +385,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
     scrub_ambient_git_identity(&mut command);
@@ -396,6 +408,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
     scrub_ambient_git_identity(&mut command);
@@ -440,6 +453,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
@@ -485,6 +499,7 @@ where
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
@@ -1302,6 +1317,7 @@ pub fn knit_split_output(
         .args(args)
         .current_dir(cwd)
         .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
         .env_remove("KNIT_REMOTE_URL")
@@ -1414,6 +1430,11 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
     }
 
     let (status, response) = match (method.as_str(), path.as_str()) {
+        ("GET", "/api/v1/me/forge-credentials") => (
+            200,
+            "{\"data\":[{\"forge\":\"test-forge\",\"hosts\":[\"code.example.test\"],\"connected\":true},{\"forge\":\"other\",\"hosts\":[\"off.example.test\"],\"connected\":false}]}"
+                .to_string(),
+        ),
         ("POST", "/api/v1/me/forge-credentials/git") => {
             let mut log = fs::read_to_string(dir.join("vend-requests.txt")).unwrap_or_default();
             log.push_str(&format!("{body}\n"));

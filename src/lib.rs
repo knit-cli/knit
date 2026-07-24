@@ -129,6 +129,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::list_remote_projects(remote.as_deref(), json)
             }
             RemoteCommand::AuthStatus { name, json } => commands::remote_auth_status(&name, json),
+            RemoteCommand::SyncHelpers { name } => commands::sync_remote_helpers_command(&name),
             RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
             RemoteCommand::Remove {
                 name,
