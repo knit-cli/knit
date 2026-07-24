@@ -13,7 +13,7 @@ use anyhow::{bail, Context, Result};
 use knit_runtime::{RuntimeContext, RuntimeRepo};
 use std::path::PathBuf;
 
-pub fn try_handle(name: &str, force: bool) -> Result<bool> {
+pub fn try_handle(name: &str, force: bool, purge: bool) -> Result<bool> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active).ok();
     let runtime = project.as_ref().and_then(|p| p.runtime.clone());
@@ -39,7 +39,11 @@ pub fn try_handle(name: &str, force: bool) -> Result<bool> {
             if !runtime_applies(&ctx, runtime.as_ref()) {
                 return Ok(false);
             }
-            knit_runtime::down(&ctx).map(|_| true)
+            if purge {
+                knit_runtime::purge(&ctx).map(|_| true)
+            } else {
+                knit_runtime::down(&ctx).map(|_| true)
+            }
         }
         "status" => {
             if !runtime_applies(&ctx, runtime.as_ref()) {
@@ -49,6 +53,21 @@ pub fn try_handle(name: &str, force: bool) -> Result<bool> {
         }
         _ => Ok(false),
     }
+}
+
+/// Remove all Docker resources owned by a bundle runtime before its generated
+/// worktrees are discarded. Callers use this for terminal bundle lifecycle
+/// transitions (archive/land/delete), where keeping restart data would only
+/// leak project-scoped volumes and Compose build images.
+pub(crate) fn purge_active_runtime(active: &ActiveBundle) -> Result<bool> {
+    let project = load_project_for_bundle(active).ok();
+    let runtime = project.as_ref().and_then(|project| project.runtime.clone());
+    let ctx = runtime_context(active, project.as_ref());
+    if !runtime_applies(&ctx, runtime.as_ref()) {
+        return Ok(false);
+    }
+    knit_runtime::purge(&ctx)?;
+    Ok(true)
 }
 
 /// Whether `down`/`status` should handle this bundle: a configured runtime,

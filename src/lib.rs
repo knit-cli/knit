@@ -406,8 +406,9 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             list,
             force,
+            purge,
             args,
-        } => commands::run_project_command(name.as_deref(), &repos, all, list, force, &args),
+        } => commands::run_project_command(name.as_deref(), &repos, all, list, force, purge, &args),
         Commands::Publish { target } => match target {
             PublishCommand::Create {
                 repos,
