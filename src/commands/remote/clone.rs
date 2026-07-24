@@ -7,10 +7,7 @@ use super::client::{
     fetch_project_export, localize_bundle, normalize_base_url, prepare_feature_branches,
     token_from_env,
 };
-use super::credentials::{
-    git_with_vended_credential, with_vended_credential_retry, CredentialedOutcome,
-    GitCredentialSource, VENDED_CREDENTIAL_LABEL,
-};
+use super::credentials::NO_ACCESS_HINT;
 use super::{
     print_json_error_envelope, RemoteErrorKind, RemoteExportRepository, RemoteProjectExport,
 };
@@ -70,10 +67,6 @@ struct CloneDocumentRepo {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
-    /// `"remote-vended"` when the repo was cloned via a server-vended git
-    /// credential, so drivers can tell the user which repos rode remote-vended creds.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    credential: Option<&'static str>,
 }
 
 #[derive(Debug, Serialize)]
@@ -197,12 +190,9 @@ fn clone_fetched_export(
         )
     })?;
 
-    let vend_source = GitCredentialSource::from_export(&remote, &token, &export);
-    let (repo_paths, failed_repos, vended_repos) = clone_export_repositories_collecting(
-        &target_root,
-        &export.repositories,
-        Some(&vend_source),
-    );
+    super::helpers::ensure_helpers_for_git(&remote_name);
+    let (repo_paths, failed_repos) =
+        clone_export_repositories_collecting(&target_root, &export.repositories);
     if repo_paths.is_empty() {
         bail!(
             "Failed to clone any repository for project `{}`:\n{}",
@@ -257,7 +247,7 @@ fn clone_fetched_export(
     let mut worktrees_materialized = false;
     if materialize {
         if let Some(bundle_id) = selected_bundle_id.as_deref() {
-            materialize_imported_bundle(&target_root, bundle_id, Some(&vend_source))?;
+            materialize_imported_bundle(&target_root, bundle_id)?;
             worktrees_materialized = true;
         }
     }
@@ -309,7 +299,6 @@ fn clone_fetched_export(
         &target_root,
         &repo_paths,
         &failed_repos,
-        &vended_repos,
         &bundles,
         dropped_bundles,
         selected_bundle_id,
@@ -328,7 +317,6 @@ fn clone_document(
     target_root: &Path,
     repo_paths: &BTreeMap<String, PathBuf>,
     failed_repos: &[(String, String)],
-    vended_repos: &BTreeSet<String>,
     bundles: &[ChangeGroup],
     dropped_bundles: Vec<DroppedBundle>,
     active_bundle: Option<String>,
@@ -348,14 +336,10 @@ fn clone_document(
         .map(|repository| {
             let local_id = export_repo_local_id(repository);
             if repo_paths.contains_key(&local_id) {
-                let credential = vended_repos
-                    .contains(&local_id)
-                    .then_some(VENDED_CREDENTIAL_LABEL);
                 CloneDocumentRepo {
                     id: local_id,
                     status: "cloned",
                     error: None,
-                    credential,
                 }
             } else {
                 let error = failed_repos
@@ -366,7 +350,6 @@ fn clone_document(
                     id: local_id,
                     status: "failed",
                     error,
-                    credential: None,
                 }
             }
         })
@@ -499,27 +482,24 @@ fn prepare_clone_target(target: &Path) -> Result<()> {
 pub(super) fn clone_export_repositories(
     target_root: &Path,
     repositories: &[RemoteExportRepository],
-    vend: Option<&GitCredentialSource>,
 ) -> Result<BTreeMap<String, PathBuf>> {
     let mut paths = BTreeMap::new();
 
     for repository in repositories {
-        let (local_id, repo_path, _vended) =
-            clone_one_export_repository(target_root, repository, vend)?;
+        let (local_id, repo_path) = clone_one_export_repository(target_root, repository)?;
         paths.insert(local_id, repo_path);
     }
 
     Ok(paths)
 }
 
-/// Clone (or adopt) one exported repository. A failed plain clone of a
-/// non-public repo is retried once with a vended credential when a source is
-/// available. Returns whether the vended retry did the clone.
+/// Clone (or adopt) one exported repository. Authentication comes from the
+/// installed Git credential helpers; a failed non-public clone carries the
+/// access hint.
 fn clone_one_export_repository(
     target_root: &Path,
     repository: &RemoteExportRepository,
-    vend: Option<&GitCredentialSource>,
-) -> Result<(String, PathBuf, bool)> {
+) -> Result<(String, PathBuf)> {
     let local_id = export_repo_local_id(repository);
     let remote_url = repository
         .remote_url
@@ -539,7 +519,7 @@ fn clone_one_export_repository(
             out::path(repo_path.display())
         );
         checkout_export_base_branch(&repo_path, repository)?;
-        return Ok((local_id, repo_path, false));
+        return Ok((local_id, repo_path));
     }
 
     let clone_args = [
@@ -547,69 +527,49 @@ fn clone_one_export_repository(
         OsString::from(remote_url),
         repo_path.as_os_str().to_os_string(),
     ];
-    let outcome = with_vended_credential_retry(vend, &local_id, |credential| match credential {
-        None => git_output(target_root, clone_args.clone()),
-        Some(credential) => {
-            // A failed clone can leave a partial target dir behind; clear it so
-            // the credentialed retry starts clean.
-            if repo_path.exists() {
-                let _ = fs::remove_dir_all(&repo_path);
-            }
-            git_with_vended_credential(target_root, clone_args.clone(), credential)
+    if let Err(error) = git_output(target_root, clone_args) {
+        // A failed clone can leave a partial target dir behind; clear it so a
+        // rerun starts clean.
+        if repo_path.exists() {
+            let _ = fs::remove_dir_all(&repo_path);
         }
-    });
-    let vended = match outcome {
-        CredentialedOutcome::Plain(_) => false,
-        CredentialedOutcome::Vended(_) => true,
-        CredentialedOutcome::Failed(error) => {
-            return Err(error.context(format!("{local_id}: failed to clone {remote_url}")))
-        }
-    };
+        let error = if repository.visibility.as_deref() == Some("public") {
+            error
+        } else {
+            anyhow::anyhow!("{error:#}; {NO_ACCESS_HINT}")
+        };
+        return Err(error.context(format!("{local_id}: failed to clone {remote_url}")));
+    }
     crate::human!(
-        "{}: {} {}{}",
+        "{}: {} {}",
         out::repo(&local_id),
         out::movement("cloned"),
-        out::path(repo_path.display()),
-        if vended {
-            format!(" {}", out::muted("(vended credentials)"))
-        } else {
-            String::new()
-        }
+        out::path(repo_path.display())
     );
 
     checkout_export_base_branch(&repo_path, repository)?;
-    Ok((local_id, repo_path, vended))
+    Ok((local_id, repo_path))
 }
 
 /// Clone every exported repository, skipping (and recording) any that fail so an
 /// inaccessible repo, such as a private GitHub repo the token cannot read, does
 /// not abort the whole clone. Mirrors the per-repo resilience used by incremental
-/// remote pull. Returns the cloned paths, the (local id, error) failures, and
-/// the ids of repos cloned via a vended credential.
+/// remote pull. Returns the cloned paths and the (local id, error) failures.
 fn clone_export_repositories_collecting(
     target_root: &Path,
     repositories: &[RemoteExportRepository],
-    vend: Option<&GitCredentialSource>,
-) -> (
-    BTreeMap<String, PathBuf>,
-    Vec<(String, String)>,
-    BTreeSet<String>,
-) {
+) -> (BTreeMap<String, PathBuf>, Vec<(String, String)>) {
     let mut paths = BTreeMap::new();
     let mut failed = Vec::new();
-    let mut vended = BTreeSet::new();
     for repository in repositories {
-        match clone_one_export_repository(target_root, repository, vend) {
-            Ok((local_id, repo_path, used_vend)) => {
-                if used_vend {
-                    vended.insert(local_id.clone());
-                }
+        match clone_one_export_repository(target_root, repository) {
+            Ok((local_id, repo_path)) => {
                 paths.insert(local_id, repo_path);
             }
             Err(error) => failed.push((export_repo_local_id(repository), format!("{error:#}"))),
         }
     }
-    (paths, failed, vended)
+    (paths, failed)
 }
 
 fn format_repo_failures(failed: &[(String, String)]) -> String {
@@ -772,14 +732,10 @@ fn select_active_bundle(
         .map(|bundle| bundle.id.clone()))
 }
 
-pub(super) fn materialize_imported_bundle(
-    root: &Path,
-    bundle_id: &str,
-    vend: Option<&GitCredentialSource>,
-) -> Result<()> {
+pub(super) fn materialize_imported_bundle(root: &Path, bundle_id: &str) -> Result<()> {
     let bundle_path = bundle_path(root, bundle_id);
     let bundle: ChangeGroup = read_json(&bundle_path)?;
-    prepare_feature_branches(&bundle, vend)?;
+    prepare_feature_branches(&bundle)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), bundle_path, bundle);
     materialize_repos(&mut active, None)?;
     fast_forward_feature_checkouts(&mut active)?;
@@ -841,7 +797,6 @@ mod tests {
 
     fn export_repo(name: &str, remote_url: &str) -> RemoteExportRepository {
         RemoteExportRepository {
-            id: None,
             local_id: Some(name.to_string()),
             name: name.to_string(),
             default_branch: None,
@@ -865,8 +820,7 @@ mod tests {
             export_repo("good", &source.to_string_lossy()),
         ];
 
-        let (paths, failed, vended) = clone_export_repositories_collecting(&target, &repos, None);
-        assert!(vended.is_empty(), "no vend source, nothing can be vended");
+        let (paths, failed) = clone_export_repositories_collecting(&target, &repos);
 
         assert!(paths.contains_key("good"), "good repo should be cloned");
         assert!(target.join("good").join(".git").exists());
@@ -981,13 +935,11 @@ mod tests {
                     id: "backend".to_string(),
                     status: "cloned",
                     error: None,
-                    credential: Some(VENDED_CREDENTIAL_LABEL),
                 },
                 CloneDocumentRepo {
                     id: "frontend".to_string(),
                     status: "failed",
                     error: Some("git clone failed".to_string()),
-                    credential: None,
                 },
             ],
             cloned_repo_count: 1,
@@ -1011,7 +963,7 @@ mod tests {
                 "project": {"id": "knit-tools", "owner": "marc-merino", "slug": "knit-tools"},
                 "targetPath": "/abs/path/to/knit-tools",
                 "repos": [
-                    {"id": "backend", "status": "cloned", "credential": "remote-vended"},
+                    {"id": "backend", "status": "cloned"},
                     {"id": "frontend", "status": "failed", "error": "git clone failed"},
                 ],
                 "clonedRepoCount": 1,

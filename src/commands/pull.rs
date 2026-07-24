@@ -1,4 +1,5 @@
 use crate::checkout::checkout_dir;
+use crate::commands::base::advance_local_base;
 use crate::commands::bundle::list_open_bundle_ids;
 use crate::commands::project::load_project_by_id;
 use crate::commands::remote::{
@@ -7,7 +8,7 @@ use crate::commands::remote::{
 };
 use crate::git::{current_branch, git_output, rev_parse};
 use crate::ids::short_sha;
-use crate::model::{ChangeGroup, RepoEntry};
+use crate::model::{ChangeGroup, ProjectRepoEntry, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::status::status_label;
@@ -263,10 +264,10 @@ fn print_pull_summary(repo_id: &str, before: &str, after: &str) {
 // ---------------------------------------------------------------------------
 
 /// Entry point for `knit pull`. Decides what to update from context and flags:
-/// - `--main` / `--bundles` (or both) run the aggregate, best-effort report.
-/// - With no target flags: inside a resolved bundle, pull that bundle's feature
-///   worktrees plus its remote artifact; at the workspace base (the shared
-///   fallback) pull everything (project main repos + every open bundle).
+/// - `--base`, `--current`, or `--bundles` run the aggregate report.
+/// - With no target flags: inside a resolved bundle, pull that bundle's recorded
+///   base source checkouts plus its remote artifact; at the workspace base (the
+///   shared fallback) pull current source checkouts plus every open bundle.
 #[allow(clippy::too_many_arguments)]
 pub fn pull(
     selectors: &[String],
@@ -275,22 +276,27 @@ pub fn pull(
     force: bool,
     feature: bool,
     main: bool,
+    base: bool,
+    current: bool,
     bundles: bool,
     remote: Option<&str>,
     no_remote: bool,
     merge: bool,
 ) -> Result<()> {
-    if main || bundles {
-        return aggregate_pull(main, bundles, rebase, force, remote, no_remote, merge);
+    let current = current || main;
+    if base || current || bundles {
+        return aggregate_pull(
+            base, current, bundles, rebase, force, remote, no_remote, merge,
+        );
     }
 
     // A bare `knit pull` (no repo/flag target) at the workspace base means
-    // "update everything": the project's main repos plus every open bundle.
+    // "update everything": the project's source checkouts plus every open bundle.
     // Explicit selectors, `--all`, or `--feature` keep the single-bundle meaning.
     if selectors.is_empty() && !all && !feature {
         let active = load_active_bundle()?;
         if active.resolution_source == BundleResolutionSource::Config {
-            return aggregate_pull(true, true, rebase, force, remote, no_remote, merge);
+            return aggregate_pull(false, true, true, rebase, force, remote, no_remote, merge);
         }
     }
 
@@ -310,8 +316,8 @@ enum Outcome {
 }
 
 /// Serializes git work that touches the same source repo while letting distinct
-/// repos run concurrently. A `--main` repo and any bundle that includes the same
-/// repo share one lock; unrelated repos never block each other.
+/// repos run concurrently. Base/current work and any bundle that includes the
+/// same repo share one lock; unrelated repos never block each other.
 #[derive(Default)]
 struct RepoGate {
     locks: Mutex<HashMap<PathBuf, Arc<Mutex<()>>>>,
@@ -340,11 +346,12 @@ impl RepoGate {
     }
 }
 
-/// Update project main repos and/or every open bundle, in parallel, reporting
-/// each target's outcome instead of aborting on the first problem.
+/// Update project bases, current checkouts, and/or every open bundle in parallel,
+/// reporting each target's outcome instead of aborting on the first problem.
 #[allow(clippy::too_many_arguments)]
 fn aggregate_pull(
-    main: bool,
+    base: bool,
+    current: bool,
     bundles: bool,
     rebase: bool,
     force: bool,
@@ -356,15 +363,24 @@ fn aggregate_pull(
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let config = load_config(&root)?;
 
-    let main_repos: Vec<(String, PathBuf)> = match (main, config.active_project.clone()) {
-        (true, Some(project_id)) => load_project_by_id(&root, &project_id)?
-            .repos
+    let project_repos = match ((base || current), config.active_project.clone()) {
+        (true, Some(project_id)) => load_project_by_id(&root, &project_id)?.repos,
+        // No active project: project-wide targets have nothing to update, but
+        // the run should still process any requested bundles.
+        _ => Vec::new(),
+    };
+    let base_repos: Vec<ProjectRepoEntry> = if base {
+        project_repos.clone()
+    } else {
+        Vec::new()
+    };
+    let current_repos: Vec<(String, PathBuf)> = if current {
+        project_repos
             .iter()
             .map(|repo| (repo.id.clone(), PathBuf::from(&repo.path)))
-            .collect(),
-        // No active project: `--main` has nothing to update, but the run should
-        // still report (and process any bundles) rather than erroring out.
-        _ => Vec::new(),
+            .collect()
+    } else {
+        Vec::new()
     };
 
     let bundle_ids = if bundles {
@@ -383,11 +399,24 @@ fn aggregate_pull(
         .collect();
 
     let gate = RepoGate::default();
-    let mut main_results: Vec<(String, Outcome)> = Vec::new();
+    let mut base_results: Vec<(String, Outcome)> = Vec::new();
+    let mut current_results: Vec<(String, Outcome)> = Vec::new();
     let mut bundle_results: Vec<(String, Outcome)> = Vec::new();
 
     std::thread::scope(|scope| {
-        let main_handles: Vec<_> = main_repos
+        let base_handles: Vec<_> = base_repos
+            .iter()
+            .map(|repo| {
+                let gate = &gate;
+                scope.spawn(move || {
+                    let path = PathBuf::from(&repo.path);
+                    let outcome = gate.lock_all(std::slice::from_ref(&path), || pull_base(repo));
+                    (repo.id.clone(), outcome)
+                })
+            })
+            .collect();
+
+        let current_handles: Vec<_> = current_repos
             .iter()
             .map(|(id, path)| {
                 let gate = &gate;
@@ -421,7 +450,11 @@ fn aggregate_pull(
             })
             .collect();
 
-        main_results = main_handles
+        base_results = base_handles
+            .into_iter()
+            .map(|handle| handle.join().unwrap())
+            .collect();
+        current_results = current_handles
             .into_iter()
             .map(|handle| handle.join().unwrap())
             .collect();
@@ -431,8 +464,32 @@ fn aggregate_pull(
             .collect();
     });
 
-    report(&main_results, &bundle_results);
+    report(&base_results, &current_results, &bundle_results);
+    if base_results
+        .iter()
+        .any(|(_, outcome)| matches!(outcome, Outcome::Failed(_)))
+    {
+        bail!("one or more configured base branches could not be updated");
+    }
     Ok(())
+}
+
+fn pull_base(repo: &ProjectRepoEntry) -> Outcome {
+    let path = PathBuf::from(&repo.path);
+    match advance_local_base(&path, &repo.base_branch) {
+        Ok(update) => match update.before {
+            Some(before) if before == update.after => Outcome::Unchanged(update.after),
+            Some(before) => Outcome::Advanced {
+                before,
+                after: update.after,
+            },
+            None => Outcome::Advanced {
+                before: "(missing)".to_string(),
+                after: update.after,
+            },
+        },
+        Err(error) => Outcome::Failed(condense(&error)),
+    }
 }
 
 /// Best-effort `git pull` of one checkout on its current branch. Never bails:
@@ -518,11 +575,22 @@ fn condense(error: &anyhow::Error) -> String {
         .join("; ")
 }
 
-fn report(main_results: &[(String, Outcome)], bundle_results: &[(String, Outcome)]) {
+fn report(
+    base_results: &[(String, Outcome)],
+    current_results: &[(String, Outcome)],
+    bundle_results: &[(String, Outcome)],
+) {
     let mut totals = Totals::default();
-    if !main_results.is_empty() {
-        println!("{}", out::heading("Main repos:"));
-        for (id, outcome) in main_results {
+    if !base_results.is_empty() {
+        println!("{}", out::heading("Base branches:"));
+        for (id, outcome) in base_results {
+            print_outcome(id, outcome);
+            totals.add(outcome);
+        }
+    }
+    if !current_results.is_empty() {
+        println!("{}", out::heading("Current checkouts:"));
+        for (id, outcome) in current_results {
             print_outcome(id, outcome);
             totals.add(outcome);
         }
@@ -534,7 +602,7 @@ fn report(main_results: &[(String, Outcome)], bundle_results: &[(String, Outcome
             totals.add(outcome);
         }
     }
-    if main_results.is_empty() && bundle_results.is_empty() {
+    if base_results.is_empty() && current_results.is_empty() && bundle_results.is_empty() {
         println!("{}", out::muted("Nothing to pull."));
         return;
     }

@@ -53,14 +53,14 @@ pub(super) fn resolve_project_id(
     Ok(project_id)
 }
 
-pub(super) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
+pub(crate) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
     let remote_name = slugify(name);
     config.remotes.get(&remote_name).with_context(|| {
         format!("No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first.")
     })
 }
 
-pub(super) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
+pub(crate) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
         .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")
@@ -259,10 +259,7 @@ pub(super) fn localize_bundle(
     Ok(bundle)
 }
 
-pub(super) fn prepare_feature_branches(
-    bundle: &ChangeGroup,
-    vend: Option<&super::credentials::GitCredentialSource>,
-) -> Result<()> {
+pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
     for repo in &bundle.repos {
         let Some(branch) = repo.feature_branch.as_deref() else {
             continue;
@@ -272,25 +269,13 @@ pub(super) fn prepare_feature_branches(
             continue;
         }
 
-        // A failed fetch of a non-public repo is retried once with a vended
-        // credential when the caller supplied a source (clone, bundle pull).
-        let fetch =
-            super::credentials::with_vended_credential_retry(vend, &repo.id, |credential| {
-                match credential {
-                    None => git_output(&repo_path, ["fetch", "origin", branch]),
-                    Some(credential) => super::credentials::git_with_vended_credential(
-                        &repo_path,
-                        ["fetch", "origin", branch],
-                        credential,
-                    ),
-                }
-            });
-        match fetch {
-            super::credentials::CredentialedOutcome::Plain(_)
-            | super::credentials::CredentialedOutcome::Vended(_) => {}
-            super::credentials::CredentialedOutcome::Failed(error) => {
-                return Err(error.context(format!("{}: failed to fetch origin/{branch}", repo.id)));
-            }
+        // Authentication comes from the installed Git credential helpers.
+        if let Err(error) = git_output(&repo_path, ["fetch", "origin", branch]) {
+            return Err(anyhow::anyhow!(
+                "{error:#}; {}",
+                super::credentials::NO_ACCESS_HINT
+            )
+            .context(format!("{}: failed to fetch origin/{branch}", repo.id)));
         }
         let remote_ref = format!("origin/{branch}");
         if !ref_exists(&repo_path, &remote_ref) {
