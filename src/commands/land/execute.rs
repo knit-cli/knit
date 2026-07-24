@@ -9,7 +9,7 @@ use super::{
     LandPlan, LandRun, LandRunStep, LandStatus, LandStep, LandStepKind, PublicationUpdate,
     StepOutcome, LAND_RUN_KIND,
 };
-use crate::git::{git_output, is_git_worktree};
+use crate::git::{git_output, is_git_worktree, rev_parse};
 use crate::ids::{node_id, slugify};
 use crate::model::{
     BundleNode, DeployCheckoutUpdate, DeployMode, PublicationEntry, SCHEMA_VERSION,
@@ -734,7 +734,9 @@ fn prepare_deployment_checkout(
         format!("{remote}/{}", checkout.branch)
     } else {
         fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
-        "FETCH_HEAD".to_string()
+        // FETCH_HEAD belongs to the worktree where fetch ran. Resolve it before
+        // operating in a managed deployment worktree that already exists.
+        rev_parse(&repo_root, "FETCH_HEAD")?
     };
 
     if path.exists() {
