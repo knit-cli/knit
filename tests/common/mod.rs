@@ -308,7 +308,6 @@ pub fn isolated_knit_home() -> String {
         .to_string()
 }
 
-
 /// Isolated global Git config for the binary under test: `knit remote
 /// sync-helpers` and clone-time helper installation write `git config
 /// --global`, which must never touch the running user's real gitconfig.
