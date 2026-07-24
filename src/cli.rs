@@ -24,6 +24,13 @@ pub enum FetchMode {
     Knit,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug)]
+pub enum GitCredentialOperation {
+    Get,
+    Store,
+    Erase,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
     /// Initialize a reusable project repo template (like `git init`, for a project).
@@ -39,6 +46,11 @@ pub enum Commands {
         #[command(subcommand)]
         command: ProjectCommand,
     },
+    /// Inspect project source checkouts, configured bases, and open bundles.
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommand,
+    },
     /// Manage your saved per-project views (named bundle shapes).
     View {
         #[command(subcommand)]
@@ -48,6 +60,14 @@ pub enum Commands {
     Remote {
         #[command(subcommand)]
         command: RemoteCommand,
+    },
+    /// Act as a provider-neutral Git credential helper backed by a named remote.
+    GitCredential {
+        /// Named remote whose authenticated API brokers connected forge accounts.
+        #[arg(long)]
+        remote: String,
+        /// Git credential-helper operation. Git appends this argument automatically.
+        operation: GitCredentialOperation,
     },
     /// Clone a remote project export into a local Knit workspace.
     Clone {
@@ -120,6 +140,12 @@ pub enum Commands {
         /// Use each original repo checkout directly instead of creating a Knit worktree.
         #[arg(long)]
         in_place: bool,
+        /// Do not fetch bases; prefer cached origin/<base>, then the local base.
+        #[arg(long, conflicts_with = "from_local_base")]
+        offline: bool,
+        /// Start from local configured base branches without fetching origin.
+        #[arg(long)]
+        from_local_base: bool,
         /// Replace an existing bundle with the same slug.
         #[arg(long)]
         force: bool,
@@ -186,8 +212,8 @@ pub enum Commands {
         no_remote: bool,
     },
     /// Pull tracked repos. With no flags: inside a bundle pulls that bundle's
-    /// checkouts; at the workspace base pulls every project main repo and open
-    /// bundle, reporting each.
+    /// checkouts; at the workspace base pulls every project source checkout and
+    /// open bundle, reporting each.
     Pull {
         /// Optional repo ids or paths to limit a single-bundle pull.
         repos: Vec<String>,
@@ -203,10 +229,16 @@ pub enum Commands {
         /// Pull the tracked feature checkouts instead of original/base repo paths.
         #[arg(long)]
         feature: bool,
-        /// Update the active project's repos (their source checkouts, current branch, fast-forward only).
-        #[arg(long)]
+        /// Deprecated alias for --current.
+        #[arg(long, hide = true)]
         main: bool,
-        /// Update every open bundle's checkouts from its remote artifact. Combine with --main.
+        /// Fetch and safely fast-forward the active project's configured base branches.
+        #[arg(long)]
+        base: bool,
+        /// Update the active project's source checkouts on their current branches.
+        #[arg(long)]
+        current: bool,
+        /// Update every open bundle's checkouts from its remote artifact.
         #[arg(long)]
         bundles: bool,
         /// Also pull the current bundle artifact from a named sync remote.
@@ -562,6 +594,12 @@ pub enum BundleCommand {
         /// Use each original repo checkout directly instead of creating a Knit worktree.
         #[arg(long)]
         in_place: bool,
+        /// Do not fetch bases; prefer cached origin/<base>, then the local base.
+        #[arg(long, conflicts_with = "from_local_base")]
+        offline: bool,
+        /// Start from local configured base branches without fetching origin.
+        #[arg(long)]
+        from_local_base: bool,
         /// Only update the bundle; do not create branches or worktrees.
         #[arg(long)]
         no_worktree: bool,
@@ -698,6 +736,12 @@ pub enum BundleCommand {
 }
 
 #[derive(Subcommand)]
+pub enum WorkspaceCommand {
+    /// Show source checkout and configured-base state for the active project.
+    Status,
+}
+
+#[derive(Subcommand)]
 pub enum ProjectCommand {
     /// Add or update a repo in the active project.
     Add {
@@ -714,6 +758,16 @@ pub enum ProjectCommand {
         /// Write or refresh project-specific AGENTS.md guidance.
         #[arg(long)]
         agents: bool,
+    },
+    /// Change only a project repo's configured base branch.
+    SetBase {
+        /// Stable repo id inside the project.
+        repo_id: String,
+        /// New configured base branch.
+        branch: String,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
     },
     /// List projects in this workspace.
     List,
@@ -904,6 +958,9 @@ pub enum RemoteCommand {
         /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
+        /// Read the remote token from stdin instead of command arguments.
+        #[arg(long, conflicts_with = "token")]
+        token_stdin: bool,
         /// Store this remote in the user-level Knit config instead of the workspace.
         #[arg(long)]
         global: bool,
@@ -929,6 +986,9 @@ pub enum RemoteCommand {
         /// Remove the user-level remote instead of the workspace remote.
         #[arg(long)]
         global: bool,
+        /// Revoke the configured bearer token on the remote before removing it locally.
+        #[arg(long, requires = "global")]
+        revoke: bool,
     },
     /// List the remote projects visible to the resolved remote token.
     Projects {
@@ -938,6 +998,20 @@ pub enum RemoteCommand {
         /// Print a machine-readable JSON document to stdout.
         #[arg(long)]
         json: bool,
+    },
+    /// Inspect the current remote token without exposing its secret.
+    AuthStatus {
+        /// Remote name.
+        name: String,
+        /// Print the server response as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// Install exact-host Git credential helpers for the remote's connected
+    /// forges into the global Git config, removing stale knit entries.
+    SyncHelpers {
+        /// Remote name (must be configured in the user-level Knit config).
+        name: String,
     },
     /// Store or clear a token for a remote.
     Token {

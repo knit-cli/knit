@@ -22,7 +22,7 @@ use commands::PushForce;
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
     ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
-    SyncCommand, TagCommand, ViewCommand,
+    SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
@@ -37,6 +37,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 observe,
                 agents,
             } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
+            ProjectCommand::SetBase {
+                repo_id,
+                branch,
+                project,
+            } => commands::set_project_repo_base(project.as_deref(), &repo_id, &branch),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
             ProjectCommand::Remove { name, repos, force } => {
@@ -70,6 +75,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::remove_project_run_command(&name)
                 }
             },
+        },
+        Commands::Workspace { command } => match command {
+            WorkspaceCommand::Status => commands::show_workspace_status(),
         },
         Commands::View { command } => match command {
             ViewCommand::List { project } => commands::list_views(project.as_deref()),
@@ -113,14 +121,21 @@ pub fn run(cli: Cli) -> Result<()> {
                 name,
                 url,
                 token,
+                token_stdin,
                 global,
-            } => commands::add_remote(&name, &url, token.as_deref(), global),
+            } => commands::add_remote(&name, &url, token.as_deref(), token_stdin, global),
             RemoteCommand::List { global } => commands::list_remotes(global),
             RemoteCommand::Projects { remote, json } => {
                 commands::list_remote_projects(remote.as_deref(), json)
             }
+            RemoteCommand::AuthStatus { name, json } => commands::remote_auth_status(&name, json),
+            RemoteCommand::SyncHelpers { name } => commands::sync_remote_helpers_command(&name),
             RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
-            RemoteCommand::Remove { name, global } => commands::remove_remote(&name, global),
+            RemoteCommand::Remove {
+                name,
+                global,
+                revoke,
+            } => commands::remove_remote(&name, global, revoke),
             RemoteCommand::Token {
                 name,
                 token,
@@ -128,6 +143,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 global,
             } => commands::set_remote_token(&name, token.as_deref(), clear, global),
         },
+        Commands::GitCredential { remote, operation } => {
+            commands::run_git_credential_helper(&remote, operation)
+        }
         Commands::Clone {
             project,
             target,
@@ -163,6 +181,8 @@ pub fn run(cli: Cli) -> Result<()> {
             exclude,
             no_worktree,
             in_place,
+            offline,
+            from_local_base,
             force,
             agents,
             cd,
@@ -179,6 +199,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     &exclude,
                     !no_worktree,
                     in_place,
+                    bundle_base_mode(offline, from_local_base),
                     force,
                     agents,
                     cd.as_deref(),
@@ -191,8 +212,16 @@ pub fn run(cli: Cli) -> Result<()> {
                 repos,
                 base,
                 in_place,
+                offline,
+                from_local_base,
                 no_worktree,
-            }) => commands::track_repo_selectors(&repos, base.as_deref(), !no_worktree, in_place),
+            }) => commands::track_repo_selectors(
+                &repos,
+                base.as_deref(),
+                !no_worktree,
+                in_place,
+                bundle_base_mode(offline, from_local_base),
+            ),
             Some(BundleCommand::Remove {
                 repos,
                 keep_worktree,
@@ -298,6 +327,8 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             feature,
             main,
+            base,
+            current,
             bundles,
             remote,
             no_remote,
@@ -309,6 +340,8 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             feature,
             main,
+            base,
+            current,
             bundles,
             remote.as_deref(),
             no_remote,
@@ -656,6 +689,16 @@ pub fn run(cli: Cli) -> Result<()> {
         },
         Commands::Doctor => commands::doctor_workspace(),
         Commands::Migrate { check } => commands::migrate_workspace(check),
+    }
+}
+
+fn bundle_base_mode(offline: bool, from_local_base: bool) -> commands::BundleBaseMode {
+    if from_local_base {
+        commands::BundleBaseMode::Local
+    } else if offline {
+        commands::BundleBaseMode::CachedRemote
+    } else {
+        commands::BundleBaseMode::FreshRemote
     }
 }
 

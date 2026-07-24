@@ -55,6 +55,13 @@ default). From that directory you can simply run `claude`, `opencode`, or any
 other coding agent — it wakes up inside an isolated checkout whose context
 resolves automatically, with guidance already on disk.
 
+For repos with an `origin`, bundle creation first fetches each project's
+configured base branch and records the exact remote commit before creating any
+feature branch. Dirty or differently checked-out source repos are left alone.
+Local-only repos use their local configured base. Use `knit workspace status`
+to compare current checkouts with configured bases; `--offline` uses cached
+remote refs and `--from-local-base` deliberately starts from local bases.
+
 If your tool opens the *source* folder instead — Cursor, Codex, or any
 agent rooted at the workspace — that works too: the agent can create a bundle
 and commit into it from there with `knit --bundle my-feature …`. Opening the
@@ -215,6 +222,8 @@ in the same page.
 ## Concepts
 
 **Project.** A reusable repo template, created once with `knit init <name>` (like `git init`, but for a set of repos). Add repos with `knit project add <id> <path>`; mark a repo `--observe` to keep it available but out of default bundle starts. Projects can also define commands (`knit project command set …`) and a default landing template. Projects are optional — you can also `knit bundle add <path>` repos directly into an ad-hoc bundle.
+
+Knit infers each repo's base from Git's remote-default metadata when available, including nonstandard names such as `stable`. Use `knit project set-base <repo-id> <branch>` to correct only that setting; existing bundles remain pinned and are reported rather than silently rewritten.
 
 **Bundle.** The branch-like feature unit and the cross-repo analogue of a git branch. `knit bundle "<title>"` creates one; bare `knit bundle` shows the resolved one. The same source repo can appear in many bundles at once, each on its own `knit/<bundle>` feature branch and worktree (`.knit/worktrees/fix-a/backend`, `.knit/worktrees/fix-b/backend`), so parallel features never collide. Bundle-aware commands resolve their bundle from `--bundle`, then `KNIT_BUNDLE`, then the generated worktree path, then the workspace fallback. The bundle's `.bundle.json` is the source of truth for the feature.
 

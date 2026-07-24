@@ -3,8 +3,8 @@ use crate::commands::agents::{
     print_bundle_worktree_agents_summary, write_bundle_worktree_agents_md,
 };
 use crate::git::{
-    branch_exists, current_branch, git_output, git_output_optional, is_git_worktree, ref_exists,
-    resolve_base_ref, rev_parse,
+    branch_exists, current_branch, git_output, git_output_optional, is_ancestor, is_git_worktree,
+    ref_exists, resolve_base_ref, rev_parse,
 };
 use crate::ids::node_id;
 use crate::model::{BundleNode, RepoEntry};
@@ -140,8 +140,13 @@ struct MaterializeResult {
 enum MaterializeLog {
     InPlace,
     WorktreeExists(String),
-    WorktreeFromBranch,
-    WorktreeFromOrigin(String),
+    WorktreeFromBranch {
+        contains_base: bool,
+    },
+    WorktreeFromOrigin {
+        remote_ref: String,
+        contains_base: bool,
+    },
     WorktreeCreated(String),
 }
 
@@ -182,17 +187,30 @@ fn print_materialize_result(update: &MaterializeResult) {
             out::repo(&update.repo_id),
             out::path(worktree_path)
         ),
-        MaterializeLog::WorktreeFromBranch => crate::human!(
-            "{}: {} worktree from existing branch",
-            out::repo(&update.repo_id),
-            out::movement("created")
-        ),
-        MaterializeLog::WorktreeFromOrigin(remote_ref) => crate::human!(
-            "{}: {} worktree from {}",
-            out::repo(&update.repo_id),
-            out::movement("created"),
-            out::branch(remote_ref)
-        ),
+        MaterializeLog::WorktreeFromBranch { contains_base } => {
+            crate::human!(
+                "{}: {} worktree from existing branch",
+                out::repo(&update.repo_id),
+                out::movement("created")
+            );
+            if !contains_base {
+                print_reused_branch_base_warning(update);
+            }
+        }
+        MaterializeLog::WorktreeFromOrigin {
+            remote_ref,
+            contains_base,
+        } => {
+            crate::human!(
+                "{}: {} worktree from {}",
+                out::repo(&update.repo_id),
+                out::movement("created"),
+                out::branch(remote_ref)
+            );
+            if !contains_base {
+                print_reused_branch_base_warning(update);
+            }
+        }
         MaterializeLog::WorktreeCreated(feature_branch) => crate::human!(
             "{}: {} {}",
             out::repo(&update.repo_id),
@@ -200,6 +218,14 @@ fn print_materialize_result(update: &MaterializeResult) {
             out::branch(feature_branch)
         ),
     }
+}
+
+fn print_reused_branch_base_warning(update: &MaterializeResult) {
+    crate::human!(
+        "{} {} reused feature branch does not contain the newly recorded base; its diff may include base movement. Preserve and migrate intentional work, or remove the untouched repo with --delete-branch before adding it again.",
+        out::warn("Warn:"),
+        out::repo(&update.repo_id)
+    );
 }
 
 fn materialize_one_repo(
@@ -218,15 +244,13 @@ fn materialize_one_repo(
 
     let worktree_path = format!(".knit/worktrees/{bundle_id}/{}", repo.id);
     let worktree_abs = root.join(&worktree_path);
-    let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
-    let base_sha = rev_parse(&repo_root, &base_ref)
-        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    let base_sha = materialization_base(&repo_root, repo)?;
 
     let mut update = MaterializeResult {
         repo_index,
         repo_id: repo.id.clone(),
         base_sha: if repo.base_sha.is_none() {
-            Some(base_sha)
+            Some(base_sha.clone())
         } else {
             None
         },
@@ -272,7 +296,9 @@ fn materialize_one_repo(
             rev_parse(&worktree_abs, "HEAD")
                 .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
         );
-        update.log = MaterializeLog::WorktreeFromBranch;
+        update.log = MaterializeLog::WorktreeFromBranch {
+            contains_base: is_ancestor(&repo_root, &base_sha, &feature_branch),
+        };
         return Ok(update);
     }
 
@@ -302,7 +328,10 @@ fn materialize_one_repo(
             rev_parse(&worktree_abs, "HEAD")
                 .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
         );
-        update.log = MaterializeLog::WorktreeFromOrigin(remote_ref);
+        update.log = MaterializeLog::WorktreeFromOrigin {
+            contains_base: is_ancestor(&repo_root, &base_sha, &feature_branch),
+            remote_ref,
+        };
         return Ok(update);
     }
 
@@ -314,7 +343,7 @@ fn materialize_one_repo(
             OsString::from("-b"),
             OsString::from(&feature_branch),
             worktree_abs.as_os_str().to_os_string(),
-            OsString::from(base_ref),
+            OsString::from(&base_sha),
         ],
     )
     .with_context(|| format!("failed to create branch/worktree for {}", repo.id))?;
@@ -346,9 +375,7 @@ fn materialize_in_place(
     repo_root: &Path,
     feature_branch: &str,
 ) -> Result<MaterializeResult> {
-    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
-    let base_sha = rev_parse(repo_root, &base_ref)
-        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    let base_sha = materialization_base(repo_root, repo)?;
 
     let current = current_branch(repo_root)?;
     if current.as_deref() != Some(feature_branch) {
@@ -389,7 +416,7 @@ fn materialize_in_place(
                     OsString::from("checkout"),
                     OsString::from("-b"),
                     OsString::from(feature_branch),
-                    OsString::from(base_ref),
+                    OsString::from(&base_sha),
                 ],
             )
             .with_context(|| format!("{}: failed to create {feature_branch}", repo.id))?;
@@ -412,4 +439,20 @@ fn materialize_in_place(
         ),
         log: MaterializeLog::InPlace,
     })
+}
+
+fn materialization_base(repo_root: &Path, repo: &RepoEntry) -> Result<String> {
+    if let Some(base_sha) = &repo.base_sha {
+        // Verify the recorded object is available before creating a branch.
+        rev_parse(repo_root, base_sha).with_context(|| {
+            format!(
+                "{}: recorded base commit {base_sha} is not available locally",
+                repo.id
+            )
+        })?;
+        return Ok(base_sha.clone());
+    }
+    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
+    rev_parse(repo_root, &base_ref)
+        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))
 }

@@ -3,6 +3,7 @@ use crate::commands::agents::{
     agent_teamwork_section, print_bundle_worktree_agents_summary, upsert_managed_section,
     write_bundle_worktree_agents_md,
 };
+use crate::commands::base::BundleBaseMode;
 use crate::ids::{expand_repo_selectors, slugify};
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, ProjectRepoEntry, ProjectView};
 use crate::output as out;
@@ -27,6 +28,7 @@ pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
         &[],
         true,
         false,
+        BundleBaseMode::FreshRemote,
         force,
         agents,
         None,
@@ -44,6 +46,7 @@ pub fn start_bundle(
     exclude: &[String],
     materialize: bool,
     in_place: bool,
+    base_mode: BundleBaseMode,
     force: bool,
     agents: bool,
     cd: Option<&str>,
@@ -113,6 +116,7 @@ pub fn start_bundle(
                     &selected,
                     materialize,
                     in_place,
+                    base_mode,
                 )?;
                 save_active_bundle(&active)?;
             }
@@ -469,6 +473,7 @@ knit init my-project
 knit project add backend ../backend
 knit project add frontend ../frontend
 knit project add docs ../docs --observe
+knit project set-base backend stable
 knit project command set dev --repo frontend -- docker compose up
 knit bundle "feature title"
 ```
@@ -476,6 +481,16 @@ knit bundle "feature title"
 A bundle is the cross-repo analogue of a git branch: `knit bundle "feature title"`
 creates one (like `git branch <name>`), `knit bundle` alone shows the current one, and
 creation flags go straight on it, e.g. `knit bundle "feature title" --project x --repo backend`.
+Bundle creation fetches each selected repo's configured `origin/<baseBranch>` and records that exact commit before creating any feature branch. Source checkouts are not moved, and a dirty source checkout does not make the new bundle stale. Use `--offline` to prefer cached remote bases or `--from-local-base` only when deliberately starting from local base branches.
+
+Inspect and update the workspace's distinct Git states explicitly:
+
+```sh
+knit workspace status
+knit pull --base
+knit pull --current
+knit pull --bundles
+```
 
 For ad-hoc bundles, create a bundle and add local repositories directly:
 
@@ -623,9 +638,10 @@ knit cherrypick --from feature-a --repo backend abc123
 ## Useful Commands
 
 - `knit bundle` shows the resolved bundle and where it came from.
-- `knit bundle "Feature title"` creates a bundle (the git-branch-style shorthand).
+- `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
-- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip).
+- `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
+- `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
 - `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
@@ -646,6 +662,8 @@ knit cherrypick --from feature-a --repo backend abc123
 - Remote bundle cleanup uses the configured sync remote. Orphaned remote records are archived (never deleted) with the everyday `bundle:push` scope; true remote deletion stays per-bundle via `knit bundle delete --remote-bundles` and a `bundle:delete` token.
 - `knit switch <bundle> --workspace` changes the shared workspace fallback bundle (the `--workspace` flag is required so the change is deliberate).
 - `knit project remove <project> --force` removes a reusable project template artifact.
+- `knit workspace status` shows each project repo's source checkout, configured local/remote base divergence, dirty state, and the open bundle set.
+- `knit pull --base` fetches and safely fast-forwards configured base branches; `knit pull --current` updates source checkouts' current branches; `knit pull --bundles` syncs open bundle state.
 - `knit run <project-command>` runs a configured command inside the resolved bundle checkout.
 - `knit run --repo <repo> -- <command>` runs a one-off command inside a tracked checkout.
 - `knit merge <bundle> --into <branch-or-bundle>` merges a bundle into a local target with rollback by default.

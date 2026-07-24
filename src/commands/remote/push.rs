@@ -20,9 +20,23 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
+use std::io::{self, Read};
 use std::path::Path;
 
-pub fn add_remote(name: &str, url: &str, token: Option<&str>, global: bool) -> Result<()> {
+const MAX_STDIN_TOKEN_BYTES: u64 = 64 * 1024;
+
+pub fn add_remote(
+    name: &str,
+    url: &str,
+    token: Option<&str>,
+    token_stdin: bool,
+    global: bool,
+) -> Result<()> {
+    if token_stdin && !global {
+        bail!("--token-stdin requires --global so a user credential is never stored in workspace config");
+    }
+    let stdin_token = token_stdin.then(read_stdin_token).transpose()?;
+    let token = token.or(stdin_token.as_deref());
     let (root, mut config) = if global {
         (None, load_global_config()?)
     } else {
@@ -53,6 +67,23 @@ pub fn add_remote(name: &str, url: &str, token: Option<&str>, global: bool) -> R
         warn_workspace_scoped_token(&remote_name);
     }
     Ok(())
+}
+
+fn read_stdin_token() -> Result<String> {
+    let mut bytes = Vec::new();
+    io::stdin()
+        .take(MAX_STDIN_TOKEN_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .context("failed to read remote token from stdin")?;
+    if bytes.len() as u64 > MAX_STDIN_TOKEN_BYTES {
+        bail!("remote token exceeds {MAX_STDIN_TOKEN_BYTES} bytes");
+    }
+    let token = String::from_utf8(bytes).context("remote token from stdin is not UTF-8")?;
+    let token = token.trim_end_matches(['\r', '\n']);
+    if token.is_empty() {
+        bail!("remote token from stdin is empty");
+    }
+    Ok(token.to_string())
 }
 
 /// Workspace config can end up shared (committed, templated, copied between
@@ -149,7 +180,104 @@ pub fn show_remote(name: &str, global: bool) -> Result<()> {
     Ok(())
 }
 
-pub fn remove_remote(name: &str, global: bool) -> Result<()> {
+pub fn remote_auth_status(name: &str, json_output: bool) -> Result<()> {
+    // Environment-bound credentials live only in the private user config;
+    // workspace config is repository-controlled and must not redirect token
+    // introspection to another server.
+    let config = load_global_config()?;
+    let remote_name = slugify(name);
+    let remote = resolve_remote(&config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let mut status: Value = request_json(remote, &token, "GET", "/me/access-token", None)?;
+    let forge_response = request(remote, &token, "GET", "/me/forge-credentials", None)?;
+    let forge_credentials: Value = if (200..300).contains(&forge_response.status) {
+        decode_response(forge_response)?
+    } else if status
+        .get("scopes")
+        .and_then(Value::as_array)
+        .is_some_and(|scopes| scopes.iter().any(|scope| scope == "forge:credential"))
+    {
+        bail!(
+            "Sync remote returned HTTP {} while checking forge credential capabilities: {}",
+            forge_response.status,
+            forge_response.body.trim()
+        );
+    } else {
+        Value::Array(Vec::new())
+    };
+    if let Some(status) = status.as_object_mut() {
+        status.insert("forgeCredentials".to_string(), forge_credentials);
+    }
+    if json_output {
+        println!("{}", serde_json::to_string_pretty(&status)?);
+        return Ok(());
+    }
+
+    let kind = status
+        .get("tokenKind")
+        .and_then(Value::as_str)
+        .unwrap_or("legacy");
+    let subject = status
+        .get("subjectUserId")
+        .and_then(Value::as_str)
+        .unwrap_or("unbound");
+    let environment = status
+        .get("environmentId")
+        .and_then(Value::as_str)
+        .unwrap_or("unbound");
+    let expiry = status
+        .get("expiresAt")
+        .and_then(Value::as_str)
+        .unwrap_or("none");
+    let scopes = status
+        .get("scopes")
+        .and_then(Value::as_array)
+        .map(|values| {
+            values
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        })
+        .unwrap_or_default();
+    println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
+    println!("{} {kind}", out::heading("Token kind:"));
+    println!("{} {subject}", out::heading("Subject:"));
+    println!("{} {environment}", out::heading("Environment:"));
+    println!("{} {expiry}", out::heading("Expires:"));
+    println!("{} {scopes}", out::heading("Scopes:"));
+    Ok(())
+}
+
+/// Install this remote's exact-host Git credential helpers into the global
+/// Git config and drop stale knit-shaped entries. The one owner of helper
+/// state: environment runtimes call this instead of writing Git config
+/// themselves.
+pub fn sync_remote_helpers_command(name: &str) -> Result<()> {
+    // Same boundary as the credential helper itself: only the private
+    // user-level config may name the remote that brokers forge credentials.
+    let config = load_global_config()?;
+    let remote_name = slugify(name);
+    let remote = resolve_remote(&config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let hosts = super::helpers::sync_remote_helpers(&remote_name, remote, &token)?;
+    if hosts.is_empty() {
+        println!(
+            "{} {}",
+            out::heading("Credential helpers:"),
+            out::muted("no connected forge hosts; stale entries removed")
+        );
+    } else {
+        println!(
+            "{} {}",
+            out::heading("Credential helpers:"),
+            hosts.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
+pub fn remove_remote(name: &str, global: bool, revoke: bool) -> Result<()> {
     let (root, mut config) = if global {
         (None, load_global_config()?)
     } else {
@@ -157,6 +285,16 @@ pub fn remove_remote(name: &str, global: bool) -> Result<()> {
         (Some(root), config)
     };
     let remote_name = slugify(name);
+    let revoke_error = if revoke {
+        config
+            .remotes
+            .get(&remote_name)
+            .map(|remote| revoke_remote_token(&remote_name, remote))
+            .transpose()
+            .err()
+    } else {
+        None
+    };
     if config.remotes.remove(&remote_name).is_none() {
         bail!("No remote named `{remote_name}`.");
     }
@@ -177,6 +315,16 @@ pub fn remove_remote(name: &str, global: bool) -> Result<()> {
     } else {
         save_global_config(&config)?;
     }
+    // A removed global remote must not leave Git invoking a helper that can
+    // no longer resolve it.
+    if global {
+        if let Err(error) = super::helpers::remove_remote_helpers(Some(&remote_name)) {
+            println!(
+                "{} {error:#}",
+                out::warn("could not remove its git credential helper entries:")
+            );
+        }
+    }
     let scope = if global { "global " } else { "" };
     println!(
         "{} {}{}",
@@ -184,6 +332,33 @@ pub fn remove_remote(name: &str, global: bool) -> Result<()> {
         scope,
         out::repo(remote_name)
     );
+    if let Some(error) = revoke_error {
+        bail!("remote removed locally, but its token could not be revoked: {error:#}");
+    }
+    Ok(())
+}
+
+fn revoke_remote_token(name: &str, remote: &KnitRemote) -> Result<()> {
+    let token = resolve_token(name, remote)?;
+    let status: Value = request_json(remote, &token, "GET", "/me/access-token", None)?;
+    let token_id = status
+        .get("id")
+        .and_then(Value::as_str)
+        .context("remote token introspection returned no token id")?;
+    let response = request(
+        remote,
+        &token,
+        "DELETE",
+        &format!("/tokens/{token_id}"),
+        None,
+    )?;
+    if !(200..300).contains(&response.status) {
+        bail!(
+            "Sync remote returned HTTP {}: {}",
+            response.status,
+            response.body.trim()
+        );
+    }
     Ok(())
 }
 

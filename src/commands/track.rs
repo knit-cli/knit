@@ -1,10 +1,9 @@
 use crate::commands::agents::{
     print_bundle_worktree_agents_summary, write_bundle_worktree_agents_md,
 };
+use crate::commands::base::{snapshot_base, BundleBaseMode};
 use crate::commands::worktree::materialize_repos;
-use crate::git::{
-    current_branch, git_output_optional, git_root, infer_base_branch, resolve_base_ref, rev_parse,
-};
+use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
 use crate::ids::{node_id, slugify, unique_repo_id};
 use crate::model::{BundleNode, CheckoutMode, ProjectRepoEntry, RepoEntry};
 use crate::output as out;
@@ -36,7 +35,12 @@ pub fn track_repos(
     } else {
         CheckoutMode::Worktree
     };
-    let plans = resolve_repo_plans(repo_paths, base_override, checkout_mode)?;
+    let plans = resolve_repo_plans(
+        repo_paths,
+        base_override,
+        checkout_mode,
+        BundleBaseMode::FreshRemote,
+    )?;
     apply_repo_plans(&mut active, plans, materialize)?;
     // Persist the fully materialized artifact before printing the AGENTS.md
     // summary, so a SIGPIPE on that final write can no longer drop the recorded
@@ -54,6 +58,7 @@ pub fn track_repo_selectors(
     base_override: Option<&str>,
     materialize: bool,
     in_place: bool,
+    base_mode: BundleBaseMode,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let checkout_mode = if in_place {
@@ -63,7 +68,7 @@ pub fn track_repo_selectors(
     };
     let mut plans = Vec::new();
     for selector in selectors {
-        if let Some(plan) = resolve_project_selector(&active, selector, in_place)? {
+        if let Some(plan) = resolve_project_selector(&active, selector, in_place, base_mode)? {
             plans.push(plan);
         } else {
             plans.push(resolve_repo_plan(
@@ -71,10 +76,12 @@ pub fn track_repo_selectors(
                 base_override,
                 None,
                 checkout_mode,
+                base_mode,
             )?);
         }
     }
     ensure_unique_paths(&plans)?;
+    reject_already_tracked_paths(&active, &plans)?;
     apply_repo_plans(&mut active, plans, materialize)?;
     // Persist the fully materialized artifact before printing the AGENTS.md
     // summary, so a SIGPIPE on that final write can no longer drop the recorded
@@ -92,11 +99,22 @@ pub fn track_project_repos(
     repos: &[ProjectRepoEntry],
     materialize: bool,
     in_place: bool,
+    base_mode: BundleBaseMode,
 ) -> Result<()> {
-    let plans = repos
-        .iter()
-        .map(|repo| resolve_project_repo_plan(repo, in_place))
-        .collect::<Result<Vec<_>>>()?;
+    // Resolve and fetch every base before recording any repo. A failure leaves
+    // the bundle empty, so start_bundle can roll it back without orphaning
+    // branches or partially materialized worktrees.
+    let plans = std::thread::scope(|scope| {
+        let handles: Vec<_> = repos
+            .iter()
+            .cloned()
+            .map(|repo| scope.spawn(move || resolve_project_repo_plan(&repo, in_place, base_mode)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("base snapshot worker panicked"))
+            .collect::<Result<Vec<_>>>()
+    })?;
     ensure_unique_paths(&plans)?;
     apply_repo_plans(active, plans, materialize)
 }
@@ -190,11 +208,12 @@ fn resolve_repo_plans(
     repo_paths: &[PathBuf],
     base_override: Option<&str>,
     checkout_mode: CheckoutMode,
+    base_mode: BundleBaseMode,
 ) -> Result<Vec<RepoPlan>> {
     let mut plans: Vec<RepoPlan> = Vec::new();
 
     for repo_path in repo_paths {
-        let plan = resolve_repo_plan(repo_path, base_override, None, checkout_mode)?;
+        let plan = resolve_repo_plan(repo_path, base_override, None, checkout_mode, base_mode)?;
         plans.push(plan);
     }
 
@@ -207,6 +226,7 @@ fn resolve_repo_plan(
     base_override: Option<&str>,
     desired_id: Option<String>,
     checkout_mode: CheckoutMode,
+    base_mode: BundleBaseMode,
 ) -> Result<RepoPlan> {
     let repo_root = git_root(repo_path)?;
     let name = repo_root
@@ -219,10 +239,9 @@ fn resolve_repo_plan(
     let remote = git_output_optional(&repo_root, ["remote", "get-url", "origin"])?;
     let base_branch = match base_override {
         Some(base) => base.to_string(),
-        None => infer_base_branch(&repo_root, current_branch.as_deref())?,
+        None => infer_base_branch(&repo_root, current_branch.as_deref())?.branch,
     };
-    let base_ref = resolve_base_ref(&repo_root, &base_branch);
-    let base_sha = rev_parse(&repo_root, &base_ref)?;
+    let base_sha = snapshot_base(&repo_root, &base_branch, base_mode)?.sha;
 
     Ok(RepoPlan {
         desired_id: desired_id.unwrap_or_else(|| slugify(&name)),
@@ -238,6 +257,7 @@ fn resolve_project_selector(
     active: &crate::store::ActiveBundle,
     selector: &str,
     in_place: bool,
+    base_mode: BundleBaseMode,
 ) -> Result<Option<RepoPlan>> {
     let Some(project_id) = &active.bundle.project_id else {
         return Ok(None);
@@ -253,25 +273,34 @@ fn resolve_project_selector(
     let Some(repo) = project.repos.iter().find(|repo| repo.id == selector) else {
         return Ok(None);
     };
-    Ok(Some(resolve_project_repo_plan(repo, in_place)?))
+    Ok(Some(resolve_project_repo_plan(repo, in_place, base_mode)?))
 }
 
-fn resolve_project_repo_plan(repo: &ProjectRepoEntry, in_place: bool) -> Result<RepoPlan> {
+fn resolve_project_repo_plan(
+    repo: &ProjectRepoEntry,
+    in_place: bool,
+    base_mode: BundleBaseMode,
+) -> Result<RepoPlan> {
     let checkout_mode = if in_place {
         CheckoutMode::InPlace
     } else {
         repo.checkout_mode
     };
     let repo_root = git_root(Path::new(&repo.path))?;
-    let base_ref = resolve_base_ref(&repo_root, &repo.base_branch);
-    let base_sha = rev_parse(&repo_root, &base_ref)
-        .with_context(|| format!("{}: failed to resolve base ref {base_ref}", repo.id))?;
+    let snapshot = snapshot_base(&repo_root, &repo.base_branch, base_mode)
+        .with_context(|| format!("{}: failed to snapshot configured base", repo.id))?;
+    println!(
+        "{}: base {} {}",
+        out::repo(&repo.id),
+        out::branch(&snapshot.source_ref),
+        out::sha(crate::ids::short_sha(&snapshot.sha))
+    );
     Ok(RepoPlan {
         desired_id: repo.id.clone(),
         path: repo_root.to_string_lossy().to_string(),
         remote: repo.remote.clone(),
         base_branch: repo.base_branch.clone(),
-        base_sha,
+        base_sha: snapshot.sha,
         checkout_mode,
     })
 }
@@ -284,6 +313,27 @@ fn ensure_unique_paths(plans: &[RepoPlan]) -> Result<()> {
             .any(|existing| same_path(&existing.path, &plan.path))
         {
             bail!("Repo {} was provided more than once.", plan.path);
+        }
+    }
+    Ok(())
+}
+
+fn reject_already_tracked_paths(
+    active: &crate::store::ActiveBundle,
+    plans: &[RepoPlan],
+) -> Result<()> {
+    for plan in plans {
+        if let Some(existing) = active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| same_path(&repo.path, &plan.path))
+        {
+            bail!(
+                "Repo {} is already tracked in bundle {}. `knit bundle add` will not rewrite its recorded base; use `knit project set-base` for future bundle additions.",
+                out::repo(&existing.id),
+                out::node(&active.bundle.id)
+            );
         }
     }
     Ok(())
