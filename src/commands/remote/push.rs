@@ -249,6 +249,34 @@ pub fn remote_auth_status(name: &str, json_output: bool) -> Result<()> {
     Ok(())
 }
 
+/// Install this remote's exact-host Git credential helpers into the global
+/// Git config and drop stale knit-shaped entries. The one owner of helper
+/// state: environment runtimes call this instead of writing Git config
+/// themselves.
+pub fn sync_remote_helpers_command(name: &str) -> Result<()> {
+    // Same boundary as the credential helper itself: only the private
+    // user-level config may name the remote that brokers forge credentials.
+    let config = load_global_config()?;
+    let remote_name = slugify(name);
+    let remote = resolve_remote(&config, &remote_name)?;
+    let token = resolve_token(&remote_name, remote)?;
+    let hosts = super::helpers::sync_remote_helpers(&remote_name, remote, &token)?;
+    if hosts.is_empty() {
+        println!(
+            "{} {}",
+            out::heading("Credential helpers:"),
+            out::muted("no connected forge hosts; stale entries removed")
+        );
+    } else {
+        println!(
+            "{} {}",
+            out::heading("Credential helpers:"),
+            hosts.iter().cloned().collect::<Vec<_>>().join(", ")
+        );
+    }
+    Ok(())
+}
+
 pub fn remove_remote(name: &str, global: bool, revoke: bool) -> Result<()> {
     let (root, mut config) = if global {
         (None, load_global_config()?)
@@ -286,6 +314,16 @@ pub fn remove_remote(name: &str, global: bool, revoke: bool) -> Result<()> {
         save_config(&root, &config)?;
     } else {
         save_global_config(&config)?;
+    }
+    // A removed global remote must not leave Git invoking a helper that can
+    // no longer resolve it.
+    if global {
+        if let Err(error) = super::helpers::remove_remote_helpers(Some(&remote_name)) {
+            println!(
+                "{} {error:#}",
+                out::warn("could not remove its git credential helper entries:")
+            );
+        }
     }
     let scope = if global { "global " } else { "" };
     println!(
