@@ -53,14 +53,14 @@ pub(super) fn resolve_project_id(
     Ok(project_id)
 }
 
-pub(super) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
+pub(crate) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
     let remote_name = slugify(name);
     config.remotes.get(&remote_name).with_context(|| {
         format!("No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first.")
     })
 }
 
-pub(super) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
+pub(crate) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
         .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")

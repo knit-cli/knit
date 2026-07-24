@@ -1,9 +1,10 @@
 //! Provider-neutral Git credential helper backed by a named Knit remote.
 
 use crate::cli::GitCredentialOperation;
-use crate::commands::remote::{normalize_git_target, request_forge_credential, VendAttempt};
+use crate::commands::remote::{
+    normalize_git_target, request_forge_credential, resolve_remote, resolve_token, VendAttempt,
+};
 use crate::ids::slugify;
-use crate::model::KnitRemote;
 use crate::store::load_global_config;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
@@ -34,10 +35,7 @@ pub fn run_git_credential_helper(
     // repository-controlled workspace config replace their URL or token.
     let config = load_global_config()?;
     let remote_name = slugify(remote_name);
-    let remote = config
-        .remotes
-        .get(&remote_name)
-        .with_context(|| format!("No remote named `{remote_name}`."))?;
+    let remote = resolve_remote(&config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
     let path = input.get("path").map(String::as_str);
 
@@ -74,20 +72,3 @@ fn read_input() -> Result<BTreeMap<String, String>> {
     Ok(fields)
 }
 
-fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
-    let env_name = format!(
-        "KNIT_REMOTE_{}_TOKEN",
-        name.chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    );
-    std::env::var(env_name)
-        .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| remote.token.clone())
-        .context("No token configured for the selected Knit remote.")
-}

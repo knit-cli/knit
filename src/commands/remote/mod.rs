@@ -17,6 +17,7 @@ mod pull;
 mod push;
 
 pub use client::configured_sync_remote_names;
+pub(crate) use client::{resolve_remote, resolve_token};
 pub use clone::clone_project_from_remote;
 pub(crate) use credentials::{normalize_git_target, request_forge_credential, VendAttempt};
 pub use facade::{sync_pull, sync_push, SyncTargets};
