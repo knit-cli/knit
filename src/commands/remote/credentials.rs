@@ -1,68 +1,66 @@
-//! Vended git-credential fallback: when a git clone/fetch fails for a
-//! non-public repo, ask the sync remote to vend the stored project-member
-//! credential and retry once. The credential lives only in the child git
-//! process environment, delivered through an ephemeral GIT_ASKPASS shim —
-//! never in the URL, argv, git config, or any file that outlives the call.
+//! Forge credential plumbing. The public helper endpoint returns a credential
+//! only on Git's credential-protocol stdout. Clone/fetch retries install that
+//! helper for one Git process, so raw forge secrets never cross argv,
+//! environment variables, Git config, or disk.
 
 use super::client::request;
 use super::clone::export_repo_local_id;
 use super::{RemoteExportRepository, RemoteProjectExport};
-use crate::git::git_output_with_env;
+use crate::git::git_output;
 use crate::model::KnitRemote;
 use anyhow::{anyhow, bail, Context, Result};
-use serde::Deserialize;
-use std::collections::BTreeMap;
-use std::ffi::OsStr;
-use std::fs;
-use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU32, Ordering};
+use serde::{Deserialize, Serialize};
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::path::Path;
 
 /// Appended to a repo's failure when the server has no credential to vend.
 pub(super) const NO_ACCESS_HINT: &str =
-    "no git access: configure SSH keys or ask a project member to connect GitHub on the sync remote";
+    "no HTTPS git access: connect your forge account on the remote or configure SSH credentials";
 
 /// Marker recorded in `--json` repo entries for repos that rode a vended
 /// credential; part of the machine-readable contract with ivaldi.
 pub(super) const VENDED_CREDENTIAL_LABEL: &str = "remote-vended";
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub(super) struct VendedCredential {
-    pub(super) username: String,
-    pub(super) password: String,
-    #[serde(default)]
-    pub(super) provider: Option<String>,
-    #[serde(default)]
-    pub(super) acts_as: Option<String>,
+pub(crate) struct VendedCredential {
+    pub(crate) username: String,
+    pub(crate) password: String,
 }
 
 /// Result of asking the server for a credential: either one to retry with, or
-/// an authoritative "nobody connected GitHub" (HTTP 409 `noCredential`).
-pub(super) enum VendAttempt {
+/// an authoritative absence/unsupported host response.
+pub(crate) enum VendAttempt {
     Credential(VendedCredential),
     NoCredential,
 }
 
+pub(super) struct BrokeredCredentialHelper {
+    remote_name: String,
+    host: String,
+}
+
 struct VendRepo {
-    server_id: Option<String>,
+    host: Option<String>,
     visibility: Option<String>,
 }
 
-/// Everything needed to vend credentials for the repos of one project export:
-/// the resolved remote + token and the export's server-side project/repo ids.
+/// Everything needed to attach the named remote helper to repositories in one
+/// export: the arbitrary remote name and each repository's exact HTTPS host.
 pub(super) struct GitCredentialSource {
-    remote: KnitRemote,
-    token: String,
-    project_id: Option<String>,
+    remote_name: String,
     repos: BTreeMap<String, VendRepo>,
 }
 
 impl GitCredentialSource {
     pub(super) fn from_export(
+        remote_name: &str,
         remote: &KnitRemote,
         token: &str,
         export: &RemoteProjectExport,
     ) -> Self {
+        let connected_hosts = connected_forge_hosts(remote, token);
         let repos = export
             .repositories
             .iter()
@@ -70,16 +68,18 @@ impl GitCredentialSource {
                 (
                     export_repo_local_id(repository),
                     VendRepo {
-                        server_id: repository.id.clone(),
+                        host: repository
+                            .remote_url
+                            .as_deref()
+                            .and_then(https_host_from_url)
+                            .filter(|host| connected_hosts.contains(host)),
                         visibility: repository.visibility.clone(),
                     },
                 )
             })
             .collect();
         Self {
-            remote: remote.clone(),
-            token: token.to_string(),
-            project_id: export.project.id.clone(),
+            remote_name: remote_name.to_string(),
             repos,
         }
     }
@@ -95,62 +95,162 @@ impl GitCredentialSource {
         if repo.visibility.as_deref() == Some("public") {
             return false;
         }
-        repo.server_id.is_some() && self.project_id.is_some()
+        repo.host.is_some()
     }
 
-    fn vend(&self, local_id: &str) -> Result<VendAttempt> {
+    fn helper(&self, local_id: &str) -> Result<BrokeredCredentialHelper> {
         let repo = self
             .repos
             .get(local_id)
             .with_context(|| format!("{local_id}: not part of the remote export"))?;
-        let project_id = self
-            .project_id
+        let host = repo
+            .host
             .as_deref()
-            .context("remote export carries no project id; cannot request a git credential")?;
-        let repository_id = repo
-            .server_id
-            .as_deref()
-            .with_context(|| format!("{local_id}: export carries no repository id"))?;
-        let response = request(
-            &self.remote,
-            &self.token,
-            "POST",
-            &format!("/projects/{project_id}/repositories/{repository_id}/git-credential"),
-            None,
-        )?;
-        if response.status == 409 {
-            return Ok(VendAttempt::NoCredential);
-        }
-        if !(200..300).contains(&response.status) {
-            bail!(
-                "Sync remote returned HTTP {}: {}",
-                response.status,
-                response.body.trim()
-            );
-        }
-        #[derive(Deserialize)]
-        struct Envelope {
-            data: VendedCredential,
-        }
-        let envelope: Envelope = serde_json::from_str(&response.body)
-            .context("failed to parse git-credential response")?;
-        let credential = envelope.data;
-        // Transparency: the vended credential acts as a real account.
+            .with_context(|| format!("{local_id}: repository has no supported HTTPS host"))?;
+        // Transparency without resolving the raw credential in this process.
         crate::human!(
             "{}: {}",
             crate::output::repo(local_id),
-            crate::output::muted(format!(
-                "using remote-vended {} credential{}",
-                credential.provider.as_deref().unwrap_or("git"),
-                credential
-                    .acts_as
-                    .as_deref()
-                    .map(|acts_as| format!(" (acts as {acts_as})"))
-                    .unwrap_or_default()
-            ))
+            crate::output::muted("using the configured remote credential helper")
         );
-        Ok(VendAttempt::Credential(credential))
+        Ok(BrokeredCredentialHelper {
+            remote_name: self.remote_name.clone(),
+            host: host.to_string(),
+        })
     }
+}
+
+fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> BTreeSet<String> {
+    #[derive(Deserialize)]
+    struct Descriptor {
+        connected: bool,
+        hosts: Vec<String>,
+    }
+
+    #[derive(Deserialize)]
+    struct Envelope {
+        data: Vec<Descriptor>,
+    }
+
+    let Ok(response) = request(remote, token, "GET", "/me/forge-credentials", None) else {
+        return BTreeSet::new();
+    };
+    if !(200..300).contains(&response.status) {
+        return BTreeSet::new();
+    }
+    serde_json::from_str::<Envelope>(&response.body)
+        .map(|envelope| {
+            envelope
+                .data
+                .into_iter()
+                .filter(|descriptor| descriptor.connected)
+                .flat_map(|descriptor| descriptor.hosts)
+                .filter_map(|host| normalize_git_target("https", &host))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[derive(Serialize)]
+struct ForgeCredentialRequest<'a> {
+    protocol: &'a str,
+    host: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    path: Option<&'a str>,
+}
+
+/// Ask a named KnitHub-compatible remote for the token subject's forge
+/// credential. Unsupported hosts and missing connections are soft misses so
+/// Git can continue through any other configured credential helpers.
+pub(crate) fn request_forge_credential(
+    remote: &KnitRemote,
+    token: &str,
+    protocol: &str,
+    host: &str,
+    path: Option<&str>,
+) -> Result<VendAttempt> {
+    let payload = serde_json::to_value(ForgeCredentialRequest {
+        protocol,
+        host,
+        path,
+    })?;
+    let response = request(
+        remote,
+        token,
+        "POST",
+        "/me/forge-credentials/git",
+        Some(&payload),
+    )?;
+    if matches!(response.status, 404 | 409) {
+        return Ok(VendAttempt::NoCredential);
+    }
+    if !(200..300).contains(&response.status) {
+        bail!(
+            "Sync remote returned HTTP {}: {}",
+            response.status,
+            response.body.trim()
+        );
+    }
+    #[derive(Deserialize)]
+    struct Envelope {
+        data: VendedCredential,
+    }
+    let envelope: Envelope = serde_json::from_str(&response.body)
+        .context("failed to parse forge credential response")?;
+    Ok(VendAttempt::Credential(envelope.data))
+}
+
+pub(crate) fn normalize_git_target(protocol: &str, host: &str) -> Option<String> {
+    if protocol != "https" || host.trim() != host || !host.is_ascii() {
+        return None;
+    }
+    let normalized = host.to_ascii_lowercase();
+    if normalized.is_empty()
+        || normalized.len() > 253
+        || normalized.ends_with('.')
+        || normalized.contains("..")
+        || normalized.contains(':')
+        || !normalized.split('.').all(valid_dns_label)
+    {
+        return None;
+    }
+    let parsed = url::Url::parse(&format!("https://{normalized}/")).ok()?;
+    if parsed.port().is_some() || parsed.host_str()? != normalized {
+        return None;
+    }
+    Some(normalized)
+}
+
+fn valid_dns_label(label: &str) -> bool {
+    !label.is_empty()
+        && label.len() <= 63
+        && label
+            .as_bytes()
+            .first()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && label
+            .as_bytes()
+            .last()
+            .is_some_and(u8::is_ascii_alphanumeric)
+        && label
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+}
+
+fn https_host_from_url(remote_url: &str) -> Option<String> {
+    let authority = remote_url.strip_prefix("https://")?.split('/').next()?;
+    if authority.contains(':') {
+        return None;
+    }
+    let parsed = url::Url::parse(remote_url).ok()?;
+    if parsed.scheme() != "https"
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.port().is_some()
+    {
+        return None;
+    }
+    normalize_git_target("https", parsed.host_str()?)
 }
 
 /// Outcome of a git operation ran through the vended-credential fallback.
@@ -168,7 +268,7 @@ pub(super) enum CredentialedOutcome<T> {
 pub(super) fn with_vended_credential_retry<T>(
     source: Option<&GitCredentialSource>,
     local_id: &str,
-    attempt: impl Fn(Option<&VendedCredential>) -> Result<T>,
+    attempt: impl Fn(Option<&BrokeredCredentialHelper>) -> Result<T>,
 ) -> CredentialedOutcome<T> {
     let original = match attempt(None) {
         Ok(value) => return CredentialedOutcome::Plain(value),
@@ -177,178 +277,68 @@ pub(super) fn with_vended_credential_retry<T>(
     let Some(source) = source.filter(|source| source.should_vend(local_id)) else {
         return CredentialedOutcome::Failed(original);
     };
-    match source.vend(local_id) {
-        Ok(VendAttempt::Credential(credential)) => match attempt(Some(&credential)) {
+    match source.helper(local_id) {
+        Ok(helper) => match attempt(Some(&helper)) {
             Ok(value) => CredentialedOutcome::Vended(value),
-            Err(retry_error) => CredentialedOutcome::Failed(retry_error),
+            Err(retry_error) => {
+                CredentialedOutcome::Failed(anyhow!("{retry_error:#}; {NO_ACCESS_HINT}"))
+            }
         },
-        Ok(VendAttempt::NoCredential) => {
-            CredentialedOutcome::Failed(anyhow!("{original:#}; {NO_ACCESS_HINT}"))
-        }
-        Err(vend_error) => CredentialedOutcome::Failed(anyhow!(
-            "{original:#}; credential vending failed: {vend_error:#}"
+        Err(helper_error) => CredentialedOutcome::Failed(anyhow!(
+            "{original:#}; credential helper setup failed: {helper_error:#}; {NO_ACCESS_HINT}"
         )),
     }
 }
 
-/// Run a git command with a vended credential supplied through an ephemeral
-/// GIT_ASKPASS shim. The shim echoes from environment variables only and is
-/// deleted before this function returns, whatever the git outcome.
-pub(super) fn git_with_vended_credential<I, S>(
+/// Run Git with a one-process, exact-host credential helper. The helper itself
+/// retrieves the token subject's credential over Git's stdin/stdout protocol;
+/// this parent process never receives the username or password.
+pub(super) fn git_with_brokered_credential<I, S>(
     cwd: &Path,
     args: I,
-    credential: &VendedCredential,
+    helper: &BrokeredCredentialHelper,
 ) -> Result<String>
 where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let shim = AskpassShim::create()?;
-    let script = shim.script.to_string_lossy().to_string();
-    git_output_with_env(
-        cwd,
-        args,
-        &[
-            ("GIT_ASKPASS", script.as_str()),
-            ("GIT_TERMINAL_PROMPT", "0"),
-            ("KNIT_GIT_USER", credential.username.as_str()),
-            ("KNIT_GIT_PASS", credential.password.as_str()),
-        ],
-    )
+    let executable = std::env::current_exe().context("failed to resolve the knit executable")?;
+    let executable = executable
+        .to_str()
+        .context("knit executable path is not valid UTF-8")?;
+    let command = format!(
+        "!{} git-credential --remote {}",
+        shell_quote(executable),
+        shell_quote(&helper.remote_name)
+    );
+    let key = format!("credential.https://{}.helper", helper.host);
+    let mut git_args = vec![
+        OsString::from("-c"),
+        OsString::from(format!("{key}=")),
+        OsString::from("-c"),
+        OsString::from(format!("{key}={command}")),
+    ];
+    git_args.extend(args.into_iter().map(|arg| arg.as_ref().to_os_string()));
+    git_output(cwd, git_args)
 }
 
-/// An askpass script on disk for the duration of one git call. The script
-/// contains no secrets — it echoes `$KNIT_GIT_USER` / `$KNIT_GIT_PASS` from
-/// the environment — and its private directory is removed on drop.
-struct AskpassShim {
-    dir: PathBuf,
-    script: PathBuf,
-}
-
-impl AskpassShim {
-    fn create() -> Result<Self> {
-        static COUNTER: AtomicU32 = AtomicU32::new(0);
-        let dir = std::env::temp_dir().join(format!(
-            "knit-askpass-{}-{}",
-            std::process::id(),
-            COUNTER.fetch_add(1, Ordering::Relaxed)
-        ));
-        fs::create_dir_all(&dir)
-            .with_context(|| format!("failed to create askpass dir {}", dir.display()))?;
-        let script = if cfg!(windows) {
-            dir.join("askpass.bat")
-        } else {
-            dir.join("askpass.sh")
-        };
-        fs::write(&script, askpass_script_body())
-            .with_context(|| format!("failed to write askpass shim {}", script.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            for path in [&dir, &script] {
-                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).with_context(
-                    || {
-                        format!(
-                            "failed to restrict askpass permissions on {}",
-                            path.display()
-                        )
-                    },
-                )?;
-            }
-        }
-        Ok(Self { dir, script })
-    }
-}
-
-impl Drop for AskpassShim {
-    fn drop(&mut self) {
-        let _ = fs::remove_file(&self.script);
-        let _ = fs::remove_dir_all(&self.dir);
-    }
-}
-
-fn askpass_script_body() -> &'static str {
-    if cfg!(windows) {
-        concat!(
-            "@echo off\r\n",
-            "echo %* | findstr /i \"username\" >nul\r\n",
-            "if %errorlevel%==0 (echo %KNIT_GIT_USER%) else (echo %KNIT_GIT_PASS%)\r\n",
-        )
-    } else {
-        concat!(
-            "#!/bin/sh\n",
-            "# Ephemeral knit askpass shim: credentials come from the environment only.\n",
-            "case \"$1\" in\n",
-            "  *[Uu]sername*) printf '%s\\n' \"$KNIT_GIT_USER\" ;;\n",
-            "  *) printf '%s\\n' \"$KNIT_GIT_PASS\" ;;\n",
-            "esac\n",
-        )
-    }
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn credential() -> VendedCredential {
-        VendedCredential {
-            username: "x-access-token".to_string(),
-            password: "ghs_secret_token".to_string(),
-            provider: Some("github".to_string()),
-            acts_as: Some("marc".to_string()),
-        }
-    }
-
     #[test]
-    fn askpass_shim_contains_no_secret_and_is_removed_after_drop() {
-        let shim = AskpassShim::create().unwrap();
-        let script = shim.script.clone();
-        let dir = shim.dir.clone();
-        let body = fs::read_to_string(&script).unwrap();
-        assert!(body.contains("KNIT_GIT_USER"));
-        assert!(body.contains("KNIT_GIT_PASS"));
-        assert!(!body.contains("ghs_"), "shim must never embed a secret");
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let mode = fs::metadata(&script).unwrap().permissions().mode();
-            assert_eq!(mode & 0o777, 0o700, "shim must be private+executable");
-        }
-        drop(shim);
-        assert!(!script.exists(), "shim script must be deleted");
-        assert!(!dir.exists(), "shim dir must be deleted");
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn askpass_shim_echoes_credentials_from_env_only() {
-        let shim = AskpassShim::create().unwrap();
-        let run = |prompt: &str| {
-            let output = std::process::Command::new("sh")
-                .arg(&shim.script)
-                .arg(prompt)
-                .env("KNIT_GIT_USER", "vend-user")
-                .env("KNIT_GIT_PASS", "vend-pass")
-                .output()
-                .unwrap();
-            String::from_utf8_lossy(&output.stdout).trim().to_string()
+    fn brokered_git_run_has_no_raw_credential_channel() {
+        let dir = std::env::temp_dir();
+        let helper = BrokeredCredentialHelper {
+            remote_name: "moonbase".to_string(),
+            host: "forge.example".to_string(),
         };
-        assert_eq!(run("Username for 'https://github.com':"), "vend-user");
-        assert_eq!(run("Password for 'https://x@github.com':"), "vend-pass");
-    }
-
-    #[test]
-    fn vended_git_run_keeps_credential_out_of_argv() {
-        // The runner's argv is exactly the caller's git args: the credential
-        // travels only in the environment. Assert by running a benign git
-        // command through the vended path and checking it succeeds without the
-        // credential appearing anywhere in the invocation or output.
-        let dir = std::env::temp_dir().join(format!("knit-vend-argv-{}", std::process::id()));
-        fs::create_dir_all(&dir).unwrap();
-        let output = git_with_vended_credential(&dir, ["version"], &credential()).unwrap();
+        let output = git_with_brokered_credential(&dir, ["version"], &helper).unwrap();
         assert!(output.contains("git version"));
-        assert!(!output.contains("ghs_secret_token"));
-        fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
@@ -356,8 +346,6 @@ mod tests {
         use std::sync::atomic::{AtomicU32, Ordering};
         let source = source_with_repo("backend", Some("private"));
         let attempts = AtomicU32::new(0);
-        // No server is running, so vend() would fail; instead exercise the
-        // closure contract via a source that never qualifies (public repo).
         let public = source_with_repo("backend", Some("public"));
         let outcome = with_vended_credential_retry(Some(&public), "backend", |credential| {
             attempts.fetch_add(1, Ordering::Relaxed);
@@ -369,6 +357,17 @@ mod tests {
         // Public repo: no vend attempted, single failed attempt.
         assert_eq!(attempts.load(Ordering::Relaxed), 1);
         assert!(matches!(outcome, CredentialedOutcome::Failed(_)));
+
+        let attempts = AtomicU32::new(0);
+        let outcome = with_vended_credential_retry(Some(&source), "backend", |helper| {
+            attempts.fetch_add(1, Ordering::Relaxed);
+            match helper {
+                None => anyhow::bail!("plain attempt fails"),
+                Some(helper) => Ok(helper.host.clone()),
+            }
+        });
+        assert_eq!(attempts.load(Ordering::Relaxed), 2);
+        assert!(matches!(outcome, CredentialedOutcome::Vended(host) if host == "forge.example"));
 
         // Unknown repo id: no vend either.
         let outcome = with_vended_credential_retry(Some(&source), "unknown", |_| {
@@ -389,26 +388,53 @@ mod tests {
         repos.insert(
             local_id.to_string(),
             VendRepo {
-                server_id: Some("r-1".to_string()),
+                host: Some("forge.example".to_string()),
                 visibility: visibility.map(ToString::to_string),
             },
         );
         GitCredentialSource {
-            remote: KnitRemote {
-                url: "http://127.0.0.1:1".to_string(),
-                token: None,
-            },
-            token: "t".to_string(),
-            project_id: Some("p-1".to_string()),
+            remote_name: "moonbase".to_string(),
             repos,
         }
     }
 
     #[test]
-    fn should_vend_requires_non_public_and_ids() {
+    fn should_vend_requires_non_public_and_https_host() {
         assert!(source_with_repo("backend", Some("private")).should_vend("backend"));
         assert!(source_with_repo("backend", None).should_vend("backend"));
         assert!(!source_with_repo("backend", Some("public")).should_vend("backend"));
         assert!(!source_with_repo("backend", Some("private")).should_vend("other"));
+    }
+
+    #[test]
+    fn target_normalization_rejects_credential_forwarding_shapes() {
+        assert_eq!(
+            normalize_git_target("https", "FORGE.EXAMPLE"),
+            Some("forge.example".to_string())
+        );
+        for (protocol, host) in [
+            ("http", "forge.example"),
+            ("https", "forge.example:443"),
+            ("https", "forge.example."),
+            ("https", "forge..example"),
+            ("https", "forge._example"),
+            ("https", "forge.-example"),
+            ("https", "fоrge.example"),
+            ("https", "user@forge.example"),
+        ] {
+            assert_eq!(normalize_git_target(protocol, host), None, "{host}");
+        }
+    }
+
+    #[test]
+    fn extracts_only_plain_https_hosts() {
+        assert_eq!(
+            https_host_from_url("https://forge.example/owner/repo.git"),
+            Some("forge.example".to_string())
+        );
+        assert_eq!(https_host_from_url("http://forge.example/a/b"), None);
+        assert_eq!(https_host_from_url("ssh://git@forge.example/a/b"), None);
+        assert_eq!(https_host_from_url("https://token@forge.example/a/b"), None);
+        assert_eq!(https_host_from_url("https://forge.example:443/a/b"), None);
     }
 }
