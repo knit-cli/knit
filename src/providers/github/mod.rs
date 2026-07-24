@@ -156,6 +156,26 @@ impl Forge for GitHub {
         Ok(())
     }
 
+    fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return api::edit_base(target, repo_full_name, selector, base);
+        }
+
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("edit"),
+                OsString::from(selector),
+                OsString::from("--base"),
+                OsString::from(base),
+            ],
+        );
+        cli_output(CLI, &target.cwd, args, None)?;
+        Ok(())
+    }
+
     fn merge(
         &self,
         target: &PrTarget,

@@ -33,7 +33,7 @@ use crate::advice;
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::model::RepoEntry;
 use crate::output as out;
-use crate::providers::{self, Forge, PrTarget, PullRequest};
+use crate::providers::{self, publication_for_repo, Forge, PrTarget, PullRequest};
 use crate::store::{
     load_active_bundle, load_active_bundle_for_update, read_json, save_active_bundle, write_json,
     ActiveBundle,
@@ -49,9 +49,11 @@ pub fn generate_land_plan(
     provider: Option<&str>,
     out_path: Option<&Path>,
     force: bool,
+    target_branch: Option<&str>,
 ) -> Result<()> {
     let active = load_active_bundle()?;
-    let plan = plan::build_default_plan(&active, provider)?;
+    let target_branch = normalize_target_branch(target_branch)?;
+    let plan = plan::build_default_plan(&active, provider, target_branch.as_deref())?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     let path = out_path
         .map(resolve_user_path)
@@ -67,18 +69,28 @@ pub fn generate_land_plan(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
     write_json(&path, &plan)?;
-    display::print_plan(&plan, &path);
+    display::print_plan(&active, &plan, &path);
+    let apply = target_branch
+        .as_deref()
+        .map(|target| format!("`knit land --target {target} apply`"))
+        .unwrap_or_else(|| "`knit land apply`".to_string());
     advice::print(
         &active.root,
-        "inspect or edit this plan, then run `knit land apply` when you are ready to execute it.",
+        format!("inspect or edit this plan, then run {apply} when you are ready to execute it."),
     );
     Ok(())
 }
 
-pub fn land_default() -> Result<()> {
+pub fn land_default(target_branch: Option<&str>) -> Result<()> {
     let active = load_active_bundle()?;
+    let target_branch = normalize_target_branch(target_branch)?;
     if let Some(path) = resolve_land_run_path(&active, None)? {
         let run: LandRun = read_json(&path)?;
+        if target_branch.is_some() {
+            let plan_path = resolve_stored_path(&active.root, &run.plan_path);
+            let plan: LandPlan = read_json(&plan_path)?;
+            ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
+        }
         display::print_run_status(&active, &run, &path);
         if run.status == LandStatus::Succeeded {
             return Ok(());
@@ -100,8 +112,9 @@ pub fn land_default() -> Result<()> {
     let plan_path = default_plan_path(&active);
     if plan_path.exists() {
         let plan: LandPlan = read_json(&plan_path)?;
+        ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
         validate::validate_plan_for_bundle(&active, &plan)?;
-        display::print_plan(&plan, &plan_path);
+        display::print_plan(&active, &plan, &plan_path);
         advice::print(
             &active.root,
             "inspect or edit this plan, then run `knit land apply` when you are ready to execute it.",
@@ -110,7 +123,7 @@ pub fn land_default() -> Result<()> {
     }
 
     drop(active);
-    generate_land_plan(None, None, false)
+    generate_land_plan(None, None, false, target_branch.as_deref())
 }
 
 pub fn apply_land_plan(
@@ -121,8 +134,10 @@ pub fn apply_land_plan(
     keep_worktrees: bool,
     tag: Option<String>,
     no_tag: bool,
+    target_branch: Option<&str>,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    let target_branch = normalize_target_branch(target_branch)?;
     let path = resolve_land_plan_path(&active, plan_path)?;
     if !path.exists() {
         bail!(
@@ -131,9 +146,11 @@ pub fn apply_land_plan(
         );
     }
     let plan: LandPlan = read_json(&path)?;
+    ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
+    prepare_plan_publication_targets(&mut active, &plan)?;
     validate::preflight_publications(&active, &plan, None)?;
 
     let run_path = new_run_path(&active, &plan);
@@ -151,6 +168,101 @@ pub fn apply_land_plan(
     Ok(())
 }
 
+fn normalize_target_branch(target_branch: Option<&str>) -> Result<Option<String>> {
+    let Some(target_branch) = target_branch else {
+        return Ok(None);
+    };
+    let target_branch = target_branch.trim();
+    if target_branch.is_empty() {
+        bail!("--target must name a non-empty branch");
+    }
+    Ok(Some(target_branch.to_string()))
+}
+
+fn ensure_requested_target_matches_plan(
+    requested_target: Option<&str>,
+    plan: &LandPlan,
+) -> Result<()> {
+    let Some(requested_target) = requested_target else {
+        return Ok(());
+    };
+    if plan.target_branch.as_deref() == Some(requested_target) {
+        return Ok(());
+    }
+    let planned = plan.target_branch.as_deref().unwrap_or("recorded PR bases");
+    bail!(
+        "Land plan targets {planned}, not `{requested_target}`. Regenerate it with `knit land --target {requested_target} plan --force`, inspect it, then apply again."
+    )
+}
+
+/// Apply the plan's native target contract to the recorded review objects
+/// before target-specific readiness checks and merge execution. Each
+/// successful retarget is recorded immediately so a partially interrupted
+/// provider operation remains resumable and the bundle never lies about the
+/// remote PR base.
+fn prepare_plan_publication_targets(active: &mut ActiveBundle, plan: &LandPlan) -> Result<()> {
+    let Some(target_branch) = plan.target_branch.as_deref() else {
+        return Ok(());
+    };
+    let mut seen = std::collections::BTreeSet::new();
+    for step in &plan.steps {
+        if step.step_type != LandStepKind::MergePr {
+            continue;
+        }
+        let repo_id = required_repo_id(step)?;
+        if !seen.insert(repo_id.to_string()) {
+            continue;
+        }
+        let (_, repo, cwd) = repo_context(active, repo_id)?;
+        let forge = providers::for_repo(&repo)?;
+        let target = PrTarget::checkout(&cwd);
+        let publication = publication_for_repo(&active.bundle, repo_id)
+            .with_context(|| format!("{repo_id}: missing review publication"))?
+            .clone();
+        let current = forge.view(&target, &publication.url)?;
+        let current_base = current
+            .base_ref_name
+            .as_deref()
+            .unwrap_or(&publication.base_branch);
+        if current_base == target_branch {
+            continue;
+        }
+        if state_is_merged(&current) {
+            bail!(
+                "{repo_id}: PR #{} already merged into `{current_base}` and cannot be landed into `{target_branch}`.",
+                current.number
+            );
+        }
+        ensure_open_for_retarget(repo_id, &current)?;
+        forge
+            .edit_base(&target, &publication.url, target_branch)
+            .with_context(|| {
+                format!(
+                    "{repo_id}: failed to retarget PR #{} from `{current_base}` to `{target_branch}`",
+                    current.number
+                )
+            })?;
+        let refreshed = forge.view(&target, &publication.url)?;
+        if refreshed.base_ref_name.as_deref() != Some(target_branch) {
+            bail!(
+                "{repo_id}: provider did not retarget PR #{} to `{target_branch}`",
+                current.number
+            );
+        }
+        providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &refreshed);
+        save_active_bundle(active)?;
+        println!(
+            "{} {} PR #{} {} -> {}",
+            out::ok("retargeted"),
+            out::repo(repo_id),
+            current.number,
+            out::branch(current_base),
+            out::branch(target_branch)
+        );
+    }
+    Ok(())
+}
+
 /// Decide whether a just-landed bundle gets a known-good tag. An explicit
 /// `--tag [name]` always tags (empty name defaults to the bundle slug); the
 /// `auto-tag` config default tags unless `--no-tag` overrides. Tagging is
@@ -164,10 +276,29 @@ fn tag_landed_bundle(
     remote: &[String],
     no_remote: bool,
 ) {
+    let alternate_target = active.bundle.repos.iter().any(|repo| {
+        publication_for_repo(&active.bundle, &repo.id)
+            .is_some_and(|publication| publication.base_branch != repo.base_branch)
+    });
     let auto_tag = !no_tag
         && crate::store::load_effective_config(&active.root)
             .map(|config| config.auto_tag_enabled())
             .unwrap_or(false);
+    if alternate_target && tag.is_none() {
+        if auto_tag {
+            println!(
+                "{} skipped automatic tag because this landing targeted an alternate review branch; `knit tag` pins configured project bases.",
+                out::warn("warning:")
+            );
+        }
+        return;
+    }
+    if alternate_target && tag.is_some() {
+        println!(
+            "{} explicit --tag records the configured project bases, not the alternate review target.",
+            out::warn("warning:")
+        );
+    }
     let name = match tag {
         Some(name) if !name.is_empty() => name,
         Some(_) => active.bundle.id.clone(),
@@ -176,7 +307,7 @@ fn tag_landed_bundle(
             advice::print(
                 &active.root,
                 format!(
-                    "after verifying main, mark this landed state known-good with `knit tag <name> --bundle {}`.",
+                    "after verifying the configured project bases, mark them known-good with `knit tag <name> --bundle {}`.",
                     active.bundle.id
                 ),
             );
@@ -265,12 +396,7 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         out::heading("Land plan:"),
         out::path(plan_path.display())
     );
-    if providers::by_id(&plan.provider).is_some() {
-        println!(
-            "{} each recorded review object's base branch",
-            out::heading("Lands into:")
-        );
-    }
+    display::print_plan_landing_targets(&active, &plan);
     for step in &plan.steps {
         display::print_planned_step(&active, step);
     }
@@ -417,6 +543,16 @@ fn ensure_open_and_ready(repo_id: &str, pr: &PullRequest) -> Result<()> {
             }
             Ok(())
         }
+        state => bail!("{repo_id}: PR #{} is {state}, expected OPEN.", pr.number),
+    }
+}
+
+fn ensure_open_for_retarget(repo_id: &str, pr: &PullRequest) -> Result<()> {
+    if pr.is_draft.unwrap_or(false) {
+        bail!("{repo_id}: PR #{} is a draft.", pr.number);
+    }
+    match pr.state.as_deref().unwrap_or("UNKNOWN") {
+        "OPEN" => Ok(()),
         state => bail!("{repo_id}: PR #{} is {state}, expected OPEN.", pr.number),
     }
 }

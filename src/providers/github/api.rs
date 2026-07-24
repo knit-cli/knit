@@ -175,6 +175,21 @@ pub(super) fn edit_body(
     Ok(())
 }
 
+pub(super) fn edit_base(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    base: &str,
+) -> Result<()> {
+    let number = selector_pr_number(selector)
+        .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
+    let payload = serde_json::to_string(&json!({ "base": base }))
+        .context("failed to encode GitHub pull request target payload")?;
+    let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
+    github_api_output(target, "PATCH", &endpoint, Some(&payload))?;
+    Ok(())
+}
+
 pub(super) fn merge(
     target: &PrTarget,
     repo_full_name: &str,

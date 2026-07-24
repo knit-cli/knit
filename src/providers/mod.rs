@@ -131,6 +131,13 @@ pub trait Forge {
     ) -> Result<String>;
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest>;
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()>;
+    /// Change the destination branch of an existing open review object.
+    fn edit_base(&self, _target: &PrTarget, _selector: &str, _base: &str) -> Result<()> {
+        bail!(
+            "{} does not support changing an existing review object's target branch in Knit yet; publish it against the intended branch instead.",
+            self.id()
+        )
+    }
     fn merge(
         &self,
         target: &PrTarget,

@@ -1,5 +1,6 @@
 //! Builds the default land plan from the resolved bundle and its project's
-//! landing template: one merge step per recorded PR plus any project deployments.
+//! landing template: one merge step per recorded PR plus the deployments for
+//! each declared target branch selected by those PRs.
 
 use super::process::DEFAULT_COMMAND_TIMEOUT_SECONDS;
 use super::{
@@ -19,6 +20,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(super) fn build_default_plan(
     active: &ActiveBundle,
     requested_provider: Option<&str>,
+    target_branch: Option<&str>,
 ) -> Result<LandPlan> {
     let project = load_project_for_bundle(active)?;
     let landing = project
@@ -71,7 +73,7 @@ pub(super) fn build_default_plan(
             previous_ordered = Some(id);
         }
     }
-    append_project_deployments(active, landing, &mut steps)?;
+    append_project_deployments(active, landing, target_branch, &mut steps)?;
 
     if steps.is_empty() {
         bail!(
@@ -85,6 +87,7 @@ pub(super) fn build_default_plan(
         id: format!("land-{}", active.bundle.id),
         provider,
         bundle_id: active.bundle.id.clone(),
+        target_branch: target_branch.map(ToOwned::to_owned),
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
         on_failure: landing.and_then(|landing| landing.on_failure),
@@ -171,6 +174,7 @@ fn merge_interval_seconds(merge: Option<&ProjectLandingMergePlan>) -> u64 {
 fn append_project_deployments(
     active: &ActiveBundle,
     landing: Option<&ProjectLandingPlan>,
+    explicit_target: Option<&str>,
     steps: &mut Vec<LandStep>,
 ) -> Result<()> {
     let Some(landing) = landing else {
@@ -186,56 +190,154 @@ fn append_project_deployments(
         .filter(|step| step.step_type == LandStepKind::MergePr)
         .map(|step| step.id.clone())
         .collect::<Vec<_>>();
-
-    for deployment in &landing.deployments {
-        if let Some(repo_id) = &deployment.repo_id {
-            if !active.bundle.repos.iter().any(|repo| repo.id == *repo_id) {
-                continue;
+    let target_by_repo = active
+        .bundle
+        .repos
+        .iter()
+        .filter(|repo| merge_step_ids.contains_key(&repo.id))
+        .filter_map(|repo| {
+            Some((
+                repo.id.clone(),
+                publication_for_repo(&active.bundle, &repo.id)?
+                    .base_branch
+                    .clone(),
+            ))
+        })
+        .map(|(repo_id, recorded_target)| {
+            (
+                repo_id,
+                explicit_target.unwrap_or(&recorded_target).to_string(),
+            )
+        })
+        .collect::<BTreeMap<_, _>>();
+    let target_branches = active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| target_by_repo.get(&repo.id))
+        .fold(Vec::<String>::new(), |mut branches, branch| {
+            if !branches.contains(branch) {
+                branches.push(branch.clone());
             }
-        }
-        let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
-            DeployMode::Push
-        } else {
-            DeployMode::Command
+            branches
         });
-        let needs = if deployment.needs.is_empty() {
-            default_deployment_needs(
-                deployment.repo_id.as_deref(),
+    let has_declared_target = target_branches
+        .iter()
+        .any(|branch| landing.targets.contains_key(branch));
+    let all_merges_use_configured_bases = target_by_repo.iter().all(|(repo_id, branch)| {
+        active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| repo.id == *repo_id)
+            .is_some_and(|repo| repo.base_branch == *branch)
+    });
+
+    // Top-level deployments are the backward-compatible configured-base lane.
+    // A branch-keyed target takes precedence whenever one of the recorded PR
+    // bases declares it. Deploy-only plans also retain their legacy behavior.
+    if target_by_repo.is_empty() || (!has_declared_target && all_merges_use_configured_bases) {
+        for deployment in &landing.deployments {
+            append_project_deployment(
+                active,
+                steps,
+                deployment,
+                None,
                 &merge_step_ids,
                 &all_merge_ids,
-            )
-        } else {
-            deployment.needs.clone()
-        };
-        let checkout = deployment.checkout.as_ref().map(|checkout| LandCheckout {
-            branch: checkout.branch.clone(),
-            remote: checkout.remote.clone(),
-            update: checkout.update,
-        });
-        steps.push(LandStep {
-            id: deployment.id.clone(),
-            step_type: LandStepKind::Deploy,
-            needs,
-            repo_id: deployment.repo_id.clone(),
-            method: None,
-            wait_for_checks: None,
-            required_checks_only: None,
-            delete_branch: None,
-            required_only: None,
-            timeout_seconds: (mode == DeployMode::Command).then_some(
-                deployment
-                    .timeout_seconds
-                    .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS),
-            ),
-            interval_seconds: None,
-            cwd: deployment.cwd.clone(),
-            command: deployment.command.clone(),
-            env: deployment.env.clone(),
-            deployment_mode: Some(mode),
-            checkout,
-        });
+            )?;
+        }
     }
 
+    for branch in &target_branches {
+        let Some(target) = landing.targets.get(branch) else {
+            continue;
+        };
+        for deployment in &target.deployments {
+            if deployment
+                .repo_id
+                .as_ref()
+                .is_some_and(|repo_id| target_by_repo.get(repo_id) != Some(branch))
+            {
+                continue;
+            }
+            append_project_deployment(
+                active,
+                steps,
+                deployment,
+                Some(branch),
+                &merge_step_ids,
+                &all_merge_ids,
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+fn append_project_deployment(
+    active: &ActiveBundle,
+    steps: &mut Vec<LandStep>,
+    deployment: &crate::model::ProjectLandingDeployment,
+    target_branch: Option<&str>,
+    merge_step_ids: &BTreeMap<String, String>,
+    all_merge_ids: &[String],
+) -> Result<()> {
+    if let Some(repo_id) = &deployment.repo_id {
+        if !active.bundle.repos.iter().any(|repo| repo.id == *repo_id) {
+            return Ok(());
+        }
+    }
+    if steps.iter().any(|step| step.id == deployment.id) {
+        bail!(
+            "landing step id `{}` is selected more than once; use unique deployment ids across landing targets",
+            deployment.id
+        );
+    }
+    let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
+        DeployMode::Push
+    } else {
+        DeployMode::Command
+    });
+    let needs = if deployment.needs.is_empty() {
+        default_deployment_needs(deployment.repo_id.as_deref(), merge_step_ids, all_merge_ids)
+    } else {
+        deployment.needs.clone()
+    };
+    let checkout = deployment.checkout.as_ref().map(|checkout| LandCheckout {
+        branch: checkout.branch.clone(),
+        remote: checkout.remote.clone(),
+        update: checkout.update,
+    });
+    let mut env = deployment.env.clone();
+    if let Some(target_branch) = target_branch {
+        env.insert(
+            "KNIT_LAND_TARGET_BRANCH".to_string(),
+            target_branch.to_string(),
+        );
+    }
+    steps.push(LandStep {
+        id: deployment.id.clone(),
+        step_type: LandStepKind::Deploy,
+        needs,
+        repo_id: deployment.repo_id.clone(),
+        method: None,
+        wait_for_checks: None,
+        required_checks_only: None,
+        delete_branch: None,
+        required_only: None,
+        timeout_seconds: (mode == DeployMode::Command).then_some(
+            deployment
+                .timeout_seconds
+                .unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS),
+        ),
+        interval_seconds: None,
+        cwd: deployment.cwd.clone(),
+        command: deployment.command.clone(),
+        env,
+        deployment_mode: Some(mode),
+        checkout,
+    });
     Ok(())
 }
 
