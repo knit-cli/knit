@@ -95,7 +95,7 @@ fn tag_creates_annotated_tags_pins_origin_base_and_records_node() {
 
     let message = node["message"].as_str().unwrap();
     assert!(message.contains("bundle: venue-capacity"), "{message}");
-    assert!(message.contains("main CI"), "{message}");
+    assert!(message.contains("configured-base CI"), "{message}");
     // Local bare origins have no GitHub slug, so CI evidence degrades to
     // unknown without blocking the tag.
     assert!(message.contains("unknown (no GitHub remote)"), "{message}");
@@ -332,7 +332,7 @@ fn tag_works_on_archived_bundle_and_list_falls_back_to_project() {
 }
 
 #[test]
-fn tag_records_main_ci_evidence() {
+fn tag_records_configured_base_ci_evidence() {
     let root = unique_temp_dir();
     let (workspace, backend, _frontend, _backend_remote, _collab) = setup_remote_bundle(&root);
 
@@ -362,7 +362,10 @@ fn tag_records_main_ci_evidence() {
         ],
     );
     // Red CI warns but never blocks.
-    assert!(output.contains("frontend: main CI is failed"), "{output}");
+    assert!(
+        output.contains("frontend: configured-base CI is failed"),
+        "{output}"
+    );
     assert!(output.contains("tagged"), "{output}");
     assert!(!git(&backend, ["tag", "--list", "knit/rel-ci"])
         .trim()
@@ -422,6 +425,40 @@ fn land_apply_auto_tag_config_defaults_to_bundle_slug() {
 
     let bundle = read_bundle(&workspace);
     assert_eq!(tag_nodes(&bundle, "venue-capacity").len(), 1);
+}
+
+#[cfg(unix)]
+#[test]
+fn alternate_target_landing_does_not_auto_tag_configured_project_bases() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    let bundle_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    for publication in bundle["publications"].as_array_mut().unwrap() {
+        publication["baseBranch"] = json!("staging");
+    }
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+    fs::write(fake_gh_dir.join("create-backend.base"), "staging\n").unwrap();
+    fs::write(fake_gh_dir.join("create-frontend.base"), "staging\n").unwrap();
+
+    knit(&workspace, ["config", "set", "auto-tag", "true"]);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("skipped automatic tag"), "{apply}");
+
+    let bundle = read_bundle(&workspace);
+    assert!(tag_nodes(&bundle, "venue-capacity").is_empty());
 }
 
 #[cfg(unix)]

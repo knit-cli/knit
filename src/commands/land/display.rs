@@ -8,7 +8,7 @@ use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
 use std::path::Path;
 
-pub(super) fn print_plan(plan: &LandPlan, path: &Path) {
+pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
     println!("{} {}", out::heading("Land plan"), out::node(&plan.id));
     println!("{} {}", out::heading("Provider:"), plan.provider);
     println!(
@@ -16,12 +16,17 @@ pub(super) fn print_plan(plan: &LandPlan, path: &Path) {
         out::heading("Plan file:"),
         out::path(path.display())
     );
-    if providers::by_id(&plan.provider).is_some() {
-        println!(
-            "{} each recorded review object's base branch",
-            out::heading("Lands into:")
-        );
-    }
+    print_landing_targets(
+        active,
+        plan.steps
+            .iter()
+            .filter(|step| step.step_type == LandStepKind::MergePr)
+            .filter_map(|step| step.repo_id.as_ref()),
+        plan.target_branch.as_deref(),
+        plan.steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::Deploy),
+    );
     println!();
     for step in &plan.steps {
         println!(
@@ -35,7 +40,14 @@ pub(super) fn print_plan(plan: &LandPlan, path: &Path) {
         }
     }
     println!();
-    println!("{} knit land apply", out::heading("Apply:"));
+    match plan.target_branch.as_deref() {
+        Some(target) => println!(
+            "{} knit land --target {} apply",
+            out::heading("Apply:"),
+            target
+        ),
+        None => println!("{} knit land apply", out::heading("Apply:")),
+    }
 }
 
 pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {
@@ -50,12 +62,17 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
         out::heading("Run file:"),
         out::path(path.display())
     );
-    if providers::by_id(&run.provider).is_some() {
-        println!(
-            "{} each recorded review object's base branch",
-            out::heading("Lands into:")
-        );
-    }
+    print_landing_targets(
+        active,
+        run.steps
+            .iter()
+            .filter(|step| step.step_type == LandStepKind::MergePr)
+            .filter_map(|step| step.repo_id.as_ref()),
+        None,
+        run.steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::Deploy),
+    );
     println!();
     for step in &run.steps {
         println!(
@@ -84,6 +101,64 @@ pub(super) fn print_planned_step(active: &ActiveBundle, step: &LandStep) {
     );
     if let Some(repo_id) = &step.repo_id {
         print_pr_status(active, repo_id, None);
+    }
+}
+
+pub(super) fn print_plan_landing_targets(active: &ActiveBundle, plan: &LandPlan) {
+    print_landing_targets(
+        active,
+        plan.steps
+            .iter()
+            .filter(|step| step.step_type == LandStepKind::MergePr)
+            .filter_map(|step| step.repo_id.as_ref()),
+        plan.target_branch.as_deref(),
+        plan.steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::Deploy),
+    );
+}
+
+fn print_landing_targets<'a>(
+    active: &ActiveBundle,
+    repo_ids: impl IntoIterator<Item = &'a String>,
+    explicit_target: Option<&str>,
+    has_deployment_steps: bool,
+) {
+    let targets = repo_ids
+        .into_iter()
+        .filter_map(|repo_id| {
+            let publication = publication_for_repo(&active.bundle, repo_id)?;
+            let base_branch = explicit_target.unwrap_or(&publication.base_branch);
+            let is_alternate = active
+                .bundle
+                .repos
+                .iter()
+                .find(|repo| repo.id == *repo_id)
+                .is_some_and(|repo| base_branch != repo.base_branch);
+            Some((repo_id, base_branch, is_alternate))
+        })
+        .collect::<Vec<_>>();
+    if targets.is_empty() {
+        return;
+    }
+
+    println!("{}", out::heading("Lands into:"));
+    let has_alternate_target = targets.iter().any(|(_, _, is_alternate)| *is_alternate);
+    for (repo_id, base_branch, _) in targets {
+        println!("  {} -> {}", out::repo(repo_id), out::branch(base_branch));
+    }
+    if has_alternate_target {
+        if has_deployment_steps {
+            println!(
+                "{} matching `landing.targets.<branch>` deployment steps are included below.",
+                out::heading("Deployment:")
+            );
+        } else {
+            println!(
+                "{} no deployment steps matched these branches; declare them under `landing.targets.<branch>.deployments` or add an explicit step to this plan.",
+                out::heading("Deployment:")
+            );
+        }
     }
 }
 

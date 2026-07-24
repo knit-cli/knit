@@ -1,17 +1,17 @@
 //! `knit tag` — cross-repo known-good markers on origin base branches.
 //!
-//! A tag records the post-land state of the mains: per repo, the commit
+//! A tag records the state of the configured project bases: per repo, the commit
 //! `origin/<base_branch>` points at after a fresh fetch, named as one set. The
 //! `tag.created` ledger node is the source of truth; annotated git tags
 //! `knit/<name>` in each repo are a default-on export of it (host/CI
 //! visibility, checkout-without-knit, GC protection of the pinned commits).
 //!
 //! The tag claims exactly what Knit can prove: "at tag time these were the
-//! mains, named as one set, with this evidence" — the evidence being recorded
+//! configured project bases, named as one set, with this evidence" — the evidence being recorded
 //! feature-branch checks plus best-effort host CI verdicts for the tagged
 //! commits themselves. It never claims "tested"; red or missing evidence is a
 //! recorded warning, not an error. Tagging is deliberately decoupled from
-//! landing: land, verify main however you trust, then tag. Tags are immutable
+//! landing: land, verify the configured project bases however you trust, then tag. Tags are immutable
 //! — re-running `knit tag <name>` on the same bundle resumes an interrupted
 //! tag set instead of moving it.
 
@@ -723,7 +723,7 @@ fn build_annotation(
         }
     }
 
-    lines.push("main CI (on the tagged commits, at tag time):".to_string());
+    lines.push("configured-base CI (on the tagged commits, at tag time):".to_string());
     for (repo_id, verdict) in evidence {
         lines.push(format!("  {repo_id}: {verdict}"));
     }
@@ -763,7 +763,7 @@ fn print_honesty_warnings(
     for (repo_id, verdict) in evidence {
         if verdict == "failed" || verdict == "pending" {
             println!(
-                "{} {}: main CI is {} for the tagged commit",
+                "{} {}: configured-base CI is {} for the tagged commit",
                 out::warn("warning:"),
                 out::repo(repo_id),
                 verdict
