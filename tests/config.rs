@@ -441,3 +441,96 @@ fn every_configured_remote_is_a_sync_remote_by_default() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_helpers_owns_global_git_credential_helper_entries() {
+    let root = unique_temp_dir();
+    let outside = root.join("outside");
+    let knit_home = root.join("knit-home");
+    let gitconfig = root.join("gitconfig");
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&outside).unwrap();
+    let remote_url = spawn_fake_remote_api(&fake_dir, String::new());
+
+    // Pre-existing global entries: a foreign helper on the connected forge
+    // host, and a stale knit-shaped entry left by a renamed remote.
+    fs::write(
+        &gitconfig,
+        concat!(
+            "[credential \"https://code.example.test\"]\n",
+            "\thelper = osxkeychain\n",
+            "[credential \"https://old.example.test\"]\n",
+            "\thelper = !'/old/knit' git-credential --remote 'oldname'\n",
+        ),
+    )
+    .unwrap();
+
+    let run = |args: &[&str]| {
+        let output = Command::new(env!("CARGO_BIN_EXE_knit"))
+            .args(args)
+            .current_dir(&outside)
+            .env("KNIT_HOME", &knit_home)
+            .env("GIT_CONFIG_GLOBAL", &gitconfig)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "knit {args:?}: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).to_string()
+    };
+    let helpers_for = |host: &str| -> Vec<String> {
+        let output = Command::new("git")
+            .args([
+                "config",
+                "--file",
+                gitconfig.to_str().unwrap(),
+                "--get-all",
+                &format!("credential.https://{host}.helper"),
+            ])
+            .output()
+            .unwrap();
+        String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(ToString::to_string)
+            .collect()
+    };
+
+    run(&[
+        "remote",
+        "add",
+        "hub",
+        remote_url.as_str(),
+        "--global",
+        "--token",
+        "hub-secret",
+    ]);
+    let synced = run(&["remote", "sync-helpers", "hub"]);
+    assert!(synced.contains("code.example.test"), "{synced}");
+
+    let connected = helpers_for("code.example.test");
+    assert_eq!(connected.len(), 2, "{connected:?}");
+    assert!(
+        connected[0].contains("git-credential --remote 'hub'"),
+        "our helper must lead: {connected:?}"
+    );
+    assert_eq!(connected[1], "osxkeychain", "foreign helper preserved");
+    assert!(
+        helpers_for("old.example.test").is_empty(),
+        "stale knit entry for a renamed remote must be removed"
+    );
+    assert!(
+        helpers_for("off.example.test").is_empty(),
+        "disconnected forges get no helper"
+    );
+
+    run(&["remote", "remove", "hub", "--global"]);
+    assert_eq!(
+        helpers_for("code.example.test"),
+        vec!["osxkeychain".to_string()],
+        "removal must drop our helper and keep foreign ones"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
