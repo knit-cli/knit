@@ -317,6 +317,11 @@ pub enum Commands {
         /// Overwrite an existing docker-compose.knit.yml (`knit run eject`).
         #[arg(long)]
         force: bool,
+        /// With `knit run down`, also remove bundle-owned volumes and locally
+        /// built Compose images. External volumes and explicitly tagged images
+        /// are preserved.
+        #[arg(long)]
+        purge: bool,
         /// Raw command to execute, for example `knit run -r web -- docker compose up`.
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<OsString>,

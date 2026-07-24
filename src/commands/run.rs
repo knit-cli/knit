@@ -16,10 +16,20 @@ pub fn run_project_command(
     all: bool,
     list: bool,
     force: bool,
+    purge: bool,
     raw_args: &[OsString],
 ) -> Result<()> {
+    if purge && name != Some("down") {
+        bail!("`--purge` is only valid with `knit run down`.");
+    }
     if list {
-        if name.is_some() || !raw_args.is_empty() || all || !explicit_repos.is_empty() {
+        if name.is_some()
+            || !raw_args.is_empty()
+            || all
+            || !explicit_repos.is_empty()
+            || force
+            || purge
+        {
             bail!("Use `knit run --list` without a command or repo selector.");
         }
         return list_commands();
@@ -42,7 +52,7 @@ pub fn run_project_command(
                         .contains_key(&crate::ids::slugify(runtime_command))
                 });
             if !shadowed {
-                if crate::commands::runtime::try_handle(runtime_command, force)? {
+                if crate::commands::runtime::try_handle(runtime_command, force, purge)? {
                     return Ok(());
                 }
 
@@ -55,6 +65,11 @@ pub fn run_project_command(
 
                 bail!(
                     "`knit run {runtime_command}` needs a bundle repo with a docker-compose file, or a `runtime` block in the Knit project (pull it with `knit project pull --repo <stack-repo>`)."
+                );
+            }
+            if purge {
+                bail!(
+                    "Project command `down` shadows the built-in bundle runtime, so `--purge` cannot be applied."
                 );
             }
         }

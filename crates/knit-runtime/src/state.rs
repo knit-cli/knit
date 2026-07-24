@@ -23,7 +23,7 @@ pub(crate) fn frontend_port(ports: &[ServicePort]) -> Option<u16> {
         .map(|port| port.host)
 }
 
-pub(crate) fn run_down(ctx: &RuntimeContext) -> Result<()> {
+pub(crate) fn run_down(ctx: &RuntimeContext, purge: bool) -> Result<()> {
     // Project-scoped `down` resolves containers by compose label, so it works
     // even after the bundle worktree (and its compose file) is gone. With
     // recorded state, tear down exactly the stacks it lists; without state
@@ -49,13 +49,35 @@ pub(crate) fn run_down(ctx: &RuntimeContext) -> Result<()> {
     }
 
     for (project_name, profiles) in &targets {
+        // Named volumes are restart data, but anonymous volumes cannot be
+        // reattached by a later `up`. Remove service containers with `rm -v`
+        // before ordinary `down` so those anonymous volumes do not become
+        // unowned hashes that no later project-scoped purge can identify.
+        if !purge {
+            let mut remove = Command::new("docker");
+            remove.args(["compose", "-p", project_name]);
+            for profile in profiles {
+                remove.args(["--profile", profile]);
+            }
+            let status = remove
+                .args(["rm", "--force", "--stop", "--volumes"])
+                .status()
+                .context("failed to remove docker compose containers")?;
+            if !status.success() {
+                bail!("docker compose rm exited with status {status}");
+            }
+        }
+
         let mut command = Command::new("docker");
         command.args(["compose", "-p", project_name]);
         for profile in profiles {
             command.args(["--profile", profile]);
         }
+        command.args(["down", "--remove-orphans"]);
+        if purge {
+            command.args(["--volumes", "--rmi", "local"]);
+        }
         let status = command
-            .args(["down", "--remove-orphans"])
             .status()
             .context("failed to run docker compose down")?;
 
@@ -66,7 +88,11 @@ pub(crate) fn run_down(ctx: &RuntimeContext) -> Result<()> {
 
     println!(
         "{} {}",
-        out::heading("Runtime down:"),
+        out::heading(if purge {
+            "Runtime purged:"
+        } else {
+            "Runtime down:"
+        }),
         out::repo(&ctx.bundle_id)
     );
 

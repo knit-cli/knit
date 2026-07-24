@@ -18,7 +18,8 @@ you're done:
 knit bundle "my feature" --repo api --cd
 knit run up        # lift the stack: worktree code, stable ports, isolated volumes
 knit run status    # live service states, ports, URLs
-knit run down      # stop and remove
+knit run down      # stop containers; keep restart data
+knit run down --purge  # also remove bundle-owned volumes and local images
 ```
 
 What knit does to the compose shape (transform mode):
@@ -164,4 +165,8 @@ repo, not a knit change.
   eject`, then edit the generated `docker-compose.knit.yml` (step 3). Don't
   fight the transform.
 - **First build is slow** — real image builds; layer cache makes subsequent
-  runs fast. `knit run down` never deletes named volumes.
+  runs fast. Plain `knit run down` preserves named restart data while removing
+  non-reusable anonymous volumes. Use `knit run down --purge` to remove all of
+  the bundle's Compose volumes and locally built images; external volumes and
+  explicitly tagged images are preserved. Landing, archiving, or otherwise
+  disposing the bundle's worktrees purges the runtime automatically.

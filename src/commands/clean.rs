@@ -70,6 +70,18 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         return Ok(0);
     }
 
+    // A bundle whose worktrees are being discarded cannot resume its runtime.
+    // Purge while the checkouts and recorded state still identify zero-config
+    // stacks, but keep cleanup best-effort: Docker may be unavailable during
+    // archive/land and must not block a terminal bundle transition.
+    if let Err(error) = crate::commands::runtime::purge_active_runtime(active) {
+        println!(
+            "{} bundle runtime resources were not removed: {error:#}. Retry with `knit --bundle {} run down --purge`.",
+            out::warn("Warn:"),
+            active.bundle.id
+        );
+    }
+
     let mut removed = 0usize;
     let mut failures = Vec::new();
     for repo in &mut active.bundle.repos {

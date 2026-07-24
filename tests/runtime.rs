@@ -90,7 +90,7 @@ fn project_command_named_up_shadows_the_runtime_verb() {
     let stack_checkout = workspace.join(".knit/worktrees/venue-capacity/stack");
     fs::write(
         stack_checkout.join("docker-compose.knit.yml"),
-        "services:\n  backend:\n    image: scratch\n    ports:\n      - \"${KNIT_PORT_BACKEND}:4000\"\n",
+        "services:\n  backend:\n    image: scratch\n    ports:\n      - \"${KNIT_PORT_BACKEND:-4901}:4000\"\n",
     )
     .unwrap();
     knit(
@@ -203,6 +203,89 @@ fn run_up_contract_mode_injects_environment_into_repo_compose_file() {
     assert_eq!(state["database"]["mode"], "bundle");
     assert_eq!(state["profiles"], json!(["bundle-db"]));
     assert_eq!(state["env"]["KNIT_BUNDLE"], "venue-capacity");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn run_down_purge_removes_bundle_owned_volumes_and_local_images() {
+    let root = unique_temp_dir();
+    let workspace = setup_workspace(&root, true);
+    let stack_checkout = workspace.join(".knit/worktrees/venue-capacity/stack");
+    fs::write(
+        stack_checkout.join("docker-compose.knit.yml"),
+        "services:\n  backend:\n    image: scratch\n    ports:\n      - \"${KNIT_PORT_BACKEND}:4000\"\n",
+    )
+    .unwrap();
+
+    let (fake_bin, log_dir) = write_fake_docker(&root);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let env = [
+        ("PATH", path.as_str()),
+        ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+    ];
+    knit_with_env(&workspace, ["run", "up"], &env);
+    fs::remove_file(log_dir.join("calls.log")).unwrap();
+
+    let output = knit_with_env(&workspace, ["run", "down", "--purge"], &env);
+    assert!(
+        output.contains("Runtime purged:"),
+        "unexpected output: {output}"
+    );
+    let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
+    assert!(calls.contains(
+        "-p knit-run-venue-capacity --profile bundle-db down --remove-orphans --volumes --rmi local"
+    ));
+    assert!(
+        !workspace.join(".knit/runtime-runs/venue-capacity").exists(),
+        "purge should remove generated runtime state"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_archive_automatically_purges_runtime_resources() {
+    let root = unique_temp_dir();
+    // Exercise the zero-config path: cleanup must detect the compose-bearing
+    // checkout before archive removes it, even with no project runtime block.
+    let workspace = setup_workspace(&root, false);
+    let stack_checkout = workspace.join(".knit/worktrees/venue-capacity/stack");
+    fs::write(
+        stack_checkout.join("docker-compose.knit.yml"),
+        "services:\n  backend:\n    image: scratch\n    ports:\n      - \"${KNIT_PORT_BACKEND:-4901}:4000\"\n",
+    )
+    .unwrap();
+    git(&stack_checkout, ["add", "docker-compose.knit.yml"]);
+    git(
+        &stack_checkout,
+        ["commit", "-m", "Add bundle runtime compose file"],
+    );
+
+    let (fake_bin, log_dir) = write_fake_docker(&root);
+    let path = format!("{}:{}", fake_bin.display(), std::env::var("PATH").unwrap());
+    let env = [
+        ("PATH", path.as_str()),
+        ("FAKE_DOCKER_DIR", log_dir.to_str().unwrap()),
+    ];
+    knit_with_env(&workspace, ["run", "up"], &env);
+    fs::remove_file(log_dir.join("calls.log")).unwrap();
+
+    let output = knit_with_env(&workspace, ["bundle", "archive", "venue-capacity"], &env);
+    assert!(
+        output.contains("Archived bundle:"),
+        "unexpected output: {output}"
+    );
+    let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
+    assert!(
+        calls.contains("-p knit-run-venue-capacity down --remove-orphans --volumes --rmi local")
+    );
+    assert!(
+        !workspace.join(".knit/worktrees/venue-capacity").exists(),
+        "archive should remove generated worktrees"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -531,8 +614,17 @@ fn run_up_lifts_every_compose_repo_and_cross_wires_ports() {
         ],
     );
     let calls = fs::read_to_string(log_dir.join("calls.log")).unwrap();
+    assert!(calls.contains("-p knit-run-venue-capacity--alpha rm --force --stop --volumes"));
+    assert!(calls.contains("-p knit-run-venue-capacity--beta rm --force --stop --volumes"));
     assert!(calls.contains("-p knit-run-venue-capacity--alpha down --remove-orphans"));
     assert!(calls.contains("-p knit-run-venue-capacity--beta down --remove-orphans"));
+    assert!(
+        calls
+            .lines()
+            .filter(|line| line.contains(" down "))
+            .all(|line| !line.contains("--volumes") && !line.contains("--rmi")),
+        "plain `run down` should preserve named restart data and images: {calls}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
