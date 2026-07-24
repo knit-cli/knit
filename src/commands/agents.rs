@@ -1,5 +1,5 @@
 use crate::checkout::checkout_display_path;
-use crate::model::KnitProject;
+use crate::model::{KnitProject, ProjectLandingDeployment};
 use crate::output as out;
 use crate::store::read_json;
 use crate::store::ActiveBundle;
@@ -523,45 +523,30 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
         landing
             .deployments
             .iter()
-            .map(|deployment| {
-                let repo = deployment
-                    .repo_id
-                    .as_deref()
-                    .map(|repo| format!(" repo `{repo}`"))
-                    .unwrap_or_default();
-                let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
-                    crate::model::DeployMode::Push
+            .map(landing_deployment_agents_line)
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+    let target_deployments = if landing.targets.is_empty() {
+        "- (none)".to_string()
+    } else {
+        landing
+            .targets
+            .iter()
+            .map(|(branch, target)| {
+                let deployments = if target.deployments.is_empty() {
+                    "  - (none)".to_string()
                 } else {
-                    crate::model::DeployMode::Command
-                });
-                let checkout = deployment
-                    .checkout
-                    .as_ref()
-                    .map(|checkout| {
-                        let remote = checkout.remote.as_deref().unwrap_or("origin");
-                        let update = checkout.update.unwrap_or_default();
-                        format!(" from `{remote}/{}` with `{update}`", checkout.branch)
-                    })
-                    .unwrap_or_default();
-                let command = if deployment.command.is_empty() {
-                    String::new()
-                } else {
-                    format!(": `{}`", deployment.command.join(" "))
+                    target
+                        .deployments
+                        .iter()
+                        .map(|deployment| {
+                            format!("  {}", landing_deployment_agents_line(deployment))
+                        })
+                        .collect::<Vec<_>>()
+                        .join("\n")
                 };
-                let timeout = if mode == crate::model::DeployMode::Command {
-                    format!(
-                        " (timeout: {}s)",
-                        deployment
-                            .timeout_seconds
-                            .unwrap_or(crate::commands::land::DEFAULT_COMMAND_TIMEOUT_SECONDS)
-                    )
-                } else {
-                    String::new()
-                };
-                format!(
-                    "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}",
-                    id = deployment.id
-                )
+                format!("- `{branch}`:\n{deployments}")
             })
             .collect::<Vec<_>>()
             .join("\n")
@@ -581,8 +566,53 @@ Configured deployment steps:
 
 {deployments}
 
+Configured branch-target deployment steps (`landing.targets`):
+
+{target_deployments}
+
 Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan. A successful apply archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed.
 "#
+    )
+}
+
+fn landing_deployment_agents_line(deployment: &ProjectLandingDeployment) -> String {
+    let repo = deployment
+        .repo_id
+        .as_deref()
+        .map(|repo| format!(" repo `{repo}`"))
+        .unwrap_or_default();
+    let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
+        crate::model::DeployMode::Push
+    } else {
+        crate::model::DeployMode::Command
+    });
+    let checkout = deployment
+        .checkout
+        .as_ref()
+        .map(|checkout| {
+            let remote = checkout.remote.as_deref().unwrap_or("origin");
+            let update = checkout.update.unwrap_or_default();
+            format!(" from `{remote}/{}` with `{update}`", checkout.branch)
+        })
+        .unwrap_or_default();
+    let command = if deployment.command.is_empty() {
+        String::new()
+    } else {
+        format!(": `{}`", deployment.command.join(" "))
+    };
+    let timeout = if mode == crate::model::DeployMode::Command {
+        format!(
+            " (timeout: {}s)",
+            deployment
+                .timeout_seconds
+                .unwrap_or(crate::commands::land::DEFAULT_COMMAND_TIMEOUT_SECONDS)
+        )
+    } else {
+        String::new()
+    };
+    format!(
+        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}",
+        id = deployment.id
     )
 }
 

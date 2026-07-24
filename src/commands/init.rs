@@ -601,7 +601,7 @@ knit land apply
 knit land status
 ```
 
-`knit land check` is a read-only preflight: it shows each recorded PR's live state, mergeability, checks, review decision, and a landing verdict, so you can tell whether `knit land apply` will succeed before running it. When it reports a `conflict`, run `knit land update` to merge the base in and resolve, then land again. `knit publish status --live` shows the same live columns.
+`knit land check` is a read-only preflight for the reviews' current bases. Use `knit land --target <branch>` to generate a native target-aware plan; apply retargets the reviews first and then checks mergeability and CI against that target. When apply reports a `conflict`, run `knit land update` after the retarget to merge the new base in and resolve, then land again. `knit publish status --live` shows the same live columns.
 
 Land from a bundle artifact JSON (merge-only, no local workspace):
 
@@ -609,9 +609,9 @@ Land from a bundle artifact JSON (merge-only, no local workspace):
 knit land apply --from-artifact bundle.published.json --out bundle.landed.json
 ```
 
-Bare `knit land` creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. `knit land apply` executes the plan and lands each recorded PR into its GitHub PR base branch, then executes any generated or edited deployment steps. On full success it archives the bundle and removes generated worktrees under `.knit/worktrees/<bundle>/` while preserving local feature branches and the bundle artifact; pass `--keep-worktrees` to keep those checkouts. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured sync remotes; use `knit sync push --bundles` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority and deployments, while `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
+Bare `knit land` creates or shows the default plan and stops. `knit land --target staging` creates a plan that owns the target: `knit land --target staging apply` retargets every recorded review through Knit, checks and merges into staging, and selects `landing.targets.staging.deployments`. Without `--target`, recorded review bases remain authoritative. On full success apply archives the bundle and removes generated worktrees under `.knit/worktrees/<bundle>/` while preserving local feature branches and the bundle artifact; pass `--keep-worktrees` to keep those checkouts. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured sync remotes; use `knit sync push --bundles` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority, configured-base deployments, and branch-keyed `landing.targets.<branch>.deployments`; `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
-After a landed bundle's main state has been verified (deploy, CI, QA — whatever the user trusts), record it as a cross-repo known-good marker. Landing archives the bundle, so pass `--bundle` explicitly:
+After the project's configured base-branch state has been verified (deploy, CI, QA — whatever the user trusts), record it as a cross-repo known-good marker. Landing archives the bundle, so pass `--bundle` explicitly:
 
 ```sh
 knit tag v1-launch --bundle <bundle>
@@ -671,11 +671,12 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit merge status` and `knit merge show` inspect recorded merge runs.
 - `knit merge <bundle> --into <branch-or-bundle> --manual` leaves conflicts for manual resolution, followed by `knit merge --continue` or `knit merge --abort`.
 - `knit land` creates or shows the landing plan; `knit land apply` executes it, then archives the bundle and removes generated worktrees on success unless `--keep-worktrees` is passed.
+- `knit land --target <branch>` creates a native target-aware plan; applying with the same flag retargets review objects, checks and merges them there, and selects `landing.targets.<branch>` deployments.
 - `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
 - `knit land resume` continues a failed run; `knit land rollback [--apply]` previews/creates revert PRs for the merge steps a failed run already completed. A landing template or plan can set `onFailure: "rollback"` to do this automatically.
 - `knit tag <name>` records a cross-repo known-good marker: per repo it pins the freshly fetched `origin/<base_branch>` on the bundle ledger and exports annotated git tags `knit/<name>` (`--no-push` local only, `--no-git` ledger only, `-r <repo>` subset).
 - `knit tag` / `knit tag list` shows `knit/*` tags across repos with coverage; `knit tag show <name>` shows per-repo local/remote SHAs and ledger provenance.
-- `knit land apply --tag [name]` tags the landed main as part of the land (name defaults to the bundle slug); `knit config set auto-tag true` makes that the default (`--no-tag` opts out for one run).
+- `knit land apply --tag [name]` tags the configured project bases as part of the land (name defaults to the bundle slug); `knit config set auto-tag true` makes that the default (`--no-tag` opts out for one run).
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit config set advice false` disables sparse `Next:` advice.

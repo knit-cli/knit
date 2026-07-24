@@ -96,7 +96,8 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
 
     let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(land_plan.contains("Lands into:"));
-    assert!(land_plan.contains("review object's base branch"));
+    assert!(land_plan.contains("backend -> main"));
+    assert!(land_plan.contains("frontend -> main"));
     assert!(land_plan.contains("knit land apply"));
 
     fs::remove_dir_all(root).unwrap();
@@ -434,6 +435,9 @@ fn pr_create_can_override_base_branch() {
     let fake_bin = root.join("fake-bin");
     write_fake_gh(&fake_bin, &fake_gh_dir);
 
+    let create_help = knit(&workspace, ["publish", "create", "--help"]);
+    assert!(create_help.contains("knit land"), "{create_help}");
+
     let create = knit_with_fake_gh(
         &workspace,
         [
@@ -463,6 +467,12 @@ fn pr_create_can_override_base_branch() {
         bundle["publications"][0]["baseBranch"].as_str(),
         Some("release")
     );
+
+    let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(land_plan.contains("backend -> release"), "{land_plan}");
+
+    let land_status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
+    assert!(land_status.contains("backend -> release"), "{land_status}");
 
     let rerun = knit_with_fake_gh(
         &workspace,

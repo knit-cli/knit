@@ -1087,7 +1087,17 @@ fn project_agents_are_generated_from_project_json() {
                 "repoId": "frontend",
                 "mode": "push"
             }
-        ]
+        ],
+        "targets": {
+            "staging": {
+                "deployments": [{
+                    "id": "deploy-staging",
+                    "repoId": "backend",
+                    "checkout": { "branch": "staging", "remote": "origin", "update": "pull" },
+                    "command": ["fly", "deploy", "--config", "fly.staging.toml"]
+                }]
+            }
+        }
     });
     fs::write(
         &project_path,
@@ -1108,6 +1118,9 @@ fn project_agents_are_generated_from_project_json() {
     assert!(landing_agents.contains("`deploy-backend` repo `backend` uses `command` from `origin/main` with `pull`: `fly deploy`"));
     assert!(landing_agents.contains("timeout: 900s"));
     assert!(landing_agents.contains("`deploy-frontend` repo `frontend` uses `push`"));
+    assert!(landing_agents.contains("Configured branch-target deployment steps"));
+    assert!(landing_agents.contains("- `staging`:"));
+    assert!(landing_agents.contains("`deploy-staging` repo `backend` uses `command` from `origin/staging` with `pull`: `fly deploy --config fly.staging.toml`"));
     assert!(landing_agents.contains("Do not use `gh pr merge` for Knit-owned bundles."));
 
     fs::remove_dir_all(root).unwrap();

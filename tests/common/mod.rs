@@ -782,9 +782,32 @@ case "$sub" in
     ;;
   edit)
     url="$1"
+    shift
     tail="${url#https://github.com/acme/}"
     pr_repo="${tail%%/*}"
-    cat > "$GH_FAKE_DIR/edit-$pr_repo.md"
+    edited_base=""
+    body_file=""
+    while [ "$#" -gt 0 ]; do
+      case "$1" in
+        --base)
+          edited_base="$2"
+          shift 2
+          ;;
+        --body-file)
+          body_file="$2"
+          shift 2
+          ;;
+        *)
+          shift
+          ;;
+      esac
+    done
+    if [ -n "$edited_base" ]; then
+      printf '%s\n' "$edited_base" > "$GH_FAKE_DIR/create-$pr_repo.base"
+      printf '%s\n' "$pr_repo $edited_base" >> "$GH_FAKE_DIR/retarget-order.txt"
+    elif [ "$body_file" = "-" ]; then
+      cat > "$GH_FAKE_DIR/edit-$pr_repo.md"
+    fi
     printf '%s\n' "$url"
     ;;
   revert)
@@ -924,8 +947,11 @@ fn fake_github_pr_json(dir: &Path, number: &str) -> String {
     } else {
         ("open", "false")
     };
+    let base =
+        fs::read_to_string(dir.join("api-backend.base")).unwrap_or_else(|_| "main".to_string());
+    let base = base.trim();
     format!(
-        "{{\"number\":{number},\"html_url\":\"https://github.com/acme/backend/pull/{number}\",\"state\":\"{state}\",\"title\":\"backend PR\",\"body\":\"Existing body\",\"draft\":false,\"head\":{{\"ref\":\"knit/artifact-publish\",\"sha\":\"backend-head\"}},\"base\":{{\"ref\":\"main\"}},\"merged\":{merged_flag},\"mergeable\":true,\"mergeable_state\":\"clean\"}}"
+        "{{\"number\":{number},\"html_url\":\"https://github.com/acme/backend/pull/{number}\",\"state\":\"{state}\",\"title\":\"backend PR\",\"body\":\"Existing body\",\"draft\":false,\"head\":{{\"ref\":\"knit/artifact-publish\",\"sha\":\"backend-head\"}},\"base\":{{\"ref\":\"{base}\"}},\"merged\":{merged_flag},\"mergeable\":true,\"mergeable_state\":\"clean\"}}"
     )
 }
 
@@ -991,6 +1017,11 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
         }
         ("PATCH", ["repos", "acme", "backend", "pulls", number]) => {
             fs::write(dir.join("api-backend-edit.json"), &body).unwrap();
+            if let Ok(payload) = serde_json::from_str::<serde_json::Value>(&body) {
+                if let Some(base) = payload.get("base").and_then(|value| value.as_str()) {
+                    fs::write(dir.join("api-backend.base"), base).unwrap();
+                }
+            }
             (200, fake_github_pr_json(dir, number))
         }
         ("GET", ["repos", "acme", repo, "commits", _, "check-runs"]) => {

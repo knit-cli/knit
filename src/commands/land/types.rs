@@ -73,6 +73,10 @@ pub(super) struct LandPlan {
     pub(super) id: String,
     pub(super) provider: String,
     pub(super) bundle_id: String,
+    /// Explicit common review-object target selected through `knit land
+    /// --target`. When absent, each recorded publication keeps its own base.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_project_id: Option<String>,
     pub(super) created_at: String,
