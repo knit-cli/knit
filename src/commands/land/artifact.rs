@@ -3,7 +3,10 @@
 //! landed node to the artifact.
 
 use super::types::DEFAULT_LAND_PROVIDER;
-use super::{artifact_target, ensure_open_and_ready, state_is_merged};
+use super::{
+    artifact_target, ensure_open_and_ready, ensure_open_for_retarget, normalize_target_branch,
+    state_is_merged,
+};
 use crate::ids::node_id;
 use crate::model::{BundleNode, MergeMethod};
 use crate::output as out;
@@ -13,8 +16,13 @@ use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
-pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -> Result<()> {
+pub fn apply_land_from_artifact(
+    artifact_path: &Path,
+    out_path: Option<&Path>,
+    target_branch: Option<&str>,
+) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let target_branch = normalize_target_branch(target_branch)?;
     let mut bundle: crate::model::ChangeGroup = read_json(artifact_path)
         .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
     if bundle.repos.is_empty() {
@@ -37,7 +45,49 @@ pub fn apply_land_from_artifact(artifact_path: &Path, out_path: Option<&Path>) -
         let forge = providers::for_repo(repo)?;
         let target = artifact_target(&cwd, forge.as_ref(), repo)?;
 
-        let pr = forge.view(&target, &publication.url)?;
+        let mut pr = forge.view(&target, &publication.url)?;
+        if let Some(target_branch) = target_branch.as_deref() {
+            let current_base = pr
+                .base_ref_name
+                .as_deref()
+                .unwrap_or(&publication.base_branch)
+                .to_string();
+            if current_base != target_branch {
+                if state_is_merged(&pr) {
+                    bail!(
+                        "{}: PR #{} already merged into `{current_base}` and cannot be landed into `{target_branch}`.",
+                        repo.id,
+                        pr.number
+                    );
+                }
+                ensure_open_for_retarget(&repo.id, &pr)?;
+                forge
+                    .edit_base(&target, &publication.url, target_branch)
+                    .with_context(|| {
+                        format!(
+                            "{}: failed to retarget PR #{} from `{current_base}` to `{target_branch}`",
+                            repo.id, pr.number
+                        )
+                    })?;
+                pr = forge.view(&target, &publication.url)?;
+                if pr.base_ref_name.as_deref() != Some(target_branch) {
+                    bail!(
+                        "{}: provider did not retarget PR #{} to `{target_branch}`",
+                        repo.id,
+                        pr.number
+                    );
+                }
+                providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
+                println!(
+                    "{} {} PR #{} {} -> {}",
+                    out::ok("retargeted"),
+                    out::repo(&repo.id),
+                    pr.number,
+                    out::branch(&current_base),
+                    out::branch(target_branch)
+                );
+            }
+        }
         if state_is_merged(&pr) {
             providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
             merged_repo_ids.push(repo.id.clone());

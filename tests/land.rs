@@ -65,6 +65,8 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
         &root,
         vec![
             "land".to_string(),
+            "--target".to_string(),
+            "staging".to_string(),
             "apply".to_string(),
             "--from-artifact".to_string(),
             artifact.to_string_lossy().to_string(),
@@ -80,6 +82,10 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
         ],
     );
     assert!(landed.contains("checks backend"), "{landed}");
+    assert!(
+        landed.contains("retargeted backend PR #101 main -> staging"),
+        "{landed}"
+    );
     assert!(landed.contains("merged backend"), "{landed}");
     assert!(!fake_gh_dir.join("merge-order.txt").exists());
     assert_eq!(
@@ -95,11 +101,20 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
     .unwrap();
     assert_eq!(payload["merge_method"].as_str(), Some("merge"));
     assert_eq!(payload["sha"].as_str(), Some("backend-head"));
+    let edit_payload: Value = serde_json::from_str(
+        &fs::read_to_string(fake_gh_dir.join("api-backend-edit.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(edit_payload["base"].as_str(), Some("staging"));
 
     let landed_bundle: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
     assert_eq!(
         landed_bundle["publications"][0]["state"].as_str(),
         Some("MERGED")
+    );
+    assert_eq!(
+        landed_bundle["publications"][0]["baseBranch"].as_str(),
+        Some("staging")
     );
     assert!(landed_bundle["nodes"]
         .as_array()
@@ -576,6 +591,197 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
         .unwrap()
         .contains(".knit/land-worktrees/venue-capacity/backend/main"));
     assert_eq!(fs::read_to_string(&deploy_branch).unwrap().trim(), "HEAD");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn alternate_base_plan_selects_declared_target_deployments() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let deployed_target = root.join("deployed-target.txt");
+    let deploy_staging = format!(
+        "printf '%s' \"$KNIT_LAND_TARGET_BRANCH\" > '{}'",
+        deployed_target.display()
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-production",
+            "repoId": "backend",
+            "command": ["deploy-production"]
+        }],
+        "targets": {
+            "staging": {
+                "deployments": [{
+                    "id": "deploy-staging",
+                    "repoId": "backend",
+                    "command": ["sh", "-c", deploy_staging]
+                }]
+            }
+        }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "staging target"]);
+    let feature = workspace.join(".knit/worktrees/staging-target/backend");
+    append_line(&feature.join("app.txt"), "staging change");
+    knit(&workspace, ["commit", "--all", "-m", "Staging change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let output = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(output.contains("backend -> staging"), "{output}");
+    assert!(
+        output.contains("matching `landing.targets.<branch>` deployment steps are included"),
+        "{output}"
+    );
+    let plan_path = workspace.join(".knit/land-plans/staging-target.land.json");
+    let plan: Value = serde_json::from_str(&fs::read_to_string(plan_path).unwrap()).unwrap();
+    let steps = plan["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert_eq!(plan["targetBranch"].as_str(), Some("staging"));
+    assert_eq!(steps[0]["id"].as_str(), Some("merge-backend"));
+    assert_eq!(steps[1]["id"].as_str(), Some("deploy-staging"));
+    assert_eq!(
+        steps[1]["env"]["KNIT_LAND_TARGET_BRANCH"].as_str(),
+        Some("staging")
+    );
+    assert!(steps
+        .iter()
+        .all(|step| step["id"].as_str() != Some("deploy-production")));
+
+    let mismatched = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--target", "preproduction"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        mismatched.contains("Land plan targets staging"),
+        "{mismatched}"
+    );
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--target", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("retargeted"), "{apply}");
+    assert!(apply.contains("deploy-staging"), "{apply}");
+    assert_eq!(fs::read_to_string(&deployed_target).unwrap(), "staging");
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "staging"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn alternate_base_plan_without_declared_target_keeps_deployment_explicit() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-production",
+            "repoId": "backend",
+            "command": ["deploy-production"]
+        }],
+        "targets": {
+            "staging": {
+                "deployments": [{
+                    "id": "deploy-staging",
+                    "repoId": "backend",
+                    "command": ["deploy-staging"]
+                }]
+            }
+        }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "preproduction target"]);
+    let feature = workspace.join(".knit/worktrees/preproduction-target/backend");
+    append_line(&feature.join("app.txt"), "preproduction change");
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Preproduction change"],
+    );
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let output = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "preproduction"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(output.contains("backend -> preproduction"), "{output}");
+    assert!(
+        output.contains("no deployment steps matched these branches"),
+        "{output}"
+    );
+    let plan_path = workspace.join(".knit/land-plans/preproduction-target.land.json");
+    let plan: Value = serde_json::from_str(&fs::read_to_string(plan_path).unwrap()).unwrap();
+    let steps = plan["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 1);
+    assert_eq!(steps[0]["id"].as_str(), Some("merge-backend"));
 
     fs::remove_dir_all(root).unwrap();
 }

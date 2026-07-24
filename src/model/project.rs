@@ -89,6 +89,18 @@ pub struct ProjectLandingPlan {
     pub merge: ProjectLandingMergePlan,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deployments: Vec<ProjectLandingDeployment>,
+    /// Branch-keyed landing lanes. When recorded review objects target one of
+    /// these branches, Knit appends that target's deployment steps to the
+    /// generated land plan.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub targets: BTreeMap<String, ProjectLandingTarget>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingTarget {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployments: Vec<ProjectLandingDeployment>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

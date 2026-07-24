@@ -297,6 +297,10 @@ pub enum Commands {
     },
     /// Create or show the landing plan. Use `knit land apply` to execute it.
     Land {
+        /// Land every recorded review object into this target branch. The target is
+        /// stored in the plan and applied by Knit before checks and merging.
+        #[arg(long, global = true, value_name = "BRANCH")]
+        target: Option<String>,
         #[command(subcommand)]
         command: Option<LandCommand>,
     },
@@ -994,7 +998,8 @@ pub enum PublishCommand {
         /// Skip pushing feature branches. Branches must already exist on the remote.
         #[arg(long)]
         no_push: bool,
-        /// Override base branch. Use once for all repos or repeat as REPO=BRANCH.
+        /// Set the review target branch. Landing keeps it unless `knit land --target` overrides it.
+        /// Use once for all repos or repeat as REPO=BRANCH.
         #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
         bases: Vec<String>,
         /// Create review objects for every tracked repo instead of only repos with recorded work.
@@ -1147,7 +1152,7 @@ pub enum LandCommand {
         /// Skip the remote bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
-        /// After a successful land, record a cross-repo known-good tag of the resulting main. Optionally name it; defaults to the bundle slug.
+        /// After a successful land, tag the configured project bases as known-good. Optionally name it; defaults to the bundle slug.
         #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
         tag: Option<String>,
         /// Do not auto-tag even when the `auto-tag` config default is on.

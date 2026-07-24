@@ -452,13 +452,18 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::show_publication_status(&repos, all, live, provider.as_deref())
             }
         },
-        Commands::Land { command } => match command {
-            None => commands::land_default(),
+        Commands::Land { target, command } => match command {
+            None => commands::land_default(target.as_deref()),
             Some(LandCommand::Plan {
                 provider,
                 out,
                 force,
-            }) => commands::generate_land_plan(provider.as_deref(), out.as_deref(), force),
+            }) => commands::generate_land_plan(
+                provider.as_deref(),
+                out.as_deref(),
+                force,
+                target.as_deref(),
+            ),
             Some(LandCommand::Apply {
                 plan,
                 from_artifact,
@@ -476,7 +481,7 @@ pub fn run(cli: Cli) -> Result<()> {
                             "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
                         );
                     }
-                    commands::apply_land_from_artifact(&path, out.as_deref())
+                    commands::apply_land_from_artifact(&path, out.as_deref(), target.as_deref())
                 }
                 None => commands::apply_land_plan(
                     plan.as_deref(),
@@ -486,9 +491,13 @@ pub fn run(cli: Cli) -> Result<()> {
                     keep_worktrees,
                     tag,
                     no_tag,
+                    target.as_deref(),
                 ),
             },
             Some(LandCommand::Rollback { run, apply }) => {
+                if target.is_some() {
+                    anyhow::bail!("--target cannot be changed during rollback; it is stored in the landing plan.");
+                }
                 commands::rollback_land_run(run.as_deref(), apply)
             }
             Some(LandCommand::Resume {
@@ -496,16 +505,36 @@ pub fn run(cli: Cli) -> Result<()> {
                 remote,
                 no_remote,
                 skip_checks,
-            }) => commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks),
-            Some(LandCommand::Status { run }) => commands::show_land_status(run.as_deref()),
-            Some(LandCommand::Check) => commands::check_landing(),
+            }) => {
+                if target.is_some() {
+                    anyhow::bail!("--target cannot be changed during resume; it is stored in the landing plan.");
+                }
+                commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks)
+            }
+            Some(LandCommand::Status { run }) => {
+                if target.is_some() {
+                    anyhow::bail!("--target is not used by land status; inspect the stored plan target instead.");
+                }
+                commands::show_land_status(run.as_deref())
+            }
+            Some(LandCommand::Check) => {
+                if target.is_some() {
+                    anyhow::bail!("--target is applied during land apply; `knit land check` reports current review bases.");
+                }
+                commands::check_landing()
+            }
             Some(LandCommand::Update {
                 repos,
                 all,
                 push,
                 set_upstream,
                 continue_merge,
-            }) => commands::update_land_branches(&repos, all, push, set_upstream, continue_merge),
+            }) => {
+                if target.is_some() {
+                    anyhow::bail!("--target is not used by land update; apply the target plan once to retarget reviews, then run update.");
+                }
+                commands::update_land_branches(&repos, all, push, set_upstream, continue_merge)
+            }
         },
         Commands::Merge {
             source,

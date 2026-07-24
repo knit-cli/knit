@@ -35,9 +35,11 @@ knit commit --all -m "Add my feature"   # one logical commit, recorded across re
 
 knit check run ci                       # record a test verdict pinned to these exact commits
 knit publish create                     # one PR per repo, cross-linked
-knit land && knit land apply            # merge, deploy, archive, remove worktrees
+knit land --target staging              # plan native PR retarget + staging lane
+knit land --target staging apply        # retarget, check, merge, deploy, archive
+knit land && knit land apply            # default: keep recorded PR bases
 
-knit tag v1 --bundle my-feature         # after verifying main: pin the post-land mains as one
+knit tag v1 --bundle my-feature         # after verification: pin the configured project bases
                                         # named set, exported as git tags knit/v1 in every repo
 ```
 
@@ -49,7 +51,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **Parallel by construction.** The same repo can sit in many bundles at once, each on its own branch and generated worktree. Run one coding agent per bundle — they cannot collide, and each bundle worktree root carries its own `AGENTS.md` so agents wake up oriented.
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
 - **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
-- **Known-good markers across repos.** After landing and verifying main, `knit tag` pins the post-merge mains as one immutable named set — the whole-system snapshot a monorepo gets from a single SHA — recorded on the ledger and exported as plain git tags any host, CI, or clone can read.
+- **Known-good markers across repos.** After landing and verifying the configured project bases, `knit tag` pins those bases as one immutable named set — the whole-system snapshot a monorepo gets from a single SHA — recorded on the ledger and exported as plain git tags any host, CI, or clone can read.
 - **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and Urdir/Gloss cross-repo reviews on top of the same artifact.
 - **Review-ready artifact.** The same bundle artifact gives `urdir` enough cross-repo context to prepare review analysis that `gloss` can display and explain.
 

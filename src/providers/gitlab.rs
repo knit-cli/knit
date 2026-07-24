@@ -156,6 +156,22 @@ impl Forge for GitLab {
         Ok(())
     }
 
+    fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("mr"),
+                OsString::from("update"),
+                OsString::from(selector_iid(selector)),
+                OsString::from("--target-branch"),
+                OsString::from(base),
+            ],
+        );
+        cli_output(CLI, &target.cwd, args, None)?;
+        Ok(())
+    }
+
     fn merge(
         &self,
         target: &PrTarget,
