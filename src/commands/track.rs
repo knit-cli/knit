@@ -139,7 +139,7 @@ fn apply_repo_plans(
             existing.base_sha = Some(plan.base_sha);
             existing.checkout_mode = plan.checkout_mode;
             touched_repo_ids.push(existing.id.clone());
-            println!(
+            crate::human!(
                 "{} {} ({})",
                 out::movement("updated"),
                 out::repo(&existing.id),
@@ -160,7 +160,7 @@ fn apply_repo_plans(
             worktree_path: None,
             head_sha: None,
         });
-        println!("{} {}", out::movement("added"), out::repo(&repo_id));
+        crate::human!("{} {}", out::movement("added"), out::repo(&repo_id));
         touched_repo_ids.push(repo_id);
     }
 
@@ -289,7 +289,7 @@ fn resolve_project_repo_plan(
     let repo_root = git_root(Path::new(&repo.path))?;
     let snapshot = snapshot_base(&repo_root, &repo.base_branch, base_mode)
         .with_context(|| format!("{}: failed to snapshot configured base", repo.id))?;
-    println!(
+    crate::human!(
         "{}: base {} {}",
         out::repo(&repo.id),
         out::branch(&snapshot.source_ref),
