@@ -184,26 +184,46 @@ pub fn run(cli: Cli) -> Result<()> {
             offline,
             from_local_base,
             force,
+            json,
             agents,
             cd,
             command,
         } => match command {
             None => match title {
-                Some(title) => commands::start_bundle(
-                    &title,
-                    project.as_deref(),
-                    &repos,
-                    all_repos,
-                    view.as_deref(),
-                    &include,
-                    &exclude,
-                    !no_worktree,
-                    in_place,
-                    bundle_base_mode(offline, from_local_base),
-                    force,
-                    agents,
-                    cd.as_deref(),
-                ),
+                Some(title) => {
+                    if json {
+                        commands::start_bundle_json(
+                            &title,
+                            project.as_deref(),
+                            &repos,
+                            all_repos,
+                            view.as_deref(),
+                            &include,
+                            &exclude,
+                            !no_worktree,
+                            in_place,
+                            bundle_base_mode(offline, from_local_base),
+                            force,
+                            agents,
+                        )
+                    } else {
+                        commands::start_bundle(
+                            &title,
+                            project.as_deref(),
+                            &repos,
+                            all_repos,
+                            view.as_deref(),
+                            &include,
+                            &exclude,
+                            !no_worktree,
+                            in_place,
+                            bundle_base_mode(offline, from_local_base),
+                            force,
+                            agents,
+                            cd.as_deref(),
+                        )
+                    }
+                }
                 None => commands::show_current_bundle(),
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),

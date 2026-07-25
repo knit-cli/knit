@@ -149,6 +149,10 @@ pub enum Commands {
         /// Replace an existing bundle with the same slug.
         #[arg(long)]
         force: bool,
+        /// Print the created bundle id and bundle root as a machine-readable JSON
+        /// object. Progress lines move to stderr.
+        #[arg(long, requires = "title", conflicts_with = "cd")]
+        json: bool,
         /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
         #[arg(long)]
         agents: bool,
@@ -1287,4 +1291,36 @@ pub enum LandCommand {
         #[arg(long)]
         continue_merge: bool,
     },
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn bundle_create_parses_json_mode() {
+        let cli = Cli::try_parse_from(["knit", "bundle", "feature title", "--json"]).unwrap();
+
+        match cli.command {
+            Commands::Bundle {
+                title, json, cd, ..
+            } => {
+                assert_eq!(title.as_deref(), Some("feature title"));
+                assert!(json);
+                assert!(cd.is_none());
+            }
+            _ => panic!("unexpected command"),
+        }
+    }
+
+    #[test]
+    fn bundle_json_rejects_shell_mode() {
+        let error = match Cli::try_parse_from(["knit", "bundle", "feature title", "--json", "--cd"])
+        {
+            Ok(_) => panic!("--json and --cd must conflict"),
+            Err(error) => error,
+        };
+
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
 }

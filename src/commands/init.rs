@@ -13,6 +13,7 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
+use serde::Serialize;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -33,6 +34,78 @@ pub fn init_bundle(title: &str, force: bool, agents: bool) -> Result<()> {
         agents,
         None,
     )
+}
+
+/// Machine-readable `knit bundle <title> --json` result. This is intentionally
+/// small because external clients only need a stable bundle identity and the
+/// directory to open.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleStartDocument {
+    bundle_id: String,
+    bundle_root: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn start_bundle_json(
+    title: &str,
+    project: Option<&str>,
+    repo_ids: &[String],
+    all_repos: bool,
+    view: Option<&str>,
+    include: &[String],
+    exclude: &[String],
+    materialize: bool,
+    in_place: bool,
+    base_mode: BundleBaseMode,
+    force: bool,
+    agents: bool,
+) -> Result<()> {
+    crate::output::route_human_lines_to_stderr();
+    let result = (|| -> Result<BundleStartDocument> {
+        let cwd = std::env::current_dir().context("failed to read current directory")?;
+        let root = find_knit_root(&cwd).unwrap_or(cwd);
+        let bundle_id = slugify(title);
+        start_bundle(
+            title,
+            project,
+            repo_ids,
+            all_repos,
+            view,
+            include,
+            exclude,
+            materialize,
+            in_place,
+            base_mode,
+            force,
+            agents,
+            None,
+        )?;
+        Ok(bundle_start_document(&root, &bundle_id))
+    })();
+
+    match result {
+        Ok(document) => {
+            println!(
+                "{}",
+                serde_json::to_string(&document)
+                    .context("failed to serialize bundle start document")?
+            );
+            Ok(())
+        }
+        Err(error) => {
+            println!(
+                "{}",
+                serde_json::json!({
+                    "error": {
+                        "kind": "other",
+                        "message": format!("{error:#}"),
+                    }
+                })
+            );
+            Err(error)
+        }
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -72,7 +145,7 @@ pub fn start_bundle(
             let active = ActiveBundle::unlocked(root.clone(), bundle_path.clone(), bundle);
             let agents_path = write_agents_md(&root)?;
             let bundle_agents = write_bundle_worktree_agents_md(&active)?;
-            println!(
+            crate::human!(
                 "{} {}",
                 out::heading("AGENTS.md:"),
                 out::path(agents_path.display())
@@ -150,7 +223,7 @@ pub fn start_bundle(
         });
     }
 
-    println!(
+    crate::human!(
         "{} {}",
         out::heading("Active bundle:"),
         out::path(bundle_path.display())
@@ -158,7 +231,7 @@ pub fn start_bundle(
 
     if agents {
         let agents_path = write_agents_md(&root)?;
-        println!(
+        crate::human!(
             "{} {}",
             out::heading("AGENTS.md:"),
             out::path(agents_path.display())
@@ -176,6 +249,17 @@ pub fn start_bundle(
     }
 
     Ok(())
+}
+
+fn bundle_start_document(root: &Path, bundle_id: &str) -> BundleStartDocument {
+    BundleStartDocument {
+        bundle_id: bundle_id.to_string(),
+        bundle_root: root
+            .join(".knit/worktrees")
+            .join(bundle_id)
+            .to_string_lossy()
+            .into_owned(),
+    }
 }
 
 fn rollback_empty_new_bundle(
@@ -229,7 +313,7 @@ fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
 
 fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(default_shell);
-    println!("{} {}", out::heading("cd:"), out::path(path.display()));
+    crate::human!("{} {}", out::heading("cd:"), out::path(path.display()));
     let status = Command::new(&shell)
         .current_dir(path)
         .env("KNIT_ROOT", &active.root)
