@@ -28,8 +28,8 @@ pub(super) fn build_default_plan(
         .and_then(|project| project.landing.as_ref());
     let provider = requested_provider
         .or_else(|| landing.and_then(|landing| landing.provider.as_deref()))
-        .unwrap_or(DEFAULT_LAND_PROVIDER)
-        .to_string();
+        .map(ToOwned::to_owned)
+        .unwrap_or_else(|| inferred_plan_provider(active));
     ensure_provider(&provider)?;
     let merge = landing.map(|landing| &landing.merge);
     let mut steps = Vec::new();
@@ -96,6 +96,25 @@ pub(super) fn build_default_plan(
             .unwrap_or_default(),
         steps,
     })
+}
+
+fn inferred_plan_provider(active: &ActiveBundle) -> String {
+    let providers = active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| publication_for_repo(&active.bundle, &repo.id))
+        .map(|publication| publication.provider.as_str())
+        .collect::<BTreeSet<_>>();
+    if providers.len() == 1 {
+        providers
+            .into_iter()
+            .next()
+            .unwrap_or(DEFAULT_LAND_PROVIDER)
+            .to_string()
+    } else {
+        DEFAULT_LAND_PROVIDER.to_string()
+    }
 }
 
 fn load_project_for_bundle(active: &ActiveBundle) -> Result<Option<KnitProject>> {

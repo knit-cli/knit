@@ -1,5 +1,8 @@
 # Manual Test
 
+For live private-repository coverage across GitHub, GitLab, Codeberg, and
+Bitbucket Cloud, see [forge-smoke.md](forge-smoke.md).
+
 This smoke test uses two default toy git repos, one observed toy git repo, and one Knit workspace.
 
 ```sh
