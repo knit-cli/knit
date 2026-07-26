@@ -422,7 +422,14 @@ impl Forge for GitLab {
             "projects/{}/merge_requests/{iid}/pipelines?per_page=1",
             encode_path_component(&repo)
         );
-        if let Ok(output) = api_output(target, "GET", &endpoint, None) {
+        let pipelines_output = match api_output(target, "GET", &endpoint, None) {
+            Ok(output) => Some(output),
+            // Only access-shaped failures may use the synthetic CLI fallback;
+            // transient API errors must not degrade into a passed CI gate.
+            Err(error) if is_pipeline_access_error(&error) => None,
+            Err(error) => return Err(error),
+        };
+        if let Some(output) = pipelines_output {
             let pipelines: Vec<GlabPipeline> = serde_json::from_str(&output)
                 .context("failed to parse GitLab MR pipelines JSON")?;
             if let Some(pipeline) = pipelines.into_iter().next() {
@@ -438,6 +445,12 @@ impl Forge for GitLab {
                     )?;
                     let jobs: Vec<GitLabJob> = serde_json::from_str(&output)
                         .context("failed to parse GitLab pipeline jobs JSON")?;
+                    if jobs.is_empty() {
+                        // Trigger-only (parent/child) pipelines list no regular
+                        // jobs; report the pipeline itself so an existing
+                        // pipeline never reads as "no required checks".
+                        return Ok(pipeline_check(Some(pipeline)));
+                    }
                     return Ok(jobs.into_iter().map(Into::into).collect());
                 }
                 return Ok(pipeline_check(Some(pipeline)));
@@ -658,6 +671,19 @@ fn native_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result
             bail!("GitLab API request failed during {operation}: {error}")
         }
     }
+}
+
+fn is_pipeline_access_error(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string().to_ascii_lowercase();
+        message.contains("http 401")
+            || message.contains("http 403")
+            || message.contains("http 404")
+            || message.contains("unauthorized")
+            || message.contains("forbidden")
+            || message.contains("not found")
+            || message.contains("insufficient_scope")
+    })
 }
 
 fn non_empty_env(name: &str) -> Option<String> {
