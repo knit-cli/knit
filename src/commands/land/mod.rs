@@ -497,7 +497,9 @@ fn required_repo_id(step: &LandStep) -> Result<&str> {
 
 fn ensure_provider(provider: &str) -> Result<()> {
     if providers::by_id(provider).is_none() {
-        bail!("unsupported land provider `{provider}`. Supported: github, gitlab, forgejo.");
+        bail!(
+            "unsupported land provider `{provider}`. Supported: github, gitlab, forgejo, bitbucket."
+        );
     }
     Ok(())
 }
