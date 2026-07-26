@@ -182,7 +182,10 @@ pub trait Forge {
         loop {
             let runs = match self.check_runs(target, selector, required_only) {
                 Ok(runs) => runs,
-                Err(err) if is_gh_checks_access_error(&err) => Vec::new(),
+                // The lenient access-error fallback matches gh-shaped error
+                // text; other forges embed raw response bodies, so treating
+                // their failures as "no checks" would skip the CI gate.
+                Err(err) if self.id() == "github" && is_gh_checks_access_error(&err) => Vec::new(),
                 Err(err) => return Err(err),
             };
             match checks_state(&runs) {
