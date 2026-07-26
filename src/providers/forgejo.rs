@@ -4,6 +4,7 @@ use super::{
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
+use serde_json::json;
 use std::ffi::OsString;
 
 const CLI: &str = "tea";
@@ -32,6 +33,55 @@ struct TeaPr {
     base: Option<String>,
 }
 
+#[derive(Debug, Deserialize)]
+struct ForgejoApiPr {
+    #[serde(default, alias = "index")]
+    number: u64,
+    #[serde(default)]
+    html_url: String,
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    body: Option<String>,
+    #[serde(default)]
+    draft: Option<bool>,
+    head: ForgejoApiRef,
+    base: ForgejoApiRef,
+    #[serde(default)]
+    merged: bool,
+    #[serde(default)]
+    mergeable: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoApiRef {
+    #[serde(rename = "ref")]
+    ref_name: String,
+    #[serde(default)]
+    sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoReview {
+    #[serde(default)]
+    state: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoStatusCollection {
+    #[serde(default)]
+    statuses: Option<Vec<ForgejoStatus>>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoStatus {
+    #[serde(default)]
+    context: Option<String>,
+    state: String,
+}
+
 impl Forge for Forgejo {
     fn id(&self) -> &'static str {
         "forgejo"
@@ -55,6 +105,22 @@ impl Forge for Forgejo {
         head: &str,
         base: &str,
     ) -> Result<Option<PullRequest>> {
+        if use_api(target) {
+            let repo = resolve_repo(target)?;
+            let output = api_output(
+                target,
+                "GET",
+                &format!("repos/{repo}/pulls?state=all&limit=50"),
+                None,
+            )?;
+            let prs: Vec<ForgejoApiPr> =
+                serde_json::from_str(&output).context("failed to parse Forgejo pull list JSON")?;
+            return prs
+                .into_iter()
+                .find(|pr| pr.head.ref_name == head && pr.base.ref_name == base)
+                .map(|pr| enrich_api_pr(target, &repo, pr))
+                .transpose();
+        }
         let found = self
             .list(target, "all")?
             .into_iter()
@@ -69,8 +135,32 @@ impl Forge for Forgejo {
         head: &str,
         title: &str,
         body: &str,
-        _draft: bool,
+        draft: bool,
     ) -> Result<String> {
+        let title = if draft && !title.starts_with("Draft:") {
+            format!("Draft: {title}")
+        } else {
+            title.to_string()
+        };
+        if use_api(target) {
+            let repo = resolve_repo(target)?;
+            let payload = serde_json::to_string(&json!({
+                "head": head,
+                "base": base,
+                "title": title,
+                "body": body,
+            }))
+            .context("failed to encode Forgejo pull request payload")?;
+            let output = api_output(
+                target,
+                "POST",
+                &format!("repos/{repo}/pulls"),
+                Some(&payload),
+            )?;
+            let pr: ForgejoApiPr = serde_json::from_str(&output)
+                .context("failed to parse Forgejo pull create JSON")?;
+            return Ok(pr.html_url);
+        }
         let args = repo_scoped_args(
             target,
             "--repo",
@@ -82,7 +172,7 @@ impl Forge for Forgejo {
                 OsString::from("--base"),
                 OsString::from(base),
                 OsString::from("--title"),
-                OsString::from(title),
+                OsString::from(&title),
                 OsString::from("--description"),
                 OsString::from(body),
             ],
@@ -98,6 +188,18 @@ impl Forge for Forgejo {
     }
 
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
+        if use_api(target) {
+            let repo = resolve_repo(target)?;
+            let output = api_output(
+                target,
+                "GET",
+                &format!("repos/{repo}/pulls/{}", selector_index(selector)),
+                None,
+            )?;
+            let pr: ForgejoApiPr =
+                serde_json::from_str(&output).context("failed to parse Forgejo pull JSON")?;
+            return enrich_api_pr(target, &repo, pr);
+        }
         let index = selector_index(selector);
         self.list(target, "all")?
             .into_iter()
@@ -107,6 +209,9 @@ impl Forge for Forgejo {
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
+        if use_api(target) {
+            return edit_api_pr(target, selector, &json!({ "body": body }));
+        }
         let args = repo_scoped_args(
             target,
             "--repo",
@@ -122,20 +227,48 @@ impl Forge for Forgejo {
         Ok(())
     }
 
+    fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
+        edit_api_pr(target, selector, &json!({ "base": base }))
+    }
+
     fn merge(
         &self,
         target: &PrTarget,
         selector: &str,
         method: &str,
         delete_branch: bool,
-        _match_head: Option<&str>,
+        match_head: Option<&str>,
     ) -> Result<()> {
+        if let Some(expected) = match_head.filter(|sha| !sha.is_empty()) {
+            if let Some(actual) = self.view(target, selector)?.head_ref_oid {
+                if !sha_matches(expected, &actual) {
+                    bail!(
+                        "Forgejo PR {selector} head `{actual}` does not match expected `{expected}`; refusing to merge."
+                    );
+                }
+            }
+        }
         let style = match method {
             "merge" => "merge",
             "squash" => "squash",
             "rebase" => "rebase",
             other => bail!("unknown Forgejo merge method `{other}`"),
         };
+        if use_api(target) {
+            let repo = resolve_repo(target)?;
+            let payload = serde_json::to_string(&json!({
+                "Do": style,
+                "delete_branch_after_merge": delete_branch,
+            }))
+            .context("failed to encode Forgejo merge payload")?;
+            api_output(
+                target,
+                "POST",
+                &format!("repos/{repo}/pulls/{}/merge", selector_index(selector)),
+                Some(&payload),
+            )?;
+            return Ok(());
+        }
         let mut args = vec![
             OsString::from("pr"),
             OsString::from("merge"),
@@ -153,13 +286,22 @@ impl Forge for Forgejo {
 
     fn check_runs(
         &self,
-        _target: &PrTarget,
-        _selector: &str,
+        target: &PrTarget,
+        selector: &str,
         _required_only: bool,
     ) -> Result<Vec<CheckRun>> {
-        // `tea` does not expose commit-status checks; report none so landing
-        // proceeds (Codeberg/Forgejo typically gate by review, not checks).
-        Ok(Vec::new())
+        if !use_api(target) {
+            // Basic tea-only users can still publish and land; richer status
+            // evidence requires an API token.
+            return Ok(Vec::new());
+        }
+        let repo = resolve_repo(target)?;
+        let sha = self
+            .view(target, selector)?
+            .head_ref_oid
+            .filter(|sha| !sha.is_empty())
+            .with_context(|| format!("could not determine Forgejo PR head for `{selector}`"))?;
+        commit_check_runs(target, &repo, &sha)
     }
 }
 
@@ -185,6 +327,256 @@ impl Forgejo {
         }
         serde_json::from_str(&output).context("failed to parse `tea pr list` JSON")
     }
+}
+
+fn use_api(target: &PrTarget) -> bool {
+    target.repo_full_name.is_some() || api_token().is_some()
+}
+
+fn resolve_repo(target: &PrTarget) -> Result<String> {
+    if let Some(repo) = target
+        .repo_full_name
+        .as_deref()
+        .map(str::trim)
+        .filter(|repo| !repo.is_empty())
+    {
+        return Ok(repo.to_string());
+    }
+    let remote = crate::git::git_output_optional(&target.cwd, ["remote", "get-url", "origin"])?
+        .with_context(|| {
+            format!(
+                "could not resolve Forgejo repository: no origin remote in {}",
+                target.cwd.display()
+            )
+        })?;
+    full_name(&remote).with_context(|| {
+        format!(
+            "could not parse a Forgejo owner/repository from origin `{}`",
+            remote.trim()
+        )
+    })
+}
+
+fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<PullRequest> {
+    let index = pr.number;
+    let approved = api_output(
+        target,
+        "GET",
+        &format!("repos/{repo}/pulls/{index}/reviews"),
+        None,
+    )
+    .ok()
+    .and_then(|output| serde_json::from_str::<Vec<ForgejoReview>>(&output).ok())
+    .is_some_and(|reviews| {
+        reviews.iter().any(|review| {
+            review
+                .state
+                .as_deref()
+                .is_some_and(|state| state.eq_ignore_ascii_case("APPROVED"))
+        })
+    });
+    Ok(PullRequest {
+        number: pr.number,
+        url: pr.html_url,
+        state: Some(if pr.merged {
+            "MERGED".to_string()
+        } else {
+            normalize_state(pr.state.as_deref())
+        }),
+        title: pr.title,
+        base_ref_name: Some(pr.base.ref_name),
+        head_ref_name: Some(pr.head.ref_name),
+        body: pr.body,
+        is_draft: pr.draft,
+        head_ref_oid: pr.head.sha,
+        mergeable: pr.mergeable.map(|mergeable| {
+            if mergeable {
+                "MERGEABLE".to_string()
+            } else {
+                "CONFLICTING".to_string()
+            }
+        }),
+        merge_state_status: None,
+        review_decision: approved.then(|| "APPROVED".to_string()),
+    })
+}
+
+fn edit_api_pr(target: &PrTarget, selector: &str, value: &serde_json::Value) -> Result<()> {
+    let repo = resolve_repo(target)?;
+    let payload =
+        serde_json::to_string(value).context("failed to encode Forgejo pull edit payload")?;
+    api_output(
+        target,
+        "PATCH",
+        &format!("repos/{repo}/pulls/{}", selector_index(selector)),
+        Some(&payload),
+    )?;
+    Ok(())
+}
+
+pub(crate) fn commit_check_runs(target: &PrTarget, repo: &str, sha: &str) -> Result<Vec<CheckRun>> {
+    let output = api_output(
+        target,
+        "GET",
+        &format!("repos/{repo}/commits/{}/status", encode_path_component(sha)),
+        None,
+    )?;
+    let collection: ForgejoStatusCollection =
+        serde_json::from_str(&output).context("failed to parse Forgejo commit status JSON")?;
+    Ok(collection
+        .statuses
+        .unwrap_or_default()
+        .into_iter()
+        .map(Into::into)
+        .collect())
+}
+
+impl From<ForgejoStatus> for CheckRun {
+    fn from(status: ForgejoStatus) -> Self {
+        let (state, bucket) = forgejo_status_bucket(&status.state);
+        CheckRun {
+            name: status.context.unwrap_or_else(|| "status".to_string()),
+            state: Some(state.to_string()),
+            bucket: Some(bucket.to_string()),
+        }
+    }
+}
+
+fn forgejo_status_bucket(status: &str) -> (&'static str, &'static str) {
+    match status.to_ascii_lowercase().as_str() {
+        "success" => ("SUCCESS", "pass"),
+        "failure" | "error" => ("FAILURE", "fail"),
+        "cancelled" | "canceled" => ("CANCELLED", "cancel"),
+        "warning" => ("SKIPPED", "skipping"),
+        _ => ("RUNNING", "pending"),
+    }
+}
+
+fn sha_matches(expected: &str, actual: &str) -> bool {
+    expected.starts_with(actual) || actual.starts_with(expected)
+}
+
+fn api_output(
+    target: &PrTarget,
+    method: &str,
+    endpoint: &str,
+    body: Option<&str>,
+) -> Result<String> {
+    let token = api_token().context(
+        "Forgejo API access requires KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN",
+    )?;
+    let base = api_base(target)?;
+    let endpoint = endpoint.trim_start_matches('/');
+    let operation = format!("{method} /{endpoint}");
+    let agent = ureq::AgentBuilder::new()
+        .timeout_connect(std::time::Duration::from_secs(10))
+        .timeout(std::time::Duration::from_secs(30))
+        .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
+        .build();
+    for attempt in 0..3 {
+        let mut request = agent
+            .request(method, &format!("{base}/{endpoint}"))
+            .set("Accept", "application/json")
+            .set("User-Agent", "knit")
+            .set("Authorization", &format!("token {token}"));
+        if body.is_some() {
+            request = request.set("Content-Type", "application/json");
+        }
+        let response = match body {
+            Some(input) => request.send_string(input),
+            None => request.call(),
+        };
+        match response {
+            Ok(response) => {
+                return response.into_string().with_context(|| {
+                    format!("failed to read Forgejo API response for {operation}")
+                });
+            }
+            Err(ureq::Error::Status(status, response)) => {
+                let detail = response.into_string().unwrap_or_default();
+                if (500..=599).contains(&status) && attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
+                    continue;
+                }
+                if status == 401 || status == 403 {
+                    bail!(
+                        "Forgejo API request failed during {operation}: HTTP {status}: {}\nHint: set KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN to a repository-capable token.",
+                        detail.trim()
+                    );
+                }
+                bail!(
+                    "Forgejo API request failed during {operation}: HTTP {status}: {}",
+                    detail.trim()
+                );
+            }
+            Err(ureq::Error::Transport(error)) => {
+                if attempt < 2 {
+                    std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
+                    continue;
+                }
+                bail!("Forgejo API request failed during {operation}: {error}")
+            }
+        }
+    }
+    unreachable!("Forgejo API retry loop always returns or errors")
+}
+
+fn api_base(target: &PrTarget) -> Result<String> {
+    if let Some(base) = std::env::var("KNIT_FORGEJO_API_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(base);
+    }
+    if target.repo_full_name.is_none() {
+        if let Some(remote) =
+            crate::git::git_output_optional(&target.cwd, ["remote", "get-url", "origin"])?
+        {
+            if let Some(host) = super::remote_host(&remote) {
+                return Ok(format!("https://{host}/api/v1"));
+            }
+        }
+    }
+    Ok("https://codeberg.org/api/v1".to_string())
+}
+
+fn api_token() -> Option<String> {
+    ["KNIT_FORGEJO_TOKEN", "CODEBERG_TOKEN", "GITEA_TOKEN"]
+        .into_iter()
+        .find_map(|name| {
+            std::env::var(name)
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty())
+        })
+}
+
+fn ipv4_first_resolver(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr>> {
+    use std::net::ToSocketAddrs;
+    let all = netloc.to_socket_addrs()?.collect::<Vec<_>>();
+    let v4 = all
+        .iter()
+        .copied()
+        .filter(std::net::SocketAddr::is_ipv4)
+        .collect::<Vec<_>>();
+    Ok(if v4.is_empty() { all } else { v4 })
+}
+
+fn encode_path_component(input: &str) -> String {
+    let mut encoded = String::new();
+    for byte in input.bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                encoded.push(byte as char);
+            }
+            _ => {
+                use std::fmt::Write as _;
+                write!(&mut encoded, "%{byte:02X}").expect("writing to a string cannot fail");
+            }
+        }
+    }
+    encoded
 }
 
 fn into_pull_request(pr: TeaPr) -> PullRequest {
@@ -275,5 +667,12 @@ mod tests {
         );
         assert_eq!(selector_index("#9"), "9");
         assert_eq!(selector_index("5"), "5");
+    }
+
+    #[test]
+    fn null_commit_statuses_are_treated_as_empty() {
+        let collection: ForgejoStatusCollection =
+            serde_json::from_str(r#"{"statuses":null}"#).unwrap();
+        assert!(collection.statuses.unwrap_or_default().is_empty());
     }
 }

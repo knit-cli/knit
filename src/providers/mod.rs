@@ -1,3 +1,4 @@
+pub mod bitbucket;
 pub mod forgejo;
 pub mod github;
 pub mod gitlab;
@@ -216,7 +217,7 @@ pub fn for_remote(remote: &str) -> Option<Box<dyn Forge>> {
 
 /// Resolve the forge adapter for a tracked repo, using its recorded remote.
 ///
-/// GitLab and Codeberg/Forgejo are detected from the remote host; every other
+/// GitLab, Codeberg/Forgejo, and Bitbucket are detected from the remote host; every other
 /// remote (including unrecognized hosts and local paths) defaults to GitHub,
 /// preserving Knit's original `gh`-backed behavior.
 pub fn for_repo(repo: &RepoEntry) -> Result<Box<dyn Forge>> {
@@ -233,6 +234,7 @@ pub fn by_id(id: &str) -> Option<Box<dyn Forge>> {
         "github" => Some(Box::new(github::GitHub)),
         "gitlab" => Some(Box::new(gitlab::GitLab)),
         "forgejo" | "codeberg" | "gitea" => Some(Box::new(forgejo::Forgejo)),
+        "bitbucket" => Some(Box::new(bitbucket::Bitbucket)),
         _ => None,
     }
 }
@@ -245,6 +247,8 @@ fn by_host(host: &str) -> Option<Box<dyn Forge>> {
         Some(Box::new(gitlab::GitLab))
     } else if host == "codeberg.org" || host.contains("forgejo") || host.contains("gitea") {
         Some(Box::new(forgejo::Forgejo))
+    } else if host == "bitbucket.org" || host.contains("bitbucket") {
+        Some(Box::new(bitbucket::Bitbucket))
     } else {
         None
     }
@@ -625,6 +629,10 @@ mod tests {
             for_remote("https://codeberg.org/acme/x.git").map(|f| f.id()),
             Some("forgejo")
         );
+        assert_eq!(
+            for_remote("https://bitbucket.org/acme/x.git").map(|f| f.id()),
+            Some("bitbucket")
+        );
         assert!(for_remote("https://example.com/acme/x.git").is_none());
     }
 
@@ -632,7 +640,7 @@ mod tests {
     fn by_id_resolves_aliases() {
         assert_eq!(by_id("github").map(|f| f.id()), Some("github"));
         assert_eq!(by_id("codeberg").map(|f| f.id()), Some("forgejo"));
-        assert!(by_id("bitbucket").is_none());
+        assert_eq!(by_id("bitbucket").map(|f| f.id()), Some("bitbucket"));
     }
 
     #[test]

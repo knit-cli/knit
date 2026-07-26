@@ -96,9 +96,12 @@ fn tag_creates_annotated_tags_pins_origin_base_and_records_node() {
     let message = node["message"].as_str().unwrap();
     assert!(message.contains("bundle: venue-capacity"), "{message}");
     assert!(message.contains("configured-base CI"), "{message}");
-    // Local bare origins have no GitHub slug, so CI evidence degrades to
+    // Local bare origins have no forge slug, so CI evidence degrades to
     // unknown without blocking the tag.
-    assert!(message.contains("unknown (no GitHub remote)"), "{message}");
+    assert!(
+        message.contains("unknown (unparseable forge remote)"),
+        "{message}"
+    );
     assert!(message.contains("pins:"), "{message}");
 
     assert!(knit(&workspace, ["bundle", "validate"]).contains("Bundle valid"));
