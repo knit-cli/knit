@@ -97,7 +97,7 @@ knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
 knit land
-knit land plan [--provider github|gitlab|forgejo] [--out <path>] [--force]
+knit land plan [--provider github|gitlab|forgejo|bitbucket] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
 knit land apply [--plan <path>] [--keep-worktrees] [--remote <remote>]... [--no-remote] [--tag [<name>]] [--no-tag]
@@ -246,7 +246,7 @@ The intended workflow is land → verify → tag: `knit land apply` merges and d
 
 **Tagging on landing.** When you want the tag every time, let landing do it: `knit land apply --tag [name]` records the tag as part of a successful land (an omitted name defaults to the bundle slug), and `knit config set auto-tag true` makes that the default for every land (`--no-tag` opts out of the default for one run). Landing has already merged and archived by the time the tag runs, so a tag failure is a warning with a retry hint, never a failed land. Tagging on land only works with local checkouts, not `knit land apply --from-artifact`.
 
-**Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **configured-base CI** verdicts — GitHub check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
+**Honesty model.** The tag records exactly what Knit can prove, never more. The annotation and node message carry the bundle id, the land run when one exists, recorded check verdicts explicitly labeled as computed on the feature branches (not the tagged commits), and best-effort **configured-base CI** verdicts — provider check runs and commit statuses queried for each pinned SHA itself. Red or pending evidence, and a landed feature head that is not an ancestor of the tagged commit (normal after squash or rebase merges), are printed as warnings and recorded, never errors: the human decides whether the state deserves the tag. Per-repo green CI still does not prove the cross-repo *combination* works — that claim is yours, and the tag records that you made it, when, and on what evidence.
 
 The read verbs (`knit tag`, `knit tag list`, `knit tag show`) are project-wide: they scan the active project's full repo set regardless of which bundle context they run from, since tags are facts about the whole project, not one bundle. Deliberate targeting with `--bundle`/`KNIT_BUNDLE` scopes them to that bundle's repos, and ad-hoc workspaces without a project use the resolved bundle.
 
@@ -536,7 +536,7 @@ knit push --all
 knit push --set-upstream frontend
 ```
 
-`knit publish` publishes tracked feature branches to a code host. Knit is host-independent: it detects each repo's host from its git remote and drives that host's CLI. GitLab (`glab`, merge requests) and Codeberg/Forgejo (`tea`, pull requests) are detected from their remote hosts; every other remote defaults to GitHub (`gh`, pull requests). Install and authenticate the matching CLI for the repos you are publishing.
+`knit publish` publishes tracked feature branches to a code host. Knit is host-independent: it detects each repo's host from its git remote. GitHub uses `gh`, GitLab uses `glab`, Codeberg/Forgejo uses `tea` plus REST for richer metadata, and Bitbucket Cloud uses its REST API. Unrecognized remotes retain the historical GitHub fallback.
 
 ```sh
 knit publish create
@@ -550,7 +550,7 @@ knit publish sync
 knit publish status
 ```
 
-`knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
+`knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg, or Bitbucket) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. That target is recorded with the publication. A later native `knit land --target <branch>` can deliberately replace those recorded review bases as part of its landing contract. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
 
@@ -567,6 +567,21 @@ Creating reviews against staging up front with `knit publish create --base stagi
 When a bundle continues after its recorded reviews were merged or closed, pass `--renew` to start a fresh review round without replacing the bundle. Knit verifies that each recorded review is terminal, refuses open or unverifiable reviews, and refuses renewal when the feature branch still points at the recorded review head. The new review replaces the current per-repo publication projection; the terminal review remains unchanged on its host. Open renewed publications make a previously landed bundle effectively open again. Because an existing landing plan may predate the new repo set, regenerate it with `knit land plan --force` and inspect it before applying.
 
 Hosted services that run Knit from bundle artifacts can set `KNIT_GITHUB_API_TRANSPORT=ipv4` (the historical `curl`/`curl-ipv4` values still work, as do `native`/`api`) to make GitHub artifact-mode publish and landing use Knit's built-in GitHub REST client instead of `gh pr ...` commands. The client resolves hostnames IPv4-first and requires `GH_TOKEN` or `GITHUB_TOKEN` in the environment; no external `curl` is needed. It is intended for non-interactive runtimes where provider CLI prompts, host credential stores, or default IPv6 routing can hang simple GitHub I/O. Local workspace commands keep using the normal provider CLIs unless this environment variable is set. `KNIT_GITHUB_API_BASE` overrides the API base URL (defaults to `https://api.github.com`), mainly for tests.
+
+Bitbucket is always native REST. Authentication is resolved in this order:
+`KNIT_BITBUCKET_ACCESS_TOKEN` as a bearer token, or
+`KNIT_BITBUCKET_EMAIL` together with `KNIT_BITBUCKET_API_TOKEN` as HTTP Basic
+credentials. The latter also accepts the legacy Bitbucket username/app-password
+pair. `KNIT_BITBUCKET_API_BASE` overrides the default
+`https://api.bitbucket.org/2.0`.
+
+GitLab's richer REST surfaces use `KNIT_GITLAB_TOKEN` then `GITLAB_TOKEN`;
+ordinary workspace operations can continue to use `glab auth login`.
+`KNIT_GITLAB_API_BASE` defaults to `https://gitlab.com/api/v4`. Forgejo REST
+uses `KNIT_FORGEJO_TOKEN`, then `CODEBERG_TOKEN`, then `GITEA_TOKEN`.
+`KNIT_FORGEJO_API_BASE` overrides the API base; otherwise Knit derives a
+self-hosted base from the remote or defaults artifact operations to
+`https://codeberg.org/api/v1`.
 
 When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
 
@@ -620,7 +635,7 @@ knit land apply
 
 Do not merge the host review objects directly (for example `gh pr merge`) for Knit-owned bundles, and do not use `knit merge --into main` as a substitute for PR landing unless you explicitly want direct branch integration instead of PR landing.
 
-`knit land` coordinates landing the recorded cross-repo review set. It resolves each repo's host adapter from its remote (GitHub, GitLab, or Codeberg/Forgejo):
+`knit land` coordinates landing the recorded cross-repo review set. It resolves each repo's host adapter from its remote (GitHub, GitLab, Codeberg/Forgejo, or Bitbucket):
 
 ```sh
 knit land plan
@@ -750,7 +765,7 @@ Typical node types:
 
 `headNodeId` points at the latest node. Gloss can inspect any node, but the most useful review usually comes from the current head or the final pre-PR bundle.
 
-`publications` records provider metadata for published branches. It is useful for linking the GitHub PR set that belongs to the bundle, but it is not the source of truth for code state; git branches, SHAs, and bundle nodes remain the source of truth.
+`publications` records provider metadata for the hosted review set that belongs to the bundle, but it is not the source of truth for code state; git branches, SHAs, and bundle nodes remain the source of truth.
 
 `knit schema print <name>` prints bundled JSON Schemas. `knit doctor` validates workspace JSON and repairable local state such as stale locks, missing repo paths, and missing recorded worktrees. `knit migrate` rewrites older additive JSON files into the current shape; `knit migrate --check` reports what would change without writing.
 
@@ -766,7 +781,7 @@ Sparse advice is enabled by default for new workspaces. It prints a `Next:` line
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
 - `knit push` pushes feature branches to `origin` and, when sync remotes are configured and `push-sync` is enabled, the bundle artifact to those remotes; use `knit publish create` to publish review objects.
-- `knit publish` detects the host from each repo's remote: GitLab uses `glab`, Codeberg/Forgejo uses `tea`, and every other remote defaults to GitHub's `gh`. The matching CLI must be installed and authenticated. Bitbucket and other hosts would need new adapters. Native `land --target` retargeting is implemented for GitHub and GitLab. Current `tea` releases do not expose changing an existing PR's base, so a Forgejo target must be chosen at publication time with `knit publish create --base <branch>`; Knit then lands to that recorded base normally. The GitLab and Forgejo adapters target current `glab`/`tea` JSON; their field mapping may need tuning across CLI versions, and `tea` does not surface commit-status checks, so landing treats Forgejo PRs as having no required checks.
+- `knit publish` detects GitHub, GitLab, Codeberg/Forgejo, and Bitbucket Cloud from each repo remote; unrecognized remotes default to GitHub for compatibility. GitLab and Forgejo keep their CLI paths for the basic workspace loop and use REST for granular CI, review state, mergeability, SHA guards, and retargeting. Without a Forgejo REST token, those richer fields degrade to empty/unknown and the basic `tea` loop remains available. Bitbucket does not expose pre-merge conflict state, so conflicts surface as merge API errors. Bitbucket and Forgejo have no provider-native revert-PR API; GitHub and GitLab do.
 - `knit publish create` is not perfectly transactional. Branch pushes, review creation, and body updates happen sequentially. If phase two fails after review objects are created, run `knit publish sync`.
 - `knit land` resolves the host adapter per repo from its remote. A merge lands into the recorded base branch. Remote merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`, or use `knit land rollback` to open revert PRs for the steps that already merged.
 - `knit land plan` never executes local commands. `run` steps execute only during `apply` or `resume`.
@@ -791,6 +806,6 @@ See [architecture.md](architecture.md) for the module boundaries and test layout
 
 - Standalone JSON Schema for `ChangeGroup`
 - Safer partial-failure recovery for multi-repo commits
-- More host adapters (e.g. Bitbucket) and richer GitLab/Forgejo check integration
+- Additional self-hosted forge variants and pagination hardening
 - Better detection of existing registered worktrees
 - Optional bundle export/import flows for handoff to Gloss

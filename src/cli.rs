@@ -1105,7 +1105,7 @@ pub enum PublishCommand {
         /// Skip the remote bundle sync for this publish.
         #[arg(long)]
         no_remote: bool,
-        /// Limit publishing to repos hosted on this provider (github, gitlab, forgejo). Default: every repo's own host.
+        /// Limit publishing to repos hosted on this provider (github, gitlab, forgejo, bitbucket). Default: every repo's own host.
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
         /// Shorthand for `--provider github`.
@@ -1125,7 +1125,7 @@ pub enum PublishCommand {
         /// Sync every tracked repo instead of only repos with recorded work or publications.
         #[arg(long)]
         all: bool,
-        /// Limit the sync to repos hosted on this provider (github, gitlab, forgejo). Default: every repo's own host.
+        /// Limit the sync to repos hosted on this provider (github, gitlab, forgejo, bitbucket). Default: every repo's own host.
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
         /// Shorthand for `--provider github`.
@@ -1142,7 +1142,7 @@ pub enum PublishCommand {
         /// Fetch live mergeability, checks, and review state from the host.
         #[arg(long)]
         live: bool,
-        /// Limit the status to repos hosted on this provider (github, gitlab, forgejo).
+        /// Limit the status to repos hosted on this provider (github, gitlab, forgejo, bitbucket).
         #[arg(long, value_name = "PROVIDER")]
         provider: Option<String>,
         /// Shorthand for `--provider github`.
@@ -1197,7 +1197,7 @@ pub enum TagCommand {
 pub enum LandCommand {
     /// Generate an editable landing plan from recorded publications.
     Plan {
-        /// Landing provider to target. GitHub is the only provider implemented.
+        /// Landing provider to target (github, gitlab, forgejo, bitbucket).
         #[arg(long)]
         provider: Option<String>,
         /// Write the generated plan to a custom path.

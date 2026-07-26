@@ -21,7 +21,7 @@ use crate::git::{
 use crate::ids::{expand_repo_selectors, node_id, short_sha};
 use crate::model::{BundleNode, ChangeGroup, CommitRef};
 use crate::output as out;
-use crate::providers::{self, github, CheckRun, PrTarget};
+use crate::providers::{self, bitbucket, forgejo, github, gitlab, CheckRun, PrTarget};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{
     find_knit_root, load_active_bundle, load_active_bundle_for_update, load_config, read_json,
@@ -608,20 +608,24 @@ fn collect_ci_evidence(
                 let Ok(forge) = providers::for_repo(repo) else {
                     return "unknown (no provider)".to_string();
                 };
-                if forge.id() != "github" {
-                    return "unknown (provider not supported)".to_string();
-                }
                 let Some(remote) = repo.remote.as_deref() else {
                     return "unknown (no remote recorded)".to_string();
                 };
                 let Some(slug) = forge.repo_full_name(remote) else {
-                    return "unknown (no GitHub remote)".to_string();
+                    return "unknown (unparseable forge remote)".to_string();
                 };
                 let Some(target) = targets.iter().find(|target| target.repo_id == repo.id) else {
                     return "unknown (no pin)".to_string();
                 };
                 let pr_target = PrTarget::explicit(target.path.clone(), slug.clone());
-                match github::commit_check_runs(&pr_target, &slug, sha) {
+                let runs = match forge.id() {
+                    "github" => github::commit_check_runs(&pr_target, &slug, sha),
+                    "gitlab" => gitlab::commit_check_runs(&pr_target, &slug, sha),
+                    "forgejo" => forgejo::commit_check_runs(&pr_target, &slug, sha),
+                    "bitbucket" => bitbucket::commit_check_runs(&pr_target, &slug, sha),
+                    _ => return "unknown (provider not supported)".to_string(),
+                };
+                match runs {
                     Ok(runs) => ci_verdict(&runs).to_string(),
                     Err(_) => "unknown (ci query failed)".to_string(),
                 }
