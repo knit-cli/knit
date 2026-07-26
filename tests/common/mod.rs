@@ -542,11 +542,33 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("FORGE_FAKE_DIR", fake_dir);
+    scrub_ambient_forge_env(&mut command);
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
     }
     run(command)
+}
+
+/// Strip forge token/base env vars so spawned knit processes never pick up a
+/// developer's real credentials (or a sibling test's `set_var`) and silently
+/// switch adapters into native REST mode.
+pub fn scrub_ambient_forge_env(command: &mut Command) {
+    for var in [
+        "KNIT_GITLAB_API_BASE",
+        "KNIT_GITLAB_TOKEN",
+        "GITLAB_TOKEN",
+        "KNIT_FORGEJO_API_BASE",
+        "KNIT_FORGEJO_TOKEN",
+        "CODEBERG_TOKEN",
+        "GITEA_TOKEN",
+        "KNIT_BITBUCKET_API_BASE",
+        "KNIT_BITBUCKET_ACCESS_TOKEN",
+        "KNIT_BITBUCKET_EMAIL",
+        "KNIT_BITBUCKET_API_TOKEN",
+    ] {
+        command.env_remove(var);
+    }
 }
 
 pub fn git<I, S>(cwd: &Path, args: I) -> String
