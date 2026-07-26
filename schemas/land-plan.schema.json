@@ -6,7 +6,7 @@
   "properties": {
     "schemaVersion": { "const": "0.1" },
     "kind": { "const": "KnitLandPlan" },
-    "provider": { "enum": ["github"] },
+    "provider": { "enum": ["github", "gitlab", "forgejo", "bitbucket"] },
     "bundleId": { "type": "string" },
     "sourceProjectId": { "type": "string" },
     "createdAt": { "type": "string" },

@@ -516,6 +516,61 @@ where
     )
 }
 
+pub fn knit_with_fake_forge<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let old_path = std::env::var_os("PATH").unwrap_or_default();
+    let path = std::env::join_paths(
+        std::iter::once(fake_bin.to_path_buf()).chain(std::env::split_paths(&old_path)),
+    )
+    .unwrap();
+    let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+    command
+        .args(args)
+        .current_dir(cwd)
+        .env("KNIT_HOME", isolated_knit_home())
+        .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
+        .env_remove("KNIT_BUNDLE")
+        .env_remove("KNIT_SESSION")
+        .env("PATH", path)
+        .env("FORGE_FAKE_DIR", fake_dir);
+    scrub_ambient_forge_env(&mut command);
+    scrub_ambient_git_identity(&mut command);
+    for (key, value) in env {
+        command.env(key, value);
+    }
+    run(command)
+}
+
+/// Strip forge token/base env vars so spawned knit processes never pick up a
+/// developer's real credentials (or a sibling test's `set_var`) and silently
+/// switch adapters into native REST mode.
+pub fn scrub_ambient_forge_env(command: &mut Command) {
+    for var in [
+        "KNIT_GITLAB_API_BASE",
+        "KNIT_GITLAB_TOKEN",
+        "GITLAB_TOKEN",
+        "KNIT_FORGEJO_API_BASE",
+        "KNIT_FORGEJO_TOKEN",
+        "CODEBERG_TOKEN",
+        "GITEA_TOKEN",
+        "KNIT_BITBUCKET_API_BASE",
+        "KNIT_BITBUCKET_ACCESS_TOKEN",
+        "KNIT_BITBUCKET_EMAIL",
+        "KNIT_BITBUCKET_API_TOKEN",
+    ] {
+        command.env_remove(var);
+    }
+}
+
 pub fn git<I, S>(cwd: &Path, args: I) -> String
 where
     I: IntoIterator<Item = S>,
@@ -918,6 +973,90 @@ fn write_windows_shim(script: &Path) {
     let _ = script;
 }
 
+pub fn write_fake_glab(fake_bin: &Path, fake_dir: &Path) {
+    fs::create_dir_all(fake_bin).unwrap();
+    fs::create_dir_all(fake_dir).unwrap();
+    let script = fake_bin.join("glab");
+    fs::write(
+        &script,
+        r##"#!/bin/sh
+set -eu
+repo="$(basename "$PWD")"
+if [ "$1" = "api" ]; then
+  case "$*" in
+    *"/approvals"*) printf '{"approved":true}\n' ;;
+    *"/pipelines"*) printf '[]\n' ;;
+    *) printf '{}\n' ;;
+  esac
+  exit 0
+fi
+[ "$1" = "mr" ] || { echo "unexpected glab command: $*" >&2; exit 1; }
+sub="$2"
+case "$sub" in
+  list) printf '[]\n' ;;
+  create)
+    printf '%s\n' "$*" >"$FORGE_FAKE_DIR/glab-create.args"
+    printf 'https://gitlab.com/acme/%s/-/merge_requests/12\n' "$repo"
+    ;;
+  view)
+    state="opened"
+    [ ! -f "$FORGE_FAKE_DIR/glab-merged" ] || state="merged"
+    printf '{"iid":12,"web_url":"https://gitlab.com/acme/%s/-/merge_requests/12","state":"%s","title":"feature","target_branch":"main","source_branch":"knit/forge-workspace","description":"body","sha":"deadbeef","detailed_merge_status":"mergeable"}\n' "$repo" "$state"
+    ;;
+  update) printf '%s\n' "$*" >"$FORGE_FAKE_DIR/glab-update.args" ;;
+  merge)
+    printf '%s\n' "$*" >"$FORGE_FAKE_DIR/glab-merge.args"
+    : >"$FORGE_FAKE_DIR/glab-merged"
+    ;;
+  *) echo "unexpected glab mr command: $*" >&2; exit 1 ;;
+esac
+"##,
+    )
+    .unwrap();
+    make_executable(&script);
+    write_windows_shim(&script);
+}
+
+pub fn write_fake_tea(fake_bin: &Path, fake_dir: &Path) {
+    fs::create_dir_all(fake_bin).unwrap();
+    fs::create_dir_all(fake_dir).unwrap();
+    let script = fake_bin.join("tea");
+    fs::write(
+        &script,
+        r##"#!/bin/sh
+set -eu
+repo="$(basename "$PWD")"
+[ "$1" = "pr" ] || { echo "unexpected tea command: $*" >&2; exit 1; }
+sub="$2"
+case "$sub" in
+  list)
+    state="open"
+    [ ! -f "$FORGE_FAKE_DIR/tea-merged" ] || state="merged"
+    if [ -f "$FORGE_FAKE_DIR/tea-created" ]; then
+      printf '[{"Index":4,"State":"%s","Title":"feature","Head":"knit/forge-workspace","Base":"main","URL":"https://codeberg.org/acme/%s/pulls/4"}]\n' "$state" "$repo"
+    else
+      printf '[]\n'
+    fi
+    ;;
+  create)
+    printf '%s\n' "$*" >"$FORGE_FAKE_DIR/tea-create.args"
+    : >"$FORGE_FAKE_DIR/tea-created"
+    printf 'https://codeberg.org/acme/%s/pulls/4\n' "$repo"
+    ;;
+  edit) printf '%s\n' "$*" >"$FORGE_FAKE_DIR/tea-edit.args" ;;
+  merge)
+    printf '%s\n' "$*" >"$FORGE_FAKE_DIR/tea-merge.args"
+    : >"$FORGE_FAKE_DIR/tea-merged"
+    ;;
+  *) echo "unexpected tea pr command: $*" >&2; exit 1 ;;
+esac
+"##,
+    )
+    .unwrap();
+    make_executable(&script);
+    write_windows_shim(&script);
+}
+
 /// Serve a fake GitHub REST API on a local port, mirroring the routes the
 /// native `KNIT_GITHUB_API_TRANSPORT` transport hits. State is shared with the
 /// fake `gh` script through marker files in `fake_gh_dir` (`merged-backend`),
@@ -937,6 +1076,141 @@ pub fn spawn_fake_github_api(fake_gh_dir: &Path) -> String {
         }
     });
     base_url
+}
+
+/// Serve the Bitbucket Cloud routes exercised by the native adapter.
+pub fn spawn_fake_bitbucket_api(dir: &Path) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    fs::create_dir_all(dir).unwrap();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_bitbucket_request(&mut stream, &dir);
+            });
+        }
+    });
+    base_url
+}
+
+fn fake_bitbucket_pr_json(dir: &Path, number: &str) -> String {
+    let merged = dir.join("merged-backend").exists();
+    let state = if merged { "MERGED" } else { "OPEN" };
+    let base =
+        fs::read_to_string(dir.join("bitbucket-backend.base")).unwrap_or_else(|_| "main".into());
+    format!(
+        "{{\"id\":{number},\"links\":{{\"html\":{{\"href\":\"https://bitbucket.org/acme/backend/pull-requests/{number}\"}}}},\"title\":\"backend PR\",\"state\":\"{state}\",\"description\":\"Existing body\",\"draft\":false,\"source\":{{\"branch\":{{\"name\":\"knit/forge\"}},\"commit\":{{\"hash\":\"deadbeefcafe\"}}}},\"destination\":{{\"branch\":{{\"name\":\"{}\"}}}},\"participants\":[{{\"approved\":true}}]}}",
+        base.trim()
+    )
+}
+
+fn handle_fake_bitbucket_request(
+    stream: &mut std::net::TcpStream,
+    dir: &Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+    let mut content_length = 0usize;
+    let mut authorization = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                "authorization" => authorization = value.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let body = String::from_utf8_lossy(&body).to_string();
+    if !authorization.is_empty() {
+        fs::write(dir.join("bitbucket.authorization"), authorization).unwrap();
+    }
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    if target.contains("?q=") {
+        fs::write(dir.join("bitbucket.query"), &target).unwrap();
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["repositories", "acme", "backend", "pullrequests"]) => {
+            let response = if dir.join("existing-backend").exists() {
+                format!("{{\"values\":[{}]}}", fake_bitbucket_pr_json(dir, "101"))
+            } else {
+                "{\"values\":[]}".to_string()
+            };
+            (200, response)
+        }
+        ("POST", ["repositories", "acme", "backend", "pullrequests"]) => {
+            fs::write(dir.join("bitbucket-create.json"), &body).unwrap();
+            (201, fake_bitbucket_pr_json(dir, "101"))
+        }
+        ("GET", ["repositories", "acme", "backend", "pullrequests", number]) => {
+            (200, fake_bitbucket_pr_json(dir, number))
+        }
+        ("PUT", ["repositories", "acme", "backend", "pullrequests", number]) => {
+            fs::write(dir.join("bitbucket-edit.json"), &body).unwrap();
+            if let Ok(payload) = serde_json::from_str::<Value>(&body) {
+                if let Some(base) = payload
+                    .pointer("/destination/branch/name")
+                    .and_then(Value::as_str)
+                {
+                    fs::write(dir.join("bitbucket-backend.base"), base).unwrap();
+                }
+            }
+            (200, fake_bitbucket_pr_json(dir, number))
+        }
+        ("POST", ["repositories", "acme", "backend", "pullrequests", _, "merge"]) => {
+            fs::write(dir.join("bitbucket-merge.json"), &body).unwrap();
+            fs::write(dir.join("merged-backend"), "").unwrap();
+            (200, fake_bitbucket_pr_json(dir, "101"))
+        }
+        ("GET", ["repositories", "acme", "backend", "pullrequests", _, "statuses"]) => {
+            let state = if dir.join("ci-fail-backend").exists() {
+                "FAILED"
+            } else {
+                "SUCCESSFUL"
+            };
+            (
+                200,
+                format!("{{\"values\":[{{\"key\":\"ci\",\"state\":\"{state}\"}}]}}"),
+            )
+        }
+        ("GET", ["repositories", "acme", "backend", "commit", _, "statuses", "build"]) => {
+            (200, "{\"values\":[]}".to_string())
+        }
+        _ => (
+            404,
+            format!("{{\"error\":{{\"message\":\"unexpected {method} /{path}\"}}}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
 }
 
 fn fake_github_pr_json(dir: &Path, number: &str) -> String {
