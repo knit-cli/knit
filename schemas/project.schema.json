@@ -78,7 +78,7 @@
     "landing": {
       "type": "object",
       "properties": {
-        "provider": { "enum": ["github"] },
+        "provider": { "enum": ["github", "gitlab", "forgejo", "bitbucket"] },
         "onFailure": { "enum": ["resume", "rollback"], "default": "resume" },
         "requireChecks": { "type": "array", "items": { "type": "string" } },
         "merge": {

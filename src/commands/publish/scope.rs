@@ -9,7 +9,7 @@ use anyhow::{bail, Result};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// Narrow resolved repo indexes to those hosted on `provider` (e.g. "github",
-/// "gitlab", "forgejo"/"codeberg"). With no provider the indexes pass through
+/// "gitlab", "forgejo"/"codeberg", "bitbucket"). With no provider the indexes pass through
 /// unchanged, preserving the default "publish to wherever each repo is hosted"
 /// behavior. The provider string is canonicalized through the forge registry,
 /// so "codeberg" and "gitea" both match the Forgejo adapter.
@@ -24,7 +24,7 @@ pub(super) fn filter_indexes_by_provider(
     let want = providers::by_id(requested)
         .ok_or_else(|| {
             anyhow::anyhow!(
-                "unknown provider `{requested}`. Known providers: github, gitlab, forgejo."
+                "unknown provider `{requested}`. Known providers: github, gitlab, forgejo, bitbucket."
             )
         })?
         .id()

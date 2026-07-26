@@ -129,7 +129,7 @@ impl PruneCache {
             let mut seen = self.gh_auth_failure.lock().unwrap();
             if !*seen {
                 print_prune_warning(format!(
-                    "GitHub auth failed during prune refresh ({err:#}). Further refresh warnings are suppressed; using last recorded PR state."
+                    "Forge authentication failed during prune refresh ({err:#}). Further refresh warnings are suppressed; using last recorded review state."
                 ));
                 *seen = true;
             }

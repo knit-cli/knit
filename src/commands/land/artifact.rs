@@ -105,7 +105,7 @@ pub fn apply_land_from_artifact(
 
         let checks_detail = match forge.wait_for_checks(&target, &publication.url, true, 1800, 10) {
             Ok(summary) => summary.status,
-            Err(err) if providers::is_gh_checks_access_error(&err) => {
+            Err(err) if forge.id() == "github" && providers::is_gh_checks_access_error(&err) => {
                 "passed (checks unavailable)".to_string()
             }
             Err(err) => return Err(err),
