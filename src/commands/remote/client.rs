@@ -82,8 +82,6 @@ pub(super) fn token_from_env(name: &str) -> Option<String> {
         .filter(|value| !value.trim().is_empty())
         .or_else(|| std::env::var("KNIT_REMOTE_TOKEN").ok())
         .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("KNITHUB_TOKEN").ok())
-        .filter(|value| !value.trim().is_empty())
 }
 
 /// Return the sync remotes in priority order. By default the remotes list
@@ -198,7 +196,7 @@ pub(super) fn load_project_if_present(
 
 pub(super) fn fetch_project_export(
     remote: &KnitRemote,
-    token: &str,
+    token: Option<&str>,
     project_identifier: &str,
 ) -> Result<RemoteProjectExport> {
     let (owner, slug) = split_project_identifier(project_identifier);
@@ -206,7 +204,7 @@ pub(super) fn fetch_project_export(
         Some(owner) => format!("/projects/{slug}/export?owner={owner}"),
         None => format!("/projects/{slug}/export"),
     };
-    request_json(remote, token, "GET", &path, None)
+    request_json_with_optional_token(remote, token, "GET", &path, None)
 }
 
 /// Split an `owner/slug` clone reference into its parts. A bare identifier (no
@@ -445,6 +443,18 @@ pub(super) fn request_json<T: DeserializeOwned>(
     decode_response(request(remote, token, method, path, payload)?)
 }
 
+pub(super) fn request_json_with_optional_token<T: DeserializeOwned>(
+    remote: &KnitRemote,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+) -> Result<T> {
+    decode_response(request_with_optional_token(
+        remote, token, method, path, payload,
+    )?)
+}
+
 pub(super) fn decode_response<T: DeserializeOwned>(response: HttpResponse) -> Result<T> {
     if !(200..300).contains(&response.status) {
         bail!(
@@ -465,6 +475,16 @@ pub(super) fn request(
     path: &str,
     payload: Option<&Value>,
 ) -> Result<HttpResponse> {
+    request_with_optional_token(remote, Some(token), method, path, payload)
+}
+
+fn request_with_optional_token(
+    remote: &KnitRemote,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+) -> Result<HttpResponse> {
     let url = format!("{}{}", api_base_url(&remote.url), path);
     let agent = ureq::AgentBuilder::new()
         .timeout_connect(std::time::Duration::from_secs(10))
@@ -472,8 +492,11 @@ pub(super) fn request(
         .build();
     let request = agent
         .request(method, &url)
-        .set("content-type", "application/json")
-        .set("authorization", &format!("Bearer {token}"));
+        .set("content-type", "application/json");
+    let request = match token.filter(|token| !token.trim().is_empty()) {
+        Some(token) => request.set("authorization", &format!("Bearer {token}")),
+        None => request,
+    };
     let result = match payload {
         Some(value) => {
             let body = serde_json::to_string(value).context("failed to serialize request body")?;

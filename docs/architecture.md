@@ -116,7 +116,7 @@ Command files should append nodes when they create meaningful reviewable state. 
 
 ## Project History Ledger
 
-Knit also maintains project-wide history events derived from bundle ledgers. Locally these events live in `.knit/history/<project>.history.jsonl`; KnitHub stores the same metadata in its project history table and includes it in project exports.
+Knit also maintains project-wide history events derived from bundle ledgers. Locally these events live in `.knit/history/<project>.history.jsonl`; compatible remotes store the same metadata and include it in project exports.
 
 History events are pointers, not patches. They record the project, bundle, repo, branch, Knit node, commit group, Git commit SHA, movement, and timestamps. Git remains the source of truth for file contents and file-level history.
 
