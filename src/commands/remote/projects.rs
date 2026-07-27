@@ -84,6 +84,11 @@ fn fetch_remote_projects(
 ) -> std::result::Result<RemoteProjectsDocument, (RemoteErrorKind, anyhow::Error)> {
     let (remote_name, remote, _stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, None, None)?;
+    let token = token
+        .context(
+            "No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, or run `knit remote token <name> <token>`.",
+        )
+        .map_err(|error| (RemoteErrorKind::NoToken, error))?;
     let projects: Vec<RemoteProjectListItem> =
         request_json(&remote, &token, "GET", "/projects", None)
             .map_err(|error| (RemoteErrorKind::Http, error))?;

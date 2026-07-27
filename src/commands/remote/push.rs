@@ -32,15 +32,22 @@ pub fn add_remote(
     token_stdin: bool,
     global: bool,
 ) -> Result<()> {
-    if token_stdin && !global {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let workspace_root = find_knit_root(&cwd);
+    // A remote configured outside a workspace must be user-level so it can
+    // bootstrap `knit clone`. Inside a workspace, preserve workspace scope
+    // unless the user explicitly asks for `--global`.
+    let use_global = global || workspace_root.is_none();
+    if token_stdin && !use_global {
         bail!("--token-stdin requires --global so a user credential is never stored in workspace config");
     }
     let stdin_token = token_stdin.then(read_stdin_token).transpose()?;
     let token = token.or(stdin_token.as_deref());
-    let (root, mut config) = if global {
+    let (root, mut config) = if use_global {
         (None, load_global_config()?)
     } else {
-        let (root, config) = workspace_config()?;
+        let root = workspace_root.expect("workspace presence checked above");
+        let config = load_config(&root)?;
         (Some(root), config)
     };
     let remote_name = slugify(name);
@@ -56,14 +63,14 @@ pub fn add_remote(
     } else {
         save_global_config(&config)?;
     }
-    let scope = if global { "global " } else { "" };
+    let scope = if use_global { "global " } else { "" };
     println!(
         "{} {}{}",
         out::movement("configured"),
         scope,
         out::repo(&remote_name)
     );
-    if !global && token.is_some() {
+    if !use_global && token.is_some() {
         warn_workspace_scoped_token(&remote_name);
     }
     Ok(())
@@ -1315,10 +1322,12 @@ fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
         metadata["knitProject"] = serde_json::to_value(&shared).unwrap_or(Value::Null);
     }
 
+    // No `visibility` here, ever: the server defaults new projects to private
+    // and the owner changes visibility on the remote. Resending a fixed value
+    // on push would overwrite that choice.
     json!({
         "name": project_id,
         "slug": project_id,
-        "visibility": "private",
         "metadata": metadata
     })
 }
