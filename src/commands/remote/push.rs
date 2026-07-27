@@ -1322,10 +1322,12 @@ fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
         metadata["knitProject"] = serde_json::to_value(&shared).unwrap_or(Value::Null);
     }
 
+    // No `visibility` here, ever: the server defaults new projects to private
+    // and the owner changes visibility on the remote. Resending a fixed value
+    // on push would overwrite that choice.
     json!({
         "name": project_id,
         "slug": project_id,
-        "visibility": "private",
         "metadata": metadata
     })
 }
