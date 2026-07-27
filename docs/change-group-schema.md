@@ -8,7 +8,7 @@ Knit writes a bundle as a language-neutral JSON file:
 
 The user-facing name is bundle. The technical schema type is `ChangeGroup`.
 
-Project-wide history is stored separately from bundle artifacts. Local history events live in `.knit/history/<project>.history.jsonl` and KnitHub stores the same event shape in its backend. Those events point back to bundle nodes and Git commit SHAs; they do not store patches or file contents.
+Project-wide history is stored separately from bundle artifacts. Local history events live in `.knit/history/<project>.history.jsonl`, and compatible remotes store the same event shape. Those events point back to bundle nodes and Git commit SHAs; they do not store patches or file contents.
 
 ## Top-Level Fields
 

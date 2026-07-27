@@ -1334,18 +1334,18 @@ pub fn unreachable_remote_url() -> String {
     base_url
 }
 
-/// Spawn a minimal fake KnitHub API that answers every request with a project
+/// Spawn a minimal fake remote API that answers every request with a project
 /// export containing a single bundle record. Enough for creation-time slug
 /// collision checks against the sync remote.
-pub fn spawn_fake_knithub_export(bundle_slug: &str, lifecycle_state: &str) -> String {
-    spawn_fake_knithub_with_body(format!(
+pub fn spawn_fake_remote_export(bundle_slug: &str, lifecycle_state: &str) -> String {
+    spawn_fake_remote_with_body(format!(
         "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-1\",\"slug\":\"{bundle_slug}\",\"lifecycleState\":\"{lifecycle_state}\",\"currentArtifact\":null}}],\"historyEvents\":[]}}}}"
     ))
 }
 
-/// Spawn a fake KnitHub API that answers every request with the given JSON
+/// Spawn a fake remote API that answers every request with the given JSON
 /// body, e.g. a full project export including bundle artifact payloads.
-pub fn spawn_fake_knithub_with_body(body: String) -> String {
+pub fn spawn_fake_remote_with_body(body: String) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     std::thread::spawn(move || {
@@ -1393,7 +1393,7 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
     stream.flush()
 }
 
-/// Spawn a fake KnitHub push API: enough routes for `knit sync push --bundles`
+/// Spawn a fake remote push API: enough routes for `knit sync push --bundles`
 /// and the archive/restore lifecycle sync. Every pushed bundle artifact's
 /// payload state is appended to `<dir>/artifact-<slug>.states`, one state per
 /// line, so tests can assert which lifecycle states reached the remote. The
@@ -1408,7 +1408,7 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
 ///   set both differently to simulate a concurrent push between GET and POST)
 /// - `enforce-fast-forward`: POSTs without `force: true` are refused with a
 ///   plain 409, like a remote whose ledger is ahead
-pub fn spawn_fake_knithub_push_api(dir: &Path) -> String {
+pub fn spawn_fake_remote_push_api(dir: &Path) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     fs::create_dir_all(dir).unwrap();
@@ -1418,14 +1418,14 @@ pub fn spawn_fake_knithub_push_api(dir: &Path) -> String {
             let Ok(mut stream) = stream else { continue };
             let dir = dir.clone();
             std::thread::spawn(move || {
-                let _ = handle_fake_knithub_push_request(&mut stream, &dir);
+                let _ = handle_fake_remote_push_request(&mut stream, &dir);
             });
         }
     });
     base_url
 }
 
-fn handle_fake_knithub_push_request(
+fn handle_fake_remote_push_request(
     stream: &mut std::net::TcpStream,
     dir: &Path,
 ) -> std::io::Result<()> {
@@ -1625,9 +1625,7 @@ pub fn knit_split_output(
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
         .env_remove("KNIT_REMOTE_URL")
-        .env_remove("KNITHUB_URL")
         .env_remove("KNIT_REMOTE_TOKEN")
-        .env_remove("KNITHUB_TOKEN")
         .env_remove("KNIT_REMOTE_HOSTED_TOKEN");
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {

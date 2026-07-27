@@ -140,7 +140,7 @@ fn clone_project_classified(
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
     let (remote_name, remote, stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, url, token)?;
-    let export = fetch_project_export(&remote, &token, project_identifier)
+    let export = fetch_project_export(&remote, token.as_deref(), project_identifier)
         .map_err(|error| (RemoteErrorKind::Http, error))?;
     clone_fetched_export(
         project_identifier,
@@ -163,7 +163,7 @@ fn clone_fetched_export(
     remote_name: String,
     remote: KnitRemote,
     stored_token: Option<String>,
-    token: String,
+    token: Option<String>,
     export: RemoteProjectExport,
     active_bundle: Option<&str>,
     materialize: bool,
@@ -237,11 +237,13 @@ fn clone_fetched_export(
     crate::store::save_config(&target_root, &config)?;
 
     // Best-effort: restore the cloning user's saved views for the project.
-    match super::pull::pull_views_into(&target_root, &remote, &token, &project.id) {
-        Ok(count) if count > 0 => {
-            crate::human!("{} {count} view(s)", out::heading("Views:"))
+    if let Some(token) = token.as_deref() {
+        match super::pull::pull_views_into(&target_root, &remote, token, &project.id) {
+            Ok(count) if count > 0 => {
+                crate::human!("{} {count} view(s)", out::heading("Views:"))
+            }
+            _ => {}
         }
-        _ => {}
     }
 
     let mut worktrees_materialized = false;
@@ -279,7 +281,7 @@ fn clone_fetched_export(
     }
     if let Some(omitted) = export.omitted_repository_count.filter(|count| *count > 0) {
         crate::human!(
-            "{} the export omitted {omitted} private repo(s) this token cannot see; the cloned project is incomplete. Ask a project maintainer for access.",
+            "{} the remote omitted {omitted} private repo(s) from this export; the cloned project is incomplete. Ask a project maintainer for access.",
             out::warn("Not exported:")
         );
     }
@@ -377,26 +379,23 @@ fn clone_document(
     }
 }
 
-/// Resolve the remote endpoint and token exactly as `knit clone` does, tagging
-/// each failure with its machine-readable kind: endpoint problems are
-/// `noRemote`, missing credentials are `noToken`. Shared with
-/// `knit remote projects` so both verbs resolve remotes identically.
+/// Resolve the remote endpoint and any available token exactly as `knit clone`
+/// does. Public exports do not require credentials, so token absence is not a
+/// resolution error here. Callers that require authentication must reject
+/// `None` themselves with a `noToken` error.
+type ResolvedCloneRemote = (String, KnitRemote, Option<String>, Option<String>);
+
 pub(super) fn resolve_remote_for_clone_classified(
     remote_name: Option<&str>,
     url: Option<&str>,
     token: Option<&str>,
-) -> std::result::Result<
-    (String, KnitRemote, Option<String>, String),
-    (RemoteErrorKind, anyhow::Error),
-> {
+) -> std::result::Result<ResolvedCloneRemote, (RemoteErrorKind, anyhow::Error)> {
     let (remote_name, remote, stored_token) = resolve_clone_endpoint(remote_name, url, token)
         .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
     let resolved_token = token
         .map(ToString::to_string)
         .or_else(|| token_from_env(&remote_name))
-        .or_else(|| remote.token.clone())
-        .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, pass --token, or configure a stored remote token.")
-        .map_err(|error| (RemoteErrorKind::NoToken, error))?;
+        .or_else(|| remote.token.clone());
     Ok((remote_name, remote, stored_token, resolved_token))
 }
 
@@ -425,8 +424,6 @@ pub(super) fn resolve_clone_endpoint(
         .and_then(|config| config.remotes.get(&remote_name).cloned());
     let env_url = std::env::var("KNIT_REMOTE_URL")
         .ok()
-        .filter(|value| !value.trim().is_empty())
-        .or_else(|| std::env::var("KNITHUB_URL").ok())
         .filter(|value| !value.trim().is_empty());
     let remote_url = url
         .map(ToString::to_string)

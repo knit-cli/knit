@@ -36,9 +36,9 @@ struct ForgeCredentialRequest<'a> {
     path: Option<&'a str>,
 }
 
-/// Ask a named KnitHub-compatible remote for the token subject's forge
-/// credential. Unsupported hosts and missing connections are soft misses so
-/// Git can continue through any other configured credential helpers.
+/// Ask a named remote for the token subject's forge credential. Unsupported
+/// hosts and missing connections are soft misses so Git can continue through
+/// any other configured credential helpers.
 pub(crate) fn request_forge_credential(
     remote: &KnitRemote,
     token: &str,
