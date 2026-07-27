@@ -187,10 +187,10 @@ The file you queried lived in one repo; the answer tells you which commit in a
 *different* repo must be read alongside it. Pass `--pull` to refresh the
 history ledger from a sync remote first.
 
-## 10. Host it on KnitHub (optional)
+## 10. Add a sync remote (optional)
 
 Knit is local-first, but bundles, project history, and saved views can be
-hosted on your KnitHub deployment so they survive machines and show up in
+stored on a compatible remote so they survive machines and can appear in
 dashboards:
 
 ```sh
@@ -211,13 +211,15 @@ sync automatically, hosted dashboards show bundles and project history, and
 machine. `knit related --pull` and `knit sync pull` read the same hosted
 history back.
 
-<!-- image: docs/assets/knithub-dashboard.png — a project's bundles in a KnitHub deployment -->
+Projects can also be cloned through Knit. Public projects need only the remote
+URL; private projects additionally require a remote token:
 
-Projects can also be cloned from Knit. `knit clone` will rebuild the project
-as it is set up in Knit, given your git and KnitHub tokens allow it.
+```sh
+knit clone <owner>/<project> --url https://<remote-api-url>
+```
 
-KnitHub contains `gloss`. `gloss` is another tool that allows you to run a cross repo analysis/code review
-in the same page.
+A compatible remote may also display cross-repo analysis and reviews produced
+by Urdir and Gloss.
 
 ## Concepts
 

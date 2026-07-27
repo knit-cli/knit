@@ -81,10 +81,10 @@ fn partial_export(root: &Path) -> (serde_json::Value, std::path::PathBuf) {
 }
 
 #[test]
-fn clone_json_reports_repos_bundles_and_dropped_bundles() {
+fn anonymous_clone_json_reports_repos_bundles_and_dropped_bundles() {
     let root = unique_temp_dir();
     let (export, _source) = partial_export(&root);
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     let target = root.join("workspace");
 
     let (stdout, stderr, success) = knit_split_output(
@@ -97,8 +97,6 @@ fn clone_json_reports_repos_bundles_and_dropped_bundles() {
             "hosted",
             "--url",
             &base_url,
-            "--token",
-            "test-token",
             "--no-worktree",
             "--json",
         ],
@@ -150,6 +148,13 @@ fn clone_json_reports_repos_bundles_and_dropped_bundles() {
     assert!(stderr.contains("dropped bundle"), "stderr: {stderr}");
     assert!(target.join(".knit/bundles/feature-a.bundle.json").exists());
     assert!(!target.join(".knit/bundles/feature-c.bundle.json").exists());
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        config["remotes"]["hosted"]["token"],
+        serde_json::Value::Null
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -158,7 +163,7 @@ fn clone_json_reports_repos_bundles_and_dropped_bundles() {
 fn clone_human_output_mentions_dropped_bundles() {
     let root = unique_temp_dir();
     let (export, _source) = partial_export(&root);
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     let target = root.join("workspace");
 
     let output = knit(
@@ -213,7 +218,7 @@ fn remote_projects_json_lists_projects_outside_any_workspace() {
             },
         ]
     });
-    let base_url = spawn_fake_knithub_with_body(body.to_string());
+    let base_url = spawn_fake_remote_with_body(body.to_string());
     // A per-test global config proves the verb works outside any workspace.
     let knit_home = root.join("knit-home");
     fs::create_dir_all(&knit_home).unwrap();
@@ -262,6 +267,30 @@ fn remote_projects_json_lists_projects_outside_any_workspace() {
     assert!(human.contains("marc-merino/knit-tools"));
     assert!(human.contains("acme/acme-app"));
     assert!(human.contains("private"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn remote_projects_reports_a_generic_missing_token_error() {
+    let root = unique_temp_dir();
+    let outside = root.join("outside");
+    let knit_home = root.join("knit-home");
+    fs::create_dir_all(&outside).unwrap();
+    let base_url = spawn_fake_remote_with_body(r#"{"data":[]}"#.to_string());
+    let env = [("KNIT_HOME", knit_home.to_str().unwrap())];
+
+    knit_with_env(&outside, ["remote", "add", "hosted", &base_url], &env);
+    let (stdout, stderr, success) =
+        knit_split_output(&outside, &["remote", "projects", "--json"], &env);
+
+    assert!(!success);
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["error"]["kind"], "noToken");
+    assert!(stderr.contains("No remote token configured"), "{stderr}");
+    let combined = format!("{stdout}\n{stderr}").to_ascii_lowercase();
+    assert!(!combined.contains("knithub"), "{combined}");
+    assert!(!combined.contains("svartal"), "{combined}");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -444,7 +473,7 @@ fn clone_survives_history_events_missing_project_id() {
         },
         {"eventId": 42},
     ]);
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     let target = root.join("workspace");
 
     let (_stdout, stderr, success) = knit_split_output(

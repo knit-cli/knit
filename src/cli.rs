@@ -966,7 +966,7 @@ pub enum RemoteCommand {
         /// Read the remote token from stdin instead of command arguments.
         #[arg(long, conflicts_with = "token")]
         token_stdin: bool,
-        /// Store this remote in the user-level Knit config instead of the workspace.
+        /// Store this remote in the user-level Knit config instead of the workspace. This is automatic outside a workspace.
         #[arg(long)]
         global: bool,
     },

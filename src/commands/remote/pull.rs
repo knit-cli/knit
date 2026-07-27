@@ -137,7 +137,7 @@ pub fn prepare_remote_pull(
     for remote_name in candidates {
         let attempt = resolve_remote(&config, &remote_name)
             .and_then(|remote| Ok((remote, resolve_token(&remote_name, remote)?)))
-            .and_then(|(remote, token)| fetch_project_export(remote, &token, &project_id));
+            .and_then(|(remote, token)| fetch_project_export(remote, Some(&token), &project_id));
         match attempt {
             Ok(export) => {
                 crate::history::append_history_events(
@@ -525,7 +525,7 @@ pub fn remote_bundle_lifecycle(
     for remote_name in configured_sync_remote_names(config) {
         let attempt = resolve_remote(config, &remote_name)
             .and_then(|remote| Ok((remote, resolve_token(&remote_name, remote)?)))
-            .and_then(|(remote, token)| fetch_project_export(remote, &token, project_id));
+            .and_then(|(remote, token)| fetch_project_export(remote, Some(&token), project_id));
         match attempt {
             Ok(export) => {
                 return Ok(export
@@ -550,7 +550,7 @@ pub fn list_remote_bundles(
     project_id: &str,
 ) -> Result<Vec<RemoteBundleRecord>> {
     let export = with_first_available_remote(config, None, |_, remote, token| {
-        fetch_project_export(remote, token, project_id)
+        fetch_project_export(remote, Some(token), project_id)
     })?;
     Ok(export
         .bundles
@@ -617,7 +617,7 @@ pub fn delete_bundle_from_remote(
         .clone()
         .or_else(|| config.active_project.clone())
         .context("No project selected for remote bundle cleanup. Set activeProject or record projectId on the bundle.")?;
-    let export = fetch_project_export(remote, &token, &project_id)?;
+    let export = fetch_project_export(remote, Some(&token), &project_id)?;
     let Some(remote_bundle) = export.bundles.iter().find(|remote_bundle| {
         remote_bundle.slug == bundle.id && remote_bundle.lifecycle_state != "deleted"
     }) else {
@@ -659,7 +659,7 @@ pub fn fetch_bundles_from_remote(
         with_first_available_remote(config, remote_name, |name, remote, token| {
             Ok((
                 name.to_string(),
-                fetch_project_export(remote, token, &project_id)?,
+                fetch_project_export(remote, Some(token), &project_id)?,
             ))
         })?;
     crate::history::append_history_events(
@@ -858,7 +858,7 @@ fn pull_bundle_by_slug_classified(
         with_first_available_remote(&config, None, |name, remote, token| {
             Ok((
                 name.to_string(),
-                fetch_project_export(remote, token, &project_id)?,
+                fetch_project_export(remote, Some(token), &project_id)?,
             ))
         })
         .map_err(|error| (RemoteErrorKind::Http, error))?;
