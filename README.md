@@ -52,7 +52,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
 - **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
 - **Known-good markers across repos.** After landing and verifying the configured project bases, `knit tag` pins those bases as one immutable named set — the whole-system snapshot a monorepo gets from a single SHA — recorded on the ledger and exported as plain git tags any host, CI, or clone can read.
-- **Local-first, host optional.** Everything works against plain git repos. A KnitHub deployment adds hosted dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and Urdir/Gloss cross-repo reviews on top of the same artifact.
+- **Local-first, remote optional.** Everything works against plain git repos. A compatible remote can add dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and cross-repo reviews on top of the same artifact.
 - **Review-ready artifact.** The same bundle artifact gives `urdir` enough cross-repo context to prepare review analysis that `gloss` can display and explain.
 
 ## Concepts in one breath
@@ -78,4 +78,4 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 
 ## Knit, Urdir, and Gloss
 
-Knit, Urdir, and Gloss share a simple handoff. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Urdir reads a bundle later and produces cross-repo review analysis. Gloss displays and explains that review artifact; on KnitHub the three meet in one page.
+Knit, Urdir, and Gloss share a simple handoff. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Urdir reads a bundle later and produces cross-repo review analysis. Gloss displays and explains that review artifact; a compatible remote can bring the three together in one page.
