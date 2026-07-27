@@ -390,7 +390,7 @@ fn push_force_with_lease_updates_rewritten_feature_branch() {
 }
 
 #[test]
-fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
+fn push_skips_missing_implicit_sync_remote_after_git_branch_push() {
     let root = unique_temp_dir();
     let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
     let workspace = root.join("workspace");
@@ -410,8 +410,8 @@ fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
     let config_path = workspace.join(".knit/config.json");
     let mut config: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
-    config["syncRemote"] = serde_json::json!("svartal");
-    config["syncRemotes"] = serde_json::json!(["svartal"]);
+    config["syncRemote"] = serde_json::json!("remote");
+    config["syncRemotes"] = serde_json::json!(["remote"]);
     fs::write(
         &config_path,
         format!("{}\n", serde_json::to_string_pretty(&config).unwrap()),
@@ -420,7 +420,7 @@ fn push_skips_missing_implicit_knithub_remote_after_git_branch_push() {
 
     let push = knit(&workspace, ["push", "backend"]);
     assert!(push.contains("backend"), "{push}");
-    assert!(push.contains("remote sync skipped (svartal):"), "{push}");
+    assert!(push.contains("remote sync skipped (remote):"), "{push}");
     assert_eq!(
         git(&remote, ["rev-parse", "refs/heads/knit/stale-remote"]),
         sha
@@ -800,7 +800,7 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -843,17 +843,17 @@ fn sync_pull_discovers_remote_bundles_project_wide() {
     );
 
     // Author a bundle with a commit and capture its artifact — the payload
-    // another machine would have pushed to KnitHub — then erase it locally as
+    // another machine would have pushed to remote — then erase it locally as
     // if it had never existed here.
-    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
-    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
     append_line(&feature.join("app.txt"), "work from another machine");
     knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
-    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
     let payload: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
     fs::remove_file(&artifact_path).unwrap();
-    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/remote-made")).unwrap();
 
     // Two other open bundles make the source-root fallback ambiguous — the
     // situation where the old active-bundle-only sync pull broke.
@@ -870,9 +870,9 @@ fn sync_pull_discovers_remote_bundles_project_wide() {
             "bundles": [
                 {
                     "id": "rb-1",
-                    "slug": "svartal-made",
+                    "slug": "remote-made",
                     "lifecycleState": "open",
-                    "currentArtifact": {"artifactHash": "hash-svartal", "payload": payload},
+                    "currentArtifact": {"artifactHash": "hash-remote", "payload": payload},
                 },
                 {
                     "id": "rb-2",
@@ -890,7 +890,7 @@ fn sync_pull_discovers_remote_bundles_project_wide() {
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -906,7 +906,7 @@ fn sync_pull_discovers_remote_bundles_project_wide() {
     // project's dead-work history.
     assert!(artifact_path.exists());
     let list = knit(&workspace, ["bundle", "list"]);
-    assert!(list.contains("svartal-made"), "{list}");
+    assert!(list.contains("remote-made"), "{list}");
     assert!(!list.contains("dead-bundle"), "{list}");
     assert!(!list.contains("old-landed"), "{list}");
     assert!(!workspace
@@ -967,7 +967,7 @@ fn sync_pull_does_not_resurrect_locally_deleted_bundles() {
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -990,7 +990,7 @@ fn sync_pull_does_not_resurrect_locally_deleted_bundles() {
 /// A collaborator workspace with no local bundle at all (fresh `knit init` +
 /// `knit project add`, or every bundle erased) must still be able to run a
 /// bare `knit fetch`: the git side falls back to the project's repos and the
-/// KnitHub side lists each remote bundle with its repo -> branch mapping.
+/// remote side lists each remote bundle with its repo -> branch mapping.
 #[test]
 fn fetch_without_resolvable_bundle_falls_back_to_project_and_lists_remote_bundles() {
     let root = unique_temp_dir();
@@ -1006,18 +1006,18 @@ fn fetch_without_resolvable_bundle_falls_back_to_project_and_lists_remote_bundle
 
     // Author the bundle another machine would have pushed, then erase every
     // local trace of it: no bundle resolves in this workspace anymore.
-    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
-    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
     append_line(&feature.join("app.txt"), "work from another machine");
     knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
     knit(&workspace, ["push", "--set-upstream"]);
-    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
     let payload: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
     fs::remove_file(&artifact_path).unwrap();
-    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/remote-made")).unwrap();
     git(&backend, ["worktree", "prune"]);
-    git(&backend, ["branch", "-D", "knit/svartal-made"]);
+    git(&backend, ["branch", "-D", "knit/remote-made"]);
 
     let export = serde_json::json!({
         "data": {
@@ -1026,20 +1026,20 @@ fn fetch_without_resolvable_bundle_falls_back_to_project_and_lists_remote_bundle
             "repositories": [],
             "bundles": [{
                 "id": "rb-1",
-                "slug": "svartal-made",
+                "slug": "remote-made",
                 "lifecycleState": "open",
                 "currentArtifact": {"artifactHash": "hash-1", "payload": payload},
             }],
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     let output = knit_with_env(&workspace, ["fetch"], &env);
     assert!(output.contains("origin/main"), "{output}");
-    assert!(output.contains("backend -> knit/svartal-made"), "{output}");
+    assert!(output.contains("backend -> knit/remote-made"), "{output}");
     assert!(output.contains("fetched"), "{output}");
     assert!(artifact_path.exists());
 
@@ -1063,18 +1063,18 @@ fn pull_materializes_the_pointed_at_bundle_after_fetch() {
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
 
-    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
-    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
     append_line(&feature.join("app.txt"), "work from another machine");
     knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
     knit(&workspace, ["push", "--set-upstream"]);
-    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
     let payload: serde_json::Value =
         serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
     fs::remove_file(&artifact_path).unwrap();
-    fs::remove_dir_all(workspace.join(".knit/worktrees/svartal-made")).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/remote-made")).unwrap();
     git(&backend, ["worktree", "prune"]);
-    git(&backend, ["branch", "-D", "knit/svartal-made"]);
+    git(&backend, ["branch", "-D", "knit/remote-made"]);
 
     let export = serde_json::json!({
         "data": {
@@ -1083,20 +1083,20 @@ fn pull_materializes_the_pointed_at_bundle_after_fetch() {
             "repositories": [],
             "bundles": [{
                 "id": "rb-1",
-                "slug": "svartal-made",
+                "slug": "remote-made",
                 "lifecycleState": "open",
                 "currentArtifact": {"artifactHash": "hash-1", "payload": payload},
             }],
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     let fetch_output = knit_with_env(&workspace, ["fetch", "--mode", "knit"], &env);
     assert!(fetch_output.contains("new"), "{fetch_output}");
-    knit(&workspace, ["switch", "svartal-made", "--workspace"]);
+    knit(&workspace, ["switch", "remote-made", "--workspace"]);
 
     let pull = knit_with_env(&workspace, ["pull"], &env);
     assert!(pull.contains("materialized 1 checkout(s)"), "{pull}");
@@ -1126,12 +1126,12 @@ fn pull_fast_forwards_checkouts_after_fetch_advanced_the_artifact() {
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
 
-    knit(&workspace, ["bundle", "svartal made", "--repo", "backend"]);
-    let feature = workspace.join(".knit/worktrees/svartal-made/backend");
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
     append_line(&feature.join("app.txt"), "first line");
     knit(&workspace, ["commit", "--all", "-m", "First"]);
     knit(&workspace, ["push", "--set-upstream"]);
-    let artifact_path = workspace.join(".knit/bundles/svartal-made.bundle.json");
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
     let artifact_v1 = fs::read_to_string(&artifact_path).unwrap();
 
     // The second commit plays the collaborator: origin and the remote artifact
@@ -1151,14 +1151,14 @@ fn pull_fast_forwards_checkouts_after_fetch_advanced_the_artifact() {
             "repositories": [],
             "bundles": [{
                 "id": "rb-1",
-                "slug": "svartal-made",
+                "slug": "remote-made",
                 "lifecycleState": "open",
                 "currentArtifact": {"artifactHash": "hash-2", "payload": payload_v2},
             }],
             "historyEvents": [],
         }
     });
-    let base_url = spawn_fake_knithub_with_body(export.to_string());
+    let base_url = spawn_fake_remote_with_body(export.to_string());
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -1188,8 +1188,8 @@ fn archive_and_restore_sync_lifecycle_state_to_remote() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -1220,8 +1220,8 @@ fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
@@ -1260,7 +1260,7 @@ fn pull_walks_sync_remotes_past_unreachable_one() {
     // With no sync-remotes config, every configured remote is a sync remote.
     // `dead` sorts first and refuses connections; `live` serves a valid export.
     let dead_url = unreachable_remote_url();
-    let live_url = spawn_fake_knithub_with_body(
+    let live_url = spawn_fake_remote_with_body(
         "{\"data\":{\"project\":{\"slug\":\"demo\"},\"knitProject\":null,\"repositories\":[],\"bundles\":[],\"historyEvents\":[]}}".to_string(),
     );
     knit(&workspace, ["remote", "add", "dead", &dead_url]);
@@ -1349,8 +1349,8 @@ fn sync_push_fans_out_to_every_configured_remote_by_default() {
     );
     let fake_a = root.join("fake-a");
     let fake_b = root.join("fake-b");
-    let url_a = spawn_fake_knithub_push_api(&fake_a);
-    let url_b = spawn_fake_knithub_push_api(&fake_b);
+    let url_a = spawn_fake_remote_push_api(&fake_a);
+    let url_b = spawn_fake_remote_push_api(&fake_b);
     knit(&workspace, ["remote", "add", "alpha", &url_a]);
     knit(&workspace, ["remote", "add", "beta", &url_b]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
@@ -1390,8 +1390,8 @@ fn force_push_scaffold(
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     for title in with_bundles {
         knit(&workspace, ["bundle", title, "--repo", "backend"]);
@@ -1412,8 +1412,8 @@ fn project_push_prune_deletes_remote_repos_absent_from_local_shape() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
 
     // Remote lists backend (kept) plus two orphan records absent locally: one
@@ -1577,8 +1577,8 @@ fn push_force_with_lease_propagates_into_the_artifact_sync() {
         &workspace,
         ["project", "add", "backend", backend.to_str().unwrap()],
     );
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 

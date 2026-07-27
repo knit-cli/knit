@@ -780,7 +780,7 @@ fn prune_archives_remote_orphan_records_instead_of_deleting() {
 
     // Author a bundle with merged PRs, capture its artifact as the remote
     // record's payload, then erase it locally: the classic orphan — the
-    // KnitHub record is the last remaining trace of this shipped work.
+    // remote record is the last remaining trace of this shipped work.
     knit(&workspace, ["bundle", "shipped old", "--repo", "backend"]);
     write_bundle_publications(&workspace, "shipped-old", "MERGED");
     let artifact_path = workspace.join(".knit/bundles/shipped-old.bundle.json");
@@ -791,8 +791,8 @@ fn prune_archives_remote_orphan_records_instead_of_deleting() {
     );
     fs::remove_dir_all(workspace.join(".knit/deleted")).ok();
 
-    let fake_dir = root.join("fake-knithub");
-    let base_url = spawn_fake_knithub_push_api(&fake_dir);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
     let export = format!(
         "{{\"data\":{{\"project\":{{\"slug\":\"demo\"}},\"knitProject\":null,\"repositories\":[],\"bundles\":[{{\"id\":\"rb-shipped-old\",\"slug\":\"shipped-old\",\"lifecycleState\":\"open\",\"currentArtifact\":{{\"artifactHash\":\"h1\",\"payload\":{payload}}}}}],\"historyEvents\":[]}}}}"
     );

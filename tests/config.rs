@@ -277,7 +277,7 @@ fn environment_token_uses_stdin_and_private_global_config_with_arbitrary_remote_
 }
 
 #[test]
-fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
+fn remote_add_defaults_global_and_clone_resolves_it_outside_a_workspace() {
     let root = unique_temp_dir();
     // A plain directory with no `.knit` workspace anywhere above it.
     let outside = root.join("outside");
@@ -285,14 +285,14 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
     fs::create_dir_all(&outside).unwrap();
     let env = [("KNIT_HOME", knit_home.to_str().unwrap())];
 
-    // Configure a global remote, then clone from a non-workspace directory. An
-    // unroutable URL makes the request fail fast once resolution succeeds.
-    knit_with_env(
+    // Outside a workspace, `remote add` automatically configures user scope so
+    // the remote can bootstrap a clone. An unroutable URL makes the clone fail
+    // fast once resolution succeeds.
+    let add = knit_with_env(
         &outside,
         [
             "remote",
             "add",
-            "--global",
             "hosted",
             "http://127.0.0.1:9",
             "--token",
@@ -300,6 +300,7 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
         ],
         &env,
     );
+    assert!(add.contains("configured global hosted"), "{add}");
 
     let output = knit_fails_with_env(&outside, ["clone", "acme/widgets"], &env);
 
@@ -322,7 +323,7 @@ fn clone_resolves_url_and_token_from_global_config_outside_a_workspace() {
 }
 
 #[test]
-fn config_can_target_multiple_knithub_sync_remotes() {
+fn config_can_target_multiple_sync_remotes() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
