@@ -414,7 +414,7 @@ knit bundle restore feature-x                    # reopen; `knit bundle worktree
 
 Archiving refuses to discard dirty generated worktrees unless `--force` is passed.
 
-`knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
+`knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. With push-sync remotes configured, it also archives the bundle's record on each sync remote so hosted dashboards stop counting the deleted work as open; that mirror is best-effort (offline deletes warn and continue) and a later `knit bundle prune --remote-bundles` catches anything it missed. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
 
 ```sh
 knit bundle delete documentation-quick-wins --force
@@ -447,9 +447,9 @@ knit bundle prune --untracked
 knit bundle prune --apply --untracked --worktrees
 ```
 
-Remote bundle cleanup uses the configured sync remote and archives matching remote bundle records — it never deletes them, because a record whose local artifact is gone is often the last remaining trace of shipped work. Archiving rides the everyday `bundle:push` scope. True remote deletion stays a per-bundle decision via `knit bundle delete --remote-bundles`, which requires a `bundle:delete` token.
+Remote bundle cleanup archives matching remote bundle records — it never deletes them, because a record whose local artifact is gone is often the last remaining trace of shipped work. Archiving rides the everyday `bundle:push` scope. True remote deletion stays an explicit decision via `knit bundle prune --apply --remote-bundles`, which requires a `bundle:delete` token.
 
-With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit bundle prune --apply` could delete a local artifact while leaving its remote record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
+With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and are dead work — their artifact sits in the local `.knit/deleted/bundles/` quarantine (a locally deleted bundle is dead even with no recorded PRs), or every recorded PR is merged or closed. Without this, a delete that could not reach the remote (offline, or made before delete-time archiving existed) would leave its record behind forever, and no later prune could reach it through the local bundle scan. These are listed under "Remote orphan bundle candidates" and archived on `--apply`; records already archived on the remote are skipped. Live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
 
 So the common cleanup distinction is:
 

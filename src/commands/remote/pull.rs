@@ -645,6 +645,70 @@ pub fn delete_bundle_from_remote(
     Ok(())
 }
 
+/// Archive a bundle's record on every configured sync remote after its local
+/// artifact was deleted, so hosted dashboards stop counting deleted work as
+/// open. Archive, never delete: the record stays as durable history, and true
+/// remote deletion remains the explicit `--remote-bundles` door. Records
+/// already archived or tombstoned on a remote are left alone, and a bundle
+/// with no resolvable project is a silent no-op.
+pub fn archive_deleted_bundle_on_remotes(config: &KnitConfig, bundle: &ChangeGroup) -> Result<()> {
+    let Some(project_id) = bundle
+        .project_id
+        .clone()
+        .or_else(|| config.active_project.clone())
+    else {
+        return Ok(());
+    };
+    let mut failures = Vec::new();
+    for remote_name in configured_sync_remote_names(config) {
+        match archive_bundle_record_on_remote(config, &remote_name, &project_id, &bundle.id) {
+            Ok(Some(slug)) => println!(
+                "{}: {} {}",
+                out::node(&bundle.id),
+                out::movement("archived remote bundle"),
+                out::muted(format!("{remote_name}/{slug}"))
+            ),
+            Ok(None) => {}
+            Err(error) => failures.push(format!("{remote_name}: {error:#}")),
+        }
+    }
+    if failures.is_empty() {
+        Ok(())
+    } else {
+        bail!(
+            "failed to archive the remote bundle record on {} remote(s):\n{}",
+            failures.len(),
+            failures.join("\n")
+        )
+    }
+}
+
+fn archive_bundle_record_on_remote(
+    config: &KnitConfig,
+    remote_name: &str,
+    project_id: &str,
+    bundle_id: &str,
+) -> Result<Option<String>> {
+    let remote = resolve_remote(config, remote_name)?;
+    let token = resolve_token(remote_name, remote)?;
+    let export = fetch_project_export(remote, Some(&token), project_id)?;
+    let Some(record) = export.bundles.iter().find(|record| {
+        record.slug == bundle_id
+            && record.lifecycle_state != "deleted"
+            && record.lifecycle_state != "archived"
+    }) else {
+        return Ok(None);
+    };
+    let archived: RemoteBundle = request_json(
+        remote,
+        &token,
+        "PATCH",
+        &format!("/bundles/{}/archive", record.id),
+        None,
+    )?;
+    Ok(Some(archived.slug))
+}
+
 pub fn fetch_bundles_from_remote(
     root: &Path,
     config: &KnitConfig,
@@ -707,9 +771,9 @@ pub fn fetch_bundles_from_remote(
                 continue;
             }
             // The remote lifecycle can still read "open" for a bundle that was
-            // landed or pruned here (nothing pushes terminal state back), so
-            // the local delete quarantine is the authority: a bundle deleted
-            // locally stays deleted.
+            // deleted here (the delete-time remote archive is best-effort and
+            // can be skipped offline), so the local delete quarantine is the
+            // authority: a bundle deleted locally stays deleted.
             if root
                 .join(".knit/deleted/bundles")
                 .join(format!("{}.bundle.json", bundle.id))
