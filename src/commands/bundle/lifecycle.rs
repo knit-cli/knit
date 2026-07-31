@@ -203,7 +203,40 @@ pub fn delete_bundle(
         out::node(&bundle_id),
         out::path(deleted_path.display())
     );
+    if !remote_bundles {
+        archive_remote_record_for_deleted(&root, config, &bundle);
+    }
     Ok(())
+}
+
+/// Mirror a local delete onto the configured sync remotes by archiving the
+/// matching bundle record, so hosted dashboards stop showing deleted work as
+/// open. Best-effort like the archive/restore lifecycle sync: the local delete
+/// already succeeded, so remote failures warn instead of failing the command.
+/// A workspace without push-sync remotes is a silent no-op, and explicit
+/// `--remote-bundles` already deleted the record outright.
+fn archive_remote_record_for_deleted(
+    root: &Path,
+    config: Option<&crate::model::KnitConfig>,
+    bundle: &ChangeGroup,
+) {
+    let loaded_config;
+    let config = match config {
+        Some(config) => config,
+        None => match crate::store::load_effective_config(root) {
+            Ok(config) => {
+                loaded_config = config;
+                &loaded_config
+            }
+            Err(_) => return,
+        },
+    };
+    if !config.push_sync {
+        return;
+    }
+    if let Err(error) = crate::commands::remote::archive_deleted_bundle_on_remotes(config, bundle) {
+        println!("{} {error:#}", out::warn("remote archive skipped:"));
+    }
 }
 
 /// Delete one repo's local feature branch in its original checkout. Uses

@@ -712,7 +712,7 @@ pub enum BundleCommand {
         /// Bundle id to restore.
         bundle: String,
     },
-    /// Move a bundle JSON artifact to .knit/deleted/bundles/.
+    /// Move a bundle JSON artifact to .knit/deleted/bundles/ and archive its record on the sync remotes.
     Delete {
         /// Bundle id to delete.
         bundle: String,

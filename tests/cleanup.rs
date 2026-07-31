@@ -819,3 +819,105 @@ fn prune_archives_remote_orphan_records_instead_of_deleting() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn delete_archives_the_remote_bundle_record() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "dead work", "--repo", "backend"]);
+
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    let export = "{\"data\":{\"project\":{\"slug\":\"demo\"},\"knitProject\":null,\"repositories\":[],\"bundles\":[{\"id\":\"rb-dead-work\",\"slug\":\"dead-work\",\"lifecycleState\":\"open\",\"currentArtifact\":null}],\"historyEvents\":[]}}";
+    fs::write(fake_dir.join("export.json"), export).unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let deleted = knit_with_env(
+        &workspace,
+        ["bundle", "delete", "dead-work", "--force", "--worktrees"],
+        &env,
+    );
+    assert!(deleted.contains("archived remote bundle"), "{deleted}");
+
+    // The local delete mirrored as an archive — never a remote deletion.
+    assert!(fake_dir.join("archived-rb-dead-work").exists());
+    assert!(!fake_dir.join("deleted-rb-dead-work").exists());
+    assert!(workspace
+        .join(".knit/deleted/bundles/dead-work.bundle.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prune_archives_quarantined_remote_records_without_recorded_prs() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Delete a never-published bundle before any remote exists: the remote
+    // record keeps reading "open" and, with no recorded PRs, the publication
+    // classifier alone would keep it as possible work in progress forever.
+    knit(
+        &workspace,
+        ["bundle", "abandoned work", "--repo", "backend"],
+    );
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "delete",
+            "abandoned-work",
+            "--force",
+            "--worktrees",
+        ],
+    );
+    assert!(workspace
+        .join(".knit/deleted/bundles/abandoned-work.bundle.json")
+        .exists());
+
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    let export = "{\"data\":{\"project\":{\"slug\":\"demo\"},\"knitProject\":null,\"repositories\":[],\"bundles\":[{\"id\":\"rb-abandoned-work\",\"slug\":\"abandoned-work\",\"lifecycleState\":\"open\",\"currentArtifact\":null},{\"id\":\"rb-already-archived\",\"slug\":\"other-work\",\"lifecycleState\":\"archived\",\"currentArtifact\":null}],\"historyEvents\":[]}}";
+    fs::write(fake_dir.join("export.json"), export).unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let pruned = knit_with_env(
+        &workspace,
+        [
+            "bundle",
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--remote-bundles",
+        ],
+        &env,
+    );
+    assert!(pruned.contains("local bundle was deleted"), "{pruned}");
+
+    // The quarantined record was archived; the already-archived one was left alone.
+    assert!(fake_dir.join("archived-rb-abandoned-work").exists());
+    assert!(!fake_dir.join("deleted-rb-abandoned-work").exists());
+    assert!(!fake_dir.join("archived-rb-already-archived").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
