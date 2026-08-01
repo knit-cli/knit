@@ -241,6 +241,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }) => commands::list_bundles(all, archived, deleted),
             Some(BundleCommand::Prune {
                 apply,
+                delete,
                 force,
                 refresh,
                 no_refresh,
@@ -263,6 +264,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 let remote_bundles = all || remote_bundles;
                 commands::prune_merged_bundles(
                     apply,
+                    delete,
                     refresh,
                     untracked,
                     report,
