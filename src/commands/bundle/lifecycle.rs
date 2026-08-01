@@ -138,6 +138,34 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     Ok(())
 }
 
+/// Archive a dead bundle found by `prune`: finished or abandoned work becomes
+/// history instead of discarded state. Records the dead reason on the archive
+/// node, removes generated worktrees, honors prune's explicit branch-cleanup
+/// flags, and mirrors the terminal state to the sync remotes through the
+/// archive lifecycle sync.
+pub fn archive_dead_bundle(
+    bundle_id: &str,
+    reason: &str,
+    branches: bool,
+    force_branches: bool,
+    remote_branches: bool,
+) -> Result<()> {
+    archive_bundle(bundle_id, Some(reason), false, true)?;
+    if branches || remote_branches {
+        let root = current_root()?;
+        let bundle_id = crate::ids::slugify(bundle_id);
+        let path = stored_bundle_path(&root, &bundle_id);
+        let bundle = load_existing_bundle(&path, &bundle_id)?;
+        if branches {
+            delete_local_feature_branches(&bundle, force_branches)?;
+        }
+        if remote_branches {
+            delete_remote_feature_branches(&bundle)?;
+        }
+    }
+    Ok(())
+}
+
 pub fn delete_bundle(
     bundle_id: &str,
     force: bool,
