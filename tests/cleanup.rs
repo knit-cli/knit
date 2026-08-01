@@ -273,14 +273,24 @@ fn bundle_prune_removes_only_bundles_with_all_recorded_prs_merged() {
             "--branches",
         ],
     );
-    assert!(pruned.contains("Deleted bundle"));
-    assert!(pruned.contains("Pruned"));
+    // Dead work whose PRs merged is finished work: archived as history with
+    // the dead reason on the ledger, never moved to the delete quarantine.
+    assert!(pruned.contains("Archived bundle"));
+    assert!(pruned.contains("dead bundle(s) as finished history"));
+    let archived_path = workspace.join(".knit/bundles/merged-cleanup.bundle.json");
+    assert!(archived_path.exists());
     assert!(!workspace
-        .join(".knit/bundles/merged-cleanup.bundle.json")
-        .exists());
-    assert!(workspace
         .join(".knit/deleted/bundles/merged-cleanup.bundle.json")
         .exists());
+    let archived: Value =
+        serde_json::from_str(&fs::read_to_string(&archived_path).unwrap()).unwrap();
+    assert_eq!(archived["state"].as_str(), Some("archived"));
+    let last_node = archived["nodes"].as_array().unwrap().last().unwrap();
+    assert_eq!(last_node["type"].as_str(), Some("feature.archived"));
+    assert_eq!(
+        last_node["message"].as_str(),
+        Some("recorded PRs are merged")
+    );
     assert!(!workspace
         .join(".knit/worktrees/merged-cleanup/backend")
         .exists());
@@ -381,6 +391,7 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     assert!(preview.contains("no recorded PRs and no pending changes"));
     assert!(!preview.contains("dirty-cleanup"));
 
+    // Explicit --delete keeps the old discard behavior available.
     let pruned = knit(
         &workspace,
         [
@@ -388,6 +399,7 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
             "prune",
             "--no-refresh",
             "--apply",
+            "--delete",
             "--worktrees",
             "--branches",
             "--force-branches",
@@ -395,6 +407,7 @@ fn bundle_prune_removes_clean_dead_work_with_missing_publications() {
     );
     assert!(pruned.contains("partial-landed"));
     assert!(pruned.contains("abandoned-cleanup"));
+    assert!(pruned.contains("Pruned:"));
     assert!(!workspace
         .join(".knit/bundles/partial-landed.bundle.json")
         .exists());
@@ -476,10 +489,13 @@ fn bundle_prune_untracked_flag_prunes_untracked_only_dead_work() {
         ],
     );
     assert!(pruned.contains("stray-cleanup"));
+    // Archived by default: the artifact stays as history while the generated
+    // checkout (and its untracked file) is discarded.
+    let stray_path = workspace.join(".knit/bundles/stray-cleanup.bundle.json");
+    assert!(stray_path.exists());
+    let stray: Value = serde_json::from_str(&fs::read_to_string(&stray_path).unwrap()).unwrap();
+    assert_eq!(stray["state"].as_str(), Some("archived"));
     assert!(!workspace
-        .join(".knit/bundles/stray-cleanup.bundle.json")
-        .exists());
-    assert!(workspace
         .join(".knit/deleted/bundles/stray-cleanup.bundle.json")
         .exists());
     assert!(!stray_feature.exists());
@@ -599,7 +615,7 @@ fn prune_can_remove_generated_worktrees_local_branches_and_remote_branches() {
             "--remote-branches",
         ],
     );
-    assert!(pruned.contains("Deleted bundle"));
+    assert!(pruned.contains("Archived bundle"));
     assert!(pruned.contains("origin/knit/remote-cleanup"));
     assert!(!feature.exists());
     assert!(!git_success(
@@ -642,7 +658,7 @@ fn prune_removes_bundle_worktree_container_dir_and_agents_md() {
         &workspace,
         ["bundle", "prune", "--no-refresh", "--apply", "--worktrees"],
     );
-    assert!(pruned.contains("Deleted bundle"));
+    assert!(pruned.contains("Archived bundle"));
     assert!(pruned.contains("container-cleanup"));
     assert!(!feature.exists());
     assert!(!bundle_root.join("AGENTS.md").exists());
@@ -737,11 +753,20 @@ fn bundle_prune_keeps_finished_bundles_unless_archived_flag() {
     assert!(workspace
         .join(".knit/bundles/finished-work.bundle.json")
         .exists());
-    assert!(!workspace
-        .join(".knit/bundles/dead-work.bundle.json")
-        .exists());
+    // The dead bundle is archived in place, joining the finished history.
+    let dead_path = workspace.join(".knit/bundles/dead-work.bundle.json");
+    assert!(dead_path.exists());
+    let dead: Value = serde_json::from_str(&fs::read_to_string(&dead_path).unwrap()).unwrap();
+    assert_eq!(dead["state"].as_str(), Some("archived"));
 
-    // Explicit opt-in prunes the finished artifact too.
+    // Pruning finished bundles discards history, so it demands --delete.
+    let missing_delete = knit_fails(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--archived", "--apply"],
+    );
+    assert!(missing_delete.contains("--delete"), "{missing_delete}");
+
+    // Explicit opt-in discards the finished artifacts too.
     let pruned_finished = knit(
         &workspace,
         [
@@ -749,6 +774,7 @@ fn bundle_prune_keeps_finished_bundles_unless_archived_flag() {
             "prune",
             "--no-refresh",
             "--archived",
+            "--delete",
             "--apply",
             "--worktrees",
         ],

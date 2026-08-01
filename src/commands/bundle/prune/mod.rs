@@ -1,5 +1,7 @@
-//! `knit prune` — find and delete dead-work bundles, orphan worktrees, and
-//! orphaned remote bundle records.
+//! `knit prune` — find dead-work bundles, orphan worktrees, and orphaned
+//! remote bundle records. Dead bundles are archived as finished history by
+//! default (which also mirrors the terminal state to the sync remotes);
+//! `--delete` discards their artifacts instead.
 //!
 //! A bundle is "dead work" when it has no open PRs, no uncommitted tracked
 //! changes in any checkout, and — for repos with no recorded review object —
@@ -10,7 +12,7 @@
 mod assess;
 mod orphans;
 
-use super::{bundle_json_paths, current_root, delete_bundle};
+use super::{archive_dead_bundle, bundle_json_paths, current_root, delete_bundle};
 use crate::output as out;
 use anyhow::{bail, Result};
 use assess::{assess_bundles, PruneAssessment, PruneCache};
@@ -29,6 +31,7 @@ pub(super) fn print_prune_warning(message: impl std::fmt::Display) {
 
 pub fn prune_merged_bundles(
     apply: bool,
+    delete: bool,
     refresh: bool,
     untracked: bool,
     report: bool,
@@ -49,6 +52,11 @@ pub fn prune_merged_bundles(
     if branches && !worktrees {
         bail!(
             "Pruning local branches requires --worktrees so generated checkouts are removed first."
+        );
+    }
+    if include_finished && !delete {
+        bail!(
+            "Pruning finished (landed/archived) bundles discards history artifacts; add --delete."
         );
     }
 
@@ -209,7 +217,7 @@ pub fn prune_merged_bundles(
         println!(
             "{}",
             out::warn(format!(
-                "Run `{}` to delete these bundle artifacts.",
+                "Run `{}` to archive these dead bundles as finished history (add --delete to discard their artifacts instead).",
                 suggested_prune_apply_command(
                     untracked,
                     worktrees,
@@ -226,16 +234,26 @@ pub fn prune_merged_bundles(
 
     let mut pruned = 0usize;
     for candidate in candidates {
-        delete_bundle(
-            &candidate.id,
-            true,
-            worktrees,
-            branches,
-            force_branches,
-            remote_branches,
-            remote_bundles,
-            config.as_ref(),
-        )?;
+        if delete {
+            delete_bundle(
+                &candidate.id,
+                true,
+                worktrees,
+                branches,
+                force_branches,
+                remote_branches,
+                remote_bundles,
+                config.as_ref(),
+            )?;
+        } else {
+            archive_dead_bundle(
+                &candidate.id,
+                &candidate.reason,
+                branches,
+                force_branches,
+                remote_branches,
+            )?;
+        }
         pruned += 1;
     }
     let mut removed_orphans = 0usize;
@@ -245,8 +263,8 @@ pub fn prune_merged_bundles(
     }
     // Remote orphan records are archived, never deleted: a record whose local
     // artifact is gone is the last remaining trace of shipped work, and the
-    // hosted dashboard is the durable archive of record. True deletion stays a
-    // per-bundle decision via `knit bundle delete --remote-bundles`.
+    // hosted dashboard is the durable archive of record. True deletion stays
+    // an explicit decision via `--delete --remote-bundles`.
     let mut removed_remote = 0usize;
     if let Some(config) = config.as_ref() {
         for orphan in remote_orphans {
@@ -268,7 +286,15 @@ pub fn prune_merged_bundles(
         }
     }
 
-    println!("{} {} bundle(s)", out::heading("Pruned:"), pruned);
+    if delete {
+        println!("{} {} bundle(s)", out::heading("Pruned:"), pruned);
+    } else {
+        println!(
+            "{} {} dead bundle(s) as finished history",
+            out::heading("Archived:"),
+            pruned
+        );
+    }
     if removed_orphans > 0 {
         println!(
             "{} {} orphan worktree dir(s)",

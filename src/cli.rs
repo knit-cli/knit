@@ -650,11 +650,14 @@ pub enum BundleCommand {
         #[arg(long)]
         deleted: bool,
     },
-    /// Delete dead bundles whose PRs are merged, closed, missing, or absent.
+    /// Archive dead bundles whose PRs are merged, closed, missing, or absent (--delete discards them instead).
     Prune {
         /// Apply pruning after listing candidate bundles.
         #[arg(long)]
         apply: bool,
+        /// Discard dead bundle artifacts to .knit/deleted/bundles/ instead of archiving them as finished history.
+        #[arg(long)]
+        delete: bool,
         /// Refresh recorded PR states from GitHub before deciding. This is the default.
         #[arg(long, conflicts_with = "no_refresh")]
         refresh: bool,
@@ -685,12 +688,12 @@ pub enum BundleCommand {
         /// Delete matching feature branches from origin.
         #[arg(long = "remote-branches", requires = "branches")]
         remote_branches: bool,
-        /// Delete matching remote bundle records.
+        /// Scan the sync remote and archive orphaned bundle records; with --delete, remote records matching pruned bundles are deleted.
         #[arg(long = "remote-bundles")]
         remote_bundles: bool,
-        /// Also prune finished (landed/archived) bundle artifacts. By default
-        /// finished bundles are history and only open dead work is pruned.
-        #[arg(long)]
+        /// Also prune finished (landed/archived) bundle artifacts. Requires
+        /// --delete because it discards history artifacts.
+        #[arg(long, requires = "delete")]
         archived: bool,
     },
     /// Mark a bundle done: archive its artifact and remove generated worktrees, keeping branches.
