@@ -1,6 +1,7 @@
 //! Orphan cleanup targets: generated worktree directories whose bundle is
-//! gone, and remote bundle records with no local artifact whose PRs
-//! are all merged or closed (unreachable by the local bundle scan).
+//! gone, and remote bundle records with no local artifact that are dead work
+//! (deleted locally, or every recorded PR merged or closed) and so are
+//! unreachable by the local bundle scan.
 
 use super::assess::{
     path_pending_changes, publication_state_is_closed, publication_state_is_merged, PruneCache,
@@ -23,9 +24,10 @@ pub(super) struct OrphanWorktree {
     pub(super) discards_pending: bool,
 }
 
-/// A bundle that exists on the sync remote but has no local artifact and
-/// whose recorded pull requests are all merged or closed, so prune can never reach
-/// it through the local `.knit/bundles/` scan.
+/// A bundle that exists on the sync remote but has no local artifact and is
+/// dead work — its artifact sits in the local delete quarantine, or every
+/// recorded pull request is merged or closed — so prune can never reach it
+/// through the local `.knit/bundles/` scan.
 pub(super) struct RemoteOrphan {
     pub(super) remote_id: String,
     pub(super) slug: String,
@@ -59,20 +61,36 @@ pub(super) fn remote_orphan_candidates(
     };
     let mut orphans = Vec::new();
     let cache = PruneCache::new();
-    let jobs: Vec<RemoteOrphanJob> = records
-        .into_iter()
-        .filter_map(|record| {
-            if record.lifecycle_state == "deleted" || local_ids.contains(&record.slug) {
-                return None;
-            }
-            let payload = record.payload?;
-            Some(RemoteOrphanJob {
+    let mut jobs: Vec<RemoteOrphanJob> = Vec::new();
+    for record in records {
+        // Archived and tombstoned records are already terminal on the remote;
+        // re-archiving them would only churn the record and the network.
+        if record.lifecycle_state == "deleted"
+            || record.lifecycle_state == "archived"
+            || local_ids.contains(&record.slug)
+        {
+            continue;
+        }
+        // An artifact in the local delete quarantine is proof the work was
+        // deliberately discarded here, so the record is dead even when it has
+        // no recorded PRs (which the classifier below keeps as possible WIP).
+        if deleted_artifact_exists(root, &record.slug) {
+            orphans.push(RemoteOrphan {
                 remote_id: record.remote_id,
                 slug: record.slug,
-                payload,
-            })
-        })
-        .collect();
+                reason: "local bundle was deleted",
+            });
+            continue;
+        }
+        let Some(payload) = record.payload else {
+            continue;
+        };
+        jobs.push(RemoteOrphanJob {
+            remote_id: record.remote_id,
+            slug: record.slug,
+            payload,
+        });
+    }
 
     let results: Vec<(String, Option<RemoteOrphan>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
@@ -183,6 +201,14 @@ fn refresh_remote_publication_state(
         },
         None => publication.state.clone(),
     }
+}
+
+/// True when the bundle's artifact sits in `.knit/deleted/bundles/`, the
+/// quarantine `knit bundle delete` moves artifacts into.
+fn deleted_artifact_exists(root: &Path, slug: &str) -> bool {
+    root.join(".knit/deleted/bundles")
+        .join(format!("{slug}.bundle.json"))
+        .is_file()
 }
 
 fn classify_remote_publication_states(states: &[String]) -> Option<&'static str> {
@@ -372,5 +398,19 @@ mod tests {
     #[test]
     fn no_publications_is_not_an_orphan() {
         assert_eq!(dead_reason(&[]), None);
+    }
+
+    #[test]
+    fn delete_quarantine_marks_the_record_dead() {
+        let root = std::env::temp_dir().join(format!(
+            "knit-orphan-quarantine-test-{}",
+            std::process::id()
+        ));
+        let deleted_dir = root.join(".knit/deleted/bundles");
+        fs::create_dir_all(&deleted_dir).unwrap();
+        fs::write(deleted_dir.join("feature.bundle.json"), b"{}").unwrap();
+        assert!(deleted_artifact_exists(&root, "feature"));
+        assert!(!deleted_artifact_exists(&root, "still-open"));
+        let _ = fs::remove_dir_all(&root);
     }
 }

@@ -25,10 +25,11 @@ pub use facade::{sync_pull, sync_push, SyncTargets};
 pub use history::pull_history_from_remote;
 pub use projects::list_remote_projects;
 pub use pull::{
-    archive_remote_bundle_by_id, delete_bundle_from_remote, delete_remote_bundle_by_id,
-    fetch_bundles_from_remote, list_remote_bundles, prepare_remote_pull, pull_bundle_by_slug,
-    pull_bundle_remote_state, pull_remote_state, pull_views_from_remote, remote_bundle_lifecycle,
-    RemoteBundleOutcome, RemoteBundleRecord, RemotePullContext,
+    archive_deleted_bundle_on_remotes, archive_remote_bundle_by_id, delete_bundle_from_remote,
+    delete_remote_bundle_by_id, fetch_bundles_from_remote, list_remote_bundles,
+    prepare_remote_pull, pull_bundle_by_slug, pull_bundle_remote_state, pull_remote_state,
+    pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome, RemoteBundleRecord,
+    RemotePullContext,
 };
 pub use push::sync_remote_helpers_command;
 pub use push::{
