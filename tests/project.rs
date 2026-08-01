@@ -26,7 +26,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle add"));
     assert!(agents.contains("knit bundle remove <repo>"));
     assert!(agents.contains("knit bundle prune"));
-    assert!(agents.contains("knit bundle prune --apply --worktrees --branches"));
+    assert!(agents.contains("archives dead bundles as finished history"));
     assert!(agents.contains("knit bundle prune --apply --all"));
     assert!(agents.contains("--remote-branches"));
     assert!(agents.contains("matching remote bundle records"));
