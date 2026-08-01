@@ -414,7 +414,7 @@ knit bundle restore feature-x                    # reopen; `knit bundle worktree
 
 Archiving refuses to discard dirty generated worktrees unless `--force` is passed.
 
-`knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
+`knit bundle delete <bundle> --force` moves the bundle JSON artifact to `.knit/deleted/bundles/` and clears the active bundle if needed. By default it preserves git state. With push-sync remotes configured, it also archives the bundle's record on each sync remote so hosted dashboards stop counting the deleted work as open; that mirror is best-effort (offline deletes warn and continue) and a later `knit bundle prune --remote-bundles` catches anything it missed. Add `--worktrees` to remove Knit-generated worktrees for that bundle before moving the artifact. Add `--branches` to delete the local `knit/<bundle>` feature branches after those generated worktrees are removed:
 
 ```sh
 knit bundle delete documentation-quick-wins --force
@@ -431,13 +431,16 @@ knit bundle delete documentation-quick-wins --force --worktrees --branches --for
 ```sh
 knit bundle prune
 knit bundle prune --no-refresh
-knit bundle prune --apply --worktrees --branches
+knit bundle prune --apply
 knit bundle prune --apply --all
+knit bundle prune --apply --delete --worktrees --branches
 ```
 
-Landed and archived bundles are finished work, not dead work: their artifacts are the audit record of what shipped, so prune keeps them (and says how many it kept) unless `--archived` opts them into the scan. `--all` deliberately does not imply `--archived`.
+On `--apply`, dead bundles are **archived, not deleted**: finished work — a bundle whose PRs all merged, even outside `knit land` — becomes history, exactly like `knit bundle archive`. The archive node records why the bundle was dead (for example "recorded PRs are merged"), generated worktrees are removed, local feature branches are preserved, and with push-sync remotes configured the terminal state is pushed so hosted dashboards flip together with the local ledger. This is what keeps the remote from accumulating bundles that read "open" after their work merged. The explicit `--branches`/`--remote-branches` cleanups still apply in either mode. Pass `--delete` to discard the artifacts to `.knit/deleted/bundles/` instead of archiving them.
 
-A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not delete it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — combine with `--worktrees` (or `--all`) on `--apply` so the untracked files are discarded with the generated checkout. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
+Landed and archived bundles are finished work, not dead work: their artifacts are the audit record of what shipped, so prune keeps them (and says how many it kept) unless `--archived` opts them into the scan. `--archived` requires `--delete` because pruning finished bundles discards history artifacts. `--all` deliberately implies neither.
+
+A bundle whose only uncommitted work is untracked files is otherwise dead work, so prune does not touch it by default; instead it lists it under "Blocked by untracked files". Pass `--untracked` to treat those bundles as dead-work candidates — the untracked files are discarded with the generated checkout on `--apply`. Bundles with tracked, uncommitted changes are still preserved even with `--untracked`.
 
 `--report` prints every scanned bundle and why it is prunable or kept (open PRs, merged PRs, tracked changes, or untracked-only files), not just the deletable candidates:
 
@@ -447,9 +450,9 @@ knit bundle prune --untracked
 knit bundle prune --apply --untracked --worktrees
 ```
 
-Remote bundle cleanup uses the configured sync remote and archives matching remote bundle records — it never deletes them, because a record whose local artifact is gone is often the last remaining trace of shipped work. Archiving rides the everyday `bundle:push` scope. True remote deletion stays a per-bundle decision via `knit bundle delete --remote-bundles`, which requires a `bundle:delete` token.
+Remote bundle cleanup archives matching remote bundle records — it never deletes them, because a record whose local artifact is gone is often the last remaining trace of shipped work. Archiving rides the everyday `bundle:push` scope. True remote deletion stays an explicit decision via `knit bundle prune --apply --delete --remote-bundles`, which requires a `bundle:delete` token.
 
-With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and whose recorded PRs are all merged or closed. Without this, a plain `knit bundle prune --apply` could delete a local artifact while leaving its remote record behind, and no later prune could ever reach it again. These are listed under "Remote orphan bundle candidates" and deleted on `--apply`; their live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
+With `--remote-bundles`, prune also detects **remote orphans**: bundle records that exist on the sync remote but have no local artifact and are dead work — their artifact sits in the local `.knit/deleted/bundles/` quarantine (a locally deleted bundle is dead even with no recorded PRs), or every recorded PR is merged or closed. Without this, a delete that could not reach the remote (offline, or made before delete-time archiving existed) would leave its record behind forever, and no later prune could reach it through the local bundle scan. These are listed under "Remote orphan bundle candidates" and archived on `--apply`; records already archived on the remote are skipped. Live PR state is refreshed from the host by URL during detection (the synced artifact can be stale), falling back to the recorded state when the lookup fails. Prune is also best-effort: an unreadable bundle file, a failed PR lookup, or an unverifiable checkout is reported as a warning and skipped (the bundle is kept to be safe) instead of aborting the whole scan.
 
 So the common cleanup distinction is:
 
