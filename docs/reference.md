@@ -594,7 +594,7 @@ When sync remotes are configured, `knit publish create` and `knit push` also pus
 
 ```sh
 knit sync push                 # push bundle + history + views + architecture for the resolved project/bundle
-knit sync push --bundles       # push only the bundle artifact (e.g. after landing)
+knit sync push --bundles       # push bundle artifacts (open bundles push their feature branches first)
 knit sync push --history       # push only project history events
 knit sync push --views         # push only your saved views
 knit sync push --kg            # push the knowledge-graph viz slice (explicit only)
@@ -606,6 +606,8 @@ knit sync push --remote hosted    # use an explicit remote
 With no target flag (`--bundles`/`--history`/`--views`/`--architecture`/`--all`), `knit sync push`/`pull` move every routine artifact family. The knowledge-graph viz slice (produced by `urdir kg viz`, often several MB) is deliberately excluded from `--all` and bare invocations — push it with an explicit `knit sync push --kg` after regenerating it. By default every configured remote is a sync remote — the remotes list itself is the sync set, and names carry no special meaning. `knit config set sync-remotes ...` (or the legacy `sync-remote`) narrows that set when some remotes should stay out of routine sync; override per invocation with one or more `--remote <name>`. Push-style syncs fan out to every sync remote and keep going past a failing one, reporting each failure at the end. Pull-style syncs walk the sync remotes in priority order and use the first one that responds.
 
 The git-shaped verbs keep their git semantics but route through the same internal sync module: `knit push --remote <name>` still pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` still pull recorded bundle state. Landing's automatic artifact sync (when `push-sync` is enabled) goes through the same module too. There is one implementation behind several differently shaped doors.
+
+Pushing a bundle always means branches + artifact: an open bundle's artifact is never uploaded to a sync remote unless its feature branches are on git `origin`. Bundle pushes (including the project-wide `knit sync push --bundles` sweep) first push any missing or stale feature branch — plain, never forced — from the bundle's checkout; if a branch cannot be pushed or verified, that bundle's artifact upload is skipped with a warning while the rest of the sweep continues. Terminal-state bundles (closed, archived, deleted) sweep artifact-only — their branches were published before landing or archiving.
 
 
 Remotes can be workspace-local or user-global. Workspace `.knit/config.json` remotes override global remotes of the same name; otherwise commands fall back to the user-level config at `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. This lets every workspace share the same hosted remote unless a workspace deliberately points that name somewhere else:
