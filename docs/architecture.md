@@ -131,7 +131,7 @@ This is consolidated into one verb family. `knit sync` keeps its original meanin
 - `knit sync push [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...`
 - `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...`
 
-With no target flag, both move every routine artifact family; the knowledge-graph viz slice is bulky and moves only on an explicit `--kg`. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote.
+With no target flag, both move every routine artifact family; the knowledge-graph viz slice is bulky and moves only on an explicit `--kg`. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote. Pushing a bundle always means branches + artifact: before an open bundle's artifact is uploaded, its feature branches are pushed to git `origin` (plain, never forced) or verified there; a bundle whose branches cannot be pushed or verified is skipped with a warning. Terminal-state bundles (closed/archived/deleted) push artifact-only.
 
 The absorbed verbs are deleted, not aliased or hidden: `knit bundle push`, `knit history push/pull/sync` (only `history list` and `history refresh` remain), `knit view push/pull`, and `knit land sync` no longer exist. The philosophy is one way per outcome — delete, do not hide.
 
