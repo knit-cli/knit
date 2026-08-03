@@ -1,13 +1,16 @@
 use crate::checkout::checkout_dir;
-use crate::git::{current_branch, git_output, git_output_optional, rev_parse};
+use crate::git::{
+    current_branch, git_output, git_output_optional, ref_commit_sha, remote_ref_sha, rev_parse,
+};
 use crate::ids::short_sha;
-use crate::model::RepoEntry;
+use crate::model::{BundleState, ChangeGroup, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{load_active_bundle, ActiveBundle};
-use anyhow::{bail, Context, Result};
+use crate::tracking::latest_recorded_head_sha;
+use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::OsString;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 struct PushSuccess {
     upstream: String,
@@ -194,6 +197,137 @@ fn read_upstream(cwd: &Path) -> Option<String> {
         ["rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{u}"],
     )
     .ok()
+}
+
+/// Ensure an open bundle's feature branches are on git `origin` before its
+/// artifact is allowed onto a sync remote: "pushing a bundle" means branches
+/// + artifact, always. Branches that are missing or stale on origin are
+/// pushed (plain, never forced) from the bundle's checkout; when no checkout
+/// exists the branch is only verified against the bundle's recorded head.
+/// Terminal-state bundles (closed/archived/deleted) are a no-op — their
+/// branches were published before landing/archiving.
+///
+/// Returns one human-readable line per branch that was actually pushed, in
+/// the same shape as `knit push` output, so callers can print them.
+pub(crate) fn ensure_open_bundle_branches_on_origin(
+    root: &Path,
+    bundle: &ChangeGroup,
+) -> Result<Vec<String>> {
+    if !matches!(bundle.state, None | Some(BundleState::Open)) {
+        return Ok(Vec::new());
+    }
+
+    let mut pushed = Vec::new();
+    for repo in &bundle.repos {
+        // No git remote recorded: the branch/artifact coupling cannot apply.
+        let Some(remote_url) = repo.remote.as_deref() else {
+            continue;
+        };
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            continue;
+        };
+        let reference = format!("refs/heads/{branch}");
+
+        let Some(cwd) = branch_push_dir(root, repo) else {
+            // Artifact-only workspace (e.g. a pulled bundle without local
+            // checkouts): nothing to push from, so verification-only against
+            // the recorded remote URL.
+            let remote_sha = remote_ref_sha(root, remote_url, &reference).with_context(|| {
+                format!(
+                    "repo {}: git remote is unreachable, so feature branch {branch} cannot be verified on origin",
+                    repo.id
+                )
+            })?;
+            verify_branch_at_recorded_head(bundle, repo, branch, remote_sha)?;
+            continue;
+        };
+
+        let local_tip = ref_commit_sha(&cwd, branch).with_context(|| {
+            format!(
+                "repo {}: failed to resolve feature branch {branch}",
+                repo.id
+            )
+        })?;
+        let remote_sha = remote_ref_sha(&cwd, "origin", &reference).with_context(|| {
+            format!(
+                "repo {}: origin is unreachable, so feature branch {branch} cannot be verified",
+                repo.id
+            )
+        })?;
+
+        let Some(local_tip) = local_tip else {
+            // The checkout exists but the branch does not (yet): fall back to
+            // verifying origin against the recorded head.
+            verify_branch_at_recorded_head(bundle, repo, branch, remote_sha)?;
+            continue;
+        };
+        if remote_sha.as_deref() == Some(local_tip.as_str()) {
+            continue;
+        }
+        run_push(&cwd, branch, true, PushForce::No).map_err(|error| {
+            anyhow!(
+                "repo {}: feature branch {branch} is not on origin and could not be pushed: {error:#}",
+                repo.id
+            )
+        })?;
+        pushed.push(format!(
+            "{}: {} {} {}",
+            out::repo(&repo.id),
+            out::movement("pushed"),
+            out::branch(format!("origin/{branch}")),
+            out::sha(short_sha(&local_tip))
+        ));
+    }
+
+    Ok(pushed)
+}
+
+/// Where a bundle repo's feature branch can be pushed from: the recorded
+/// worktree when it exists, else the source repo checkout (git worktree
+/// branches live in the shared ref store, so pushing from the source repo
+/// moves the same branch).
+fn branch_push_dir(root: &Path, repo: &RepoEntry) -> Option<PathBuf> {
+    if let Some(path) = &repo.worktree_path {
+        let path = PathBuf::from(path);
+        let path = if path.is_absolute() {
+            path
+        } else {
+            root.join(path)
+        };
+        if path.exists() {
+            return Some(path);
+        }
+    }
+    if repo.path.is_empty() {
+        return None;
+    }
+    let path = PathBuf::from(&repo.path);
+    path.exists().then_some(path)
+}
+
+/// Verification-only branch gate for repos without a pushable checkout: the
+/// branch must exist on origin at the bundle's recorded head.
+fn verify_branch_at_recorded_head(
+    bundle: &ChangeGroup,
+    repo: &RepoEntry,
+    branch: &str,
+    remote_sha: Option<String>,
+) -> Result<()> {
+    let Some(remote_sha) = remote_sha else {
+        bail!(
+            "repo {}: feature branch {branch} is missing on origin and there is no local checkout to push it from",
+            repo.id
+        );
+    };
+    match latest_recorded_head_sha(bundle, repo) {
+        Some(recorded) if recorded != remote_sha => bail!(
+            "repo {}: feature branch {branch} on origin is at {} but the bundle records {}, and there is no local checkout to push from",
+            repo.id,
+            short_sha(&remote_sha),
+            short_sha(&recorded)
+        ),
+        _ => Ok(()),
+    }
 }
 
 #[cfg(test)]
