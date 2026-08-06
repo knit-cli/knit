@@ -63,6 +63,44 @@ fn archive_records_ledger_node_and_preserves_branches() {
 }
 
 #[test]
+fn clean_archived_sweeps_landed_bundle_worktrees() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "landed cleanup"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/landed-cleanup/backend");
+    assert!(feature.exists());
+
+    // Mark the bundle landed the way `knit land apply` does: a ledger node,
+    // never a persisted state field. The sweep must treat this derived state
+    // as finished work, not skip it as open.
+    let artifact = workspace.join(".knit/bundles/landed-cleanup.bundle.json");
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    bundle["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "n-landed-test",
+            "type": "feature.landed",
+            "createdAt": "2026-01-01T00:00:00.000Z"
+        }));
+    fs::write(&artifact, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    assert!(knit(&workspace, ["bundle", "list"]).contains("landed"));
+
+    knit(&workspace, ["clean", "--archived", "--worktrees"]);
+    assert!(!feature.exists());
+    assert!(
+        git(&backend, ["branch", "--list", "knit/landed-cleanup"]).contains("knit/landed-cleanup")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn clean_removes_plans_and_generated_worktrees_only() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
@@ -527,6 +565,18 @@ fn prune_removes_orphan_worktree_dirs_without_bundle_artifacts() {
     let dirty_orphan = workspace.join(".knit/worktrees/dirty-orphan");
     fs::create_dir_all(&dirty_orphan).unwrap();
     fs::write(dirty_orphan.join("note.txt"), "untracked work\n").unwrap();
+
+    // Without --worktrees the orphan dirs are still reported — the listing
+    // must not claim there is nothing to prune — but nothing is removed,
+    // and the suggested apply command picks up the missing flag.
+    let listing = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(listing.contains("Orphan worktree dirs (pass --worktrees to remove)"));
+    assert!(listing.contains("empty-orphan"));
+    assert!(listing.contains("--apply --worktrees"));
+    let applied_without_flag = knit(&workspace, ["bundle", "prune", "--no-refresh", "--apply"]);
+    assert!(!applied_without_flag.contains("removed orphan worktree"));
+    assert!(workspace.join(".knit/worktrees/empty-orphan").exists());
+    assert!(dirty_orphan.exists());
 
     let preview = knit(
         &workspace,
