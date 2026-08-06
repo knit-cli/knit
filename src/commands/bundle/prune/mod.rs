@@ -105,11 +105,9 @@ pub fn prune_merged_bundles(
         }
     }
 
-    let (orphan_worktrees, blocked_orphan_worktrees) = if worktrees {
-        orphan_worktree_candidates(&root, force)?
-    } else {
-        (Vec::new(), Vec::new())
-    };
+    // Always scan for orphan worktree dirs so the listing is truthful even
+    // without `--worktrees`; the flag still gates their removal below.
+    let (orphan_worktrees, blocked_orphan_worktrees) = orphan_worktree_candidates(&root, force)?;
     let remote_orphans = if remote_bundles {
         remote_orphan_candidates(config.as_ref(), &local_ids, &root, refresh)
     } else {
@@ -182,7 +180,14 @@ pub fn prune_merged_bundles(
         }
     }
     if !orphan_worktrees.is_empty() {
-        println!("{}", out::heading("Orphan worktree candidates:"));
+        if worktrees {
+            println!("{}", out::heading("Orphan worktree candidates:"));
+        } else {
+            println!(
+                "{}",
+                out::heading("Orphan worktree dirs (pass --worktrees to remove):")
+            );
+        }
         for orphan in &orphan_worktrees {
             if orphan.discards_pending {
                 println!(
@@ -220,7 +225,9 @@ pub fn prune_merged_bundles(
                 "Run `{}` to archive these dead bundles as finished history (add --delete to discard their artifacts instead).",
                 suggested_prune_apply_command(
                     untracked,
-                    worktrees,
+                    worktrees
+                        || !orphan_worktrees.is_empty()
+                        || !blocked_orphan_worktrees.is_empty(),
                     force || !blocked_orphan_worktrees.is_empty(),
                     branches,
                     force_branches,
@@ -257,9 +264,11 @@ pub fn prune_merged_bundles(
         pruned += 1;
     }
     let mut removed_orphans = 0usize;
-    for orphan in orphan_worktrees {
-        remove_orphan_worktree(&orphan, force)?;
-        removed_orphans += 1;
+    if worktrees {
+        for orphan in orphan_worktrees {
+            remove_orphan_worktree(&orphan, force)?;
+            removed_orphans += 1;
+        }
     }
     // Remote orphan records are archived, never deleted: a record whose local
     // artifact is gone is the last remaining trace of shipped work, and the
