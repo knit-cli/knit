@@ -305,7 +305,14 @@ fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
         }
         let bundle: ChangeGroup = read_json(&path)?;
         let state = crate::commands::bundle::bundle_state(&bundle);
-        if !matches!(state, BundleStatus::Closed | BundleStatus::Archived) {
+        // `Landed` is derived from the ledger and never written to the
+        // artifact, so a landed bundle whose worktrees were kept (for example
+        // `knit land apply --keep-worktrees`) is finished work too — skipping
+        // it here would leave its checkouts behind forever.
+        if !matches!(
+            state,
+            BundleStatus::Closed | BundleStatus::Archived | BundleStatus::Landed
+        ) {
             continue;
         }
         let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
