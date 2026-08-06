@@ -1210,10 +1210,9 @@ fn archive_and_restore_sync_lifecycle_state_to_remote() {
 #[test]
 fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     let root = unique_temp_dir();
-    let backend = root.join("backend");
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
-    init_repo(&backend, "backend");
 
     knit(&workspace, ["init", "demo"]);
     knit(
@@ -1238,6 +1237,129 @@ fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     assert_eq!(alpha.lines().last(), Some("open"), "{alpha}");
     let beta = fs::read_to_string(fake_dir.join("artifact-beta-work.states")).unwrap();
     assert_eq!(beta.lines().last(), Some("archived"), "{beta}");
+
+    // The open bundle's feature branch went to git origin with the artifact;
+    // the archived bundle stayed artifact-only.
+    assert!(
+        git_success(
+            &remote,
+            ["rev-parse", "--verify", "refs/heads/knit/alpha-work"]
+        ),
+        "open bundle branch should be on origin after the sweep"
+    );
+    assert!(
+        !git_success(
+            &remote,
+            ["rev-parse", "--verify", "refs/heads/knit/beta-work"]
+        ),
+        "archived bundle sweep must not push branches"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_pushes_open_bundle_branches_before_artifact() {
+    let root = unique_temp_dir();
+    let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "alpha work", "--repo", "backend"]);
+    let checkout = workspace.join(".knit/worktrees/alpha-work/backend");
+    append_line(&checkout.join("app.txt"), "alpha change");
+    knit(&workspace, ["commit", "--all", "-m", "Alpha change"]);
+    let feature_head = git(&checkout, ["rev-parse", "HEAD"]);
+    assert!(
+        !git_success(
+            &remote,
+            ["rev-parse", "--verify", "refs/heads/knit/alpha-work"]
+        ),
+        "the feature branch must not be on origin before the sync push"
+    );
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("origin/knit/alpha-work"), "{output}");
+
+    // Branch first: origin now holds the recorded head.
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/alpha-work"]),
+        feature_head
+    );
+    // ...and the artifact still made it to the sync remote.
+    let states = fs::read_to_string(fake_dir.join("artifact-alpha-work.states")).unwrap();
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_skips_open_bundle_artifact_when_branch_push_fails() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    // The bad bundle is created first so the workspace fallback resolves the
+    // healthy bundle as active and the broken one is reached by the sweep.
+    knit(&workspace, ["bundle", "bad work", "--repo", "frontend"]);
+    knit(&workspace, ["bundle", "good work", "--repo", "backend"]);
+    // Break the bad bundle's git origin after creation, so its branch can
+    // neither be verified nor pushed. The generated worktree shares the
+    // source checkout's remote config.
+    git(
+        &frontend,
+        [
+            "remote",
+            "set-url",
+            "origin",
+            root.join("missing.git").to_str().unwrap(),
+        ],
+    );
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("sync skipped (bad-work)"), "{output}");
+
+    // The unreachable bundle's artifact never reached the sync remote...
+    assert!(
+        !fake_dir.join("artifact-bad-work.states").exists(),
+        "bad-work artifact must not be uploaded when its branches cannot be pushed"
+    );
+    // ...while the healthy bundle in the same sweep pushed branch + artifact.
+    let states = fs::read_to_string(fake_dir.join("artifact-good-work.states")).unwrap();
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+    assert!(
+        git_success(
+            &backend_remote,
+            ["rev-parse", "--verify", "refs/heads/knit/good-work"]
+        ),
+        "healthy bundle branch should be on origin after the sweep"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -661,6 +661,16 @@ fn push_active_bundle_to_remote(
     active: &ActiveBundle,
     force: PushForce,
 ) -> Result<()> {
+    // An open bundle's artifact must never reach a sync remote unless its
+    // feature branches are on git origin: pushing a bundle means branches +
+    // artifact, always. Terminal-state bundles are pushed artifact-only.
+    let branch_lines =
+        crate::commands::push::ensure_open_bundle_branches_on_origin(&active.root, &active.bundle)
+            .context("feature branches not pushed; artifact not synced")?;
+    for line in &branch_lines {
+        println!("{line}");
+    }
+
     let config = load_effective_config(&active.root)?;
     let project_id = project
         .map(slugify)
@@ -1235,6 +1245,23 @@ pub fn push_all_bundles_to_remote(
         };
         if exclude_bundle == Some(bundle.id.as_str()) {
             continue;
+        }
+        // Open bundles are gated on their feature branches being on git
+        // origin; one that cannot satisfy that is warn-skipped so the rest of
+        // the sweep continues. Terminal-state bundles sweep artifact-only.
+        match crate::commands::push::ensure_open_bundle_branches_on_origin(&root, &bundle) {
+            Ok(lines) => {
+                for line in lines {
+                    println!("{line}");
+                }
+            }
+            Err(error) => {
+                println!(
+                    "{} {error:#}",
+                    out::warn(format!("sync skipped ({}):", bundle.id))
+                );
+                continue;
+            }
         }
         let Some(project_id) = bundle
             .project_id
