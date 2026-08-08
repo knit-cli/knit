@@ -74,6 +74,33 @@ fn new_change_group_starts_node_chain() {
 }
 
 #[test]
+fn sync_target_uses_the_remote_server_identity() {
+    let mut bundle = ChangeGroup::new(
+        "venue-capacity".to_string(),
+        "venue capacity".to_string(),
+        "2026-05-05T00:00:00.000Z".to_string(),
+    );
+
+    assert!(bundle.record_sync_target(
+        "svartal",
+        "4a0f08dc-6f93-4be1-a4ae-d7d8bae75cf9",
+        "https://api.svartal.com/",
+    ));
+    assert!(!bundle.record_sync_target(
+        "svartal",
+        "4a0f08dc-6f93-4be1-a4ae-d7d8bae75cf9",
+        "https://api.svartal.com",
+    ));
+    assert_eq!(bundle.sync_targets.len(), 1);
+    assert_eq!(bundle.sync_targets[0].remote, "svartal");
+    assert_eq!(
+        bundle.sync_targets[0].bundle_id,
+        "4a0f08dc-6f93-4be1-a4ae-d7d8bae75cf9"
+    );
+    assert_eq!(bundle.sync_targets[0].api_url, "https://api.svartal.com");
+}
+
+#[test]
 fn ledger_relation_is_order_insensitive() {
     // Two replicas that merged the same divergent ledgers in different
     // interleavings record the same node set and compare Equal.

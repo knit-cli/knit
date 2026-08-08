@@ -6,7 +6,7 @@ use crate::ids::short_sha;
 use crate::model::{BundleState, ChangeGroup, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
-use crate::store::{load_active_bundle, ActiveBundle};
+use crate::store::{load_active_bundle_for_update, ActiveBundle};
 use crate::tracking::latest_recorded_head_sha;
 use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::OsString;
@@ -66,7 +66,7 @@ pub fn push_repos(
     remote: &[String],
     no_remote: bool,
 ) -> Result<()> {
-    let active = load_active_bundle()?;
+    let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
@@ -116,7 +116,7 @@ pub fn push_repos(
     // configured sync remote (default on; see `knit config set push-sync`).
     // The force mode carries over: a forced branch push implies the ledger
     // rewrite must be forced onto the sync remote too.
-    crate::commands::remote::maybe_sync_bundle_to_remote(remote, no_remote, force)?;
+    crate::commands::remote::maybe_sync_bundle_to_remote(&mut active, remote, no_remote, force)?;
 
     Ok(())
 }
