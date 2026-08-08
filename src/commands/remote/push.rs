@@ -13,8 +13,8 @@ use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry};
 use crate::output as out;
 use crate::store::{
-    find_knit_root, load_active_bundle, load_config, load_effective_config, load_global_config,
-    save_config, save_global_config, ActiveBundle,
+    find_knit_root, load_active_bundle_for_update, load_config, load_effective_config,
+    load_global_config, save_active_bundle, save_config, save_global_config, ActiveBundle,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -651,14 +651,14 @@ pub fn push_bundle_to_remote(
     project: Option<&str>,
     force: PushForce,
 ) -> Result<()> {
-    let active = load_active_bundle()?;
-    push_active_bundle_to_remote(remote_name, project, &active, force)
+    let mut active = load_active_bundle_for_update()?;
+    push_active_bundle_to_remote(remote_name, project, &mut active, force)
 }
 
 fn push_active_bundle_to_remote(
     remote_name: &str,
     project: Option<&str>,
-    active: &ActiveBundle,
+    active: &mut ActiveBundle,
     force: PushForce,
 ) -> Result<()> {
     // An open bundle's artifact must never reach a sync remote unless its
@@ -686,6 +686,12 @@ fn push_active_bundle_to_remote(
     }
 
     let pushed_bundle = upsert_bundle(remote, &token, &pushed_project.slug, &active.bundle)?;
+    if active
+        .bundle
+        .record_sync_target(remote_name, &pushed_bundle.id, &remote.url)
+    {
+        save_active_bundle(active)?;
+    }
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
     let history_result = super::history::push_project_history_events(
         remote,
@@ -739,6 +745,7 @@ fn push_active_bundle_to_remote(
 /// carries the same force mode into this artifact sync so branches and ledger
 /// move together.
 pub fn maybe_sync_bundle_to_remote(
+    active: &mut ActiveBundle,
     remote_overrides: &[String],
     no_remote: bool,
     force: PushForce,
@@ -775,7 +782,7 @@ pub fn maybe_sync_bundle_to_remote(
         if multiple {
             println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
         }
-        if let Err(error) = push_bundle_to_remote(&remote_name, None, force) {
+        if let Err(error) = push_active_bundle_to_remote(&remote_name, None, active, force) {
             println!(
                 "{} {error:#}",
                 out::warn(format!("remote sync skipped ({remote_name}):"))
@@ -812,7 +819,7 @@ pub fn sync_bundle_to_remote_if_enabled(
 }
 
 pub fn sync_active_bundle_to_remote_if_enabled(
-    active: &ActiveBundle,
+    active: &mut ActiveBundle,
     remote_overrides: &[String],
     no_remote: bool,
 ) -> Result<()> {
@@ -860,7 +867,7 @@ fn sync_bundle_to_remote_names(config: &KnitConfig, remote_names: &[String]) -> 
 fn sync_active_bundle_to_remote_names(
     config: &KnitConfig,
     remote_names: &[String],
-    active: &ActiveBundle,
+    active: &mut ActiveBundle,
 ) -> Result<()> {
     let multiple = remote_names.len() > 1;
     let mut failures = Vec::new();
@@ -1236,7 +1243,7 @@ pub fn push_all_bundles_to_remote(
     let mut failures = Vec::new();
 
     for path in paths {
-        let bundle: ChangeGroup = match crate::store::read_json(&path) {
+        let mut bundle: ChangeGroup = match crate::store::read_json(&path) {
             Ok(bundle) => bundle,
             Err(error) => {
                 failures.push(format!("{}: {error:#}", path.display()));
@@ -1286,6 +1293,10 @@ pub fn push_all_bundles_to_remote(
         };
         let outcome =
             upsert_bundle(remote, &token, &project_slug, &bundle).and_then(|remote_bundle| {
+                if bundle.record_sync_target(remote_name, &remote_bundle.id, &remote.url) {
+                    crate::store::write_json(&path, &bundle)?;
+                    crate::history::record_bundle_history(&root, &bundle)?;
+                }
                 push_bundle_artifact_outcome(remote, &token, &remote_bundle.id, &bundle, force)
             });
         match outcome {

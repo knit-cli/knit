@@ -162,7 +162,11 @@ pub fn apply_land_plan(
     write_json(&run_path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
     let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
-    crate::commands::remote::sync_active_bundle_to_remote_if_enabled(&active, remote, no_remote)?;
+    crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
+        &mut active,
+        remote,
+        no_remote,
+    )?;
     print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
     tag_landed_bundle(&mut active, tag, no_tag, remote, no_remote);
     Ok(())

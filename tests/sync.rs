@@ -1238,6 +1238,28 @@ fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     let beta = fs::read_to_string(fake_dir.join("artifact-beta-work.states")).unwrap();
     assert_eq!(beta.lines().last(), Some("archived"), "{beta}");
 
+    // A successful upsert records the server-owned bundle id locally and in
+    // the uploaded artifact, so UI clients never substitute the local slug.
+    let alpha_bundle: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/alpha-work.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(alpha_bundle["syncTargets"][0]["remote"], "hosted");
+    assert_eq!(alpha_bundle["syncTargets"][0]["bundleId"], "rb-alpha-work");
+    assert_eq!(alpha_bundle["syncTargets"][0]["apiUrl"], base_url);
+    let pushed_body: serde_json::Value = serde_json::from_str(
+        fs::read_to_string(fake_dir.join("artifact-alpha-work.bodies"))
+            .unwrap()
+            .lines()
+            .last()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        pushed_body["payload"]["syncTargets"][0]["bundleId"],
+        "rb-alpha-work"
+    );
+
     // The open bundle's feature branch went to git origin with the artifact;
     // the archived bundle stayed artifact-only.
     assert!(
