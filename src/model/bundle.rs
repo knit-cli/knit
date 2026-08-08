@@ -19,6 +19,17 @@ pub enum BundleState {
     Deleted,
 }
 
+/// The server-owned identity assigned to a bundle by one configured sync
+/// remote. Local bundle slugs are only project-scoped and are not valid
+/// substitutes for this id in hosted API or app routes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BundleSyncTarget {
+    pub remote: String,
+    pub bundle_id: String,
+    pub api_url: String,
+}
+
 impl BundleState {
     pub fn as_str(self) -> &'static str {
         match self {
@@ -65,6 +76,8 @@ pub struct ChangeGroup {
     pub publications: Vec<PublicationEntry>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub work_item_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sync_targets: Vec<BundleSyncTarget>,
 }
 
 impl ChangeGroup {
@@ -89,7 +102,31 @@ impl ChangeGroup {
             nodes: vec![node],
             publications: Vec::new(),
             work_item_ids: Vec::new(),
+            sync_targets: Vec::new(),
         }
+    }
+
+    /// Record (or refresh) the hosted identity returned by a successful
+    /// bundle upsert. Returns whether the persisted artifact changed.
+    pub fn record_sync_target(&mut self, remote: &str, bundle_id: &str, api_url: &str) -> bool {
+        let target = BundleSyncTarget {
+            remote: remote.to_string(),
+            bundle_id: bundle_id.to_string(),
+            api_url: api_url.trim_end_matches('/').to_string(),
+        };
+        if let Some(existing) = self
+            .sync_targets
+            .iter_mut()
+            .find(|existing| existing.remote == remote)
+        {
+            if existing == &target {
+                return false;
+            }
+            *existing = target;
+            return true;
+        }
+        self.sync_targets.push(target);
+        true
     }
 }
 
@@ -195,6 +232,16 @@ pub fn merge_ledgers(local: &ChangeGroup, remote: &ChangeGroup, now: String) -> 
             .then_with(|| a.id.cmp(&b.id))
     });
     merged.commit_groups = commit_groups;
+
+    for target in &remote.sync_targets {
+        if !merged
+            .sync_targets
+            .iter()
+            .any(|local_target| local_target.remote == target.remote)
+        {
+            merged.sync_targets.push(target.clone());
+        }
+    }
 
     for repo in &remote.repos {
         if !merged
