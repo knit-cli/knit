@@ -196,7 +196,12 @@ pub(crate) fn create_tag_set_on(
     }
 
     push_tags(&targets, name)?;
-    super::remote::maybe_sync_bundle_to_remote(remote, no_remote, super::push::PushForce::No)?;
+    super::remote::maybe_sync_bundle_to_remote(
+        active,
+        remote,
+        no_remote,
+        super::push::PushForce::No,
+    )?;
     Ok(())
 }
 
@@ -204,7 +209,7 @@ pub(crate) fn create_tag_set_on(
 /// tags at the recorded pins, verify existing ones, push only where origin
 /// lacks the tag. Never appends a second node.
 fn resume_tag_set(
-    active: &ActiveBundle,
+    active: &mut ActiveBundle,
     node: &BundleNode,
     name: &str,
     no_push: bool,
@@ -305,7 +310,12 @@ fn resume_tag_set(
     }
 
     if pushed_any {
-        super::remote::maybe_sync_bundle_to_remote(remote, no_remote, super::push::PushForce::No)?;
+        super::remote::maybe_sync_bundle_to_remote(
+            active,
+            remote,
+            no_remote,
+            super::push::PushForce::No,
+        )?;
     }
     Ok(())
 }
