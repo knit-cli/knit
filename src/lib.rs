@@ -1,4 +1,5 @@
 pub mod advice;
+pub mod api;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
@@ -20,14 +21,16 @@ use anyhow::Result;
 use commands::PushForce;
 
 pub use cli::{
-    BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
-    SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
+    ApiCommand, BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand,
+    LandCommand, ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand,
+    SchemaCommand, SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
     match cli.command {
+        Commands::Api { command } => api::run_api(command),
+        Commands::Mcp { stdio } => api::serve_mcp(stdio),
         Commands::Init { name, agents } => commands::init_project(&name, agents),
         Commands::Project { command } => match command {
             ProjectCommand::Add {

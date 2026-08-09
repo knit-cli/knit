@@ -67,6 +67,26 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 
 The full versions live in the [quickstart](docs/quickstart.md#concepts) and the [reference](docs/reference.md).
 
+## SDK and agent interfaces
+
+Knit exposes the same command surface without requiring a client to parse
+terminal output or rebuild command arguments:
+
+```sh
+knit api describe                                      # action catalog + JSON Schemas
+knit api snapshot --workspace . --bundle my-feature   # workspace artifacts as JSON
+knit api watch --workspace .                           # changed snapshots as JSON Lines
+knit api run status --workspace . --bundle my-feature # typed progress as JSON Lines
+knit api serve --stdio                                 # JSON-RPC 2.0 over NDJSON
+knit mcp --stdio                                       # standard MCP tools for agents
+```
+
+Bundle-scoped actions always require an explicit bundle. Action execution
+uses argument arrays with an explicit workspace directory and never invokes a
+shell. `knit api describe`, JSON-RPC `action.list`, and MCP `tools/list` all
+derive from the CLI's canonical action catalog, including read-only,
+destructive, open-world, and confirmation metadata.
+
 ## Docs
 
 - **[docs/quickstart.md](docs/quickstart.md)** — install to landed multi-repo change in ten minutes, plus the concepts in full.

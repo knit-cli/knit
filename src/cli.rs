@@ -33,6 +33,17 @@ pub enum GitCredentialOperation {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Machine-readable Knit APIs for SDKs and agent harnesses.
+    Api {
+        #[command(subcommand)]
+        command: ApiCommand,
+    },
+    /// Serve Knit actions as Model Context Protocol tools.
+    Mcp {
+        /// Read and write newline-delimited JSON-RPC messages on stdio.
+        #[arg(long, required = true)]
+        stdio: bool,
+    },
     /// Initialize a reusable project repo template (like `git init`, for a project).
     Init {
         /// Project name.
@@ -490,6 +501,59 @@ pub enum Commands {
         /// Report required migrations without writing files.
         #[arg(long)]
         check: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum ApiCommand {
+    /// Describe the stable action catalog and its input schemas.
+    Describe,
+    /// Print a machine-readable snapshot of a Knit workspace.
+    Snapshot {
+        /// Workspace root or a path contained by it. Defaults to the current directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Resolve the snapshot against this bundle instead of the workspace fallback.
+        #[arg(long)]
+        bundle: Option<String>,
+    },
+    /// Watch workspace artifacts and emit changed snapshots as JSON Lines.
+    Watch {
+        /// Workspace root or a path contained by it. Defaults to the current directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Resolve snapshots against this bundle instead of the workspace fallback.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Poll interval in milliseconds.
+        #[arg(long, default_value_t = 1000)]
+        interval_ms: u64,
+        /// Emit one snapshot and exit. Useful for probes and conformance tests.
+        #[arg(long)]
+        once: bool,
+    },
+    /// Run one catalog action and emit progress as JSON Lines.
+    Run {
+        /// Stable action id returned by `knit api describe`.
+        action_id: String,
+        /// Workspace root or a path contained by it. Defaults to the current directory.
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Required for bundle-scoped actions.
+        #[arg(long)]
+        bundle: Option<String>,
+        /// Session identity to record on any ledger nodes created by the action.
+        #[arg(long)]
+        session_id: Option<String>,
+        /// JSON object, a path to a JSON file, or `-` to read JSON from stdin.
+        #[arg(long, default_value = "{}")]
+        input_json: String,
+    },
+    /// Serve the Knit JSON-RPC API over stdio.
+    Serve {
+        /// Read and write newline-delimited JSON-RPC messages on stdio.
+        #[arg(long, required = true)]
+        stdio: bool,
     },
 }
 
