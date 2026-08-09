@@ -411,18 +411,29 @@ where
 /// Spawn a forge CLI by name. On Windows, `Command::new` resolves `.exe` only,
 /// missing `.cmd`/`.bat` shims (common for npm- or scoop-installed CLIs) — and
 /// probing extensions globally would let a real `gh.exe` late in PATH shadow a
-/// `gh.cmd` early in PATH. Resolve PATH ourselves so directory order wins
-/// first and extension order (`exe`, `cmd`, `bat`) second, matching how
-/// cmd.exe itself resolves commands.
+/// `gh.cmd` early in PATH. Resolve PATH ourselves so directory order wins.
+/// Prefer a native executable, but also support extensionless shell scripts
+/// through Git for Windows' `sh`; unlike batch shims, that path preserves
+/// multiline PR bodies as a single argument.
 fn forge_cli_command(bin: &str) -> Command {
     #[cfg(windows)]
     {
         if let Some(paths) = std::env::var_os("PATH") {
             for dir in std::env::split_paths(&paths) {
-                for extension in ["exe", "cmd", "bat"] {
-                    let candidate = dir.join(format!("{bin}.{extension}"));
-                    if candidate.is_file() {
-                        return Command::new(candidate);
+                let executable = dir.join(format!("{bin}.exe"));
+                if executable.is_file() {
+                    return Command::new(executable);
+                }
+                let shell_script = dir.join(bin);
+                if shell_script.is_file() {
+                    let mut command = Command::new("sh");
+                    command.arg(shell_script);
+                    return command;
+                }
+                for extension in ["cmd", "bat"] {
+                    let shim = dir.join(format!("{bin}.{extension}"));
+                    if shim.is_file() {
+                        return Command::new(shim);
                     }
                 }
             }

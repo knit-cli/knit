@@ -2,7 +2,7 @@
 # Published as `knit-cli` (the crates.io name `knit` is taken); the installed
 # binary is still `knit`.
 name = "knit-cli"
-version = "0.1.0-alpha.4"
+version = "0.1.0-alpha.5"
 edition = "2021"
 license = "Apache-2.0"
 description = "A local-first CLI for coordinating cross-repo feature bundles."
@@ -26,7 +26,7 @@ members = [".", "crates/knit-runtime"]
 
 [dependencies]
 anyhow = "1"
-knit-runtime = { version = "0.1.0-alpha.4", path = "crates/knit-runtime" }
+knit-runtime = { version = "0.1.0-alpha.5", path = "crates/knit-runtime" }
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4.5", features = ["derive"] }
 ctrlc = { version = "3.4", features = ["termination"] }
