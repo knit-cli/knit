@@ -121,8 +121,11 @@ pub fn sync_push(
             // resolves; the sweep covers everything and history is pushed
             // separately.
             let active_id = crate::store::load_active_bundle()
-                .ok()
-                .map(|active| active.bundle.id);
+                .and_then(|active| {
+                    crate::store::ensure_workspace_fallback_status_is_unambiguous(&active)?;
+                    Ok(active.bundle.id)
+                })
+                .ok();
             match &active_id {
                 Some(_) => {
                     if let Err(error) = push_bundle_to_remote(remote, None, force) {

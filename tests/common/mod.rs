@@ -201,13 +201,17 @@ pub fn install_parallel_push_hook(repo: &Path, gate: &Path, id: &str, peer: &str
 
 pub fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str, peer: &str) {
     fs::create_dir_all(gate).unwrap();
-    let hook_path = git(repo, ["rev-parse", "--git-path", &format!("hooks/{hook}")]);
-    let hook_path = PathBuf::from(hook_path.trim());
-    let hook_path = if hook_path.is_absolute() {
-        hook_path
+    // Resolve the repository's own hooks directory explicitly. Agent and IDE
+    // sessions may inject a process-wide core.hooksPath; honoring it here
+    // would install this temporary synchronization hook outside the fixture
+    // repository and contaminate unrelated tests or real Git operations.
+    let git_dir = PathBuf::from(git(repo, ["rev-parse", "--git-dir"]).trim());
+    let git_dir = if git_dir.is_absolute() {
+        git_dir
     } else {
-        repo.join(hook_path)
+        repo.join(git_dir)
     };
+    let hook_path = git_dir.join("hooks").join(hook);
     fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
     fs::write(
         &hook_path,
