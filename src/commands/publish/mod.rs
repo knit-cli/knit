@@ -394,6 +394,7 @@ mod tests {
                 123,
                 "https://github.com/acme/backend/pull/123",
             )],
+            sync_targets: Vec::new(),
             work_item_ids: Vec::new(),
         };
 
@@ -441,6 +442,7 @@ mod tests {
             }],
             nodes: Vec::new(),
             publications: Vec::new(),
+            sync_targets: Vec::new(),
             work_item_ids: Vec::new(),
         };
 
