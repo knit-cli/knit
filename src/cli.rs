@@ -71,16 +71,15 @@ pub enum Commands {
     },
     /// Clone a remote project export into a local Knit workspace.
     Clone {
-        /// Project to clone: `owner/slug`, a bare slug, or a project id. Use the
-        /// `owner/slug` form (owner is a username or org slug) when a slug is not
-        /// unique across owners.
+        /// Absolute project URL (`https://host/owner/slug`), `owner/slug`, or a
+        /// project id. The absolute URL is self-contained and unambiguous.
         project: String,
         /// Directory to create. Defaults to the project slug.
         target: Option<PathBuf>,
         /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
-        /// Remote base URL. Required when the remote is not configured.
+        /// Remote base URL for legacy selectors. Do not combine with an absolute project URL.
         #[arg(long)]
         url: Option<String>,
         /// Remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.

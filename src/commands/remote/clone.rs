@@ -138,12 +138,14 @@ fn clone_project_classified(
     active_bundle: Option<&str>,
     materialize: bool,
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
+    let reference = parse_clone_reference(project_identifier, url)
+        .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
     let (remote_name, remote, stored_token, token) =
-        resolve_remote_for_clone_classified(remote_name, url, token)?;
-    let export = fetch_project_export(&remote, token.as_deref(), project_identifier)
+        resolve_remote_for_clone_classified(remote_name, reference.remote_url.as_deref(), token)?;
+    let export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
         .map_err(|error| (RemoteErrorKind::Http, error))?;
     clone_fetched_export(
-        project_identifier,
+        &reference.project_identifier,
         target,
         remote_name,
         remote,
@@ -385,6 +387,70 @@ fn clone_document(
 /// `None` themselves with a `noToken` error.
 type ResolvedCloneRemote = (String, KnitRemote, Option<String>, Option<String>);
 
+#[derive(Debug, PartialEq, Eq)]
+struct CloneReference {
+    project_identifier: String,
+    remote_url: Option<String>,
+}
+
+/// Accept the traditional `owner/slug` selector and the absolute, GitHub-like
+/// form `https://host/owner/slug`. In the absolute form the authority is the
+/// remote endpoint and the two path segments are the unambiguous project
+/// namespace; there is no second URL argument that can disagree with it.
+fn parse_clone_reference(reference: &str, url: Option<&str>) -> Result<CloneReference> {
+    let parsed = match url::Url::parse(reference) {
+        Ok(parsed) => parsed,
+        Err(_) if reference.contains("://") => {
+            bail!("Invalid absolute project URL `{reference}`.")
+        }
+        Err(_) => {
+            return Ok(CloneReference {
+                project_identifier: reference.to_string(),
+                remote_url: url.map(ToString::to_string),
+            })
+        }
+    };
+
+    if !matches!(parsed.scheme(), "http" | "https")
+        || parsed.host_str().is_none()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+        || parsed.query().is_some()
+        || parsed.fragment().is_some()
+    {
+        bail!(
+            "Clone project URLs must have the form `https://host/owner/project` without credentials, a query, or a fragment."
+        );
+    }
+    if url.is_some() {
+        bail!("Do not pass --url with an absolute project URL; the project URL already identifies the remote endpoint.");
+    }
+
+    let segments = parsed
+        .path_segments()
+        .map(|segments| {
+            segments
+                .filter(|segment| !segment.trim().is_empty())
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    if segments.len() != 2 {
+        bail!(
+            "Clone project URLs must have exactly an owner and project path: `https://host/owner/project`."
+        );
+    }
+
+    let mut endpoint = parsed;
+    endpoint.set_path("");
+    endpoint.set_query(None);
+    endpoint.set_fragment(None);
+    Ok(CloneReference {
+        project_identifier: format!("{}/{}", slugify(&segments[0]), slugify(&segments[1])),
+        remote_url: Some(endpoint.as_str().trim_end_matches('/').to_string()),
+    })
+}
+
 pub(super) fn resolve_remote_for_clone_classified(
     remote_name: Option<&str>,
     url: Option<&str>,
@@ -413,15 +479,43 @@ pub(super) fn resolve_clone_endpoint(
         None => crate::store::load_global_config().ok(),
     };
     let requested_name = remote_name.map(slugify).filter(|name| !name.is_empty());
-    let configured_name = config
-        .as_ref()
-        .and_then(|config| configured_sync_remote_names(config).into_iter().next());
-    let remote_name = requested_name.or(configured_name).with_context(|| {
-        "No remote selected. Pass `--remote <name>` with `--url <url>`, or configure a sync remote first."
-    })?;
+    let configured_name = config.as_ref().and_then(|config| {
+        if let Some(url) = url {
+            configured_sync_remote_names(config)
+                .into_iter()
+                .find(|name| {
+                    config
+                        .remotes
+                        .get(name)
+                        .is_some_and(|remote| clone_endpoints_match(&remote.url, url))
+                })
+        } else {
+            configured_sync_remote_names(config).into_iter().next()
+        }
+    });
+    // An absolute clone URL is self-contained. When no configured remote owns
+    // that endpoint, record it as `origin`, just as Git does for a URL clone.
+    let remote_name = requested_name
+        .clone()
+        .or(configured_name)
+        .or_else(|| url.map(|_| "origin".to_string()))
+        .with_context(|| {
+            "No remote selected. Pass an absolute project URL, use `--remote <name>` with `--url <url>`, or configure a sync remote first."
+        })?;
     let configured = config
         .as_ref()
         .and_then(|config| config.remotes.get(&remote_name).cloned());
+    if requested_name.is_some() {
+        if let (Some(configured), Some(url)) = (configured.as_ref(), url) {
+            if !clone_endpoints_match(&configured.url, url) {
+                bail!(
+                    "Remote `{remote_name}` points at `{}`, but the absolute project URL points at `{}`.",
+                    configured.url,
+                    url
+                );
+            }
+        }
+    }
     let env_url = std::env::var("KNIT_REMOTE_URL")
         .ok()
         .filter(|value| !value.trim().is_empty());
@@ -441,6 +535,21 @@ pub(super) fn resolve_clone_endpoint(
     };
 
     Ok((remote_name, remote, stored_token))
+}
+
+/// Treat a hosted frontend and its `api.` sibling as the same configured
+/// service so an absolute API clone URL can reuse the user's stored token.
+fn clone_endpoints_match(left: &str, right: &str) -> bool {
+    fn identity(value: &str) -> Option<(String, String, Option<u16>)> {
+        let parsed = url::Url::parse(value).ok()?;
+        let host = parsed
+            .host_str()?
+            .trim_start_matches("api.")
+            .to_ascii_lowercase();
+        Some((parsed.scheme().to_ascii_lowercase(), host, parsed.port()))
+    }
+
+    identity(left) == identity(right)
 }
 
 fn resolve_clone_target(target: Option<&Path>, project_identifier: &str) -> Result<PathBuf> {
@@ -801,6 +910,43 @@ mod tests {
             visibility: None,
             metadata: Value::Null,
         }
+    }
+
+    #[test]
+    fn absolute_clone_reference_owns_endpoint_and_project_namespace() {
+        let reference =
+            parse_clone_reference("https://svartal.com/Marc-Merino/Arbient/", None).unwrap();
+
+        assert_eq!(
+            reference,
+            CloneReference {
+                project_identifier: "marc-merino/arbient".to_string(),
+                remote_url: Some("https://svartal.com".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn absolute_clone_reference_rejects_confusable_url_override() {
+        let error = parse_clone_reference(
+            "https://api.svartal.com/marc/arbient",
+            Some("https://api.knithub.dev"),
+        )
+        .unwrap_err();
+
+        assert!(error.to_string().contains("Do not pass --url"));
+    }
+
+    #[test]
+    fn clone_endpoint_matches_frontend_and_api_siblings() {
+        assert!(clone_endpoints_match(
+            "https://svartal.com",
+            "https://api.svartal.com"
+        ));
+        assert!(!clone_endpoints_match(
+            "https://api.knithub.dev",
+            "https://api.svartal.com"
+        ));
     }
 
     #[test]
