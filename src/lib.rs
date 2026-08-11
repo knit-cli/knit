@@ -488,18 +488,38 @@ pub fn run(cli: Cli) -> Result<()> {
                 commands::show_publication_status(&repos, all, live, provider.as_deref())
             }
         },
-        Commands::Land { target, command } => match command {
-            None => commands::land_default(target.as_deref()),
+        Commands::Land {
+            target,
+            lane,
+            repo_targets,
+            command,
+        } => match command {
+            None => {
+                if !repo_targets.is_empty() {
+                    anyhow::bail!(
+                        "--repo-target is only used with `knit land apply --from-artifact`"
+                    );
+                }
+                commands::land_default(target.as_deref(), lane.as_deref())
+            }
             Some(LandCommand::Plan {
                 provider,
                 out,
                 force,
-            }) => commands::generate_land_plan(
-                provider.as_deref(),
-                out.as_deref(),
-                force,
-                target.as_deref(),
-            ),
+            }) => {
+                if !repo_targets.is_empty() {
+                    anyhow::bail!(
+                        "--repo-target is only used with `knit land apply --from-artifact`"
+                    );
+                }
+                commands::generate_land_plan(
+                    provider.as_deref(),
+                    out.as_deref(),
+                    force,
+                    target.as_deref(),
+                    lane.as_deref(),
+                )
+            }
             Some(LandCommand::Apply {
                 plan,
                 from_artifact,
@@ -517,22 +537,36 @@ pub fn run(cli: Cli) -> Result<()> {
                             "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
                         );
                     }
-                    commands::apply_land_from_artifact(&path, out.as_deref(), target.as_deref())
+                    commands::apply_land_from_artifact(
+                        &path,
+                        out.as_deref(),
+                        target.as_deref(),
+                        lane.as_deref(),
+                        &repo_targets,
+                    )
                 }
-                None => commands::apply_land_plan(
-                    plan.as_deref(),
-                    &remote,
-                    no_remote,
-                    skip_checks,
-                    keep_worktrees,
-                    tag,
-                    no_tag,
-                    target.as_deref(),
-                ),
+                None => {
+                    if !repo_targets.is_empty() {
+                        anyhow::bail!(
+                            "--repo-target is only used with `knit land apply --from-artifact`"
+                        );
+                    }
+                    commands::apply_land_plan(
+                        plan.as_deref(),
+                        &remote,
+                        no_remote,
+                        skip_checks,
+                        keep_worktrees,
+                        tag,
+                        no_tag,
+                        target.as_deref(),
+                        lane.as_deref(),
+                    )
+                }
             },
             Some(LandCommand::Rollback { run, apply }) => {
-                if target.is_some() {
-                    anyhow::bail!("--target cannot be changed during rollback; it is stored in the landing plan.");
+                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                    anyhow::bail!("--target/--lane cannot be changed during rollback; the selection is stored in the landing plan.");
                 }
                 commands::rollback_land_run(run.as_deref(), apply)
             }
@@ -542,20 +576,20 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_remote,
                 skip_checks,
             }) => {
-                if target.is_some() {
-                    anyhow::bail!("--target cannot be changed during resume; it is stored in the landing plan.");
+                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                    anyhow::bail!("--target/--lane cannot be changed during resume; the selection is stored in the landing plan.");
                 }
                 commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks)
             }
             Some(LandCommand::Status { run }) => {
-                if target.is_some() {
-                    anyhow::bail!("--target is not used by land status; inspect the stored plan target instead.");
+                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                    anyhow::bail!("--target/--lane are not used by land status; inspect the stored plan instead.");
                 }
                 commands::show_land_status(run.as_deref())
             }
             Some(LandCommand::Check) => {
-                if target.is_some() {
-                    anyhow::bail!("--target is applied during land apply; `knit land check` reports current review bases.");
+                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                    anyhow::bail!("--target/--lane are applied during land apply; `knit land check` reports current review bases.");
                 }
                 commands::check_landing()
             }
@@ -566,8 +600,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 set_upstream,
                 continue_merge,
             }) => {
-                if target.is_some() {
-                    anyhow::bail!("--target is not used by land update; apply the target plan once to retarget reviews, then run update.");
+                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                    anyhow::bail!("--target/--lane are not used by land update; apply the plan once to retarget reviews, then run update.");
                 }
                 commands::update_land_branches(&repos, all, push, set_upstream, continue_merge)
             }
