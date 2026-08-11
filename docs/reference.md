@@ -42,6 +42,8 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 ## Commands
 
 ```sh
+knit clone https://<host>/<owner>/<project> [target] [--token <token>] [--active-bundle <bundle>] [--no-worktree] [--json]
+knit clone <owner>/<project> [target] [--remote <name>] [--url <url>] [--token <token>] [--active-bundle <bundle>] [--no-worktree] [--json]
 knit init <name> [--agents]
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
 knit project set-base <repo-id> <branch> [--project <name>]
