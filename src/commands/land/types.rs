@@ -77,6 +77,12 @@ pub(super) struct LandPlan {
     /// --target`. When absent, each recorded publication keeps its own base.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) target_branch: Option<String>,
+    /// Named project lane used to create this plan. `target_branches` is the
+    /// resolved, immutable per-repository projection of that lane.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) lane: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) target_branches: BTreeMap<String, String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_project_id: Option<String>,
     pub(super) created_at: String,

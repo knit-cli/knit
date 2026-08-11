@@ -8,8 +8,8 @@ use super::{
     LAND_PLAN_KIND,
 };
 use crate::model::{
-    DeployMode, KnitProject, MergeMethod, ProjectLandingMergePlan, ProjectLandingPlan, RepoEntry,
-    SCHEMA_VERSION,
+    DeployMode, KnitProject, MergeMethod, ProjectLandingLane, ProjectLandingMergePlan,
+    ProjectLandingPlan, RepoEntry, SCHEMA_VERSION,
 };
 use crate::providers::publication_for_repo;
 use crate::store::{load_config, project_path, read_json, ActiveBundle};
@@ -21,6 +21,7 @@ pub(super) fn build_default_plan(
     active: &ActiveBundle,
     requested_provider: Option<&str>,
     target_branch: Option<&str>,
+    lane_name: Option<&str>,
 ) -> Result<LandPlan> {
     let project = load_project_for_bundle(active)?;
     let landing = project
@@ -73,7 +74,15 @@ pub(super) fn build_default_plan(
             previous_ordered = Some(id);
         }
     }
-    append_project_deployments(active, landing, target_branch, &mut steps)?;
+    let target_branches = resolve_lane_targets(project.as_ref(), landing, lane_name, &steps)?;
+    append_project_deployments(
+        active,
+        landing,
+        target_branch,
+        lane_name,
+        &target_branches,
+        &mut steps,
+    )?;
 
     if steps.is_empty() {
         bail!(
@@ -88,6 +97,8 @@ pub(super) fn build_default_plan(
         provider,
         bundle_id: active.bundle.id.clone(),
         target_branch: target_branch.map(ToOwned::to_owned),
+        lane: lane_name.map(ToOwned::to_owned),
+        target_branches,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
         on_failure: landing.and_then(|landing| landing.on_failure),
@@ -96,6 +107,86 @@ pub(super) fn build_default_plan(
             .unwrap_or_default(),
         steps,
     })
+}
+
+fn resolve_lane_targets(
+    project: Option<&KnitProject>,
+    landing: Option<&ProjectLandingPlan>,
+    lane_name: Option<&str>,
+    steps: &[LandStep],
+) -> Result<BTreeMap<String, String>> {
+    let Some(lane_name) = lane_name else {
+        return Ok(BTreeMap::new());
+    };
+    let project = project.ok_or_else(|| {
+        anyhow::anyhow!(
+            "Landing lane `{lane_name}` needs a project-backed bundle with landing.lanes configured."
+        )
+    })?;
+    let landing = landing
+        .ok_or_else(|| anyhow::anyhow!("Project `{}` has no landing configuration.", project.id))?;
+    let lane = landing.lanes.get(lane_name).ok_or_else(|| {
+        let available = landing.lanes.keys().cloned().collect::<Vec<_>>();
+        if available.is_empty() {
+            anyhow::anyhow!("Project `{}` declares no landing lanes.", project.id)
+        } else {
+            anyhow::anyhow!(
+                "Unknown landing lane `{lane_name}`. Available lanes: {}.",
+                available.join(", ")
+            )
+        }
+    })?;
+    validate_lane(project, lane_name, lane)?;
+
+    steps
+        .iter()
+        .filter(|step| step.step_type == LandStepKind::MergePr)
+        .filter_map(|step| step.repo_id.as_ref())
+        .map(|repo_id| {
+            let branch = lane_branch(lane, repo_id).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Landing lane `{lane_name}` has no branch for repository `{repo_id}`. Add landing.lanes.{lane_name}.branches.{repo_id} or defaultBranch."
+                )
+            })?;
+            Ok((repo_id.clone(), branch.to_string()))
+        })
+        .collect()
+}
+
+fn validate_lane(project: &KnitProject, lane_name: &str, lane: &ProjectLandingLane) -> Result<()> {
+    if lane
+        .default_branch
+        .as_deref()
+        .is_some_and(|branch| branch.trim().is_empty())
+    {
+        bail!("landing.lanes.{lane_name}.defaultBranch must not be empty");
+    }
+    if let (Some(default), Some(wildcard)) =
+        (lane.default_branch.as_deref(), lane.branches.get("*"))
+    {
+        if default != wildcard {
+            bail!(
+                "landing lane `{lane_name}` declares conflicting defaultBranch `{default}` and branches.* `{wildcard}`"
+            );
+        }
+    }
+    for (repo_id, branch) in &lane.branches {
+        if branch.trim().is_empty() {
+            bail!("landing.lanes.{lane_name}.branches.{repo_id} must not be empty");
+        }
+        if repo_id != "*" && !project.repos.iter().any(|repo| repo.id == *repo_id) {
+            bail!("landing lane `{lane_name}` maps unknown project repository `{repo_id}`");
+        }
+    }
+    Ok(())
+}
+
+fn lane_branch<'a>(lane: &'a ProjectLandingLane, repo_id: &str) -> Option<&'a str> {
+    lane.branches
+        .get(repo_id)
+        .or_else(|| lane.branches.get("*"))
+        .map(String::as_str)
+        .or(lane.default_branch.as_deref())
 }
 
 fn inferred_plan_provider(active: &ActiveBundle) -> String {
@@ -194,6 +285,8 @@ fn append_project_deployments(
     active: &ActiveBundle,
     landing: Option<&ProjectLandingPlan>,
     explicit_target: Option<&str>,
+    lane_name: Option<&str>,
+    lane_targets: &BTreeMap<String, String>,
     steps: &mut Vec<LandStep>,
 ) -> Result<()> {
     let Some(landing) = landing else {
@@ -209,6 +302,29 @@ fn append_project_deployments(
         .filter(|step| step.step_type == LandStepKind::MergePr)
         .map(|step| step.id.clone())
         .collect::<Vec<_>>();
+    if let Some(lane_name) = lane_name {
+        let lane = landing
+            .lanes
+            .get(lane_name)
+            .expect("lane was resolved before deployments");
+        for deployment in &lane.deployments {
+            let target_branch = deployment
+                .repo_id
+                .as_ref()
+                .and_then(|repo_id| lane_targets.get(repo_id))
+                .map(String::as_str);
+            append_project_deployment(
+                active,
+                steps,
+                deployment,
+                target_branch,
+                Some(lane_name),
+                &merge_step_ids,
+                &all_merge_ids,
+            )?;
+        }
+        return Ok(());
+    }
     let target_by_repo = active
         .bundle
         .repos
@@ -262,6 +378,7 @@ fn append_project_deployments(
                 steps,
                 deployment,
                 None,
+                None,
                 &merge_step_ids,
                 &all_merge_ids,
             )?;
@@ -285,6 +402,7 @@ fn append_project_deployments(
                 steps,
                 deployment,
                 Some(branch),
+                None,
                 &merge_step_ids,
                 &all_merge_ids,
             )?;
@@ -299,6 +417,7 @@ fn append_project_deployment(
     steps: &mut Vec<LandStep>,
     deployment: &crate::model::ProjectLandingDeployment,
     target_branch: Option<&str>,
+    lane_name: Option<&str>,
     merge_step_ids: &BTreeMap<String, String>,
     all_merge_ids: &[String],
 ) -> Result<()> {
@@ -334,6 +453,9 @@ fn append_project_deployment(
             "KNIT_LAND_TARGET_BRANCH".to_string(),
             target_branch.to_string(),
         );
+    }
+    if let Some(lane_name) = lane_name {
+        env.insert("KNIT_LAND_LANE".to_string(), lane_name.to_string());
     }
     steps.push(LandStep {
         id: deployment.id.clone(),

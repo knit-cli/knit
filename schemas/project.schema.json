@@ -107,47 +107,71 @@
         },
         "deployments": {
           "type": "array",
-          "items": {
+          "items": { "$ref": "#/$defs/deployment" }
+        },
+        "targets": {
+          "type": "object",
+          "additionalProperties": {
             "type": "object",
-            "required": ["id"],
-            "anyOf": [
-              { "required": ["repoId"] },
-              { "required": ["repo"] }
-            ],
             "properties": {
-              "id": { "type": "string", "minLength": 1 },
-              "repoId": { "type": "string" },
-              "repo": { "type": "string" },
-              "mode": { "enum": ["command", "push"] },
-              "needs": {
+              "deployments": {
                 "type": "array",
-                "items": { "type": "string" }
-              },
-              "checkout": {
+                "items": { "$ref": "#/$defs/deployment" }
+              }
+            },
+            "additionalProperties": false
+          }
+        },
+        "lanes": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "defaultBranch": { "type": "string", "minLength": 1 },
+              "branches": {
                 "type": "object",
-                "required": ["branch"],
-                "properties": {
-                  "branch": { "type": "string", "minLength": 1 },
-                  "remote": { "type": "string" },
-                  "update": { "enum": ["fetch", "pull", "none"] }
-                },
-                "additionalProperties": false
+                "additionalProperties": { "type": "string", "minLength": 1 }
               },
-              "cwd": { "type": "string" },
-              "timeoutSeconds": { "type": "integer", "minimum": 1 },
-              "command": {
+              "deployments": {
                 "type": "array",
-                "items": { "type": "string" },
-                "minItems": 1
-              },
-              "env": {
-                "type": "object",
-                "additionalProperties": { "type": "string" }
+                "items": { "$ref": "#/$defs/deployment" }
               }
             },
             "additionalProperties": false
           }
         }
+      },
+      "additionalProperties": false
+    }
+  },
+  "$defs": {
+    "deployment": {
+      "type": "object",
+      "required": ["id"],
+      "anyOf": [
+        { "required": ["repoId"] },
+        { "required": ["repo"] }
+      ],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "repoId": { "type": "string" },
+        "repo": { "type": "string" },
+        "mode": { "enum": ["command", "push"] },
+        "needs": { "type": "array", "items": { "type": "string" } },
+        "checkout": {
+          "type": "object",
+          "required": ["branch"],
+          "properties": {
+            "branch": { "type": "string", "minLength": 1 },
+            "remote": { "type": "string" },
+            "update": { "enum": ["fetch", "pull", "none"] }
+          },
+          "additionalProperties": false
+        },
+        "cwd": { "type": "string" },
+        "timeoutSeconds": { "type": "integer", "minimum": 1 },
+        "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
+        "env": { "type": "object", "additionalProperties": { "type": "string" } }
       },
       "additionalProperties": false
     }
