@@ -160,6 +160,42 @@ fn anonymous_clone_json_reports_repos_bundles_and_dropped_bundles() {
 }
 
 #[test]
+fn absolute_project_url_clones_without_a_preconfigured_remote() {
+    let root = unique_temp_dir();
+    let (export, _source) = partial_export(&root);
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let project_url = format!("{base_url}/acme/demo");
+    let target = root.join("workspace");
+    let knit_home = root.join("knit-home");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            &project_url,
+            target.to_str().unwrap(),
+            "--token",
+            "test-token",
+            "--no-worktree",
+            "--json",
+        ],
+        &[("KNIT_HOME", knit_home.to_str().unwrap())],
+    );
+
+    assert!(success, "absolute clone failed: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["project"]["owner"], "acme");
+    assert_eq!(document["project"]["slug"], "demo");
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["syncRemotes"], serde_json::json!(["origin"]));
+    assert_eq!(config["remotes"]["origin"]["url"], base_url);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn clone_human_output_mentions_dropped_bundles() {
     let root = unique_temp_dir();
     let (export, _source) = partial_export(&root);

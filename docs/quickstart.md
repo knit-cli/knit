@@ -207,16 +207,21 @@ with `KNIT_BUNDLE` (or sync before archiving).
 
 Once a sync remote is configured, publish and land keep the hosted artifacts in
 sync automatically, hosted dashboards show bundles and project history, and
-`knit clone <owner>/<project>` can rebuild a working workspace on another
-machine. `knit related --pull` and `knit sync pull` read the same hosted
-history back.
+an absolute `knit clone https://<host>/<owner>/<project>` can rebuild a working
+workspace on another machine. `knit related --pull` and `knit sync pull` read
+the same hosted history back.
 
-Projects can also be cloned through Knit. Public projects need only the remote
-URL; private projects additionally require a remote token:
+Projects can also be cloned through Knit. Prefer the absolute, owner-qualified
+project URL: it identifies the service and project in one GitHub-like reference.
+Public projects need only the URL; private projects additionally require a
+remote token:
 
 ```sh
-knit clone <owner>/<project> --url https://<remote-api-url>
+knit clone https://<service-host>/<owner>/<project>
 ```
+
+The legacy split form remains available as
+`knit clone <owner>/<project> --remote <name> [--url <remote-api-url>]`.
 
 A compatible remote may also display cross-repo analysis and reviews produced
 by Urdir and Gloss.
