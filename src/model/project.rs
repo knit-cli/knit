@@ -94,6 +94,24 @@ pub struct ProjectLandingPlan {
     /// generated land plan.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub targets: BTreeMap<String, ProjectLandingTarget>,
+    /// Named landing lanes resolve one logical destination (for example
+    /// `staging` or `production`) to the branch used by each repository.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub lanes: BTreeMap<String, ProjectLandingLane>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingLane {
+    /// Fallback branch for repositories without an explicit entry in
+    /// `branches`. A `"*"` entry in `branches` is accepted as an equivalent
+    /// shorthand.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branches: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deployments: Vec<ProjectLandingDeployment>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

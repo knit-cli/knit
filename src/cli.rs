@@ -335,8 +335,22 @@ pub enum Commands {
     Land {
         /// Land every recorded review object into this target branch. The target is
         /// stored in the plan and applied by Knit before checks and merging.
-        #[arg(long, global = true, value_name = "BRANCH")]
+        #[arg(long, global = true, value_name = "BRANCH", conflicts_with = "lane")]
         target: Option<String>,
+        /// Land through a named project lane. The lane resolves to a branch per
+        /// repository and is stored in the generated plan.
+        #[arg(long, global = true, value_name = "LANE", conflicts_with = "target")]
+        lane: Option<String>,
+        /// Resolved repository target used with artifact landing. Repeat as
+        /// REPO=BRANCH. Hosted Knit resolves these values from project metadata.
+        #[arg(
+            long = "repo-target",
+            global = true,
+            value_name = "REPO=BRANCH",
+            requires = "lane",
+            conflicts_with = "target"
+        )]
+        repo_targets: Vec<String>,
         #[command(subcommand)]
         command: Option<LandCommand>,
     },

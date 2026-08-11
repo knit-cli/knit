@@ -99,6 +99,8 @@ knit publish sync [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
 knit land
+knit land --lane <name>
+knit land --target <branch>
 knit land plan [--provider github|gitlab|forgejo|bitbucket] [--out <path>] [--force]
 knit land check
 knit land update [--push] [--continue-merge] [repo-id-or-path...]
@@ -325,16 +327,37 @@ Projects can define a default landing template. `knit land plan` expands it into
           }
         ]
       }
+    },
+    "lanes": {
+      "staging": {
+        "defaultBranch": "master"
+      },
+      "production": {
+        "branches": {
+          "backend": "stable",
+          "frontend": "master",
+          "scripts": "master"
+        },
+        "deployments": [
+          {
+            "id": "deploy-production-backend",
+            "repoId": "backend",
+            "command": ["bj", "deploy", "production"]
+          }
+        ]
+      }
     }
   }
 }
 ```
 
-Deployment entries are first-class landing steps. `landing.targets` declares branch-keyed landing lanes. `knit land --target staging` selects `landing.targets.staging.deployments` for the whole landing; without `--target`, recorded per-repo review bases select matching lanes and mixed bases can select more than one. A target can declare multiple repo deployments; repo-scoped entries are included only for reviews landing into that lane. Target deployment ids must be unique across lanes that can be selected together. Each selected target command receives `KNIT_LAND_TARGET_BRANCH` with the declared branch name.
+Deployment entries are first-class landing steps. `landing.lanes` declares named, project-level destinations whose `branches` map may differ by repository; `defaultBranch` (or `branches["*"]`) supplies a fallback. `knit land --lane production` resolves and stores the complete per-repo map in `targetBranches`, retargets each review independently, and includes only that lane's deployments. Lane deployments receive `KNIT_LAND_LANE`; repo-scoped deployments also receive their resolved `KNIT_LAND_TARGET_BRANCH`.
+
+`landing.targets` remains the branch-keyed deployment mechanism for raw/common targets. `knit land --target staging` selects `landing.targets.staging.deployments` for the whole landing; without `--target` or `--lane`, recorded per-repo review bases select matching targets and mixed bases can select more than one. A target can declare multiple repo deployments; repo-scoped entries are included only for reviews landing into that target. Target deployment ids must be unique across targets that can be selected together.
 
 The top-level `landing.deployments` list remains the backward-compatible configured-base lane. It runs for deploy-only plans and when every review targets its repo's configured project base and no matching branch-keyed target overrides it. An undeclared alternate branch receives no automatic deployment steps; the generated plan calls that out so the operator can declare `landing.targets.<branch>` or add an explicit step to that bundle's editable plan. Command deployments run without a shell unless the command explicitly invokes one, stream their output live while retaining only a bounded tail in the run artifact, and time out after `timeoutSeconds` (30 minutes by default). A deployment checkout uses a managed `.knit/land-worktrees/<bundle>/<repo>/<branch>/` checkout so the feature worktree is not switched away from its Knit branch. `update: "pull"` and `update: "fetch"` both refresh the managed checkout from the configured remote branch before running the command.
 
-Compatible remotes use the same native `knit land --target <branch> apply --from-artifact ...` contract: Knit retargets hosted reviews and merges them into that branch. Artifact-only landing remains command-deployment-free because it has no trusted project checkout. A target deployment with `mode: "push"` represents the deployment triggered by merging that target branch and therefore works naturally from hosted landing. Target `command` deployments execute from a local workspace, including through integrations that invoke Knit actions.
+Compatible remotes can use either the raw `knit land --target <branch> apply --from-artifact ...` contract or a named lane. For artifact landing, the trusted host resolves the lane from its project metadata and supplies one `--repo-target <repo>=<branch>` per publication alongside `--lane`; Knit rejects incomplete maps. The Knit artifact command itself remains command-deployment-free because it has no trusted project checkout. A host such as Svartal may preflight and execute the selected lane's commands after the merge when its landing machine has explicitly configured trusted repository roots.
 
 Default project repos are included by `knit bundle`; observed repos are available by id but are not branched or tracked until added explicitly. Before recording any selected repo, Knit fetches its configured `origin/<baseBranch>`, snapshots the exact fetched commit in `baseSha`, and creates the feature branch from that commit. Source checkouts are not switched or moved, and dirty source files do not affect the snapshot. Base fetches are an all-or-nothing preflight: if any selected remote base cannot be fetched, no repos or feature branches are recorded.
 
@@ -559,12 +582,12 @@ knit publish status
 
 `knit publish create` is a best-effort two-phase operation. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. That target is recorded with the publication. A later native `knit land --target <branch>` can deliberately replace those recorded review bases as part of its landing contract. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
 
-For a staging lane, select the target through Knit itself. The generated plan records `targetBranch: "staging"`; apply retargets every open review object, refreshes readiness against staging, merges there, and selects `landing.targets.staging`:
+For a named lane, select it through Knit itself. The generated plan records `lane` plus immutable `targetBranches`; apply retargets each open review object to its mapped branch, refreshes readiness, merges, and runs that lane's deployments:
 
 ```sh
 knit publish create
-knit land --target staging
-knit land --target staging apply
+knit land --lane staging
+knit land --lane staging apply
 ```
 
 Creating reviews against staging up front with `knit publish create --base staging` remains supported, but it is an optimization rather than the landing contract.
@@ -656,13 +679,13 @@ knit land rollback
 
 `knit land check` is a read-only preflight: it fetches each recorded PR once and prints a readiness table (state, mergeable, checks, review decision, and a verdict) so you can see whether `knit land apply` will succeed and why not. A `conflict` verdict points you at `knit land update`; an already-merged PR shows `already landed`. `knit publish status --live` shows the same live columns alongside the recorded review objects. Both are non-mutating.
 
-`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. `knit land --target staging` and `knit land --target staging plan` store that common target in the plan and select its declared landing lane. Without `--target`, each review keeps its recorded base. Without a project landing template, the default plan is linear in bundle repo order, uses `merge`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and selected deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `squash` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
+`knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. `--lane staging` resolves project-declared per-repo branches; `--target staging` stores one common raw target. The options are mutually exclusive. Without either, each review keeps its recorded base. Without a project landing template, the default plan is linear in bundle repo order, uses `merge`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and selected deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `squash` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
 
 Bare `knit land` is safe: it creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. Execute the plan explicitly with `knit land apply` after inspection.
 
 `knit land update` prepares published PR branches for landing by fetching each PR's base branch, merging that base into the feature checkout, and recording the movement as a first-class `land.update` bundle node. This is the preferred way to resolve routine "base moved" landing conflicts because the integration merge is attributed to landing prep instead of appearing later as an incidental `git.observed` movement. Pass `--push` to push the updated feature branches after recording the node. If a merge conflicts, resolve and commit it in the feature checkout, then run `knit land update --continue-merge` to record the already-resolved movement as `land.update`.
 
-`knit land apply` validates the inspected plan, refuses draft/closed/missing reviews, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. When the plan has `targetBranch`, Knit first retargets each open review through its forge adapter, records the new base in the bundle, and only then evaluates mergeability and checks against that branch. Passing a different `--target` to apply is refused so an inspected plan cannot silently change destination. Already-merged reviews are accepted only when they landed into the requested target; an open review that conflicts with its new base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the review merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. Run and command-deploy output is streamed live, capture is bounded to protect the caller from unbounded memory growth, and `timeoutSeconds` terminates the command tree when it exceeds its limit (default 1800 seconds). If a step fails, the run stops and records the exact step status, bounded stdout/stderr tails, and failure detail; generated bundle worktrees are left intact so `knit land resume` and `knit land rollback` can continue from the recorded run. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated.
+`knit land apply` validates the inspected plan, refuses draft/closed/missing reviews, writes a durable run file under `.knit/land-runs/`, then executes the plan step by step. When the plan has `targetBranch` or lane `targetBranches`, Knit first retargets each open review through its forge adapter, records the new base in the bundle, and only then evaluates mergeability and checks against that branch. Passing a different `--target` or `--lane` to apply is refused so an inspected plan cannot silently change destination. Already-merged reviews are accepted only when they landed into the requested target; an open review that conflicts with its new base is rejected with guidance to run `knit land update` first. `deploy` steps support `deploymentMode: "command"` for real deployment commands and `deploymentMode: "push"` for deployments that are triggered by the review merge itself. A command deployment can specify a `checkout` branch; Knit creates or refreshes a managed detached checkout under `.knit/land-worktrees/` before running the command. Run and command-deploy output is streamed live, capture is bounded to protect the caller from unbounded memory growth, and `timeoutSeconds` terminates the command tree when it exceeds its limit (default 1800 seconds). If a step fails, the run stops and records the exact step status, bounded stdout/stderr tails, and failure detail; generated bundle worktrees are left intact so `knit land resume` and `knit land rollback` can continue from the recorded run. `knit land resume` continues that run from pending or failed steps only; succeeded steps are not repeated.
 
 A failed run can leave some PRs merged and others not — merged PRs cannot be un-merged, so Knit offers compensation instead of reset. `knit land rollback` previews the merge steps the failed run completed (verifying each PR is live-MERGED), and `knit land rollback --apply` opens a provider-side revert PR for each of them, records a `pr.revert` node targeting the run, and marks the run rolled back so `knit land resume` refuses to continue it. Setting `onFailure: "rollback"` in the land plan (or in the project landing template, which `knit land plan` copies into generated plans) makes `knit land apply` perform this rollback automatically when a step fails; the default `onFailure: "resume"` keeps today's stop-and-resume behavior. A fully successful `knit land apply` appends a `feature.landed` node, archives the bundle with a `feature.archived` node, removes generated worktrees under `.knit/worktrees/<bundle>/`, and preserves local feature branches plus the bundle artifact; pass `--keep-worktrees` to archive without removing those checkouts. It then syncs the updated bundle artifact to configured sync remotes when push-sync is enabled. Use repeated `--remote <name>` to force remotes, `--no-remote` to skip this sync, or `knit sync push --bundles` to push the landed artifact later.
 

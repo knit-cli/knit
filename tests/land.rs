@@ -126,6 +126,69 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
 }
 
 #[test]
+fn artifact_land_apply_accepts_a_server_resolved_lane_map() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact lane"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let artifact = workspace.join(".knit/bundles/artifact-lane.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-lane",
+        "state": "OPEN",
+        "title": "artifact lane (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-lane.out.bundle.json");
+    let landed = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "production".into(),
+            "--repo-target".into(),
+            "backend=stable".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+        ],
+    );
+    assert!(
+        landed.contains("retargeted backend PR #101 main -> stable"),
+        "{landed}"
+    );
+    let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(landed_payload["publications"][0]["baseBranch"], "stable");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn land_plan_and_apply_merges_recorded_publications_with_fake_gh() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
@@ -725,6 +788,128 @@ fn alternate_base_plan_selects_declared_target_deployments() {
             .unwrap()
             .trim(),
         "staging"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn named_lane_resolves_per_repo_targets_and_lane_deployments() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    let deployed_lane = root.join("deployed-lane.txt");
+    let deploy_lane = format!(
+        "printf '%s:%s' \"$KNIT_LAND_LANE\" \"$KNIT_LAND_TARGET_BRANCH\" > '{}'",
+        deployed_lane.display()
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "lanes": {
+            "production": {
+                "branches": {
+                    "backend": "stable",
+                    "frontend": "master"
+                },
+                "deployments": [{
+                    "id": "deploy-production",
+                    "repoId": "backend",
+                    "command": ["sh", "-c", deploy_lane]
+                }]
+            }
+        }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "production lane"]);
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/production-lane")
+                .join(repo_id)
+                .join("app.txt"),
+            "production change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Production change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let output = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(output.contains("Lane: production"), "{output}");
+    assert!(output.contains("backend -> stable"), "{output}");
+    assert!(output.contains("frontend -> master"), "{output}");
+
+    let plan_path = workspace.join(".knit/land-plans/production-lane.land.json");
+    let plan: Value = serde_json::from_str(&fs::read_to_string(plan_path).unwrap()).unwrap();
+    assert_eq!(plan["lane"].as_str(), Some("production"));
+    assert!(plan.get("targetBranch").is_none());
+    assert_eq!(plan["targetBranches"]["backend"].as_str(), Some("stable"));
+    assert_eq!(plan["targetBranches"]["frontend"].as_str(), Some("master"));
+    let deployment = plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"] == "deploy-production")
+        .unwrap();
+    assert_eq!(deployment["env"]["KNIT_LAND_LANE"], "production");
+    assert_eq!(deployment["env"]["KNIT_LAND_TARGET_BRANCH"], "stable");
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production", "apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("retargeted backend"), "{apply}");
+    assert!(apply.contains("retargeted frontend"), "{apply}");
+    assert_eq!(
+        fs::read_to_string(&deployed_lane).unwrap(),
+        "production:stable"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "stable"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-frontend.base"))
+            .unwrap()
+            .trim(),
+        "master"
     );
 
     fs::remove_dir_all(root).unwrap();
