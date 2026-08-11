@@ -50,10 +50,17 @@ pub fn generate_land_plan(
     out_path: Option<&Path>,
     force: bool,
     target_branch: Option<&str>,
+    lane_name: Option<&str>,
 ) -> Result<()> {
     let active = load_active_bundle()?;
     let target_branch = normalize_target_branch(target_branch)?;
-    let plan = plan::build_default_plan(&active, provider, target_branch.as_deref())?;
+    let lane_name = normalize_lane_name(lane_name)?;
+    let plan = plan::build_default_plan(
+        &active,
+        provider,
+        target_branch.as_deref(),
+        lane_name.as_deref(),
+    )?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     let path = out_path
         .map(resolve_user_path)
@@ -70,10 +77,13 @@ pub fn generate_land_plan(
     }
     write_json(&path, &plan)?;
     display::print_plan(&active, &plan, &path);
-    let apply = target_branch
-        .as_deref()
-        .map(|target| format!("`knit land --target {target} apply`"))
-        .unwrap_or_else(|| "`knit land apply`".to_string());
+    let apply = if let Some(lane) = lane_name.as_deref() {
+        format!("`knit land --lane {lane} apply`")
+    } else if let Some(target) = target_branch.as_deref() {
+        format!("`knit land --target {target} apply`")
+    } else {
+        "`knit land apply`".to_string()
+    };
     advice::print(
         &active.root,
         format!("inspect or edit this plan, then run {apply} when you are ready to execute it."),
@@ -81,15 +91,20 @@ pub fn generate_land_plan(
     Ok(())
 }
 
-pub fn land_default(target_branch: Option<&str>) -> Result<()> {
+pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Result<()> {
     let active = load_active_bundle()?;
     let target_branch = normalize_target_branch(target_branch)?;
+    let lane_name = normalize_lane_name(lane_name)?;
     if let Some(path) = resolve_land_run_path(&active, None)? {
         let run: LandRun = read_json(&path)?;
-        if target_branch.is_some() {
+        if target_branch.is_some() || lane_name.is_some() {
             let plan_path = resolve_stored_path(&active.root, &run.plan_path);
             let plan: LandPlan = read_json(&plan_path)?;
-            ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
+            ensure_requested_selection_matches_plan(
+                target_branch.as_deref(),
+                lane_name.as_deref(),
+                &plan,
+            )?;
         }
         display::print_run_status(&active, &run, &path);
         if run.status == LandStatus::Succeeded {
@@ -112,7 +127,11 @@ pub fn land_default(target_branch: Option<&str>) -> Result<()> {
     let plan_path = default_plan_path(&active);
     if plan_path.exists() {
         let plan: LandPlan = read_json(&plan_path)?;
-        ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
+        ensure_requested_selection_matches_plan(
+            target_branch.as_deref(),
+            lane_name.as_deref(),
+            &plan,
+        )?;
         validate::validate_plan_for_bundle(&active, &plan)?;
         display::print_plan(&active, &plan, &plan_path);
         advice::print(
@@ -123,7 +142,13 @@ pub fn land_default(target_branch: Option<&str>) -> Result<()> {
     }
 
     drop(active);
-    generate_land_plan(None, None, false, target_branch.as_deref())
+    generate_land_plan(
+        None,
+        None,
+        false,
+        target_branch.as_deref(),
+        lane_name.as_deref(),
+    )
 }
 
 pub fn apply_land_plan(
@@ -135,9 +160,11 @@ pub fn apply_land_plan(
     tag: Option<String>,
     no_tag: bool,
     target_branch: Option<&str>,
+    lane_name: Option<&str>,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let target_branch = normalize_target_branch(target_branch)?;
+    let lane_name = normalize_lane_name(lane_name)?;
     let path = resolve_land_plan_path(&active, plan_path)?;
     if !path.exists() {
         bail!(
@@ -146,7 +173,7 @@ pub fn apply_land_plan(
         );
     }
     let plan: LandPlan = read_json(&path)?;
-    ensure_requested_target_matches_plan(target_branch.as_deref(), &plan)?;
+    ensure_requested_selection_matches_plan(target_branch.as_deref(), lane_name.as_deref(), &plan)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
@@ -183,20 +210,41 @@ fn normalize_target_branch(target_branch: Option<&str>) -> Result<Option<String>
     Ok(Some(target_branch.to_string()))
 }
 
-fn ensure_requested_target_matches_plan(
+pub(super) fn normalize_lane_name(lane_name: Option<&str>) -> Result<Option<String>> {
+    let Some(lane_name) = lane_name else {
+        return Ok(None);
+    };
+    let lane_name = lane_name.trim();
+    if lane_name.is_empty() {
+        bail!("--lane must name a non-empty project landing lane");
+    }
+    Ok(Some(lane_name.to_string()))
+}
+
+fn ensure_requested_selection_matches_plan(
     requested_target: Option<&str>,
+    requested_lane: Option<&str>,
     plan: &LandPlan,
 ) -> Result<()> {
-    let Some(requested_target) = requested_target else {
-        return Ok(());
-    };
-    if plan.target_branch.as_deref() == Some(requested_target) {
-        return Ok(());
+    if let Some(requested_lane) = requested_lane {
+        if plan.lane.as_deref() == Some(requested_lane) {
+            return Ok(());
+        }
+        let planned = plan.lane.as_deref().unwrap_or("no named lane");
+        bail!(
+            "Land plan uses {planned}, not lane `{requested_lane}`. Regenerate it with `knit land --lane {requested_lane} plan --force`, inspect it, then apply again."
+        );
     }
-    let planned = plan.target_branch.as_deref().unwrap_or("recorded PR bases");
-    bail!(
-        "Land plan targets {planned}, not `{requested_target}`. Regenerate it with `knit land --target {requested_target} plan --force`, inspect it, then apply again."
-    )
+    if let Some(requested_target) = requested_target {
+        if plan.target_branch.as_deref() == Some(requested_target) {
+            return Ok(());
+        }
+        let planned = plan.target_branch.as_deref().unwrap_or("recorded PR bases");
+        bail!(
+            "Land plan targets {planned}, not `{requested_target}`. Regenerate it with `knit land --target {requested_target} plan --force`, inspect it, then apply again."
+        )
+    }
+    Ok(())
 }
 
 /// Apply the plan's native target contract to the recorded review objects
@@ -205,9 +253,9 @@ fn ensure_requested_target_matches_plan(
 /// provider operation remains resumable and the bundle never lies about the
 /// remote PR base.
 fn prepare_plan_publication_targets(active: &mut ActiveBundle, plan: &LandPlan) -> Result<()> {
-    let Some(target_branch) = plan.target_branch.as_deref() else {
+    if plan.target_branch.is_none() && plan.target_branches.is_empty() {
         return Ok(());
-    };
+    }
     let mut seen = std::collections::BTreeSet::new();
     for step in &plan.steps {
         if step.step_type != LandStepKind::MergePr {
@@ -223,6 +271,14 @@ fn prepare_plan_publication_targets(active: &mut ActiveBundle, plan: &LandPlan) 
         let publication = publication_for_repo(&active.bundle, repo_id)
             .with_context(|| format!("{repo_id}: missing review publication"))?
             .clone();
+        let target_branch = plan
+            .target_branches
+            .get(repo_id)
+            .map(String::as_str)
+            .or(plan.target_branch.as_deref())
+            .with_context(|| {
+                format!("landing plan has no resolved target branch for repository `{repo_id}`")
+            })?;
         let current = forge.view(&target, &publication.url)?;
         let current_base = current
             .base_ref_name

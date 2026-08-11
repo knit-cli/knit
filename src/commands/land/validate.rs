@@ -35,6 +35,36 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
     }
     ensure_provider(&plan.provider)?;
     ordered_step_ids(&plan.steps)?;
+    if plan.target_branch.is_some() && plan.lane.is_some() {
+        bail!("land plan cannot contain both targetBranch and lane");
+    }
+    if plan.lane.is_none() && !plan.target_branches.is_empty() {
+        bail!("land plan targetBranches require a named lane");
+    }
+    if let Some(lane) = &plan.lane {
+        if lane.trim().is_empty() {
+            bail!("land plan lane must not be empty");
+        }
+        let merge_repos = plan
+            .steps
+            .iter()
+            .filter(|step| step.step_type == LandStepKind::MergePr)
+            .filter_map(|step| step.repo_id.as_ref())
+            .collect::<BTreeSet<_>>();
+        for (repo_id, branch) in &plan.target_branches {
+            if branch.trim().is_empty() {
+                bail!("land plan targetBranches.{repo_id} must not be empty");
+            }
+            if !merge_repos.contains(repo_id) {
+                bail!("land plan targetBranches names non-merge repository `{repo_id}`");
+            }
+        }
+        for repo_id in merge_repos {
+            if !plan.target_branches.contains_key(repo_id) {
+                bail!("land plan lane `{lane}` has no targetBranches entry for `{repo_id}`");
+            }
+        }
+    }
 
     for step in &plan.steps {
         if step.timeout_seconds == Some(0) {

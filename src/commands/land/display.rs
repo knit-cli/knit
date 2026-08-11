@@ -6,11 +6,15 @@ use crate::model::DeployMode;
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
+use std::collections::BTreeMap;
 use std::path::Path;
 
 pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
     println!("{} {}", out::heading("Land plan"), out::node(&plan.id));
     println!("{} {}", out::heading("Provider:"), plan.provider);
+    if let Some(lane) = &plan.lane {
+        println!("{} {}", out::heading("Lane:"), lane);
+    }
     println!(
         "{} {}",
         out::heading("Plan file:"),
@@ -23,6 +27,7 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
             .filter(|step| step.step_type == LandStepKind::MergePr)
             .filter_map(|step| step.repo_id.as_ref()),
         plan.target_branch.as_deref(),
+        &plan.target_branches,
         plan.steps
             .iter()
             .any(|step| step.step_type == LandStepKind::Deploy),
@@ -40,13 +45,14 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
         }
     }
     println!();
-    match plan.target_branch.as_deref() {
-        Some(target) => println!(
+    match (plan.lane.as_deref(), plan.target_branch.as_deref()) {
+        (Some(lane), _) => println!("{} knit land --lane {} apply", out::heading("Apply:"), lane),
+        (None, Some(target)) => println!(
             "{} knit land --target {} apply",
             out::heading("Apply:"),
             target
         ),
-        None => println!("{} knit land apply", out::heading("Apply:")),
+        (None, None) => println!("{} knit land apply", out::heading("Apply:")),
     }
 }
 
@@ -69,6 +75,7 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
             .filter(|step| step.step_type == LandStepKind::MergePr)
             .filter_map(|step| step.repo_id.as_ref()),
         None,
+        &BTreeMap::new(),
         run.steps
             .iter()
             .any(|step| step.step_type == LandStepKind::Deploy),
@@ -112,6 +119,7 @@ pub(super) fn print_plan_landing_targets(active: &ActiveBundle, plan: &LandPlan)
             .filter(|step| step.step_type == LandStepKind::MergePr)
             .filter_map(|step| step.repo_id.as_ref()),
         plan.target_branch.as_deref(),
+        &plan.target_branches,
         plan.steps
             .iter()
             .any(|step| step.step_type == LandStepKind::Deploy),
@@ -122,13 +130,18 @@ fn print_landing_targets<'a>(
     active: &ActiveBundle,
     repo_ids: impl IntoIterator<Item = &'a String>,
     explicit_target: Option<&str>,
+    repo_targets: &BTreeMap<String, String>,
     has_deployment_steps: bool,
 ) {
     let targets = repo_ids
         .into_iter()
         .filter_map(|repo_id| {
             let publication = publication_for_repo(&active.bundle, repo_id)?;
-            let base_branch = explicit_target.unwrap_or(&publication.base_branch);
+            let base_branch = repo_targets
+                .get(repo_id.as_str())
+                .map(String::as_str)
+                .or(explicit_target)
+                .unwrap_or(&publication.base_branch);
             let is_alternate = active
                 .bundle
                 .repos

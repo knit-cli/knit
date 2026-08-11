@@ -4,8 +4,8 @@
 
 use super::types::DEFAULT_LAND_PROVIDER;
 use super::{
-    artifact_target, ensure_open_and_ready, ensure_open_for_retarget, normalize_target_branch,
-    state_is_merged,
+    artifact_target, ensure_open_and_ready, ensure_open_for_retarget, normalize_lane_name,
+    normalize_target_branch, state_is_merged,
 };
 use crate::ids::node_id;
 use crate::model::{BundleNode, MergeMethod};
@@ -14,15 +14,23 @@ use crate::providers::{self, publication_for_repo};
 use crate::store::{read_json, write_json};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub fn apply_land_from_artifact(
     artifact_path: &Path,
     out_path: Option<&Path>,
     target_branch: Option<&str>,
+    lane_name: Option<&str>,
+    repo_targets: &[String],
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let target_branch = normalize_target_branch(target_branch)?;
+    let lane_name = normalize_lane_name(lane_name)?;
+    let repo_targets = parse_repo_targets(repo_targets)?;
+    if lane_name.is_none() && !repo_targets.is_empty() {
+        bail!("--repo-target requires --lane");
+    }
     let mut bundle: crate::model::ChangeGroup = read_json(artifact_path)
         .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
     if bundle.repos.is_empty() {
@@ -30,6 +38,27 @@ pub fn apply_land_from_artifact(
     }
     if bundle.publications.is_empty() {
         bail!("Bundle artifact has no review publications. Run publish first.");
+    }
+    if lane_name.is_some() {
+        let published_repo_ids = bundle
+            .repos
+            .iter()
+            .filter(|repo| publication_for_repo(&bundle, &repo.id).is_some())
+            .map(|repo| repo.id.as_str())
+            .collect::<BTreeSet<_>>();
+        for repo_id in repo_targets.keys() {
+            if !published_repo_ids.contains(repo_id.as_str()) {
+                bail!("--repo-target names unpublished or unknown repository `{repo_id}`");
+            }
+        }
+        for repo_id in published_repo_ids {
+            if !repo_targets.contains_key(repo_id) {
+                bail!(
+                    "Landing lane `{}` has no resolved artifact target for repository `{repo_id}`. Pass `--repo-target {repo_id}=BRANCH`.",
+                    lane_name.as_deref().unwrap_or_default()
+                );
+            }
+        }
     }
 
     let started_at = now_iso();
@@ -46,7 +75,11 @@ pub fn apply_land_from_artifact(
         let target = artifact_target(&cwd, forge.as_ref(), repo)?;
 
         let mut pr = forge.view(&target, &publication.url)?;
-        if let Some(target_branch) = target_branch.as_deref() {
+        let repo_target = repo_targets
+            .get(&repo.id)
+            .map(String::as_str)
+            .or(target_branch.as_deref());
+        if let Some(target_branch) = repo_target {
             let current_base = pr
                 .base_ref_name
                 .as_deref()
@@ -162,4 +195,25 @@ pub fn apply_land_from_artifact(
             Ok(())
         }
     }
+}
+
+fn parse_repo_targets(values: &[String]) -> Result<BTreeMap<String, String>> {
+    let mut targets = BTreeMap::new();
+    for value in values {
+        let (repo_id, branch) = value.split_once('=').ok_or_else(|| {
+            anyhow::anyhow!("Invalid --repo-target `{value}`; expected REPO=BRANCH")
+        })?;
+        let repo_id = repo_id.trim();
+        let branch = branch.trim();
+        if repo_id.is_empty() || branch.is_empty() {
+            bail!("Invalid --repo-target `{value}`; repository and branch must be non-empty");
+        }
+        if targets
+            .insert(repo_id.to_string(), branch.to_string())
+            .is_some()
+        {
+            bail!("Duplicate --repo-target for repository `{repo_id}`");
+        }
+    }
+    Ok(targets)
 }
