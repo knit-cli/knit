@@ -49,15 +49,31 @@ pub(crate) fn sync_remote_helpers(
     remote_name: &str,
     remote: &KnitRemote,
     token: &str,
-) -> Result<BTreeSet<String>> {
-    let hosts = connected_forge_hosts(remote, token)?;
+) -> Result<HelperSync> {
+    let Some(hosts) = connected_forge_hosts(remote, token)? else {
+        // A legacy or otherwise non-environment token cannot vend forge
+        // credentials. Remove helpers previously installed for this remote so
+        // Git does not invoke a broker that is now guaranteed to reject it.
+        converge(
+            &BTreeMap::new(),
+            RemoveScope::Remote(remote_name.to_string()),
+        )?;
+        return Ok(HelperSync::Unavailable);
+    };
     let helper = helper_command(remote_name)?;
     let desired: BTreeMap<String, String> = hosts
         .iter()
         .map(|host| (host.clone(), helper.clone()))
         .collect();
     converge(&desired, RemoveScope::AnyRemote)?;
-    Ok(hosts)
+    Ok(HelperSync::Configured(hosts))
+}
+
+pub(crate) enum HelperSync {
+    Configured(BTreeSet<String>),
+    /// The token is valid for ordinary sync operations but is not allowed to
+    /// broker the user's forge credential.
+    Unavailable,
 }
 
 /// Best-effort helper install before clone/fetch traffic. Only acts when the
@@ -77,7 +93,7 @@ pub(crate) fn ensure_helpers_for_git(remote_name: &str) {
         return;
     };
     match sync_remote_helpers(&remote_name, remote, &token) {
-        Ok(hosts) if !hosts.is_empty() => {
+        Ok(HelperSync::Configured(hosts)) if !hosts.is_empty() => {
             crate::human!(
                 "{} {} {}",
                 crate::output::heading("Credential helper:"),
@@ -85,7 +101,7 @@ pub(crate) fn ensure_helpers_for_git(remote_name: &str) {
                 crate::output::muted(format!("(remote {remote_name})"))
             );
         }
-        Ok(_) => {}
+        Ok(HelperSync::Configured(_) | HelperSync::Unavailable) => {}
         Err(error) => {
             crate::human!(
                 "{}",
@@ -218,7 +234,7 @@ fn git_config(args: &[&str]) -> Result<()> {
 
 /// The remote's connected forge hosts, exact-HTTPS-host validated on our side
 /// regardless of what the server sent.
-fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<String>> {
+fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<Option<BTreeSet<String>>> {
     #[derive(Deserialize)]
     struct Descriptor {
         connected: bool,
@@ -231,6 +247,13 @@ fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<St
     }
 
     let response = request(remote, token, "GET", "/me/forge-credentials", None)?;
+    // Forge credential vending is intentionally limited to isolated,
+    // environment-bound tokens carrying `forge:credential`. Ordinary and
+    // legacy sync tokens receive 403 and should simply fall back to the
+    // user's existing Git credential chain.
+    if response.status == 403 {
+        return Ok(None);
+    }
     if !(200..300).contains(&response.status) {
         bail!(
             "Sync remote returned HTTP {}: {}",
@@ -240,13 +263,15 @@ fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<St
     }
     let envelope: Envelope =
         serde_json::from_str(&response.body).context("failed to parse forge credential list")?;
-    Ok(envelope
-        .data
-        .into_iter()
-        .filter(|descriptor| descriptor.connected)
-        .flat_map(|descriptor| descriptor.hosts)
-        .filter_map(|host| normalize_git_target("https", &host))
-        .collect())
+    Ok(Some(
+        envelope
+            .data
+            .into_iter()
+            .filter(|descriptor| descriptor.connected)
+            .flat_map(|descriptor| descriptor.hosts)
+            .filter_map(|host| normalize_git_target("https", &host))
+            .collect(),
+    ))
 }
 
 #[cfg(test)]
