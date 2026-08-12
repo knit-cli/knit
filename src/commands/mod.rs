@@ -52,7 +52,7 @@ pub use fetch::fetch_repos;
 pub use git_credential::run_git_credential_helper;
 pub use git_passthrough::run_git;
 pub use history::{refresh_history, show_history, show_related_history};
-pub use init::{init_bundle, start_bundle};
+pub use init::{init_bundle, refresh_agents, start_bundle};
 pub use land::{
     apply_land_from_artifact, apply_land_plan, check_landing, generate_land_plan, land_default,
     resume_land_run, rollback_land_run, show_land_status, update_land_branches,

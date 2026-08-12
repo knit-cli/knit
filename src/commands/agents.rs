@@ -357,7 +357,7 @@ This project defines a native Knit bundle runtime. The committed source of truth
 
 ```sh
 knit project pull --repo {stack_repo}
-knit project agents
+knit agents
 ```
 
 From a bundle worktree that includes `{stack_repo}`:

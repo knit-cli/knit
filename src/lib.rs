@@ -29,6 +29,7 @@ pub fn run(cli: Cli) -> Result<()> {
     store::set_bundle_override(cli.bundle);
     match cli.command {
         Commands::Init { name, agents } => commands::init_project(&name, agents),
+        Commands::Agents { project } => commands::refresh_agents(project.as_deref()),
         Commands::Project { command } => match command {
             ProjectCommand::Add {
                 repo_id,

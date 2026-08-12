@@ -148,6 +148,55 @@ fn sync_does_not_duplicate_ledger_commits_when_head_projection_is_stale() {
 }
 
 #[test]
+fn archive_restore_and_rematerialize_preserve_recorded_head_tracking() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "restored feature"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let checkout = workspace.join(".knit/worktrees/restored-feature/backend");
+    fs::write(checkout.join("app.txt"), "recorded feature\n").unwrap();
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Record feature before archive"],
+    );
+    let recorded = git(&checkout, ["rev-parse", "HEAD"]);
+
+    knit(&workspace, ["bundle", "archive", "restored-feature"]);
+    assert!(!checkout.exists());
+    knit(&workspace, ["bundle", "restore", "restored-feature"]);
+    knit(
+        &workspace,
+        ["--bundle", "restored-feature", "bundle", "worktree"],
+    );
+
+    assert_eq!(
+        git(&checkout, ["rev-parse", "HEAD"]).trim(),
+        recorded.trim()
+    );
+    let status = knit(&workspace, ["--bundle", "restored-feature", "status"]);
+    assert!(!status.contains("unrecorded commits"), "{status}");
+    let sync = knit(&workspace, ["--bundle", "restored-feature", "sync"]);
+    assert!(sync.contains("No unrecorded git commits found."), "{sync}");
+    let bundle_path = workspace.join(".knit/bundles/restored-feature.bundle.json");
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(bundle_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|node| node["type"].as_str() == Some("git.observed"))
+            .count(),
+        0
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn bundle_context_supports_parallel_worktrees_and_workspace_switches() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
