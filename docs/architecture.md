@@ -15,8 +15,9 @@ src/
     land/             landing plan/check/execute/update/validate/display
     merge/            local integration runs and reports
     publish/          publish workflow: scope/remote/sync/status phases plus PR body generation
-    remote/           sync-remote transport: client, facade, per-artifact push/pull/history, clone
+    remote/           sync-remote transport: client, facade, credentials/helpers/projects, per-artifact push/pull/history, clone
     agents.rs         generated AGENTS.md guidance
+    check.rs          bundle-ledger check verdicts
     cherrypick.rs     move recorded commits between bundles
     clean.rs
     commit.rs
@@ -24,6 +25,7 @@ src/
     diff.rs
     doctor.rs
     fetch.rs
+    git_credential.rs
     git_passthrough.rs
     history/          `knit history` / `knit related`: target resolution + git/Knit-history join
     init.rs
@@ -40,14 +42,17 @@ src/
     stage.rs
     status.rs
     sync.rs
+    tag.rs
     track.rs
     view.rs           per-user saved bundle shapes
+    workspace.rs      project source-checkout and cached-origin status
     worktree.rs
   providers/
     mod.rs        Forge trait, PrTarget, host detection, shared CLI runner + publication helpers
     github/       GitHub forge adapter: gh CLI impl, REST api ops, HTTP transport
     gitlab.rs     GitLab forge adapter via the glab CLI (merge requests)
     forgejo.rs    Codeberg/Forgejo forge adapter via the tea CLI
+    bitbucket.rs  Bitbucket Cloud forge adapter via REST
   model/
     mod.rs        module wiring and shared types
     bundle.rs     bundle / ChangeGroup artifact and node ledger
@@ -70,8 +75,9 @@ src/
   tracking.rs   tracked-branch ancestry helpers
 tests/
   common/       shared test harness (toy repos, isolated KNIT_HOME)
-  bundle.rs  cleanup.rs  config.rs  feature_flow.rs  ids.rs  land.rs
-  merge.rs  model.rs  project.rs  publish.rs  runtime.rs  status.rs  sync.rs
+  bitbucket.rs  bundle.rs  bundle_pull.rs  check.rs  cleanup.rs  clone.rs
+  config.rs  docs.rs  feature_flow.rs  forgejo.rs  gitlab.rs  ids.rs  land.rs
+  merge.rs  model.rs  project.rs  publish.rs  runtime.rs  status.rs  sync.rs  tag.rs
 ```
 
 Rust does not use classes in the TypeScript sense. The equivalent separation here is modules plus explicit data types. `model/` owns the long-lived schema types, including the `ChangeGroup` bundle and node ledger; each module in `commands/` coordinates one user-facing command with filesystem and git operations. A command starts as a single file and becomes a directory module only when it grows distinct phases (plan/execute/report), as `bundle/`, `history/`, `land/`, `merge/`, `publish/`, `remote/`, `revert/`, and `runtime/` have. Keep command files under ~700 lines; split by phase or concern once they pass it.
@@ -108,7 +114,7 @@ The bundle carries both current state and history:
 
 - `repos`: current tracked repos, checkout modes, branches, and checkout paths.
 - `commitGroups`: flat list of logical commits across repos.
-- `nodes`: ordered ledger entries such as `feature.created`, `feature.archived`, `feature.landed`, `pr.revert`, `repo.added`, `worktree.materialized`, `commit.group`, `git.observed`, `revert.group`, and `repo.removed`. Older artifacts may carry `feature.closed` and `checkpoint` nodes from removed commands; readers must tolerate unknown node types.
+- `nodes`: ordered ledger entries such as `feature.created`, `feature.archived`, `feature.landed`, `pr.revert`, `repo.added`, `worktree.materialized`, `commit.group`, `git.observed`, `land.update`, `revert.group`, `check.recorded`, `tag.created`, and `repo.removed`. Older artifacts may carry `feature.closed` and `checkpoint` nodes from removed commands; readers must tolerate unknown node types.
 - `publications`: provider metadata for PRs or other forge review objects created or synced by Knit.
 - `headNodeId`: the latest node in the ledger.
 
@@ -124,18 +130,18 @@ This split enables related-work queries without duplicating Git. `knit related` 
 
 ## Remote Artifact Sync
 
-Three kinds of Knit artifact move between the workspace and sync remotes: bundle artifacts, project history events, and per-user saved views. Historically these were reached through eight overlapping doors: `knit push --remote`, `knit bundle push`, `knit fetch --bundles`, `knit pull --bundles`, `knit history push/pull/sync`, `knit view push/pull`, `knit land sync`, and the automatic push-sync-on-land driven by the `push-sync`/`sync-remote`/`sync-remotes` config keys. Several verbs did the same thing under different names, and the command surface gave no single place to learn "how do I move artifacts to a remote".
+Five kinds of Knit artifact move between the workspace and sync remotes: bundle artifacts, project history events, per-user saved views, project architecture, and an explicit knowledge-graph visualization slice. Historically the routine families were reached through eight overlapping doors: `knit push --remote`, `knit bundle push`, `knit fetch --bundles`, `knit pull --bundles`, `knit history push/pull/sync`, `knit view push/pull`, `knit land sync`, and the automatic push-sync-on-land driven by the `push-sync`/`sync-remote`/`sync-remotes` config keys. Several verbs did the same thing under different names, and the command surface gave no single place to learn "how do I move artifacts to a remote".
 
 This is consolidated into one verb family. `knit sync` keeps its original meaning exactly — a local-only reconcile that records git commits made outside Knit — and gains two subcommands that are the one explicit way to move artifacts:
 
 - `knit sync push [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...`
-- `knit sync pull [--bundles|--history|--views|--all] [--remote <name>]...`
+- `knit sync pull [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...`
 
 With no target flag, both move every routine artifact family; the knowledge-graph viz slice is bulky and moves only on an explicit `--kg`. Remote selection resolves explicit `--remote` overrides first, then configured sync remotes, then the sole configured remote. Pushing a bundle always means branches + artifact: before an open bundle's artifact is uploaded, its feature branches are pushed to git `origin` (plain, never forced) or verified there; a bundle whose branches cannot be pushed or verified is skipped with a warning. Terminal-state bundles (closed/archived/deleted) push artifact-only.
 
 The absorbed verbs are deleted, not aliased or hidden: `knit bundle push`, `knit history push/pull/sync` (only `history list` and `history refresh` remain), `knit view push/pull`, and `knit land sync` no longer exist. The philosophy is one way per outcome — delete, do not hide.
 
-The git-parity verbs keep their git shapes because they are about branches first: `knit push --remote <name>` pushes branches and then the bundle artifact, and `knit fetch --bundles` / `knit pull --bundles` pull recorded bundle state. They are not duplicate implementations — they route through the same `commands/remote/` helpers that the `knit sync` subcommands and landing's automatic sync use. `commands/remote/facade.rs` is the thin selector that the `knit sync` subcommands call: it owns choosing artifact families and remotes, then delegates transport to the per-artifact helpers in `commands/remote/{push,pull,history}.rs`. One implementation, several differently shaped doors into it. The `push-sync`/`sync-remote`/`sync-remotes` config keys are unchanged and still drive automatic artifact sync after a successful land.
+The git-parity verbs keep their git shapes because they are about branches first: `knit push --remote <name>` pushes branches and then the bundle artifact, while `knit fetch --mode knit` and `knit pull --bundles` pull recorded bundle state. They are not duplicate implementations — they route through the same `commands/remote/` helpers that the `knit sync` subcommands and landing's automatic sync use. `commands/remote/facade.rs` is the thin selector that the `knit sync` subcommands call: it owns choosing artifact families and remotes, then delegates transport to the per-artifact helpers in `commands/remote/{push,pull,history}.rs`. One implementation, several differently shaped doors into it. The `push-sync`/`sync-remote`/`sync-remotes` config keys are unchanged and still drive automatic artifact sync after a successful land.
 
 ## Project And Context State
 

@@ -1,8 +1,10 @@
-//! `knit tag` — cross-repo known-good markers on origin base branches.
+//! `knit tag` — cross-repo known-good markers on configured base branches.
 //!
 //! A tag records the state of the configured project bases: per repo, the commit
-//! `origin/<base_branch>` points at after a fresh fetch, named as one set. The
-//! `tag.created` ledger node is the source of truth; annotated git tags
+//! `origin/<base_branch>` points at after a fresh fetch, named as one set. A
+//! local-only `--no-push` tag falls back to the local configured base when the
+//! repo has no origin. The `tag.created` ledger node is the source of truth;
+//! annotated git tags
 //! `knit/<name>` in each repo are a default-on export of it (host/CI
 //! visibility, checkout-without-knit, GC protection of the pinned commits).
 //!
@@ -50,6 +52,7 @@ struct TagTarget {
     repo_id: String,
     path: PathBuf,
     base_branch: String,
+    has_origin: bool,
 }
 
 /// `knit tag <name>`: pin the freshly fetched origin bases of the resolved
@@ -135,7 +138,7 @@ pub(crate) fn create_tag_set_on(
         );
     }
 
-    let targets = targets_for(active, indexes)?;
+    let targets = targets_for(active, indexes, no_push)?;
     let pins = fetch_pins(&targets)?;
     if !no_git {
         preflight_collisions(&targets, name)?;
@@ -475,7 +478,11 @@ fn find_tag_node<'a>(bundle: &'a ChangeGroup, name: &str) -> Option<&'a BundleNo
         .find(|node| node.node_type == "tag.created" && node.title.as_deref() == Some(name))
 }
 
-fn targets_for(active: &ActiveBundle, indexes: &[usize]) -> Result<Vec<TagTarget>> {
+fn targets_for(
+    active: &ActiveBundle,
+    indexes: &[usize],
+    allow_local_base: bool,
+) -> Result<Vec<TagTarget>> {
     let mut targets = Vec::new();
     let mut failures = Vec::new();
     for &index in indexes {
@@ -489,9 +496,10 @@ fn targets_for(active: &ActiveBundle, indexes: &[usize]) -> Result<Vec<TagTarget
             ));
             continue;
         }
-        if git_output_optional(&path, ["remote", "get-url", "origin"])?.is_none() {
+        let has_origin = git_output_optional(&path, ["remote", "get-url", "origin"])?.is_some();
+        if !has_origin && !allow_local_base {
             failures.push(format!(
-                "{}: no `origin` remote configured in {}",
+                "{}: no `origin` remote configured in {} (use --no-push to tag the local configured base)",
                 repo.id,
                 path.display()
             ));
@@ -501,6 +509,7 @@ fn targets_for(active: &ActiveBundle, indexes: &[usize]) -> Result<Vec<TagTarget
             repo_id: repo.id.clone(),
             path,
             base_branch: repo.base_branch.clone(),
+            has_origin,
         });
     }
     if !failures.is_empty() {
@@ -539,10 +548,15 @@ fn fetch_pins(targets: &[TagTarget]) -> Result<Vec<(String, String)>> {
 }
 
 fn fetch_pin(target: &TagTarget) -> Result<String> {
-    git_output(&target.path, ["fetch", "origin"])?;
-    let remote_ref = format!("origin/{}", target.base_branch);
-    ref_commit_sha(&target.path, &remote_ref)?
-        .with_context(|| format!("no `{remote_ref}` after fetch"))
+    if target.has_origin {
+        git_output(&target.path, ["fetch", "origin"])?;
+        let remote_ref = format!("origin/{}", target.base_branch);
+        return ref_commit_sha(&target.path, &remote_ref)?
+            .with_context(|| format!("no `{remote_ref}` after fetch"));
+    }
+
+    ref_commit_sha(&target.path, &target.base_branch)?
+        .with_context(|| format!("no local configured base `{}`", target.base_branch))
 }
 
 /// Refuse to reuse a name that exists anywhere, locally or on origin. Tags
@@ -587,7 +601,7 @@ fn preflight_collision(target: &TagTarget, name: &str) -> Result<Vec<String>> {
     if ref_commit_sha(&target.path, &tag_ref(name))?.is_some() {
         hits.push("local".to_string());
     }
-    if remote_ref_sha(&target.path, "origin", &tag_ref(name))?.is_some() {
+    if target.has_origin && remote_ref_sha(&target.path, "origin", &tag_ref(name))?.is_some() {
         hits.push("origin".to_string());
     }
     Ok(hits)
@@ -679,9 +693,22 @@ fn build_annotation(
     pins: &[(String, String)],
     evidence: &[(String, String)],
 ) -> String {
+    let base_branches = targets
+        .iter()
+        .map(|target| target.base_branch.as_str())
+        .collect::<BTreeSet<_>>();
+    let base_label = if base_branches.len() == 1 {
+        base_branches
+            .iter()
+            .next()
+            .copied()
+            .unwrap_or("configured base")
+    } else {
+        "configured bases"
+    };
     let mut lines = vec![
         format!(
-            "knit tag {name}: known-good main across {} repo(s)",
+            "knit tag {name}: known-good {base_label} across {} repo(s)",
             pins.len()
         ),
         String::new(),
@@ -744,12 +771,18 @@ fn build_annotation(
 
     lines.push("pins:".to_string());
     for (repo_id, sha) in pins {
-        let base = targets
+        let source = targets
             .iter()
             .find(|target| target.repo_id == *repo_id)
-            .map(|target| target.base_branch.as_str())
-            .unwrap_or("main");
-        lines.push(format!("  {repo_id}: {sha} (origin/{base})"));
+            .map(|target| {
+                if target.has_origin {
+                    format!("origin/{}", target.base_branch)
+                } else {
+                    format!("local {}", target.base_branch)
+                }
+            })
+            .unwrap_or_else(|| "configured base".to_string());
+        lines.push(format!("  {repo_id}: {sha} ({source})"));
     }
 
     lines.join("\n")

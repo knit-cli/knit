@@ -240,6 +240,50 @@ fn tag_no_push_then_rerun_resumes_and_pushes_once() {
 }
 
 #[test]
+fn tag_no_push_uses_local_configured_base_without_origin() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    git(&backend, ["checkout", "-b", "stable"]);
+
+    knit(&workspace, ["bundle", "local release"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            "--base",
+            "stable",
+        ],
+    );
+    let expected = git(&backend, ["rev-parse", "stable"]);
+
+    let output = knit(&workspace, ["tag", "local-v1", "--no-push"]);
+    assert!(output.contains("tagged"), "{output}");
+    assert_eq!(
+        git(&backend, ["rev-parse", "refs/tags/knit/local-v1^{commit}"]).trim(),
+        expected.trim()
+    );
+    let bundle_path = workspace.join(".knit/bundles/local-release.bundle.json");
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(bundle_path).unwrap()).unwrap();
+    let nodes = tag_nodes(&bundle, "local-v1");
+    let message = nodes[0]["message"].as_str().unwrap();
+    assert!(message.contains("known-good stable"), "{message}");
+    assert!(message.contains("(local stable)"), "{message}");
+    let show = knit(&workspace, ["tag", "show", "local-v1"]);
+    assert!(show.contains("known-good stable"), "{show}");
+
+    let pushed = knit_fails(&workspace, ["tag", "needs-origin"]);
+    assert!(pushed.contains("no `origin` remote configured"), "{pushed}");
+    assert!(pushed.contains("use --no-push"), "{pushed}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn tag_resume_recreates_deleted_local_tag_and_rejects_moved_one() {
     let root = unique_temp_dir();
     let (workspace, backend, _frontend, _backend_remote, _collab) = setup_remote_bundle(&root);

@@ -20,6 +20,7 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("knit bundle \""));
     assert!(agents.contains("fetches each selected repo's configured `origin/<baseBranch>`"));
     assert!(agents.contains("knit workspace status"));
+    assert!(agents.contains("knit agents"));
     assert!(agents.contains("knit pull --base"));
     assert!(agents.contains("knit pull --current"));
     assert!(agents.contains("knit project set-base"));
@@ -31,7 +32,13 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("--remote-branches"));
     assert!(agents.contains("matching remote bundle records"));
     assert!(agents.contains("archived (never deleted) with the everyday `bundle:push` scope"));
+    assert!(agents.contains("--apply --delete --remote-bundles"));
     assert!(agents.contains("knit project remove <project> --force"));
+    assert!(agents.contains("knit bundle pull <slug>"));
+    assert!(agents.contains("knit check run <name>"));
+    assert!(agents.contains("knit history list"));
+    assert!(agents.contains("--architecture|--kg"));
+    assert!(agents.contains("archived or landed bundles"));
     assert!(agents.contains("knit --bundle feature-a commit"));
     assert!(agents.contains("knit --bundle feature-a commit --all"));
     assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
@@ -1005,6 +1012,117 @@ fn cherrypick_moves_source_commits_into_destination_bundle() {
         .unwrap()
         .iter()
         .any(|node| node["type"].as_str() == Some("git.observed")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn cherrypick_full_sha_deduplicates_repeated_ledger_mentions() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["bundle", "source feature", "--repo", "backend"],
+    );
+    let source_checkout = workspace.join(".knit/worktrees/source-feature/backend");
+    append_line(&source_checkout.join("app.txt"), "source change");
+    git(&source_checkout, ["add", "app.txt"]);
+    git(&source_checkout, ["commit", "-m", "Source change"]);
+    let source_sha = git(&source_checkout, ["rev-parse", "HEAD"]);
+    knit(&workspace, ["--bundle", "source-feature", "sync"]);
+
+    // Simulate an older repaired artifact that mentions the same repo/SHA in
+    // two loggable nodes. A full SHA must not be called ambiguous merely
+    // because the ledger contains duplicate historical mentions.
+    let source_path = workspace.join(".knit/bundles/source-feature.bundle.json");
+    let mut source: Value =
+        serde_json::from_str(&fs::read_to_string(&source_path).unwrap()).unwrap();
+    let mut duplicate = source["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"].as_str() == Some("git.observed"))
+        .unwrap()
+        .clone();
+    duplicate["id"] = json!("git_duplicate_sha_mention");
+    source["nodes"].as_array_mut().unwrap().push(duplicate);
+    fs::write(
+        &source_path,
+        format!("{}\n", serde_json::to_string_pretty(&source).unwrap()),
+    )
+    .unwrap();
+
+    knit(
+        &workspace,
+        ["bundle", "picked feature", "--repo", "backend"],
+    );
+    let picked = knit(
+        &workspace,
+        [
+            "--bundle",
+            "picked-feature",
+            "cherrypick",
+            "--from",
+            "source-feature",
+            source_sha.trim(),
+        ],
+    );
+    assert!(picked.contains("picking"), "{picked}");
+    let picked_checkout = workspace.join(".knit/worktrees/picked-feature/backend");
+    assert!(fs::read_to_string(picked_checkout.join("app.txt"))
+        .unwrap()
+        .contains("source change"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn agents_command_refreshes_workspace_and_project_sections() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    fs::write(workspace.join("AGENTS.md"), "custom workspace guidance\n").unwrap();
+
+    let output = knit(&workspace, ["agents"]);
+    assert!(output.contains("Workspace AGENTS.md:"), "{output}");
+    assert!(output.contains("Project AGENTS.md:"), "{output}");
+    let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(agents.contains("custom workspace guidance"));
+    assert!(agents.contains("<!-- BEGIN KNIT AGENTS -->"));
+    assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: demo -->"));
+    assert!(agents.contains("- `backend`"));
+    assert_eq!(
+        agents.matches("If the harness provides subagents").count(),
+        1
+    );
+
+    let rerun = knit(&workspace, ["agents"]);
+    assert!(rerun.contains("Workspace AGENTS.md:"), "{rerun}");
+    let refreshed = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert_eq!(refreshed.matches("<!-- BEGIN KNIT AGENTS -->").count(), 1);
+    assert_eq!(
+        refreshed
+            .matches("<!-- BEGIN KNIT PROJECT AGENTS: demo -->")
+            .count(),
+        1
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
