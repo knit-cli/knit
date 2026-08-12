@@ -113,6 +113,7 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
     }
     entries.sort();
 
+    let mut shown = 0usize;
     for path in entries {
         let bundle: ChangeGroup = read_json(&path)?;
         let state = bundle_state(&bundle);
@@ -136,6 +137,15 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
             state,
             bundle.repos.len()
         );
+        shown += 1;
+    }
+    if shown == 0 {
+        let message = if archived || deleted || all {
+            "No bundles matched the selected states."
+        } else {
+            "No open or landed bundles. Pass --archived to include archived bundles."
+        };
+        println!("{}", out::muted(message));
     }
     Ok(())
 }

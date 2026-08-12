@@ -143,10 +143,10 @@ This merges every repo's `knit/my-feature` branch into its own `main`, recording
 After landing, once you have verified that main actually works (the deploy, CI, a quick QA pass — whatever you trust), you can record that fact as a cross-repo known-good marker:
 
 ```sh
-knit tag v1 --bundle my-feature
+knit tag v1 --bundle my-feature --no-push
 ```
 
-This fetches each repo's origin, pins `origin/main` across all repos as one named set on the bundle ledger, and exports annotated git tags `knit/v1` everywhere — the whole-system snapshot a monorepo gets from a single SHA. Tags are immutable and re-running the same command resumes a partially pushed set. `knit tag` lists them; `knit tag show v1` shows per-repo SHAs and provenance.
+The toy repos have no `origin`, so `--no-push` pins each local configured base and exports local annotated tags. In a hosted project, omit `--no-push`: Knit fetches and pins each `origin/<base_branch>`, then pushes the tags. Either way the bundle ledger records one immutable named set — the whole-system snapshot a monorepo gets from a single SHA. Re-running the same command resumes a partial set. `knit tag` lists the tags; `knit tag show v1` shows per-repo SHAs and provenance.
 
 ## 8. Wrap up
 

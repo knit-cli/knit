@@ -41,6 +41,11 @@ pub enum Commands {
         #[arg(long)]
         agents: bool,
     },
+    /// Refresh the workspace and active-project AGENTS.md guidance.
+    Agents {
+        /// Project name. Defaults to the active project; omitted in an ad-hoc workspace.
+        project: Option<String>,
+    },
     /// Manage reusable project repo templates.
     Project {
         #[command(subcommand)]
@@ -280,7 +285,7 @@ pub enum Commands {
         #[command(subcommand)]
         command: CheckCommand,
     },
-    /// Record a cross-repo known-good marker: annotated git tags `knit/<name>` on each repo's origin base.
+    /// Record a cross-repo known-good marker on each repo's configured base.
     #[command(args_conflicts_with_subcommands = true)]
     Tag {
         /// Tag name (creates `knit/<name>` in every tracked repo). With no name and no subcommand, lists tags.

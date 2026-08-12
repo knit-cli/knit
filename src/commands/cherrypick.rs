@@ -134,23 +134,6 @@ fn source_repo_matches(repo: &RepoEntry, selector: &str) -> bool {
 }
 
 fn resolve_source_target(source: &ChangeGroup, target: &str) -> Result<Vec<CommitRef>> {
-    let node = resolve_source_node(source, target)?;
-    let node_refs = commits_for_node(source, node)?;
-    if node_is_named_match(node, target) || target == "HEAD" || target.starts_with("HEAD~") {
-        return Ok(node_refs);
-    }
-
-    let matching = node_refs
-        .into_iter()
-        .filter(|commit| commit.sha == target || commit.sha.starts_with(target))
-        .collect::<Vec<_>>();
-    if matching.is_empty() {
-        bail!("No recorded git commit matched `{target}`.");
-    }
-    Ok(matching)
-}
-
-fn resolve_source_node<'a>(source: &'a ChangeGroup, target: &str) -> Result<&'a BundleNode> {
     let loggable = source
         .nodes
         .iter()
@@ -172,7 +155,7 @@ fn resolve_source_node<'a>(source: &'a ChangeGroup, target: &str) -> Result<&'a 
         let Some(index) = loggable.len().checked_sub(1 + offset) else {
             bail!("Log selector `{target}` is before the start of the source bundle log.");
         };
-        return Ok(loggable[index]);
+        return commits_for_node(source, loggable[index]);
     }
 
     let named = loggable
@@ -181,27 +164,36 @@ fn resolve_source_node<'a>(source: &'a ChangeGroup, target: &str) -> Result<&'a 
         .copied()
         .collect::<Vec<_>>();
     match named.as_slice() {
-        [node] => return Ok(node),
+        [node] => return commits_for_node(source, node),
         [] => {}
         _ => bail!("`{target}` is ambiguous; use a longer bundle node id."),
     }
 
-    let sha_matches = loggable
-        .iter()
-        .filter_map(|node| {
-            commits_for_node(source, node)
-                .ok()
-                .is_some_and(|commits| {
-                    commits
-                        .iter()
-                        .any(|commit| commit.sha == target || commit.sha.starts_with(target))
-                })
-                .then_some(*node)
-        })
-        .collect::<Vec<_>>();
-    match sha_matches.as_slice() {
-        [node] => Ok(node),
-        [] => bail!("No source bundle log entry or recorded git commit matched `{target}`."),
+    // The same git commit can legitimately appear in more than one ledger
+    // node (for example an old artifact may contain both its original commit
+    // group and a later git.observed repair). Resolve by distinct git commit,
+    // not by the number of nodes that mention it. A longer SHA only helps when
+    // the prefix actually matches different SHAs.
+    let mut matching = Vec::new();
+    let mut seen_refs = HashSet::new();
+    let mut matching_shas = BTreeSet::new();
+    for node in loggable {
+        let Ok(commits) = commits_for_node(source, node) else {
+            continue;
+        };
+        for commit in commits {
+            if commit.sha == target || commit.sha.starts_with(target) {
+                matching_shas.insert(commit.sha.clone());
+                if seen_refs.insert((commit.repo_id.clone(), commit.sha.clone())) {
+                    matching.push(commit);
+                }
+            }
+        }
+    }
+
+    match matching_shas.len() {
+        0 => bail!("No source bundle log entry or recorded git commit matched `{target}`."),
+        1 => Ok(matching),
         _ => bail!("`{target}` is ambiguous; use a longer git SHA."),
     }
 }

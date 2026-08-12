@@ -59,6 +59,13 @@ fn archive_records_ledger_node_and_preserves_branches() {
     let second_archive = knit_fails(&workspace, ["bundle", "archive", "venue-capacity"]);
     assert!(second_archive.contains("already archived"));
 
+    let default_list = knit(&workspace, ["bundle", "list"]);
+    assert!(
+        default_list.contains("No open or landed bundles"),
+        "{default_list}"
+    );
+    assert!(knit(&workspace, ["bundle", "list", "--archived"]).contains("venue-capacity"));
+
     fs::remove_dir_all(root).unwrap();
 }
 
