@@ -90,11 +90,24 @@ pub fn run(cli: Cli) -> Result<()> {
             } => commands::show_view(name.as_deref(), project.as_deref(), repos),
             ViewCommand::Save {
                 name,
+                base,
+                from,
                 include,
                 exclude,
                 from_bundle,
                 project,
-            } => commands::save_view(&name, &include, &exclude, from_bundle, project.as_deref()),
+            } => commands::save_view(
+                &name,
+                base.as_deref(),
+                from.as_deref(),
+                &include,
+                &exclude,
+                from_bundle,
+                project.as_deref(),
+            ),
+            ViewCommand::Freeze { name, project } => {
+                commands::freeze_view(&name, project.as_deref())
+            }
             ViewCommand::Include {
                 name,
                 repos,

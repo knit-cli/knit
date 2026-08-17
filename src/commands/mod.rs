@@ -86,8 +86,8 @@ pub use sync::sync_bundle;
 pub use tag::{create_tag, list_tags, show_tag};
 pub use track::{track_repo_selectors, track_repos};
 pub use view::{
-    edit_views, list_views, remove_view, save_view, set_default_view, show_view, view_exclude,
-    view_include, view_unset,
+    edit_views, freeze_view, list_views, remove_view, save_view, set_default_view, show_view,
+    view_exclude, view_include, view_unset,
 };
 pub use workspace::show_workspace_status;
 pub use worktree::create_worktrees;

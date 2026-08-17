@@ -908,15 +908,31 @@ pub enum ViewCommand {
     Save {
         /// View name.
         name: String,
-        /// Repo id to add on top of the project default. Repeatable.
+        /// Seed set: `default` (delta over the project default set) or `none`
+        /// (the include list is the complete repo set).
+        #[arg(long, value_parser = ["default", "none"], value_name = "BASE")]
+        base: Option<String>,
+        /// Seed the view from an existing saved view, then apply the flags.
+        #[arg(long, value_name = "VIEW", conflicts_with = "from_bundle")]
+        from: Option<String>,
+        /// Repo id to add on top of the seed set. Repeatable.
         #[arg(long = "include", value_name = "REPO")]
         include: Vec<String>,
-        /// Repo id to drop from the project default. Repeatable.
+        /// Repo id to drop from the seed set. Repeatable.
         #[arg(long = "exclude", value_name = "REPO")]
         exclude: Vec<String>,
-        /// Derive include/exclude from the current bundle's repos.
+        /// Derive the view from the current bundle's repos.
         #[arg(long)]
         from_bundle: bool,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
+    /// Convert a delta view into an absolute repo list (base `none`), so it
+    /// no longer follows changes to the project default set.
+    Freeze {
+        /// View name.
+        name: String,
         /// Project name. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,

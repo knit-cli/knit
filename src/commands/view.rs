@@ -8,7 +8,7 @@
 use crate::commands::init::{resolve_active_view, resolve_view_repos};
 use crate::commands::project::load_project_by_id;
 use crate::ids::{expand_repo_selectors, slugify};
-use crate::model::{KnitProjectViews, ProjectView};
+use crate::model::{KnitProjectViews, ProjectView, ViewBase};
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, find_knit_root, load_active_bundle, load_config, load_views, project_path,
@@ -81,6 +81,8 @@ pub fn show_view(name: Option<&str>, project: Option<&str>, repos: bool) -> Resu
 
 pub fn save_view(
     name: &str,
+    base: Option<&str>,
+    from: Option<&str>,
     include: &[String],
     exclude: &[String],
     from_bundle: bool,
@@ -89,28 +91,111 @@ pub fn save_view(
     let (root, project_id) = resolve_project(project)?;
     let project_artifact = load_project_by_id(&root, &project_id)?;
     let name = slugify(name);
-
-    let (include, exclude) = if from_bundle {
-        if !include.is_empty() || !exclude.is_empty() {
-            bail!("Use --from-bundle on its own, not with --include/--exclude.");
-        }
-        derive_from_bundle(&project_id, &project_artifact)?
-    } else {
-        (
-            normalize_ids(&project_artifact, include)?,
-            normalize_ids(&project_artifact, exclude)?,
-        )
-    };
+    let base = parse_base(base)?;
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
-    views
-        .views
-        .insert(name.clone(), ProjectView { include, exclude });
+
+    // Seed from an existing view, the current bundle, or empty; the flags
+    // then apply on top of the seed.
+    let mut view = if let Some(from_name) = from {
+        let from_name = slugify(from_name);
+        views
+            .views
+            .get(&from_name)
+            .cloned()
+            .with_context(|| missing_view(&project_id, &from_name))?
+    } else if from_bundle {
+        if !include.is_empty() || !exclude.is_empty() {
+            bail!("Use --from-bundle on its own, not with --include/--exclude.");
+        }
+        derive_from_bundle(&project_id, &project_artifact, base.unwrap_or_default())?
+    } else {
+        ProjectView::default()
+    };
+    if let Some(base) = base {
+        view.base = base;
+    }
+    // A repo belongs to exactly one list; a flag flips the membership.
+    for id in normalize_ids(&project_artifact, include)? {
+        view.exclude.retain(|existing| existing != &id);
+        if !view.include.contains(&id) {
+            view.include.push(id);
+        }
+    }
+    for id in normalize_ids(&project_artifact, exclude)? {
+        view.include.retain(|existing| existing != &id);
+        if !view.exclude.contains(&id) {
+            view.exclude.push(id);
+        }
+    }
+    if view.base == ViewBase::None && !view.exclude.is_empty() {
+        bail!(
+            "An absolute view (--base none) lists its repos with --include; \
+             --exclude has nothing to remove. Use `knit view freeze` to convert \
+             a delta view into an absolute repo list."
+        );
+    }
+
+    views.views.insert(name.clone(), view);
     views.updated_at = now_iso();
     save_views(&root, &views)?;
     println!("{} {}", out::movement("saved view"), out::repo(&name));
     Ok(())
+}
+
+/// Rewrite a delta view in place as an absolute repo list: resolve it against
+/// the current default set and pin the result as `base: none`.
+pub fn freeze_view(name: &str, project: Option<&str>) -> Result<()> {
+    let (root, project_id) = resolve_project(project)?;
+    let project_artifact = load_project_by_id(&root, &project_id)?;
+    let name = slugify(name);
+
+    let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
+    let mut views = load_views(&root, &project_id)?;
+    let view = views
+        .views
+        .get(&name)
+        .with_context(|| missing_view(&project_id, &name))?;
+    if view.base == ViewBase::None {
+        println!(
+            "{} {}",
+            out::repo(&name),
+            out::muted("is already an absolute view.")
+        );
+        return Ok(());
+    }
+    let include: Vec<String> =
+        resolve_view_repos(&project_artifact, &[], false, Some(view), &[], &[])?
+            .into_iter()
+            .map(|repo| repo.id)
+            .collect();
+    views.views.insert(
+        name.clone(),
+        ProjectView {
+            base: ViewBase::None,
+            include,
+            exclude: Vec::new(),
+        },
+    );
+    views.updated_at = now_iso();
+    save_views(&root, &views)?;
+    println!(
+        "{} {} {}",
+        out::movement("froze view"),
+        out::repo(&name),
+        out::muted("(absolute repo list)")
+    );
+    Ok(())
+}
+
+fn parse_base(base: Option<&str>) -> Result<Option<ViewBase>> {
+    match base {
+        None => Ok(None),
+        Some("default") => Ok(Some(ViewBase::Default)),
+        Some("none") => Ok(Some(ViewBase::None)),
+        Some(other) => bail!("Unknown view base `{other}`. Use `default` or `none`."),
+    }
 }
 
 pub fn view_include(name: &str, repos: &[String], project: Option<&str>) -> Result<()> {
@@ -221,6 +306,12 @@ fn mutate_view_list(
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
     let view = views.views.entry(name.clone()).or_default();
+    if matches!(kind, ListKind::Exclude) && view.base == ViewBase::None {
+        bail!(
+            "View {} is absolute (base none); drop repos from it with `knit view unset` instead.",
+            out::repo(&name)
+        );
+    }
     // A repo belongs to exactly one list; moving it flips the membership.
     for id in &ids {
         view.include.retain(|existing| existing != id);
@@ -239,12 +330,14 @@ fn mutate_view_list(
     Ok(())
 }
 
-/// Diff the active bundle's repos against the project's default set to build a
-/// view that reproduces the current bundle shape.
+/// Build a view that reproduces the current bundle shape: as deltas against
+/// the project's default set, or — for `base: none` — as the absolute list of
+/// the bundle's project repos.
 fn derive_from_bundle(
     project_id: &str,
     project_artifact: &crate::model::KnitProject,
-) -> Result<(Vec<String>, Vec<String>)> {
+    base: ViewBase,
+) -> Result<ProjectView> {
     let active = load_active_bundle()?;
     if active.bundle.project_id.as_deref() != Some(project_id) {
         bail!(
@@ -260,6 +353,13 @@ fn derive_from_bundle(
         .map(|repo| repo.id.clone())
         .collect();
 
+    if base == ViewBase::None {
+        return Ok(ProjectView {
+            base,
+            include: bundle_ids,
+            exclude: Vec::new(),
+        });
+    }
     let mut include = Vec::new();
     let mut exclude = Vec::new();
     for repo in &project_artifact.repos {
@@ -270,7 +370,11 @@ fn derive_from_bundle(
             exclude.push(repo.id.clone());
         }
     }
-    Ok((include, exclude))
+    Ok(ProjectView {
+        base,
+        include,
+        exclude,
+    })
 }
 
 /// Slugify, validate against the project, and de-duplicate a list of repo ids.
@@ -293,6 +397,13 @@ fn normalize_ids(project: &crate::model::KnitProject, repos: &[String]) -> Resul
 }
 
 fn summary(view: &ProjectView) -> String {
+    if view.base == ViewBase::None {
+        return if view.include.is_empty() {
+            "(empty absolute view)".to_string()
+        } else {
+            format!("={}", view.include.join(","))
+        };
+    }
     let mut parts = Vec::new();
     if !view.include.is_empty() {
         parts.push(format!("+{}", view.include.join(",")));

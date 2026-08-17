@@ -68,7 +68,8 @@ knit remote token <name> [token] [--clear] [--global]
 knit git-credential --remote <name> get|store|erase
 knit view list [--project <name>]
 knit view show [name] [--project <name>] [--repos]
-knit view save <name> [--include <repo>]... [--exclude <repo>]... [--from-bundle] [--project <name>]
+knit view save <name> [--base default|none] [--from <view>] [--include <repo>]... [--exclude <repo>]... [--from-bundle] [--project <name>]
+knit view freeze <name> [--project <name>]
 knit view include <name> <repo>... [--project <name>]
 knit view exclude <name> <repo>... [--project <name>]
 knit view unset <name> <repo>... [--project <name>]
@@ -286,6 +287,17 @@ knit view default backend            # bare `knit bundle` now uses this shape
 knit view list                       # `*` marks the default
 knit view show frontend --repos      # print the repos this view resolves to
 ```
+
+A view's `base` chooses its seed set. The default, `base: default`, seeds from the project's `includeByDefault` repos, so the view tracks later changes to the default set — right for team shapes layered on a small, stable default set. `--base none` seeds empty: the include list **is** the complete shape, and the view never absorbs default-set changes — right for pinned selections in large projects where most repos are observed. `--from <view>` seeds a new view from an existing one before the flags apply, and `knit view freeze <name>` converts a delta view in place into the absolute repo list it currently resolves to:
+
+```sh
+knit view save platform --include api,worker,queue        # delta: default set + three repos
+knit view save legacy --base none --include api,worker    # absolute: exactly these repos
+knit view save platform-plus --from platform --include docs   # seeded copy, then deltas
+knit view freeze legacy                                   # pin a delta view as absolute
+```
+
+`--base none` rejects `--exclude` (there is no seed set to remove from), and `knit view exclude` refuses absolute views — use `knit view unset` to drop repos from them.
 
 `knit bundle "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle "x" --view backend --include docs` and `knit bundle "y" --all-repos --exclude sej` both work.
 
