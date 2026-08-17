@@ -11,8 +11,8 @@ use super::{
 };
 use crate::advice;
 use crate::git::{
-    branch_exists, current_branch, git_output, is_ancestor, is_git_worktree, ref_exists,
-    resolve_base_ref, rev_list, rev_parse,
+    branch_exists, commit_details, current_branch, git_output, is_ancestor, is_git_worktree,
+    ref_exists, resolve_base_ref, rev_list, rev_parse,
 };
 use crate::ids::{node_id, slugify};
 use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry, SCHEMA_VERSION};
@@ -626,6 +626,7 @@ fn finalize_target_bundle(
             movement: Movement::Advanced,
             before_sha: Some(step.before_sha.clone()),
             after_sha: after_sha.clone(),
+            commit_details: commit_details(&checkout, &commits),
             commits,
             dropped_commits: Vec::new(),
         });

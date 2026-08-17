@@ -1,8 +1,8 @@
 use crate::checkout::{checkout_dir, ensure_expected_branch, ensure_mutable_checkouts};
-use crate::git::{commit_author, git_output, git_output_optional, rev_parse};
+use crate::git::{commit_author, commit_details, git_output, git_output_optional, rev_parse};
 use crate::ids::{commit_group_id, short_sha};
 use crate::model::{
-    BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange, RepoEntry,
+    BundleNode, CommitAuthor, CommitDetail, CommitGroup, CommitRef, Movement, RepoChange, RepoEntry,
 };
 use crate::output as out;
 use crate::status::has_staged_changes;
@@ -12,6 +12,7 @@ use crate::store::{
 use crate::time::now_iso;
 use crate::tracking::{sync_note, sync_observed_changes};
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
@@ -93,6 +94,10 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
                     after_sha: outcome.sha.clone(),
                     commits: vec![outcome.sha.clone()],
                     dropped_commits: Vec::new(),
+                    commit_details: outcome
+                        .detail
+                        .map(|detail| BTreeMap::from([(outcome.sha.clone(), detail)]))
+                        .unwrap_or_default(),
                 });
                 active.bundle.repos[outcome.repo_index].head_sha = Some(outcome.sha);
             }
@@ -138,6 +143,7 @@ struct CommitOutcome {
     before_sha: String,
     sha: String,
     author: CommitAuthor,
+    detail: Option<CommitDetail>,
 }
 
 fn run_commit(target: &CommitTarget, commit_message: &str) -> Result<CommitOutcome> {
@@ -154,11 +160,13 @@ fn run_commit(target: &CommitTarget, commit_message: &str) -> Result<CommitOutco
         .with_context(|| format!("{}: failed to read commit sha", target.repo_id))?;
     let author = commit_author(&target.worktree_abs, &sha)
         .with_context(|| format!("{}: failed to read commit author", target.repo_id))?;
+    let detail = commit_details(&target.worktree_abs, std::slice::from_ref(&sha)).remove(&sha);
     Ok(CommitOutcome {
         repo_index: target.repo_index,
         before_sha: target.before_sha.clone(),
         sha,
         author,
+        detail,
     })
 }
 

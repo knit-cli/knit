@@ -145,8 +145,8 @@ knit migrate [--check]
 knit sync                                      # record git commits made outside Knit (local reconcile)
 knit sync push [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
 knit sync pull [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
-knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--project <project>]
-knit history refresh [--project <project>]
+knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--kind <kind>]... [--project <project>]
+knit history refresh [--rebuild] [--project <project>]
 knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
 knit commit -m "<message>" [--stage]
 knit log [-<count>]
@@ -738,7 +738,9 @@ knit merge x-y-compat --into feature-y
 
 Knit also keeps a project-wide history ledger under `.knit/history/<project>.history.jsonl` and syncs it with sync remotes when history APIs are available. This ledger is metadata only: it records bundle ids, repo ids, branch names, Knit node ids, timestamps, and Git commit SHAs. Git remains the source of truth for file contents, diffs, and file-level history.
 
-Use `knit history list` to inspect the local project history and `knit history refresh` to rebuild it from local bundle artifacts. Exchange history events with a sync remote through the shared sync verbs: `knit sync push --history` and `knit sync pull --history`.
+Use `knit history list` to inspect the local project history and `knit history refresh` to record new events from local bundle artifacts. Events cover both commits (`commit.recorded`, `commit.observed`, `commit.dropped`, ...) and bundle lifecycle (`bundle.created`, `bundle.landed`, `bundle.archived`, `repo.added`, `repo.removed`); narrow a listing with `--kind` (repeatable), `--repo`, and `--bundle`. Each commit event is named by that commit's subject line and timed by its author date, so a sync sweep that records days of work does not collapse into one timestamp. Exchange history events with a sync remote through the shared sync verbs: `knit sync push --history` and `knit sync pull --history`.
+
+`knit history refresh --rebuild` regenerates the whole ledger from the bundle artifacts on disk, replacing recorded events with their current form — this is how events recorded before their commit detail existed gain messages and real times. Events whose bundle artifact is gone are preserved, and the file is replaced atomically.
 
 Use `knit related` before editing a file or area with possible cross-repo coupling. The command asks Git which commits touched the path, joins those SHAs to Knit history, then expands matching events to their bundle, commit group, and companion repo commits:
 
