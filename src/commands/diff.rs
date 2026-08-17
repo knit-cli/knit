@@ -1,5 +1,5 @@
 use crate::checkout::{checkout_dir, checkout_display_path};
-use crate::git::{current_branch, git_output, resolve_base_ref};
+use crate::git::{current_branch, display_color_args, git_output, resolve_base_ref};
 use crate::ids::short_sha;
 use crate::model::RepoEntry;
 use crate::output as out;
@@ -120,18 +120,13 @@ fn print_no_diff_context(repo: &RepoEntry, checkout: &Path) -> Result<()> {
 }
 
 fn run_diff(checkout: &Path, base: &str, stat: bool) -> Result<String> {
+    let mut args = vec![OsString::from("diff")];
+    args.extend(display_color_args());
     if stat {
-        git_output(
-            checkout,
-            [
-                OsString::from("diff"),
-                OsString::from("--stat"),
-                OsString::from(base),
-            ],
-        )
-    } else {
-        git_output(checkout, [OsString::from("diff"), OsString::from(base)])
+        args.push(OsString::from("--stat"));
     }
+    args.push(OsString::from(base));
+    git_output(checkout, args)
 }
 
 fn diff_base(repo: &RepoEntry, checkout: &Path) -> Result<String> {

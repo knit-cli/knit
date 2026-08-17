@@ -1,5 +1,5 @@
 use crate::checkout::checkout_dir;
-use crate::git::git_output;
+use crate::git::{display_color_args, git_output};
 use crate::ids::short_sha;
 use crate::model::{BundleNode, CommitGroup, CommitRef, Movement, RepoChange};
 use crate::output as out;
@@ -457,15 +457,14 @@ fn show_repo_commit(active: &ActiveBundle, repo_id: &str, sha: &str) -> Result<(
         return Ok(());
     };
 
-    match git_output(
-        &repo_dir,
-        [
-            OsString::from("show"),
-            OsString::from("--stat"),
-            OsString::from("--oneline"),
-            OsString::from(sha),
-        ],
-    ) {
+    let mut show_args = vec![OsString::from("show")];
+    show_args.extend(display_color_args());
+    show_args.extend([
+        OsString::from("--stat"),
+        OsString::from("--oneline"),
+        OsString::from(sha),
+    ]);
+    match git_output(&repo_dir, show_args) {
         Ok(output) if output.trim().is_empty() => {
             println!("{}", out::muted("  git show returned no output"));
         }
