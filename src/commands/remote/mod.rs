@@ -26,10 +26,10 @@ pub use history::pull_history_from_remote;
 pub use projects::list_remote_projects;
 pub use pull::{
     archive_deleted_bundle_on_remotes, archive_remote_bundle_by_id, delete_bundle_from_remote,
-    delete_remote_bundle_by_id, fetch_bundles_from_remote, list_remote_bundles,
-    prepare_remote_pull, pull_bundle_by_slug, pull_bundle_remote_state, pull_remote_state,
-    pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome, RemoteBundleRecord,
-    RemotePullContext,
+    delete_remote_bundle_by_id, fetch_bundles_from_remote, fetch_remote_bundle_payload,
+    list_remote_bundles, prepare_remote_pull, pull_bundle_by_slug, pull_bundle_remote_state,
+    pull_remote_state, pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome,
+    RemoteBundleRecord, RemotePullContext,
 };
 pub use push::sync_remote_helpers_command;
 pub use push::{
@@ -216,11 +216,26 @@ struct RemoteExportBundle {
     current_artifact: Option<RemoteExportArtifact>,
 }
 
+/// The artifact metadata a project export carries for a bundle. The default
+/// export is slim: it identifies the current artifact (hash and friends) but
+/// carries no `payload`, so the client fetches the payloads it actually needs
+/// one bundle at a time. An older server that ignores the slim request still
+/// inlines `payload`, and that copy is used as-is.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteExportArtifact {
     artifact_hash: String,
-    payload: Value,
+    #[serde(default)]
+    payload: Option<Value>,
+}
+
+/// One bundle fetched on its own (`GET /bundles/:id?include=artifact`) — the
+/// incremental door that replaces reading every payload out of one export.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteBundleDetail {
+    #[serde(default)]
+    current_artifact: Option<RemoteExportArtifact>,
 }
 
 #[cfg(test)]

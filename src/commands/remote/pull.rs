@@ -3,18 +3,18 @@
 
 use super::client::{
     configured_sync_remote_names, decode_bundle_payload, effective_workspace_config,
-    ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts, fetch_project_export,
-    load_project_if_present, localize_bundle, prepare_feature_branches, request_json,
-    resolve_project_id, resolve_remote, resolve_sync_remote_name, resolve_token,
-    with_first_available_remote,
+    ensure_remote_bundle_fast_forward, fast_forward_feature_checkouts, fetch_bundle_artifact,
+    fetch_project_export, load_project_if_present, localize_bundle, prepare_feature_branches,
+    request_json, resolve_export_bundle_payload, resolve_project_id, resolve_remote,
+    resolve_sync_remote_name, resolve_token, with_first_available_remote,
 };
 use super::clone::{
     clone_export_repositories, export_repo_local_id, materialize_imported_bundle,
     project_repo_entry_from_export,
 };
 use super::{
-    print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportRepository,
-    RemoteProjectExport, RemoteViews,
+    print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportBundle,
+    RemoteExportRepository, RemoteProjectExport, RemoteViews,
 };
 use crate::commands::worktree::materialize_repos;
 use crate::ids::slugify;
@@ -33,6 +33,7 @@ use serde::Serialize;
 use std::collections::BTreeSet;
 use std::fs;
 use std::path::Path;
+use std::sync::Mutex;
 
 /// Pull the current user's saved views for a project from the sync remote,
 /// replacing the local views artifact.
@@ -76,9 +77,30 @@ pub(super) fn pull_views_into(
 
 /// The local project plus the remote project export, fetched once so many
 /// bundles can be localized and pulled without repeating the network round-trip.
+/// The export is slim (no artifact payloads), so the context also carries the
+/// remote it came from: payloads are fetched one bundle at a time, on demand.
 pub struct RemotePullContext {
     project: KnitProject,
     export: RemoteProjectExport,
+    remote_name: String,
+    remote: KnitRemote,
+    token: Option<String>,
+    /// Serializes per-bundle artifact fetches. `knit pull` walks the open
+    /// bundles on parallel threads, and bounded server memory — one payload
+    /// built at a time — is the entire point of the incremental fetch.
+    fetch_gate: Mutex<()>,
+}
+
+impl RemotePullContext {
+    /// The remote bundle's payload plus its artifact hash: the inlined copy
+    /// when the server sent one, otherwise a single sequential fetch.
+    fn bundle_payload(&self, entry: &RemoteExportBundle) -> Result<(ChangeGroup, String)> {
+        let _gate = self
+            .fetch_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        resolve_export_bundle_payload(&self.remote, self.token.as_deref(), entry)
+    }
 }
 
 /// Outcome of pulling a single bundle's recorded state from the remote.
@@ -95,8 +117,10 @@ pub enum RemoteBundleOutcome {
     Skipped(String),
 }
 
-/// A bundle as it exists on the configured sync remote, with its current
-/// artifact payload decoded into a `ChangeGroup` when one is present.
+/// A bundle as it exists on the configured sync remote. `payload` is filled
+/// only when the export inlined one (an older server); with the slim export it
+/// stays `None` and callers that need the payload fetch it per bundle with
+/// [`fetch_remote_bundle_payload`], for the records they actually care about.
 pub struct RemoteBundleRecord {
     pub remote_id: String,
     pub slug: String,
@@ -136,17 +160,27 @@ pub fn prepare_remote_pull(
         .with_context(|| format!("No local Knit project named `{project_id}`."))?;
     for remote_name in candidates {
         let attempt = resolve_remote(&config, &remote_name)
-            .and_then(|remote| Ok((remote, resolve_token(&remote_name, remote)?)))
-            .and_then(|(remote, token)| fetch_project_export(remote, Some(&token), &project_id));
+            .and_then(|remote| Ok((remote.clone(), resolve_token(&remote_name, remote)?)))
+            .and_then(|(remote, token)| {
+                let export = fetch_project_export(&remote, Some(&token), &project_id)?;
+                Ok((remote, token, export))
+            });
         match attempt {
-            Ok(export) => {
+            Ok((remote, token, export)) => {
                 crate::history::append_history_events(
                     &root,
                     &project_id,
                     &export.decoded_history_events(&project_id),
                 )?;
                 reconcile_project_repositories(&root, &mut project, &export)?;
-                return Ok(Some(RemotePullContext { project, export }));
+                return Ok(Some(RemotePullContext {
+                    project,
+                    export,
+                    remote_name,
+                    remote,
+                    token: Some(token),
+                    fetch_gate: Mutex::new(()),
+                }));
             }
             Err(error) => {
                 if explicit {
@@ -313,19 +347,31 @@ pub fn pull_bundle_remote_state(
             "no remote artifact".to_string(),
         ));
     };
-    let remote_payload = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)?;
+    // The export only carries artifact metadata. When its hash is the one this
+    // artifact was last reconciled with, the remote holds nothing new and the
+    // payload is never downloaded — only the checkouts are refreshed.
+    if artifact.payload.is_none()
+        && local.synced_artifact_hash(&context.remote_name) == Some(artifact.artifact_hash.as_str())
+    {
+        return refresh_bundle_checkouts(root, path, local, materialize, "up to date");
+    }
+    let (remote_payload, artifact_hash) = context.bundle_payload(remote_bundle)?;
     match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
         LedgerRelation::Equal => {
-            return refresh_bundle_checkouts(root, path, local, materialize, "up to date")
+            let local =
+                record_synced_artifact(&path, local, context, remote_bundle, &artifact_hash)?;
+            return refresh_bundle_checkouts(root, path, local, materialize, "up to date");
         }
         LedgerRelation::LocalAhead => {
+            let local =
+                record_synced_artifact(&path, local, context, remote_bundle, &artifact_hash)?;
             return refresh_bundle_checkouts(
                 root,
                 path,
                 local,
                 materialize,
                 "local is ahead of remote",
-            )
+            );
         }
         LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
@@ -335,7 +381,13 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::Diverged => {
             let localized = localize_bundle(remote_payload, &context.project)?;
             prepare_feature_branches(&localized)?;
-            let merged = merge_ledgers(&local, &localized, now_iso());
+            let mut merged = merge_ledgers(&local, &localized, now_iso());
+            merged.record_sync_target_with_artifact(
+                &context.remote_name,
+                &remote_bundle.id,
+                &context.remote.url,
+                Some(&artifact_hash),
+            );
             let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
             materialize_repos(&mut active, None)?;
             // The artifact merge stands on its own: checkouts that cannot
@@ -355,18 +407,47 @@ pub fn pull_bundle_remote_state(
                 );
             }
             save_active_bundle(&active)?;
-            return Ok(RemoteBundleOutcome::Merged(artifact.artifact_hash.clone()));
+            return Ok(RemoteBundleOutcome::Merged(artifact_hash));
         }
         LedgerRelation::RemoteAhead => {}
     }
-    let localized = localize_bundle(remote_payload, &context.project)?;
+    let mut localized = localize_bundle(remote_payload, &context.project)?;
+    localized.record_sync_target_with_artifact(
+        &context.remote_name,
+        &remote_bundle.id,
+        &context.remote.url,
+        Some(&artifact_hash),
+    );
     prepare_feature_branches(&localized)?;
     ensure_remote_bundle_fast_forward(&local, &localized)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, localized);
     materialize_repos(&mut active, None)?;
     fast_forward_feature_checkouts(&mut active)?;
     save_active_bundle(&active)?;
-    Ok(RemoteBundleOutcome::Pulled(artifact.artifact_hash.clone()))
+    Ok(RemoteBundleOutcome::Pulled(artifact_hash))
+}
+
+/// Record on the local artifact which remote artifact it is in sync with, so
+/// the next pull can decide from the slim export alone that there is nothing
+/// to download. Persists only when the recording changed something; the
+/// bundle's own `updatedAt` is deliberately left alone, since nothing about
+/// the recorded work changed.
+fn record_synced_artifact(
+    path: &Path,
+    mut bundle: ChangeGroup,
+    context: &RemotePullContext,
+    remote_bundle: &RemoteExportBundle,
+    artifact_hash: &str,
+) -> Result<ChangeGroup> {
+    if bundle.record_sync_target_with_artifact(
+        &context.remote_name,
+        &remote_bundle.id,
+        &context.remote.url,
+        Some(artifact_hash),
+    ) {
+        write_json(path, &bundle)?;
+    }
+    Ok(bundle)
 }
 
 /// Refresh a bundle whose artifact needs no update. Fetches feature branches,
@@ -543,8 +624,9 @@ pub fn remote_bundle_lifecycle(
     }
 }
 
-/// List the bundle records the sync remote holds for `project_id`, decoding each
-/// bundle's current artifact payload when it is a supported Knit bundle.
+/// List the bundle records the sync remote holds for `project_id`. Payloads are
+/// carried over only when the server inlined them; the slim export leaves them
+/// out, and callers fetch the few they need one at a time.
 pub fn list_remote_bundles(
     config: &KnitConfig,
     project_id: &str,
@@ -556,10 +638,12 @@ pub fn list_remote_bundles(
         .bundles
         .into_iter()
         .map(|bundle| {
-            let payload = bundle
-                .current_artifact
-                .as_ref()
-                .and_then(|artifact| decode_bundle_payload(&artifact.payload, &bundle.slug).ok());
+            let payload = bundle.current_artifact.as_ref().and_then(|artifact| {
+                artifact
+                    .payload
+                    .as_ref()
+                    .and_then(|payload| decode_bundle_payload(payload, &bundle.slug).ok())
+            });
             RemoteBundleRecord {
                 remote_id: bundle.id,
                 slug: bundle.slug,
@@ -568,6 +652,19 @@ pub fn list_remote_bundles(
             }
         })
         .collect())
+}
+
+/// Fetch one listed remote bundle's artifact payload by its remote id. Callers
+/// walk their candidates sequentially: the server builds one payload at a time.
+pub fn fetch_remote_bundle_payload(
+    config: &KnitConfig,
+    remote_id: &str,
+    slug: &str,
+) -> Result<ChangeGroup> {
+    with_first_available_remote(config, None, |_, remote, token| {
+        fetch_bundle_artifact(remote, Some(token), remote_id, slug)
+    })
+    .map(|(payload, _)| payload)
 }
 
 /// Delete a single bundle record from the sync remote by its remote id, returning the
@@ -719,10 +816,12 @@ pub fn fetch_bundles_from_remote(
         .clone()
         .context("Bundle fetch requires active_project. Set with `knit init <name>`.")?;
 
-    let (remote_name, export) =
+    let (remote_name, remote, token, export) =
         with_first_available_remote(config, remote_name, |name, remote, token| {
             Ok((
                 name.to_string(),
+                remote.clone(),
+                token.to_string(),
                 fetch_project_export(remote, Some(token), &project_id)?,
             ))
         })?;
@@ -754,49 +853,100 @@ pub fn fetch_bundles_from_remote(
             continue;
         };
 
-        let mut bundle = decode_bundle_payload(&artifact.payload, &remote_bundle.slug)
-            .with_context(|| format!("failed to decode bundle `{}`", remote_bundle.slug))?;
-        let branch_mapping = bundle_branch_mapping(&bundle);
-
-        let bundle_path = bundles_dir.join(format!("{}.bundle.json", bundle.id));
+        // A remote bundle's local artifact is the one its slug names (a
+        // bundle's slug is its local id). Everything that can be decided from
+        // the slim export alone is decided here, before any payload is
+        // downloaded: the sweep must not pull an artifact it has no use for.
+        let bundle_path = bundles_dir.join(format!("{}.bundle.json", remote_bundle.slug));
+        let local: Option<ChangeGroup> =
+            if bundle_path.exists() {
+                Some(read_json(&bundle_path).with_context(|| {
+                    format!("failed to read local bundle `{}`", remote_bundle.slug)
+                })?)
+            } else {
+                None
+            };
         // Discovery is for bundles you might act on: a remote bundle with no
         // local artifact is only localized while it is open. Resurrecting the
         // project's full landed/archived history would flood the workspace
         // and undo `knit bundle prune` on every sync. Existing local
         // artifacts still fast-forward whatever their state, so work landed
         // or archived on another machine is reflected here.
+        match local.as_ref() {
+            None => {
+                if remote_bundle.lifecycle_state != "open" {
+                    continue;
+                }
+                // The remote lifecycle can still read "open" for a bundle that
+                // was deleted here (the delete-time remote archive is
+                // best-effort and can be skipped offline), so the local delete
+                // quarantine is the authority: a bundle deleted locally stays
+                // deleted.
+                if root
+                    .join(".knit/deleted/bundles")
+                    .join(format!("{}.bundle.json", remote_bundle.slug))
+                    .exists()
+                {
+                    quarantined_count += 1;
+                    continue;
+                }
+            }
+            Some(local) => {
+                // The recorded hash still matches the remote's: nothing new to
+                // download for this bundle.
+                if artifact.payload.is_none()
+                    && local.synced_artifact_hash(&remote_name)
+                        == Some(artifact.artifact_hash.as_str())
+                {
+                    println!(
+                        "  {} {} {} [{}]",
+                        out::node(&remote_bundle.slug),
+                        out::muted(&remote_bundle.lifecycle_state),
+                        bundle_branch_mapping(local),
+                        out::muted("up to date")
+                    );
+                    continue;
+                }
+            }
+        }
+
+        let (mut bundle, artifact_hash) =
+            resolve_export_bundle_payload(&remote, Some(&token), &remote_bundle)
+                .with_context(|| format!("failed to fetch bundle `{}`", remote_bundle.slug))?;
+        let branch_mapping = bundle_branch_mapping(&bundle);
+
         let status;
-        if !bundle_path.exists() {
-            if remote_bundle.lifecycle_state != "open" {
-                continue;
-            }
-            // The remote lifecycle can still read "open" for a bundle that was
-            // deleted here (the delete-time remote archive is best-effort and
-            // can be skipped offline), so the local delete quarantine is the
-            // authority: a bundle deleted locally stays deleted.
-            if root
-                .join(".knit/deleted/bundles")
-                .join(format!("{}.bundle.json", bundle.id))
-                .exists()
-            {
-                quarantined_count += 1;
-                continue;
-            }
-            bundle = localize_bundle(bundle, &local_project)
-                .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
-            crate::store::write_json(&bundle_path, &bundle)
-                .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
-            fetched_count += 1;
-            status = out::movement("new").to_string();
-        } else {
+        if let Some(mut local) = local {
             // An existing local artifact is only refreshed when the remote
             // ledger is strictly ahead (a fast-forward). Equal/local-ahead
             // artifacts are left untouched; diverged ledgers keep local.
-            let local: ChangeGroup = read_json(&bundle_path)
-                .with_context(|| format!("failed to read local bundle `{}`", bundle.id))?;
+            //
+            // Record which remote artifact the local one is in sync with, so
+            // the next sweep can skip this download entirely. A diverged
+            // ledger is deliberately not recorded: it must keep reporting
+            // divergence until the user combines the two.
+            let record_synced = |local: &mut ChangeGroup| -> Result<()> {
+                if local.record_sync_target_with_artifact(
+                    &remote_name,
+                    &remote_bundle.id,
+                    &remote.url,
+                    Some(&artifact_hash),
+                ) {
+                    crate::store::write_json(&bundle_path, local).with_context(|| {
+                        format!("failed to write bundle `{}`", remote_bundle.slug)
+                    })?;
+                }
+                Ok(())
+            };
             match ledger_relation(&local.node_id_sequence(), &bundle.node_id_sequence()) {
-                LedgerRelation::Equal => status = out::muted("up to date").to_string(),
-                LedgerRelation::LocalAhead => status = out::muted("local ahead").to_string(),
+                LedgerRelation::Equal => {
+                    record_synced(&mut local)?;
+                    status = out::muted("up to date").to_string();
+                }
+                LedgerRelation::LocalAhead => {
+                    record_synced(&mut local)?;
+                    status = out::muted("local ahead").to_string();
+                }
                 LedgerRelation::Diverged => {
                     status = out::warn(
                         "diverged; kept local (run `knit pull --merge` to combine the ledgers)",
@@ -819,6 +969,12 @@ pub fn fetch_bundles_from_remote(
                                 .and_then(|local_repo| local_repo.worktree_path.clone());
                         }
                     }
+                    bundle.record_sync_target_with_artifact(
+                        &remote_name,
+                        &remote_bundle.id,
+                        &remote.url,
+                        Some(&artifact_hash),
+                    );
                     crate::store::write_json(&bundle_path, &bundle).with_context(|| {
                         format!("failed to write bundle `{}`", remote_bundle.slug)
                     })?;
@@ -826,6 +982,19 @@ pub fn fetch_bundles_from_remote(
                     status = out::movement("updated").to_string();
                 }
             }
+        } else {
+            bundle = localize_bundle(bundle, &local_project)
+                .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
+            bundle.record_sync_target_with_artifact(
+                &remote_name,
+                &remote_bundle.id,
+                &remote.url,
+                Some(&artifact_hash),
+            );
+            crate::store::write_json(&bundle_path, &bundle)
+                .with_context(|| format!("failed to write bundle `{}`", remote_bundle.slug))?;
+            fetched_count += 1;
+            status = out::movement("new").to_string();
         }
         println!(
             "  {} {} {} [{status}]",
@@ -918,10 +1087,12 @@ fn pull_bundle_by_slug_classified(
         .clone()
         .context("Bundle pull requires an active project. Run `knit init <name>` or clone one.")
         .map_err(other)?;
-    let (remote_name, export) =
+    let (remote_name, remote, token, export) =
         with_first_available_remote(&config, None, |name, remote, token| {
             Ok((
                 name.to_string(),
+                remote.clone(),
+                token.to_string(),
                 fetch_project_export(remote, Some(token), &project_id)?,
             ))
         })
@@ -947,14 +1118,17 @@ fn pull_bundle_by_slug_classified(
             anyhow!("Remote has no bundle named `{slug}`."),
         ));
     };
-    let Some(artifact) = remote_bundle.current_artifact.as_ref() else {
+    if remote_bundle.current_artifact.is_none() {
         return Err((
             RemoteErrorKind::NotFound,
             anyhow!("Remote bundle `{slug}` has no artifact to pull."),
         ));
-    };
-    let mut bundle =
-        decode_bundle_payload(&artifact.payload, &remote_bundle.slug).map_err(other)?;
+    }
+    // One named bundle, one artifact fetch (or the payload an older server
+    // already inlined in the export).
+    let (mut bundle, artifact_hash) =
+        resolve_export_bundle_payload(&remote, Some(&token), remote_bundle)
+            .map_err(|error| (RemoteErrorKind::Http, error))?;
     let bundle_id = bundle.id.clone();
     if root
         .join(".knit/deleted/bundles")
@@ -972,6 +1146,12 @@ fn pull_bundle_by_slug_classified(
         let _lock = acquire_named_lock(&root, &bundle_id).map_err(other)?;
         if !path.exists() {
             bundle = localize_bundle(bundle, &local_project).map_err(other)?;
+            bundle.record_sync_target_with_artifact(
+                &remote_name,
+                &remote_bundle.id,
+                &remote.url,
+                Some(&artifact_hash),
+            );
             write_json(&path, &bundle).map_err(other)?;
             crate::human!(
                 "{} {} {}",
@@ -1012,6 +1192,12 @@ fn pull_bundle_by_slug_classified(
                                 .and_then(|local_repo| local_repo.worktree_path.clone());
                         }
                     }
+                    localized.record_sync_target_with_artifact(
+                        &remote_name,
+                        &remote_bundle.id,
+                        &remote.url,
+                        Some(&artifact_hash),
+                    );
                     write_json(&path, &localized).map_err(other)?;
                     crate::human!(
                         "{} {} {}",

@@ -541,3 +541,131 @@ fn clone_survives_history_events_missing_project_id() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A clone against a server serving the slim export fetches each bundle's
+/// artifact on its own, one after another, instead of receiving every payload
+/// inline in one response.
+#[test]
+fn clone_fetches_each_bundle_artifact_individually() {
+    let root = unique_temp_dir();
+    let source = root.join("backend-source");
+    init_repo(&source, "backend");
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {
+                    "localId": "backend",
+                    "name": "backend",
+                    "defaultBranch": null,
+                    "remoteUrl": source.to_string_lossy(),
+                    "metadata": {},
+                },
+                {
+                    "localId": "frontend",
+                    "name": "frontend",
+                    "defaultBranch": null,
+                    "remoteUrl": root.join("no-such-repo").to_string_lossy(),
+                    "metadata": {},
+                },
+            ],
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "feature-a",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "hash-a", "sizeBytes": 42},
+                },
+                {
+                    "id": "rb-2",
+                    "slug": "feature-c",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "hash-c", "sizeBytes": 42},
+                },
+            ],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "feature-a",
+                "currentArtifact": {
+                    "artifactHash": "hash-a",
+                    "payload": bundle_payload("feature-a", &["backend"]),
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-2.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-2",
+                "slug": "feature-c",
+                "currentArtifact": {
+                    "artifactHash": "hash-c",
+                    "payload": bundle_payload("feature-c", &["backend", "frontend"]),
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+
+    assert!(success, "clone against a slim export failed: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(
+        document["bundles"]["restored"],
+        serde_json::json!(["feature-a"])
+    );
+    assert_eq!(
+        document["bundles"]["dropped"],
+        serde_json::json!([{"id": "feature-c", "missingRepos": ["frontend"]}])
+    );
+
+    // One request per bundle, in export order.
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string(), "rb-2".to_string()]
+    );
+
+    let restored: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(target.join(".knit/bundles/feature-a.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        restored["syncTargets"][0]["artifactHash"],
+        serde_json::json!("hash-a")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
