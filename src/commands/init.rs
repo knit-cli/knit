@@ -360,9 +360,10 @@ pub(crate) fn resolve_active_view(
 }
 
 /// Resolve a project's repo set for a bundle, applying (in order): the explicit
-/// `--repo`/`--all-repos` set or the `includeByDefault` set plus the active
-/// view's include/exclude deltas, then ad-hoc `include`/`exclude` overrides.
-/// Results preserve project order and are de-duplicated.
+/// `--repo`/`--all-repos` set or the view's seed set (`includeByDefault`, or
+/// empty for a `base: none` view) plus the view's include/exclude deltas, then
+/// ad-hoc `include`/`exclude` overrides. Results preserve project order and are
+/// de-duplicated.
 pub(crate) fn resolve_view_repos(
     project: &KnitProject,
     repo_ids: &[String],
@@ -386,9 +387,13 @@ pub(crate) fn resolve_view_repos(
             selected.insert(repo.id.clone());
         }
     } else {
-        for repo in &project.repos {
-            if repo.include_by_default {
-                selected.insert(repo.id.clone());
+        // An absolute view (`base: none`) seeds empty; its include list is the
+        // complete shape and never absorbs default-set changes.
+        if view.map_or(true, |view| view.base.is_default()) {
+            for repo in &project.repos {
+                if repo.include_by_default {
+                    selected.insert(repo.id.clone());
+                }
             }
         }
         if let Some(view) = view {

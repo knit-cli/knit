@@ -41,14 +41,36 @@ impl KnitProjectViews {
     }
 }
 
-/// A single named view: deltas applied over the project default repo set.
+/// How a view seeds its repo set before `include`/`exclude` are applied.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ViewBase {
+    /// Seed from the project's `includeByDefault` set (delta view).
+    #[default]
+    Default,
+    /// Seed empty: `include` is the complete repo list (absolute view).
+    None,
+}
+
+impl ViewBase {
+    pub fn is_default(&self) -> bool {
+        matches!(self, ViewBase::Default)
+    }
+}
+
+/// A single named view: deltas applied over the project default repo set, or —
+/// with `base: none` — an absolute repo list that never absorbs default-set
+/// changes.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectView {
-    /// Repo ids to add to the default set.
+    /// Seeding mode. Skipped when `default` so existing files stay unchanged.
+    #[serde(default, skip_serializing_if = "ViewBase::is_default")]
+    pub base: ViewBase,
+    /// Repo ids to add to the seed set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub include: Vec<String>,
-    /// Repo ids to drop from the default set.
+    /// Repo ids to drop from the seed set.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclude: Vec<String>,
 }

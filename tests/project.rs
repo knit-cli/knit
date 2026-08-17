@@ -586,6 +586,173 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
 }
 
 #[test]
+fn absolute_views_ignore_the_default_set() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    // backend and frontend are defaults; docs is observed. An absolute view
+    // selects exactly its include list, defaults notwithstanding.
+    knit(
+        &workspace,
+        [
+            "view",
+            "save",
+            "pinned",
+            "--base",
+            "none",
+            "--include",
+            "backend,docs",
+        ],
+    );
+    let repos = knit(&workspace, ["view", "show", "pinned", "--repos"]);
+    assert_eq!(
+        repos.lines().collect::<Vec<_>>(),
+        vec!["backend", "docs"],
+        "{repos}"
+    );
+
+    knit(&workspace, ["bundle", "pinned feature", "--view", "pinned"]);
+    assert_eq!(
+        bundle_repo_ids(&workspace, "pinned-feature"),
+        vec!["backend", "docs"]
+    );
+
+    // Ad-hoc flags still compose on top of an absolute view.
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "pinned plus",
+            "--view",
+            "pinned",
+            "--include",
+            "frontend",
+            "--exclude",
+            "docs",
+        ],
+    );
+    assert_eq!(
+        bundle_repo_ids(&workspace, "pinned-plus"),
+        vec!["backend", "frontend"]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn absolute_view_rejects_exclude() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    let error = knit_fails(
+        &workspace,
+        [
+            "view",
+            "save",
+            "pinned",
+            "--base",
+            "none",
+            "--exclude",
+            "frontend",
+        ],
+    );
+    assert!(error.contains("--base none"), "{error}");
+
+    knit(
+        &workspace,
+        [
+            "view",
+            "save",
+            "pinned",
+            "--base",
+            "none",
+            "--include",
+            "backend",
+        ],
+    );
+    let error = knit_fails(&workspace, ["view", "exclude", "pinned", "frontend"]);
+    assert!(error.contains("absolute"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn view_save_from_seeds_an_existing_view() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(
+        &workspace,
+        ["view", "save", "backend", "--exclude", "frontend"],
+    );
+    // Seeded copy plus a delta: the include flag flips frontend back in.
+    knit(
+        &workspace,
+        [
+            "view",
+            "save",
+            "wider",
+            "--from",
+            "backend",
+            "--include",
+            "frontend,docs",
+        ],
+    );
+    let repos = knit(&workspace, ["view", "show", "wider", "--repos"]);
+    assert_eq!(
+        repos.lines().collect::<Vec<_>>(),
+        vec!["backend", "frontend", "docs"],
+        "{repos}"
+    );
+
+    let error = knit_fails(&workspace, ["view", "save", "x", "--from", "missing"]);
+    assert!(error.contains("no saved view"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn view_freeze_pins_the_resolved_repo_list() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    knit(
+        &workspace,
+        ["view", "save", "shape", "--exclude", "frontend"],
+    );
+    let before = knit(&workspace, ["view", "show", "shape", "--repos"]);
+    assert_eq!(
+        before.lines().collect::<Vec<_>>(),
+        vec!["backend"],
+        "{before}"
+    );
+
+    knit(&workspace, ["view", "freeze", "shape"]);
+
+    let raw = knit(&workspace, ["view", "show", "shape"]);
+    let view: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(view["base"].as_str(), Some("none"), "{raw}");
+    assert_eq!(view["include"], serde_json::json!(["backend"]), "{raw}");
+    assert!(view.get("exclude").is_none(), "{raw}");
+
+    let after = knit(&workspace, ["view", "show", "shape", "--repos"]);
+    assert_eq!(
+        after.lines().collect::<Vec<_>>(),
+        vec!["backend"],
+        "{after}"
+    );
+
+    // Freezing an absolute view is a no-op, not an error.
+    knit(&workspace, ["view", "freeze", "shape"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn view_save_accepts_comma_separated_exclude_list() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
