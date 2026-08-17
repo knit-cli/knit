@@ -125,7 +125,7 @@ fn paint(text: impl Display, style: Style) -> String {
     format!("{}{}{}", code(style), text, "\x1b[0m")
 }
 
-fn should_color() -> bool {
+pub fn should_color() -> bool {
     if env::var_os("NO_COLOR").is_some() {
         return false;
     }

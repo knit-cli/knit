@@ -306,6 +306,19 @@ pub fn merge_base(cwd: &Path, left: &str, right: &str) -> Result<Option<String>>
     git_output_optional(cwd, ["merge-base", left, right])
 }
 
+/// `--color` flag for git display output (diff, show) that knit captures and
+/// reprints. The capture pipe hides the terminal from git, so git's auto mode
+/// would strip color even when knit itself is coloring; forcing here keeps
+/// git's color decision aligned with knit's. The flag route is deliberate:
+/// since git 2.17, `color.ui=always` in config behaves like `auto`.
+pub fn display_color_args() -> Vec<OsString> {
+    if crate::output::should_color() {
+        vec![OsString::from("--color=always")]
+    } else {
+        Vec::new()
+    }
+}
+
 pub fn git_output<I, S>(cwd: &Path, args: I) -> Result<String>
 where
     I: IntoIterator<Item = S>,
