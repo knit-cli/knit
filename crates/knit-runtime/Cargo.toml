@@ -4,7 +4,7 @@
 # version-control shaped; the CLI compiles it in and adapts bundle state into
 # the crate's RuntimeContext contract.
 name = "knit-runtime"
-version = "0.1.0-alpha.5"
+version = "0.1.0-alpha.6"
 edition = "2021"
 license = "Apache-2.0"
 description = "Per-bundle docker-compose runtime for knit cross-repo bundles."
