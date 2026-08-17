@@ -29,6 +29,13 @@ pub struct BundleSyncTarget {
     pub remote: String,
     pub bundle_id: String,
     pub api_url: String,
+    /// Hash of the remote artifact this local artifact was last reconciled
+    /// with (pushed to, or pulled from). It is the remote's own hash, so a
+    /// later pull can read the slim project export's artifact metadata and
+    /// tell "unchanged on the remote" from "needs downloading" without
+    /// fetching the payload at all.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub artifact_hash: Option<String>,
 }
 
 impl BundleState {
@@ -110,16 +117,34 @@ impl ChangeGroup {
     /// Record (or refresh) the hosted identity returned by a successful
     /// bundle upsert. Returns whether the persisted artifact changed.
     pub fn record_sync_target(&mut self, remote: &str, bundle_id: &str, api_url: &str) -> bool {
-        let target = BundleSyncTarget {
+        self.record_sync_target_with_artifact(remote, bundle_id, api_url, None)
+    }
+
+    /// Record the hosted identity together with the hash of the remote
+    /// artifact this bundle is now in sync with. `artifact_hash` of `None`
+    /// leaves any previously recorded hash alone, so callers that only learn
+    /// the identity (an upsert) never erase what a pull recorded.
+    pub fn record_sync_target_with_artifact(
+        &mut self,
+        remote: &str,
+        bundle_id: &str,
+        api_url: &str,
+        artifact_hash: Option<&str>,
+    ) -> bool {
+        let mut target = BundleSyncTarget {
             remote: remote.to_string(),
             bundle_id: bundle_id.to_string(),
             api_url: api_url.trim_end_matches('/').to_string(),
+            artifact_hash: artifact_hash.map(ToString::to_string),
         };
         if let Some(existing) = self
             .sync_targets
             .iter_mut()
             .find(|existing| existing.remote == remote)
         {
+            if target.artifact_hash.is_none() {
+                target.artifact_hash = existing.artifact_hash.clone();
+            }
             if existing == &target {
                 return false;
             }
@@ -128,6 +153,15 @@ impl ChangeGroup {
         }
         self.sync_targets.push(target);
         true
+    }
+
+    /// The remote artifact hash this bundle was last reconciled with on
+    /// `remote`, when one was recorded.
+    pub fn synced_artifact_hash(&self, remote: &str) -> Option<&str> {
+        self.sync_targets
+            .iter()
+            .find(|target| target.remote == remote)
+            .and_then(|target| target.artifact_hash.as_deref())
     }
 }
 

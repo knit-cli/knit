@@ -78,29 +78,78 @@ pub(super) fn push_project_history_events(
     if events.is_empty() {
         return Ok(0);
     }
-    let payload = json!({ "events": events });
-    let response: RemoteHistoryPush = request_json(
-        remote,
-        token,
-        "POST",
-        &format!("/projects/{project_slug}/history-events"),
-        Some(&payload),
-    )?;
-    Ok(response.inserted_count + response.skipped_count)
+    // Batched so a project ledger of thousands of events never rides in one
+    // request body; each batch upserts independently and is idempotent.
+    let mut accepted = 0;
+    for batch in events.chunks(HISTORY_PAGE_SIZE) {
+        let payload = json!({ "events": batch });
+        let response: RemoteHistoryPush = request_json(
+            remote,
+            token,
+            "POST",
+            &format!("/projects/{project_slug}/history-events"),
+            Some(&payload),
+        )?;
+        accepted += response.inserted_count + response.skipped_count;
+    }
+    Ok(accepted)
 }
 
+/// How many history events ride in one request, both directions.
+const HISTORY_PAGE_SIZE: usize = 500;
+
+/// Fetch a project's history events page by page with the server's keyset
+/// cursor (`before` + `beforeId`, taken from the last event of each page), so
+/// a ledger of any size never arrives as one response. A server that ignores
+/// the cursor resends the newest page; the no-new-events guard turns that
+/// into "stop with what one page held" instead of a loop.
 pub(super) fn fetch_project_history_events(
     remote: &KnitRemote,
     token: &str,
     project_identifier: &str,
 ) -> Result<Vec<HistoryEvent>> {
-    let raw: Vec<serde_json::Value> = request_json(
-        remote,
-        token,
-        "GET",
-        &format!("/projects/{project_identifier}/history-events"),
-        None,
-    )
-    .with_context(|| format!("failed to fetch history for project `{project_identifier}`"))?;
-    Ok(super::decode_history_events(&raw, project_identifier))
+    let base_path = format!("/projects/{project_identifier}/history-events");
+    let mut all: Vec<serde_json::Value> = Vec::new();
+    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut cursor: Option<(String, String)> = None;
+
+    loop {
+        let path = match &cursor {
+            Some((before, before_id)) => format!(
+                "{base_path}?limit={HISTORY_PAGE_SIZE}&before={before}&beforeId={before_id}"
+            ),
+            None => format!("{base_path}?limit={HISTORY_PAGE_SIZE}"),
+        };
+        let page: Vec<serde_json::Value> = request_json(remote, token, "GET", &path, None)
+            .with_context(|| {
+                format!("failed to fetch history for project `{project_identifier}`")
+            })?;
+        let page_len = page.len();
+
+        let mut new_events = 0;
+        for event in page {
+            let Some(event_id) = event.get("eventId").and_then(|value| value.as_str()) else {
+                continue;
+            };
+            if seen.insert(event_id.to_string()) {
+                all.push(event);
+                new_events += 1;
+            }
+        }
+        if page_len < HISTORY_PAGE_SIZE || new_events == 0 {
+            break;
+        }
+
+        let Some(last) = all.last() else { break };
+        let next = last
+            .get("occurredAt")
+            .and_then(|value| value.as_str())
+            .zip(last.get("eventId").and_then(|value| value.as_str()))
+            .map(|(before, before_id)| (before.to_string(), before_id.to_string()));
+        // Without a usable cursor another request could only repeat this page.
+        let Some(next) = next else { break };
+        cursor = Some(next);
+    }
+
+    Ok(super::decode_history_events(&all, project_identifier))
 }

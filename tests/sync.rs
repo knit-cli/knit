@@ -1749,3 +1749,264 @@ fn push_force_with_lease_propagates_into_the_artifact_sync() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The slim project export carries artifact metadata only, so a project-wide
+/// bundle pull downloads each payload it needs on its own — and never touches
+/// the payloads of records it skips.
+#[test]
+fn sync_pull_fetches_each_bundle_artifact_from_the_slim_export() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Author the bundle another machine would have pushed, then erase it here.
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::remove_file(&artifact_path).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/remote-made")).unwrap();
+
+    let mut archived_payload = payload.clone();
+    archived_payload["id"] = serde_json::json!("old-landed");
+
+    // The export identifies each bundle's current artifact but carries no
+    // payload — exactly what a server serving `artifacts=none` returns.
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "remote-made",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "hash-remote", "sizeBytes": 42},
+                },
+                {
+                    "id": "rb-3",
+                    "slug": "old-landed",
+                    "lifecycleState": "archived",
+                    "currentArtifact": {"artifactHash": "hash-old", "sizeBytes": 42},
+                },
+            ],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "remote-made",
+                "currentArtifact": {"artifactHash": "hash-remote", "payload": payload},
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-3.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-3",
+                "slug": "old-landed",
+                "currentArtifact": {"artifactHash": "hash-old", "payload": archived_payload},
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "pull", "--bundles", "--remote", "hosted"],
+        &env,
+    );
+    assert!(output.contains("fetched"), "{output}");
+    assert!(artifact_path.exists(), "{output}");
+
+    // Only the bundle that had to be localized was downloaded; the archived
+    // record with no local artifact is skipped before any payload is asked for.
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+
+    // The pulled artifact records which remote artifact it is in sync with.
+    let localized: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(
+        localized["syncTargets"][0]["artifactHash"],
+        serde_json::json!("hash-remote")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Once a bundle records the remote artifact hash it is in sync with, later
+/// pulls decide "nothing new" from the slim export alone: the payload is never
+/// downloaded again.
+#[test]
+fn pull_skips_the_artifact_fetch_when_the_recorded_hash_matches() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
+    append_line(&feature.join("app.txt"), "shared work");
+    knit(&workspace, ["commit", "--all", "-m", "Shared work"]);
+    knit(&workspace, ["push", "--set-upstream"]);
+
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "remote-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-same", "sizeBytes": 42},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "remote-made",
+                "currentArtifact": {"artifactHash": "hash-same", "payload": payload},
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    // First pull: nothing is recorded yet, so the payload is downloaded once
+    // and the hash it came with is written onto the local artifact.
+    knit_with_env(&workspace, ["pull"], &env);
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["syncTargets"][0]["artifactHash"],
+        serde_json::json!("hash-same")
+    );
+
+    // Second pull: the export's hash is the recorded one, so no payload is
+    // fetched at all.
+    let again = knit_with_env(&workspace, ["pull"], &env);
+    assert!(again.contains("up to date"), "{again}");
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()],
+        "a matching hash must not download the payload again"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A server that ignores the slim request (an older deployment) still inlines
+/// every payload in the export. The client must use those and never issue a
+/// per-bundle fetch — here the fake serves no bundle route at all, so a fetch
+/// would fail the pull.
+#[test]
+fn sync_pull_uses_the_payload_an_older_server_inlined() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
+    let payload: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    fs::remove_file(&artifact_path).unwrap();
+    fs::remove_dir_all(workspace.join(".knit/worktrees/remote-made")).unwrap();
+
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "remote-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-inline", "payload": payload},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "pull", "--bundles", "--remote", "hosted"],
+        &env,
+    );
+    assert!(output.contains("fetched"), "{output}");
+    assert!(artifact_path.exists(), "{output}");
+    assert!(
+        recorded_artifact_fetches(&fake_dir).is_empty(),
+        "an inlined payload must not trigger a per-bundle fetch"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

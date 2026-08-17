@@ -2,7 +2,7 @@
 //! resolution, project-export fetching, and localizing remote bundles onto the
 //! local project's repos.
 
-use super::{HttpResponse, RemoteProjectExport};
+use super::{HttpResponse, RemoteBundleDetail, RemoteExportBundle, RemoteProjectExport};
 use crate::checkout::is_in_place;
 use crate::git::{branch_exists, current_branch, git_output, is_ancestor, ref_exists, rev_parse};
 use crate::ids::slugify;
@@ -194,6 +194,13 @@ pub(super) fn load_project_if_present(
     }
 }
 
+/// Fetch the project export. The request is always for the slim shape: bundle
+/// records with artifact metadata but no payloads, and no history events. One
+/// response carrying every bundle payload plus the whole history ledger is
+/// what a large project cannot serve without exhausting the server's memory;
+/// payloads are fetched per bundle (see [`fetch_bundle_artifact`]) and history
+/// through its own endpoint. A server that ignores the parameters still
+/// answers with the full shape, and callers use whatever it inlined.
 pub(super) fn fetch_project_export(
     remote: &KnitRemote,
     token: Option<&str>,
@@ -201,10 +208,63 @@ pub(super) fn fetch_project_export(
 ) -> Result<RemoteProjectExport> {
     let (owner, slug) = split_project_identifier(project_identifier);
     let path = match owner {
-        Some(owner) => format!("/projects/{slug}/export?owner={owner}"),
-        None => format!("/projects/{slug}/export"),
+        Some(owner) => {
+            format!("/projects/{slug}/export?artifacts=none&history=false&owner={owner}")
+        }
+        None => format!("/projects/{slug}/export?artifacts=none&history=false"),
     };
     request_json_with_optional_token(remote, token, "GET", &path, None)
+}
+
+/// Fetch one bundle's current artifact by remote bundle id, returning the
+/// decoded payload and the artifact's hash. Callers must keep these calls
+/// sequential: fetching one payload at a time is the whole point of the slim
+/// export.
+pub(super) fn fetch_bundle_artifact(
+    remote: &KnitRemote,
+    token: Option<&str>,
+    remote_bundle_id: &str,
+    bundle_slug: &str,
+) -> Result<(ChangeGroup, String)> {
+    let detail: RemoteBundleDetail = request_json_with_optional_token(
+        remote,
+        token,
+        "GET",
+        &format!("/bundles/{remote_bundle_id}?include=artifact"),
+        None,
+    )
+    .with_context(|| format!("failed to fetch the artifact for remote bundle `{bundle_slug}`"))?;
+    let artifact = detail
+        .current_artifact
+        .with_context(|| format!("Remote bundle `{bundle_slug}` has no current artifact."))?;
+    let payload = artifact
+        .payload
+        .with_context(|| format!("Remote bundle `{bundle_slug}` returned no artifact payload."))?;
+    Ok((
+        decode_bundle_payload(&payload, bundle_slug)?,
+        artifact.artifact_hash,
+    ))
+}
+
+/// Resolve an export entry's bundle payload: use the payload the server
+/// inlined when it ignored the slim request (older deployments), otherwise
+/// fetch that one bundle's artifact.
+pub(super) fn resolve_export_bundle_payload(
+    remote: &KnitRemote,
+    token: Option<&str>,
+    entry: &RemoteExportBundle,
+) -> Result<(ChangeGroup, String)> {
+    let artifact = entry
+        .current_artifact
+        .as_ref()
+        .with_context(|| format!("Remote bundle `{}` has no current artifact.", entry.slug))?;
+    match artifact.payload.as_ref() {
+        Some(payload) => Ok((
+            decode_bundle_payload(payload, &entry.slug)?,
+            artifact.artifact_hash.clone(),
+        )),
+        None => fetch_bundle_artifact(remote, token, &entry.id, &entry.slug),
+    }
 }
 
 /// Split an `owner/slug` clone reference into its parts. A bare identifier (no

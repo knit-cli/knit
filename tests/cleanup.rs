@@ -903,6 +903,65 @@ fn prune_archives_remote_orphan_records_instead_of_deleting() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// With the slim export the orphan scan gets no payloads, so it fetches the
+/// artifact of each candidate record on its own to classify its PRs.
+#[test]
+fn prune_fetches_remote_orphan_artifacts_from_a_slim_export() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    knit(&workspace, ["bundle", "shipped old", "--repo", "backend"]);
+    write_bundle_publications(&workspace, "shipped-old", "MERGED");
+    let artifact_path = workspace.join(".knit/bundles/shipped-old.bundle.json");
+    let payload = fs::read_to_string(&artifact_path).unwrap();
+    knit(
+        &workspace,
+        ["bundle", "delete", "shipped-old", "--force", "--worktrees"],
+    );
+    fs::remove_dir_all(workspace.join(".knit/deleted")).ok();
+
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    // The export identifies the artifact but carries no payload; the payload
+    // is only available from the per-bundle route.
+    let export = "{\"data\":{\"project\":{\"slug\":\"demo\"},\"knitProject\":null,\"repositories\":[],\"bundles\":[{\"id\":\"rb-shipped-old\",\"slug\":\"shipped-old\",\"lifecycleState\":\"open\",\"currentArtifact\":{\"artifactHash\":\"h1\",\"sizeBytes\":42}}],\"historyEvents\":[]}}";
+    fs::write(fake_dir.join("export.json"), export).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-shipped-old.json"),
+        format!(
+            "{{\"data\":{{\"id\":\"rb-shipped-old\",\"slug\":\"shipped-old\",\"currentArtifact\":{{\"artifactHash\":\"h1\",\"payload\":{payload}}}}}}}"
+        ),
+    )
+    .unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let pruned = knit_with_env(
+        &workspace,
+        [
+            "bundle",
+            "prune",
+            "--no-refresh",
+            "--apply",
+            "--remote-bundles",
+        ],
+        &env,
+    );
+    assert!(pruned.contains("archived remote bundle"), "{pruned}");
+    assert!(fake_dir.join("archived-rb-shipped-old").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn delete_archives_the_remote_bundle_record() {
     let root = unique_temp_dir();

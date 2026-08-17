@@ -1364,6 +1364,118 @@ pub fn spawn_fake_remote_with_body(body: String) -> String {
     base_url
 }
 
+/// Spawn a fake sync remote that serves the project export and per-bundle
+/// artifacts from separate files, the way a server with the slim export does:
+///
+/// - `GET /api/v1/projects/:slug/export` -> `<dir>/export.json`
+/// - `GET /api/v1/bundles/:id` -> `<dir>/bundle-<id>.json` (404 when absent)
+///
+/// Every per-bundle artifact request is appended to `<dir>/artifact-fetches.txt`,
+/// one bundle id per line, so tests can assert exactly which payloads the
+/// client downloaded — and which it never asked for.
+pub fn spawn_fake_remote_bundle_api(dir: &Path) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    fs::create_dir_all(dir).unwrap();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_remote_bundle_request(&mut stream, &dir);
+            });
+        }
+    });
+    base_url
+}
+
+/// The bundle ids whose artifact `spawn_fake_remote_bundle_api` served, in
+/// request order. Empty when the client fetched none.
+pub fn recorded_artifact_fetches(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("artifact-fetches.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.to_string())
+        .collect()
+}
+
+fn handle_fake_remote_bundle_request(
+    stream: &mut std::net::TcpStream,
+    dir: &Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            if name.trim().eq_ignore_ascii_case("content-length") {
+                content_length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    if content_length > 0 {
+        let mut sink = vec![0u8; content_length];
+        reader.read_exact(&mut sink)?;
+    }
+
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/')
+        .to_string();
+    let segments: Vec<&str> = path.split('/').collect();
+    let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["api", "v1", "projects", _, "export"]) => {
+            match fs::read_to_string(dir.join("export.json")) {
+                Ok(body) => (200, body),
+                Err(_) => (
+                    404,
+                    "{\"errors\":{\"detail\":\"no export staged\"}}".to_string(),
+                ),
+            }
+        }
+        ("GET", ["api", "v1", "bundles", bundle_id]) => {
+            let record = dir.join("artifact-fetches.txt");
+            let mut fetched = fs::read_to_string(&record).unwrap_or_default();
+            fetched.push_str(bundle_id);
+            fetched.push('\n');
+            fs::write(&record, fetched).unwrap();
+            match fs::read_to_string(dir.join(format!("bundle-{bundle_id}.json"))) {
+                Ok(body) => (200, body),
+                Err(_) => (
+                    404,
+                    format!("{{\"errors\":{{\"detail\":\"no bundle {bundle_id} staged\"}}}}"),
+                ),
+            }
+        }
+        _ => (
+            404,
+            format!("{{\"errors\":{{\"detail\":\"unexpected endpoint {method} /{path}\"}}}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
+}
+
 fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Read, Write};
 
@@ -1478,6 +1590,18 @@ fn handle_fake_remote_push_request(
                 Err(_) => (
                     404,
                     "{\"errors\":{\"detail\":\"no export staged\"}}".to_string(),
+                ),
+            }
+        }
+        // One bundle with its artifact payload, the incremental door the
+        // client uses when the export is slim: served from
+        // `<dir>/bundle-<id>.json` when a test staged one.
+        ("GET", ["api", "v1", "bundles", bundle_id]) => {
+            match fs::read_to_string(dir.join(format!("bundle-{bundle_id}.json"))) {
+                Ok(body) => (200, body),
+                Err(_) => (
+                    404,
+                    format!("{{\"errors\":{{\"detail\":\"no bundle {bundle_id} staged\"}}}}"),
                 ),
             }
         }

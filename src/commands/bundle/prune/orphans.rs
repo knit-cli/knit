@@ -82,8 +82,25 @@ pub(super) fn remote_orphan_candidates(
             });
             continue;
         }
-        let Some(payload) = record.payload else {
-            continue;
+        // The project export carries no artifact payloads, so the few records
+        // that survived the filters above have theirs fetched one at a time.
+        // (An older server that inlined the payload is used as it came.)
+        let payload = match record.payload {
+            Some(payload) => payload,
+            None => match crate::commands::remote::fetch_remote_bundle_payload(
+                config,
+                &record.remote_id,
+                &record.slug,
+            ) {
+                Ok(payload) => payload,
+                Err(err) => {
+                    print_prune_warning(format!(
+                        "could not read remote bundle `{}` ({err:#}); skipping it",
+                        record.slug
+                    ));
+                    continue;
+                }
+            },
         };
         jobs.push(RemoteOrphanJob {
             remote_id: record.remote_id,

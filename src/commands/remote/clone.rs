@@ -3,8 +3,8 @@
 //! optionally materialize the active bundle.
 
 use super::client::{
-    configured_sync_remote_names, decode_bundle_payload, fast_forward_feature_checkouts,
-    fetch_project_export, localize_bundle, normalize_base_url, prepare_feature_branches,
+    configured_sync_remote_names, fast_forward_feature_checkouts, fetch_project_export,
+    localize_bundle, normalize_base_url, prepare_feature_branches, resolve_export_bundle_payload,
     token_from_env,
 };
 use super::credentials::NO_ACCESS_HINT;
@@ -205,7 +205,8 @@ fn clone_fetched_export(
     let project = local_project_from_export(&export, &repo_paths)?;
     write_json(&project_path(&target_root, &project.id), &project)?;
 
-    let (bundles, dropped_bundles) = localized_export_bundles(&export, &project)?;
+    let (bundles, dropped_bundles) =
+        localized_export_bundles(&export, &project, &remote, &remote_name, token.as_deref())?;
     for bundle in &bundles {
         write_json(&bundle_path(&target_root, &bundle.id), bundle)?;
     }
@@ -774,9 +775,16 @@ pub(super) fn project_repo_entry_from_export(
 /// the server withheld it). Returns the localized bundles plus a record of each
 /// dropped bundle and the repo ids it was missing, so callers can surface the
 /// loss instead of silently presenting a partial import.
+///
+/// The export carries no payloads, so each bundle's artifact is fetched on its
+/// own, one after another: a clone must never ask the server to build the whole
+/// project's artifacts at once.
 fn localized_export_bundles(
     export: &RemoteProjectExport,
     project: &KnitProject,
+    remote: &KnitRemote,
+    remote_name: &str,
+    token: Option<&str>,
 ) -> Result<(Vec<ChangeGroup>, Vec<DroppedBundle>)> {
     let available: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
     let mut localized = Vec::new();
@@ -787,10 +795,10 @@ fn localized_export_bundles(
         .iter()
         .filter(|bundle| bundle.lifecycle_state != "deleted")
     {
-        let Some(artifact) = bundle.current_artifact.as_ref() else {
+        if bundle.current_artifact.is_none() {
             continue;
-        };
-        let payload = decode_bundle_payload(&artifact.payload, &bundle.slug)?;
+        }
+        let (payload, artifact_hash) = resolve_export_bundle_payload(remote, token, bundle)?;
         let missing_repos = missing_bundle_repos(&payload, &available);
         if !missing_repos.is_empty() {
             dropped.push(DroppedBundle {
@@ -799,7 +807,14 @@ fn localized_export_bundles(
             });
             continue;
         }
-        localized.push(localize_bundle(payload, project)?);
+        let mut imported = localize_bundle(payload, project)?;
+        imported.record_sync_target_with_artifact(
+            remote_name,
+            &bundle.id,
+            &remote.url,
+            Some(&artifact_hash),
+        );
+        localized.push(imported);
     }
 
     Ok((localized, dropped))
@@ -1054,11 +1069,19 @@ mod tests {
             {"id": "rb-4", "slug": "empty", "lifecycleState": "open", "currentArtifact": null},
         ]));
         let project = project_with_backend();
+        // Payloads inlined by an older server are used as they came: no
+        // per-bundle fetch, so the unreachable URL is never contacted.
+        let remote = KnitRemote {
+            url: "http://127.0.0.1:1".to_string(),
+            token: None,
+        };
 
-        let (localized, dropped) = localized_export_bundles(&export, &project).unwrap();
+        let (localized, dropped) =
+            localized_export_bundles(&export, &project, &remote, "hosted", None).unwrap();
 
         assert_eq!(localized.len(), 1);
         assert_eq!(localized[0].id, "feature-a");
+        assert_eq!(localized[0].synced_artifact_hash("hosted"), Some("hash-a"));
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].id, "feature-c");
         assert_eq!(dropped[0].missing_repos, vec!["frontend".to_string()]);
