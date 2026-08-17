@@ -3,6 +3,7 @@
 
 use super::{CheckoutMode, SCHEMA_VERSION};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 pub const CHANGE_GROUP_KIND: &str = "ChangeGroup";
 
@@ -390,6 +391,16 @@ impl std::fmt::Display for Movement {
     }
 }
 
+/// Subject line and Git author date of one recorded commit, captured when the
+/// commit was observed. Lets history name and time a commit long after the
+/// branch it lived on is gone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CommitDetail {
+    pub subject: String,
+    pub authored_at: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoChange {
@@ -401,6 +412,11 @@ pub struct RepoChange {
     pub commits: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dropped_commits: Vec<String>,
+    /// Detail for the shas in `commits`/`droppedCommits`, keyed by sha.
+    /// Additive: older artifacts have none, and the field is omitted when
+    /// empty so their JSON stays byte-stable.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub commit_details: BTreeMap<String, CommitDetail>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

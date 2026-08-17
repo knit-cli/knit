@@ -1,11 +1,12 @@
 use crate::checkout::checkout_dir;
-use crate::git::{is_ancestor, merge_base, rev_list, rev_parse};
+use crate::git::{commit_details, is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
 use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry};
 use crate::store::ActiveBundle;
 use crate::time::now_iso;
 use anyhow::{Context, Result};
-use std::path::PathBuf;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange>> {
     let mut changes = Vec::new();
@@ -164,38 +165,50 @@ fn build_repo_change(
     after_sha: String,
 ) -> Result<RepoChange> {
     let Some(before) = before_sha.clone() else {
-        return Ok(RepoChange {
-            repo_id,
-            movement: Movement::Advanced,
-            before_sha,
-            after_sha: after_sha.clone(),
-            commits: vec![after_sha],
-            dropped_commits: Vec::new(),
-        });
+        return Ok(described(
+            worktree_dir,
+            RepoChange {
+                repo_id,
+                movement: Movement::Advanced,
+                before_sha,
+                after_sha: after_sha.clone(),
+                commits: vec![after_sha],
+                dropped_commits: Vec::new(),
+                commit_details: BTreeMap::new(),
+            },
+        ));
     };
 
     if is_ancestor(worktree_dir, &before, &after_sha) {
-        return Ok(RepoChange {
-            repo_id,
-            movement: Movement::Advanced,
-            before_sha,
-            after_sha: after_sha.clone(),
-            commits: rev_list(worktree_dir, &before, &after_sha)
-                .context("failed to list advanced commits")?,
-            dropped_commits: Vec::new(),
-        });
+        return Ok(described(
+            worktree_dir,
+            RepoChange {
+                repo_id,
+                movement: Movement::Advanced,
+                before_sha,
+                after_sha: after_sha.clone(),
+                commits: rev_list(worktree_dir, &before, &after_sha)
+                    .context("failed to list advanced commits")?,
+                dropped_commits: Vec::new(),
+                commit_details: BTreeMap::new(),
+            },
+        ));
     }
 
     if is_ancestor(worktree_dir, &after_sha, &before) {
-        return Ok(RepoChange {
-            repo_id,
-            movement: Movement::Rewound,
-            before_sha,
-            after_sha: after_sha.clone(),
-            commits: Vec::new(),
-            dropped_commits: rev_list(worktree_dir, &after_sha, &before)
-                .context("failed to list dropped commits")?,
-        });
+        return Ok(described(
+            worktree_dir,
+            RepoChange {
+                repo_id,
+                movement: Movement::Rewound,
+                before_sha,
+                after_sha: after_sha.clone(),
+                commits: Vec::new(),
+                dropped_commits: rev_list(worktree_dir, &after_sha, &before)
+                    .context("failed to list dropped commits")?,
+                commit_details: BTreeMap::new(),
+            },
+        ));
     }
 
     let base = merge_base(worktree_dir, &before, &after_sha)?;
@@ -209,12 +222,30 @@ fn build_repo_change(
         (vec![after_sha.clone()], vec![before])
     };
 
-    Ok(RepoChange {
-        repo_id,
-        movement: Movement::Diverged,
-        before_sha,
-        after_sha,
-        commits,
-        dropped_commits,
-    })
+    Ok(described(
+        worktree_dir,
+        RepoChange {
+            repo_id,
+            movement: Movement::Diverged,
+            before_sha,
+            after_sha,
+            commits,
+            dropped_commits,
+            commit_details: BTreeMap::new(),
+        },
+    ))
+}
+
+/// Capture each observed commit's subject and author date while the checkout is
+/// still in hand. Without this the ledger only has SHAs, and later readers can
+/// neither name the commit nor say when it was really written.
+fn described(worktree_dir: &Path, mut change: RepoChange) -> RepoChange {
+    let shas = change
+        .commits
+        .iter()
+        .chain(change.dropped_commits.iter())
+        .cloned()
+        .collect::<Vec<_>>();
+    change.commit_details = commit_details(worktree_dir, &shas);
+    change
 }

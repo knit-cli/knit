@@ -112,9 +112,14 @@ Current node types:
   "movement": "advanced",
   "beforeSha": "abc123",
   "afterSha": "def456",
-  "commits": ["def456"]
+  "commits": ["def456"],
+  "commitDetails": {
+    "def456": { "subject": "Add capacity form", "authoredAt": "2026-08-17T09:12:44+02:00" }
+  }
 }
 ```
+
+`commitDetails` records each listed commit's subject line and Git author date, keyed by SHA, captured while the checkout was in hand. It is optional and omitted when empty: older artifacts have none, and readers must fall back to Git (or to the node's own message and time). It is what lets project history name and time a commit after its branch is gone.
 
 Movement values:
 

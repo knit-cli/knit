@@ -5,7 +5,9 @@
 mod related;
 mod target;
 
-use crate::history::{format_history_event, load_history_events, refresh_project_history};
+use crate::history::{
+    format_history_event, load_history_events, rebuild_project_history, refresh_project_history,
+};
 use crate::ids::slugify;
 use crate::model::KnitProject;
 use crate::output as out;
@@ -25,6 +27,7 @@ pub fn show_history(
     limit: usize,
     repo: Option<&str>,
     bundle: Option<&str>,
+    kinds: &[String],
 ) -> Result<()> {
     let (root, project_id) = resolve_project(project)?;
     let appended = refresh_project_history(&root, &project_id)?;
@@ -40,6 +43,7 @@ pub fn show_history(
     events.retain(|event| {
         repo.is_none_or(|repo| event.repo_id.as_deref() == Some(repo))
             && bundle.is_none_or(|bundle| event.bundle_id.as_deref() == Some(bundle))
+            && (kinds.is_empty() || kinds.iter().any(|kind| kind == &event.kind))
     });
     events.sort_by(|a, b| {
         let a_time = a.occurred_at.as_deref().unwrap_or(&a.recorded_at);
@@ -59,8 +63,22 @@ pub fn show_history(
     Ok(())
 }
 
-pub fn refresh_history(project: Option<&str>) -> Result<()> {
+pub fn refresh_history(project: Option<&str>, rebuild: bool) -> Result<()> {
     let (root, project_id) = resolve_project(project)?;
+    if rebuild {
+        let summary = rebuild_project_history(&root, &project_id)?;
+        println!(
+            "{} {} {}",
+            out::movement("rebuilt"),
+            out::repo(&project_id),
+            out::muted(format!(
+                "{} updated, {} new, {} preserved event(s)",
+                summary.replaced, summary.added, summary.preserved
+            ))
+        );
+        return Ok(());
+    }
+
     let appended = refresh_project_history(&root, &project_id)?;
     println!(
         "{} {} {}",

@@ -26,6 +26,7 @@ pub use cli::{
 };
 
 pub fn run(cli: Cli) -> Result<()> {
+    let bundle_context = cli.bundle.clone();
     store::set_bundle_override(cli.bundle);
     match cli.command {
         Commands::Init { name, agents } => commands::init_project(&name, agents),
@@ -671,20 +672,24 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::History { command } => match command {
-            None => commands::show_history(None, 20, None, None),
+            // `knit history --bundle x` reads as a filter, so the global bundle
+            // flag stands in for the list filter when the subcommand omits it.
+            None => commands::show_history(None, 20, None, bundle_context.as_deref(), &[]),
             Some(HistoryCommand::List {
                 limit,
                 repo,
                 bundle,
+                kinds,
                 project,
             }) => commands::show_history(
                 project.as_deref(),
                 limit,
                 repo.as_deref(),
-                bundle.as_deref(),
+                bundle.or(bundle_context).as_deref(),
+                &kinds,
             ),
-            Some(HistoryCommand::Refresh { project }) => {
-                commands::refresh_history(project.as_deref())
+            Some(HistoryCommand::Refresh { rebuild, project }) => {
+                commands::refresh_history(project.as_deref(), rebuild)
             }
         },
         Commands::Related {

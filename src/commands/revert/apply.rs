@@ -4,7 +4,7 @@
 
 use super::*;
 use crate::checkout::checkout_dir;
-use crate::git::{commit_author, git_output, rev_parse};
+use crate::git::{commit_author, commit_details, git_output, rev_parse};
 use crate::ids::{revert_group_id, short_sha};
 use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange};
 use crate::output as out;
@@ -93,6 +93,7 @@ pub(super) fn apply_local_revert(
             after_sha: sha.clone(),
             commits: vec![sha.clone()],
             dropped_commits: Vec::new(),
+            commit_details: commit_details(&worktree, std::slice::from_ref(&sha)),
         });
         active.bundle.repos[repo_index].head_sha = Some(sha);
     }

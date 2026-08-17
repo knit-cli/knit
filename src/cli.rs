@@ -580,12 +580,20 @@ pub enum HistoryCommand {
         /// Limit to a bundle id.
         #[arg(long)]
         bundle: Option<String>,
+        /// Limit to an event kind (repeatable), e.g. commit.recorded or bundle.landed.
+        #[arg(long = "kind", value_name = "KIND")]
+        kinds: Vec<String>,
         /// Project id. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,
     },
-    /// Rebuild local project history from bundle ledgers.
+    /// Record new local project history events from bundle ledgers.
     Refresh {
+        /// Regenerate every event from the bundle artifacts, replacing recorded
+        /// events that lack commit messages and author times. Events whose
+        /// bundle artifact is gone are preserved.
+        #[arg(long)]
+        rebuild: bool,
         /// Project id. Defaults to the active project.
         #[arg(long)]
         project: Option<String>,

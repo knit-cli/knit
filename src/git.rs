@@ -1,5 +1,6 @@
-use crate::model::CommitAuthor;
+use crate::model::{CommitAuthor, CommitDetail};
 use anyhow::{bail, Context, Result};
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -193,6 +194,54 @@ pub fn commit_author(cwd: &Path, sha: &str) -> Result<CommitAuthor> {
     let email = lines.next().unwrap_or_default().trim().to_string();
 
     Ok(CommitAuthor { name, email })
+}
+
+/// Subject line and author date of each requested commit that this repo still
+/// has. Best effort: unknown or unreadable commits are simply absent from the
+/// result, and a repo that is not a usable checkout yields an empty map.
+/// Batched so naming a long commit list costs a bounded number of git calls.
+pub fn commit_details(cwd: &Path, shas: &[String]) -> BTreeMap<String, CommitDetail> {
+    let wanted = shas.iter().cloned().collect::<BTreeSet<_>>();
+    let mut details = BTreeMap::new();
+    // Chunked so a large batch cannot overflow the platform argument limit.
+    for chunk in wanted.iter().cloned().collect::<Vec<_>>().chunks(200) {
+        let mut args = vec![
+            OsString::from("log"),
+            OsString::from("--no-walk"),
+            // Missing commits must not fail the whole batch; without this a
+            // single pruned sha would cost every other commit its detail.
+            OsString::from("--ignore-missing"),
+            // Author dates keep the author's UTC offset, but ledger timestamps
+            // are compared as strings, so mixed offsets would misorder events.
+            // format-local under TZ=UTC pins every date to the ledger's form.
+            OsString::from("--date=format-local:%Y-%m-%dT%H:%M:%SZ"),
+            OsString::from("--format=%H %ad %s"),
+        ];
+        args.extend(chunk.iter().map(OsString::from));
+        let Ok(output) = git_output_with_env(cwd, args, &[("TZ", "UTC")]) else {
+            continue;
+        };
+        for line in output.lines() {
+            let mut parts = line.trim_end().splitn(3, ' ');
+            let (Some(sha), Some(authored_at)) = (parts.next(), parts.next()) else {
+                continue;
+            };
+            // With every requested sha missing, git log falls back to HEAD, so
+            // only commits that were actually asked for are recorded.
+            if !wanted.contains(sha) {
+                continue;
+            }
+            let subject = parts.next().unwrap_or_default();
+            details.insert(
+                sha.to_string(),
+                CommitDetail {
+                    subject: subject.lines().next().unwrap_or_default().to_string(),
+                    authored_at: authored_at.to_string(),
+                },
+            );
+        }
+    }
+    details
 }
 
 pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<String>> {

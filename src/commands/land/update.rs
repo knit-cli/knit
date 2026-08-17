@@ -4,7 +4,7 @@
 
 use super::bundle_primary_provider;
 use crate::checkout::checkout_dir;
-use crate::git::{current_branch, git_output, is_ancestor, rev_list, rev_parse};
+use crate::git::{commit_details, current_branch, git_output, is_ancestor, rev_list, rev_parse};
 use crate::ids::{node_id, short_sha};
 use crate::model::{BundleNode, Movement, RepoChange};
 use crate::output as out;
@@ -284,12 +284,15 @@ fn advanced_change(
             short_sha(&after_sha)
         );
     }
+    let commits =
+        rev_list(cwd, &before_sha, &after_sha).context("failed to list update commits")?;
     Ok(RepoChange {
         repo_id,
         movement: Movement::Advanced,
         before_sha: Some(before_sha.clone()),
         after_sha: after_sha.clone(),
-        commits: rev_list(cwd, &before_sha, &after_sha).context("failed to list update commits")?,
+        commit_details: commit_details(cwd, &commits),
+        commits,
         dropped_commits: Vec::new(),
     })
 }

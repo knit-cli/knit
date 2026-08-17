@@ -1,4 +1,7 @@
-use knit::model::{ledger_relation, ChangeGroup, LedgerRelation};
+use knit::model::{
+    ledger_relation, ChangeGroup, CommitDetail, LedgerRelation, Movement, RepoChange,
+};
+use std::collections::BTreeMap;
 
 fn seq(ids: &[&str]) -> Vec<String> {
     ids.iter().map(|id| id.to_string()).collect()
@@ -182,4 +185,42 @@ mod merge_ledgers_tests {
         let merged = merge_ledgers(&remote, &local, "2026-06-04T00:00:00.000Z".to_string());
         assert_eq!(merged.state, Some(BundleState::Archived));
     }
+}
+
+#[test]
+fn repo_changes_without_commit_details_round_trip_unchanged() {
+    // Artifacts written before commit detail existed must parse as they always
+    // did, and re-serialize without gaining an empty field.
+    let old = r#"{"repoId":"backend","movement":"advanced","beforeSha":"abc123","afterSha":"def456","commits":["def456"],"droppedCommits":["ghi789"]}"#;
+    let change: RepoChange = serde_json::from_str(old).unwrap();
+    assert!(change.commit_details.is_empty());
+    assert_eq!(change.commits, vec!["def456".to_string()]);
+    assert_eq!(serde_json::to_string(&change).unwrap(), old);
+}
+
+#[test]
+fn recorded_commit_details_survive_a_round_trip() {
+    let change = RepoChange {
+        repo_id: "backend".to_string(),
+        movement: Movement::Advanced,
+        before_sha: Some("abc123".to_string()),
+        after_sha: "def456".to_string(),
+        commits: vec!["def456".to_string()],
+        dropped_commits: Vec::new(),
+        commit_details: BTreeMap::from([(
+            "def456".to_string(),
+            CommitDetail {
+                subject: "Add capacity form".to_string(),
+                authored_at: "2026-08-12T07:30:00+02:00".to_string(),
+            },
+        )]),
+    };
+
+    let encoded = serde_json::to_string(&change).unwrap();
+    assert!(
+        encoded.contains(r#""commitDetails":{"def456":{"subject":"Add capacity form","authoredAt":"2026-08-12T07:30:00+02:00"}}"#),
+        "{encoded}"
+    );
+    let decoded: RepoChange = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.commit_details, change.commit_details);
 }
