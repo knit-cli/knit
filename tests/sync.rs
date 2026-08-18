@@ -1209,6 +1209,49 @@ fn archive_and_restore_sync_lifecycle_state_to_remote() {
 }
 
 #[test]
+fn sync_push_bundles_as_collaborator_skips_project_shape() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "collaborator-token")];
+
+    // The remote refuses the project-shape upsert: this caller reaches the
+    // project as a collaborator, not its owner.
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    knit(&workspace, ["bundle", "alpha work", "--repo", "backend"]);
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("bundle artifact(s)"), "{output}");
+
+    let alpha = fs::read_to_string(fake_dir.join("artifact-alpha-work.states"))
+        .expect("the bundle artifact must still be pushed");
+    assert_eq!(alpha.lines().last(), Some("open"), "{alpha}");
+
+    // The refusal must not degrade into creating a personal duplicate of the
+    // project, and must not push repository records either.
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "collaborator push must not POST-create a duplicate project"
+    );
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "collaborator push must not reshape repository records"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     let root = unique_temp_dir();
     let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");

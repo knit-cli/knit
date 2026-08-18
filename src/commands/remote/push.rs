@@ -680,8 +680,9 @@ fn push_active_bundle_to_remote(
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&active.root, &project_id)?;
-    let pushed_project = upsert_project(remote, &token, &project_id, local_project.as_ref())?;
-    if let Some(project) = local_project.as_ref() {
+    let (pushed_project, shape_push) =
+        upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?;
+    if let (Some(project), ProjectShapePush::Pushed) = (local_project.as_ref(), &shape_push) {
         push_repositories(remote, &token, &pushed_project.slug, &project.repos)?;
     }
 
@@ -910,13 +911,45 @@ fn upsert_project(
     }
 }
 
+/// Whether the sweep may also push the project shape and repository records,
+/// or only address the project. Only the owner reshapes a project; a
+/// collaborator pushing a bundle must not fail on that, and must never
+/// POST-create a personal duplicate of a project someone else owns.
+enum ProjectShapePush {
+    Pushed,
+    ReadOnly,
+}
+
+fn upsert_or_fetch_project(
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<(RemoteProject, ProjectShapePush)> {
+    let payload = project_payload(project_id, project);
+    let path = format!("/projects/{project_id}");
+    let response = request(remote, token, "PATCH", &path, Some(&payload))?;
+    match response.status {
+        404 => Ok((
+            decode_response(request(remote, token, "POST", "/projects", Some(&payload))?)?,
+            ProjectShapePush::Pushed,
+        )),
+        403 => Ok((
+            decode_response(request(remote, token, "GET", &path, None)?)?,
+            ProjectShapePush::ReadOnly,
+        )),
+        _ => Ok((decode_response(response)?, ProjectShapePush::Pushed)),
+    }
+}
+
 pub(super) fn upsert_project_for_history(
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
-    upsert_project(remote, token, project_id, project)
+    let (pushed, _shape) = upsert_or_fetch_project(remote, token, project_id, project)?;
+    Ok(pushed)
 }
 
 /// A repository record as the sync remote lists it. `local_id` is the id the
@@ -1283,8 +1316,11 @@ pub fn push_all_bundles_to_remote(
             Some(slug) => slug.clone(),
             None => {
                 let local_project = load_project_if_present(&root, &project_id)?;
-                let upserted = upsert_project(remote, &token, &project_id, local_project.as_ref())?;
-                if let Some(local) = local_project.as_ref() {
+                let (upserted, shape_push) =
+                    upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?;
+                if let (Some(local), ProjectShapePush::Pushed) =
+                    (local_project.as_ref(), &shape_push)
+                {
                     push_repositories(remote, &token, &upserted.slug, &local.repos)?;
                 }
                 project_slugs.insert(project_id.clone(), upserted.slug.clone());

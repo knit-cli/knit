@@ -1621,15 +1621,29 @@ fn handle_fake_remote_push_request(
                 format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
             )
         }
+        // Stage `project-shape-forbidden` to play a project the caller can
+        // read and push bundles into but not reshape (a collaborator, not
+        // the owner) — PATCH refuses, GET still resolves the record.
+        ("PATCH", ["api", "v1", "projects", _]) if dir.join("project-shape-forbidden").exists() => {
+            (403, "{\"errors\":{\"detail\":\"Forbidden\"}}".to_string())
+        }
         (_, ["api", "v1", "projects", slug]) => (
             200,
             format!("{{\"data\":{{\"id\":\"proj-1\",\"slug\":\"{slug}\"}}}}"),
         ),
-        ("POST", ["api", "v1", "projects"]) => (
-            201,
-            "{\"data\":{\"id\":\"proj-1\",\"slug\":\"demo\"}}".to_string(),
-        ),
+        ("POST", ["api", "v1", "projects"]) => {
+            fs::write(dir.join("project-created.txt"), "").unwrap();
+            (
+                201,
+                "{\"data\":{\"id\":\"proj-1\",\"slug\":\"demo\"}}".to_string(),
+            )
+        }
         ("POST", ["api", "v1", "projects", _, "repositories"]) => {
+            let record = dir.join("repositories-pushed.txt");
+            let mut existing = fs::read_to_string(&record).unwrap_or_default();
+            existing.push_str(&serde_json::to_string(&body).unwrap_or_default());
+            existing.push('\n');
+            fs::write(&record, existing).unwrap();
             (201, "{\"data\":{}}".to_string())
         }
         // Repository listing for `project push --prune`: served from a staged
