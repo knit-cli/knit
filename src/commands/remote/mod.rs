@@ -193,7 +193,7 @@ fn print_json_error_envelope(kind: RemoteErrorKind, error: &anyhow::Error) {
     println!("{}", json_error_envelope(kind, error));
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteExportRepository {
     local_id: Option<String>,

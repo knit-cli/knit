@@ -9,9 +9,10 @@ use super::client::{
     resolve_sync_remote_name, resolve_token, with_first_available_remote,
 };
 use super::clone::{
-    clone_export_repositories, export_repo_local_id, materialize_imported_bundle,
-    project_repo_entry_from_export,
+    clone_export_repositories, export_repo_forge_missing, export_repo_local_id,
+    materialize_imported_bundle, project_repo_entry_from_export,
 };
+use super::credentials::NO_ACCESS_HINT;
 use super::{
     print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportBundle,
     RemoteExportRepository, RemoteProjectExport, RemoteViews,
@@ -30,7 +31,7 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;
@@ -200,52 +201,139 @@ pub fn prepare_remote_pull(
     Ok(None)
 }
 
-/// Reconcile the local project's tracked repositories with the remote export so
-/// that repositories added or removed on the remote flow into an existing
-/// workspace, not just a fresh `knit clone`. Removals drop the project repo
-/// entry (the checkout on disk is left in place); additions clone the repo into
-/// the workspace and record it. A degenerate export with no repositories is
-/// ignored so a transient/empty response never wipes the local repo list.
+/// Reconcile the local project's tracked repositories with the remote
+/// project's *membership* — the deliberate repo list in the exported
+/// `knitProject` payload — so repos added or removed on the remote flow into
+/// an existing workspace. The export's `repositories` array is observed
+/// inventory (bundle pushes register records there) and is only consulted to
+/// enrich clones; an inventory record no membership entry claims — e.g. one
+/// projected from a since-deleted bundle — must never mutate the local
+/// project. A degenerate export with no membership is ignored so a
+/// transient/empty response never wipes the local repo list.
+///
+/// Verify-then-apply: planned additions are probed before anything mutates,
+/// successful additions are always persisted, and removals are persisted only
+/// when every planned addition succeeded — a reconcile that failed half-way
+/// must not leave the local project matching neither side.
 fn reconcile_project_repositories(
     root: &Path,
     project: &mut KnitProject,
     export: &RemoteProjectExport,
 ) -> Result<()> {
-    if export.repositories.is_empty() {
+    let Some(membership) = export
+        .knit_project
+        .as_ref()
+        .filter(|knit_project| !knit_project.repos.is_empty())
+    else {
         return Ok(());
-    }
+    };
 
-    let export_ids: BTreeSet<String> = export
-        .repositories
+    let membership_ids: BTreeSet<&str> = membership
+        .repos
         .iter()
-        .map(export_repo_local_id)
+        .map(|repo| repo.id.as_str())
         .collect();
 
     // When the server withheld private repos from this export, an absent repo
     // is indistinguishable from a hidden one — never drop local project repos
     // on an admittedly incomplete export.
     let export_complete = export.omitted_repository_count.unwrap_or(0) == 0;
-    let mut removed = Vec::new();
-    if export_complete {
-        project.repos.retain(|repo| {
-            let keep = export_ids.contains(&repo.id);
-            if !keep {
-                removed.push(repo.id.clone());
-            }
-            keep
-        });
-    }
+    let planned_removals: Vec<String> = if export_complete {
+        project
+            .repos
+            .iter()
+            .filter(|repo| !membership_ids.contains(repo.id.as_str()))
+            .map(|repo| repo.id.clone())
+            .collect()
+    } else {
+        Vec::new()
+    };
 
+    // Plan additions: membership entries absent locally, joined to inventory
+    // records for clone detail (remote URL, visibility, forge state). A
+    // membership entry without a record still reconciles from its own fields.
     let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
-    let to_add: Vec<&RemoteExportRepository> = export
+    let records: BTreeMap<String, &RemoteExportRepository> = export
         .repositories
         .iter()
-        .filter(|repository| !existing.contains(&export_repo_local_id(repository)))
+        .map(|repository| (export_repo_local_id(repository), repository))
         .collect();
 
-    let mut added = Vec::new();
+    let planned_adds: Vec<RemoteExportRepository> = membership
+        .repos
+        .iter()
+        .filter(|entry| !existing.contains(&entry.id))
+        .map(|entry| match records.get(entry.id.as_str()) {
+            Some(record) => (*record).clone(),
+            None => RemoteExportRepository {
+                local_id: Some(entry.id.clone()),
+                name: entry.id.clone(),
+                default_branch: Some(entry.base_branch.clone()),
+                remote_url: entry.remote.clone(),
+                visibility: None,
+                metadata: serde_json::json!({
+                    "checkoutMode": entry.checkout_mode.as_str(),
+                    "includeByDefault": entry.include_by_default,
+                }),
+            },
+        })
+        .collect();
+
+    if planned_adds.is_empty() && planned_removals.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "{} {}",
+        out::heading("Project repos:"),
+        out::muted(format!(
+            "syncing membership from remote (+{} / -{})",
+            planned_adds.len(),
+            planned_removals.len()
+        ))
+    );
+
+    // Verify phase: fail additions before any clone touches the workspace,
+    // and blame the right thing while doing it.
+    let mut verified = Vec::new();
     let mut failed = Vec::new();
-    for repository in to_add {
+    for repository in planned_adds {
+        let local_id = export_repo_local_id(&repository);
+        if export_repo_forge_missing(&repository) {
+            failed.push((
+                local_id,
+                "repository does not exist on its forge (the sync remote marked it missing)"
+                    .to_string(),
+            ));
+            continue;
+        }
+        let Some(url) = repository
+            .remote_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        else {
+            failed.push((local_id, "remote export has no clone URL".to_string()));
+            continue;
+        };
+        match crate::git::remote_repo_reachable(root, url) {
+            Ok(()) => verified.push(repository),
+            Err(error) => {
+                // An anonymous probe cannot tell a private repo from a
+                // nonexistent one, so only a public repo's failure rules out
+                // credentials; everything else keeps the access hint.
+                let reason = if repository.visibility.as_deref() == Some("public") {
+                    format!("repository not found on the forge (or network error): {error}")
+                } else {
+                    format!("repository not found or no access: {error}; {NO_ACCESS_HINT}")
+                };
+                failed.push((local_id, reason));
+            }
+        }
+    }
+
+    // Apply phase: clone verified additions and record them.
+    let mut added = Vec::new();
+    for repository in &verified {
         let local_id = export_repo_local_id(repository);
         match clone_export_repositories(root, std::slice::from_ref(repository)) {
             Ok(paths) => {
@@ -258,6 +346,20 @@ fn reconcile_project_repositories(
             }
             Err(error) => failed.push((local_id, format!("{error:#}"))),
         }
+    }
+
+    // Removals are destructive under uncertainty: apply them only when every
+    // planned addition made it, so a half-failed reconcile keeps the local
+    // repo list intact instead of matching neither side.
+    let mut removed = Vec::new();
+    if failed.is_empty() {
+        project.repos.retain(|repo| {
+            let keep = membership_ids.contains(repo.id.as_str());
+            if !keep {
+                removed.push(repo.id.clone());
+            }
+            keep
+        });
     }
 
     if added.is_empty() && removed.is_empty() && failed.is_empty() {
@@ -292,6 +394,17 @@ fn reconcile_project_repositories(
             out::warn("Project repo add failed:"),
             out::repo(id),
             out::muted(reason)
+        );
+    }
+    if !failed.is_empty() && !planned_removals.is_empty() {
+        println!(
+            "{}",
+            out::warn(format!(
+                "Project repos: reconcile incomplete — {} add(s) failed; keeping {} removed repo(s) locally: {}",
+                failed.len(),
+                planned_removals.len(),
+                planned_removals.join(", ")
+            ))
         );
     }
 
