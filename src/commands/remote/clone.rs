@@ -640,7 +640,14 @@ fn clone_one_export_repository(
         if repo_path.exists() {
             let _ = fs::remove_dir_all(&repo_path);
         }
-        let error = if repository.visibility.as_deref() == Some("public") {
+        // Blame the right thing: a repo the sync remote knows is gone from its
+        // forge fails for everyone, a failed public clone is not a credential
+        // problem, and only the genuinely ambiguous case earns the access hint.
+        let error = if export_repo_forge_missing(repository) {
+            anyhow::anyhow!(
+                "{error:#}; the sync remote marked this repository missing on its forge — it does not exist (or was deleted/renamed)"
+            )
+        } else if repository.visibility.as_deref() == Some("public") {
             error
         } else {
             anyhow::anyhow!("{error:#}; {NO_ACCESS_HINT}")
@@ -871,6 +878,13 @@ pub(super) fn export_repo_local_id(repository: &RemoteExportRepository) -> Strin
         .clone()
         .or_else(|| metadata_string(&repository.metadata, "localId"))
         .unwrap_or_else(|| slugify(&repository.name))
+}
+
+/// True when the sync remote marked this repository missing on its forge
+/// (an owner-credentialed 404 during visibility refresh) — no credential the
+/// puller could connect would make a clone succeed.
+pub(super) fn export_repo_forge_missing(repository: &RemoteExportRepository) -> bool {
+    metadata_string(&repository.metadata, "forgeState").as_deref() == Some("missing")
 }
 
 fn metadata_string(metadata: &Value, key: &str) -> Option<String> {

@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use std::fs;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn pull_updates_original_base_checkout_and_bundle_base_sha() {
@@ -2007,6 +2008,272 @@ fn sync_pull_uses_the_payload_an_older_server_inlined() {
         recorded_artifact_fetches(&fake_dir).is_empty(),
         "an inlined payload must not trigger a per-bundle fetch"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+// ---------------------------------------------------------------------------
+// Pull-side project reconcile: membership vs observed inventory
+// ---------------------------------------------------------------------------
+
+/// Export body whose `knitProject.repos` (deliberate membership) and
+/// `repositories` (observed inventory) can diverge — the situation orphaned
+/// bundle-projected records used to create.
+fn membership_export(
+    membership_repos: serde_json::Value,
+    repositories: serde_json::Value,
+    omitted: u64,
+) -> String {
+    serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": membership_repos,
+            },
+            "repositories": repositories,
+            "omittedRepositoryCount": omitted,
+            "bundles": [],
+            "historyEvents": [],
+        }
+    })
+    .to_string()
+}
+
+fn project_repo_ids(workspace: &Path) -> Vec<String> {
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn reconcile_scaffold(root: &Path, repos: &[&str]) -> PathBuf {
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    for label in repos {
+        let repo = root.join(label);
+        init_repo(&repo, label);
+        knit(
+            &workspace,
+            ["project", "add", label, repo.to_str().unwrap()],
+        );
+    }
+    knit(&workspace, ["bundle", "seed work", "--repo", repos[0]]);
+    workspace
+}
+
+#[test]
+fn pull_reconcile_ignores_inventory_records_outside_membership() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    // The incident shape: a ghost record in the inventory (projected by a
+    // since-deleted bundle, its GitHub repo never created) that membership
+    // does not claim. It must be neither cloned nor added — nor even probed.
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "ghost", "name": "ghost", "remoteUrl": "https://github.com/nobody/ghost.git", "visibility": "private", "metadata": {"source": "bundle_projection"}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(!output.contains("ghost"), "{output}");
+    assert!(!output.contains("Project repo add failed"), "{output}");
+    assert!(!workspace.join("ghost").exists());
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_keeps_removals_when_an_add_fails() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
+
+    // Membership says: drop oldrepo, add newrepo — but newrepo's remote does
+    // not exist. The failed add must keep the removal from being persisted,
+    // and a public repo's failure must not be blamed on credentials.
+    let missing_remote = root.join("does-not-exist");
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": missing_remote.to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": missing_remote.to_str().unwrap(), "visibility": "public", "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(output.contains("Project repo add failed:"), "{output}");
+    assert!(output.contains("repository not found on the forge"), "{output}");
+    assert!(!output.contains("no HTTPS git access"), "{output}");
+    assert!(
+        output.contains("keeping 1 removed repo(s) locally: oldrepo"),
+        "{output}"
+    );
+
+    let mut ids = project_repo_ids(&workspace);
+    ids.sort();
+    assert_eq!(ids, vec!["backend", "oldrepo"]);
+    assert!(!workspace.join("newrepo").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_applies_adds_and_removals_together() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
+
+    let newrepo = root.join("newrepo");
+    init_repo(&newrepo, "newrepo");
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "defaultBranch": "main", "visibility": "public", "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(output.contains("syncing membership from remote (+1 / -1)"), "{output}");
+    assert!(output.contains("added"), "{output}");
+    assert!(output.contains("newrepo"), "{output}");
+    assert!(output.contains("removed"), "{output}");
+    assert!(output.contains("oldrepo"), "{output}");
+
+    let mut ids = project_repo_ids(&workspace);
+    ids.sort();
+    assert_eq!(ids, vec!["backend", "newrepo"]);
+    assert!(workspace.join("newrepo").join("app.txt").exists());
+    // The removed repo's checkout on disk is left alone.
+    assert!(root.join("oldrepo").join("app.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_skips_removals_on_incomplete_export() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
+
+    // The server admits it withheld a repo from this viewer: an absent repo is
+    // indistinguishable from a hidden one, so nothing may be dropped.
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+        ]),
+        1,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(!output.contains("Project repo:"), "{output}");
+
+    let mut ids = project_repo_ids(&workspace);
+    ids.sort();
+    assert_eq!(ids, vec!["backend", "oldrepo"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_skipped_without_membership_payload() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    // Degenerate/old-server export without a knitProject payload: inventory
+    // records alone must not mutate the local project.
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {"localId": "ghost", "name": "ghost", "remoteUrl": "https://github.com/nobody/ghost.git", "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }
+    })
+    .to_string();
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(!output.contains("ghost"), "{output}");
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_reports_forge_missing_repos_honestly() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    // The sync remote's owner-credentialed visibility refresh marked the repo
+    // missing on its forge: fail fast, with no credentials hint.
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "doomed", "path": "", "remote": "https://github.com/nobody/doomed.git", "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "doomed", "name": "doomed", "remoteUrl": "https://github.com/nobody/doomed.git", "visibility": "private", "metadata": {"forgeState": "missing"}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(
+        output.contains("repository does not exist on its forge"),
+        "{output}"
+    );
+    assert!(!output.contains("no HTTPS git access"), "{output}");
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
 
     fs::remove_dir_all(root).unwrap();
 }

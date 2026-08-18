@@ -1384,7 +1384,11 @@ fn repository_payload(repo: &ProjectRepoEntry) -> Value {
         "metadata": {
             "localId": repo.id,
             "checkoutMode": repo.checkout_mode,
-            "includeByDefault": repo.include_by_default
+            "includeByDefault": repo.include_by_default,
+            // These records mirror the local project's deliberate repo list;
+            // the stamp keeps them distinguishable from records bundle
+            // projection observed, which the server may garbage-collect.
+            "source": "project_push"
         }
     })
 }

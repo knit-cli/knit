@@ -302,6 +302,17 @@ pub fn remote_ref_sha(cwd: &Path, remote: &str, reference: &str) -> Result<Optio
     Ok(plain)
 }
 
+/// Probe whether a remote repository URL answers `git ls-remote` at all, using
+/// the ambient credential helpers. `Err` carries git's error text.
+/// `GIT_TERMINAL_PROMPT=0` keeps a missing credential from turning the probe
+/// into an interactive hang.
+pub fn remote_repo_reachable(cwd: &Path, url: &str) -> std::result::Result<(), String> {
+    match git_output_with_env(cwd, ["ls-remote", url, "HEAD"], &[("GIT_TERMINAL_PROMPT", "0")]) {
+        Ok(_) => Ok(()),
+        Err(error) => Err(format!("{error:#}")),
+    }
+}
+
 pub fn merge_base(cwd: &Path, left: &str, right: &str) -> Result<Option<String>> {
     git_output_optional(cwd, ["merge-base", left, right])
 }
