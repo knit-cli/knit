@@ -1458,22 +1458,29 @@ fn repo_identity(repo_id: &str, remote: Option<&str>) -> RepoIdentity {
     let Some(remote) = remote else {
         return fallback_repo_identity(repo_id);
     };
-    let remote = remote.trim().trim_end_matches(".git");
-    let marker = "github.com";
-    let Some(index) = remote.find(marker) else {
+    // The forge adapters own remote parsing: the same host detection publish
+    // uses decides the provider id, and the adapter's parser yields the host
+    // path (nested GitLab groups included). This identity must match what the
+    // sync remote derives from bundle artifacts — a repo pushed under its
+    // local id instead of its host path splits into a second repository
+    // record there, and ambiguous records hide the repo's history.
+    let Some(forge) = crate::providers::for_remote(remote) else {
         return fallback_repo_identity(repo_id);
     };
-    let suffix = remote[index + marker.len()..].trim_start_matches([':', '/']);
-    let parts = suffix.split('/').collect::<Vec<_>>();
-    if parts.len() < 2 || parts[0].is_empty() || parts[1].is_empty() {
+    let Some(full_name) = forge.repo_full_name(remote) else {
         return fallback_repo_identity(repo_id);
-    }
-    let owner = parts[0].to_string();
-    let name = parts[1].to_string();
+    };
+    // The final segment is the repository; every leading segment is the owner.
+    let (owner, name) = match full_name.rsplit_once('/') {
+        Some((owner, name)) if !owner.is_empty() && !name.is_empty() => {
+            (owner.to_string(), name.to_string())
+        }
+        _ => return fallback_repo_identity(repo_id),
+    };
     RepoIdentity {
-        provider: "github",
-        owner: Some(owner.clone()),
-        full_name: format!("{owner}/{name}"),
+        provider: forge.id(),
+        owner: Some(owner),
+        full_name,
         name,
     }
 }
@@ -1526,12 +1533,74 @@ fn remote_listing(global: bool) -> Result<(KnitConfig, BTreeMap<String, String>)
 
 #[cfg(test)]
 mod tests {
-    use super::{apply_artifact_force_fields, lease_mismatch_message};
+    use super::{apply_artifact_force_fields, lease_mismatch_message, repo_identity};
     use crate::commands::push::PushForce;
     use serde_json::json;
 
     fn base_payload() -> serde_json::Value {
         json!({"kind": "bundle", "payload": {}})
+    }
+
+    #[test]
+    fn repo_identity_parses_every_supported_forge() {
+        for (remote, provider, owner, name) in [
+            (
+                "https://github.com/acme/backend.git",
+                "github",
+                "acme",
+                "backend",
+            ),
+            (
+                "https://gitlab.com/acme/backend.git",
+                "gitlab",
+                "acme",
+                "backend",
+            ),
+            (
+                "https://codeberg.org/acme/backend.git",
+                "forgejo",
+                "acme",
+                "backend",
+            ),
+            (
+                "https://bitbucket.org/acme/backend.git",
+                "bitbucket",
+                "acme",
+                "backend",
+            ),
+            (
+                "git@gitlab.com:acme/backend.git",
+                "gitlab",
+                "acme",
+                "backend",
+            ),
+        ] {
+            let identity = repo_identity("local-id", Some(remote));
+            assert_eq!(identity.provider, provider, "{remote}");
+            assert_eq!(identity.owner.as_deref(), Some(owner), "{remote}");
+            assert_eq!(identity.name, name, "{remote}");
+            assert_eq!(identity.full_name, format!("{owner}/{name}"), "{remote}");
+        }
+    }
+
+    #[test]
+    fn repo_identity_keeps_nested_gitlab_groups_in_the_owner() {
+        let identity = repo_identity("local-id", Some("https://gitlab.com/acme/team/backend.git"));
+        assert_eq!(identity.provider, "gitlab");
+        assert_eq!(identity.owner.as_deref(), Some("acme/team"));
+        assert_eq!(identity.name, "backend");
+        assert_eq!(identity.full_name, "acme/team/backend");
+    }
+
+    #[test]
+    fn repo_identity_falls_back_to_the_local_id_for_unknown_hosts() {
+        for remote in [None, Some("https://git.example.com/acme/backend.git")] {
+            let identity = repo_identity("backend", remote);
+            assert_eq!(identity.provider, "git");
+            assert_eq!(identity.owner, None);
+            assert_eq!(identity.name, "backend");
+            assert_eq!(identity.full_name, "backend");
+        }
     }
 
     #[test]

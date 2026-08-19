@@ -17,6 +17,11 @@ use std::path::Path;
 struct RemoteHistoryPush {
     inserted_count: usize,
     skipped_count: usize,
+    // Older sync remotes report only inserted/skipped.
+    #[serde(default)]
+    updated_count: usize,
+    #[serde(default)]
+    failed_count: usize,
 }
 
 pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Result<()> {
@@ -81,6 +86,7 @@ pub(super) fn push_project_history_events(
     // Batched so a project ledger of thousands of events never rides in one
     // request body; each batch upserts independently and is idempotent.
     let mut accepted = 0;
+    let mut failed = 0;
     for batch in events.chunks(HISTORY_PAGE_SIZE) {
         let payload = json!({ "events": batch });
         let response: RemoteHistoryPush = request_json(
@@ -90,7 +96,14 @@ pub(super) fn push_project_history_events(
             &format!("/projects/{project_slug}/history-events"),
             Some(&payload),
         )?;
-        accepted += response.inserted_count + response.skipped_count;
+        accepted += response.inserted_count + response.updated_count + response.skipped_count;
+        failed += response.failed_count;
+    }
+    if failed > 0 {
+        eprintln!(
+            "{} {failed} history event(s) were rejected by the sync remote and are missing there; the next push retries them",
+            out::warn("warning:")
+        );
     }
     Ok(accepted)
 }

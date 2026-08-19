@@ -104,6 +104,23 @@ pub fn sync_push(
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
 
+    // The resolved bundle (when one resolves) decides both which bundle gets
+    // the rich push and which project the project-scoped families target. An
+    // explicit `--bundle` can name a bundle from a project other than the
+    // workspace's active one; history, views, architecture, and kg must
+    // follow that bundle's project instead of silently syncing the active
+    // project's artifacts.
+    let resolved_bundle = crate::store::load_active_bundle()
+        .and_then(|active| {
+            crate::store::ensure_workspace_fallback_status_is_unambiguous(&active)?;
+            Ok((active.bundle.id, active.bundle.project_id))
+        })
+        .ok();
+    let active_id = resolved_bundle.as_ref().map(|(id, _)| id.as_str());
+    let project = resolved_bundle
+        .as_ref()
+        .and_then(|(_, project)| project.as_deref());
+
     for remote in &remotes {
         if multiple {
             println!("{} {}", out::heading("Remote:"), out::repo(remote));
@@ -120,12 +137,6 @@ pub fn sync_push(
             // local ledger. From a root with several open bundles nothing
             // resolves; the sweep covers everything and history is pushed
             // separately.
-            let active_id = crate::store::load_active_bundle()
-                .and_then(|active| {
-                    crate::store::ensure_workspace_fallback_status_is_unambiguous(&active)?;
-                    Ok(active.bundle.id)
-                })
-                .ok();
             match &active_id {
                 Some(_) => {
                     if let Err(error) = push_bundle_to_remote(remote, None, force) {
@@ -133,33 +144,31 @@ pub fn sync_push(
                     }
                 }
                 None => {
-                    if let Err(error) = push_history_to_remote(None, remote) {
+                    if let Err(error) = push_history_to_remote(project, remote) {
                         failures.push(format!("{remote} history: {error:#}"));
                     }
                 }
             }
-            if let Err(error) =
-                push_all_bundles_to_remote(remote, None, active_id.as_deref(), force)
-            {
+            if let Err(error) = push_all_bundles_to_remote(remote, None, active_id, force) {
                 failures.push(format!("{remote} bundles: {error:#}"));
             }
         } else if targets.history {
-            if let Err(error) = push_history_to_remote(None, remote) {
+            if let Err(error) = push_history_to_remote(project, remote) {
                 failures.push(format!("{remote} history: {error:#}"));
             }
         }
         if targets.views {
-            if let Err(error) = push_views_to_remote(None, remote) {
+            if let Err(error) = push_views_to_remote(project, remote) {
                 failures.push(format!("{remote} views: {error:#}"));
             }
         }
         if targets.architecture {
-            if let Err(error) = push_architecture_to_remote(None, remote) {
+            if let Err(error) = push_architecture_to_remote(project, remote) {
                 failures.push(format!("{remote} architecture: {error:#}"));
             }
         }
         if targets.kg {
-            if let Err(error) = push_kg_graph_to_remote(None, remote) {
+            if let Err(error) = push_kg_graph_to_remote(project, remote) {
                 failures.push(format!("{remote} kg: {error:#}"));
             }
         }
@@ -178,6 +187,17 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
     let remotes = resolve_remotes(remote_overrides)?;
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
+
+    // Same project resolution as sync_push: a resolved bundle's project wins
+    // over the workspace's active project for project-scoped families.
+    let project = crate::store::load_active_bundle()
+        .and_then(|active| {
+            crate::store::ensure_workspace_fallback_status_is_unambiguous(&active)?;
+            Ok(active.bundle.project_id)
+        })
+        .ok()
+        .flatten();
+    let project = project.as_deref();
 
     for remote in &remotes {
         if multiple {
@@ -213,12 +233,12 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             }
         }
         if targets.history {
-            if let Err(error) = pull_history_from_remote(None, Some(remote)) {
+            if let Err(error) = pull_history_from_remote(project, Some(remote)) {
                 failures.push(format!("{remote} history: {error:#}"));
             }
         }
         if targets.views {
-            if let Err(error) = pull_views_from_remote(None, remote) {
+            if let Err(error) = pull_views_from_remote(project, remote) {
                 failures.push(format!("{remote} views: {error:#}"));
             }
         }
