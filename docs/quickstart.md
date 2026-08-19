@@ -5,7 +5,7 @@ This walkthrough takes you from install to a landed multi-repo change in about t
 ## 1. Install
 Brew:
 ```sh
-brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+brew install knit-cli/tap/knit   # macOS / Linux binaries
 ```
 Cargo:
 ```sh
