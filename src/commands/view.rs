@@ -16,7 +16,7 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 pub fn list_views(project: Option<&str>) -> Result<()> {
@@ -262,6 +262,43 @@ pub fn remove_view(name: &str, project: Option<&str>) -> Result<()> {
     save_views(&root, &views)?;
     println!("{} {}", out::movement("removed view"), out::repo(&name));
     Ok(())
+}
+
+/// Views are maintained state, not a rotting cache: when a repo leaves its
+/// project, every saved view's references to it are pruned at the removal
+/// point so resolution never has to reconcile stale ids from local edits.
+/// (Tolerant resolution stays as the safety net for views synced in from
+/// other machines, which can skew from local membership.) Returns the repo
+/// ids that were actually present in at least one view.
+pub fn prune_removed_repos_from_views(
+    root: &Path,
+    project_id: &str,
+    repo_ids: &[String],
+) -> Result<Vec<String>> {
+    let ids: Vec<String> = repo_ids.iter().map(|id| slugify(id)).collect();
+    let _lock = acquire_named_lock(root, &format!("views-{project_id}"))?;
+    let mut views = load_views(root, project_id)?;
+    let mut pruned: Vec<String> = Vec::new();
+    for view in views.views.values_mut() {
+        for id in &ids {
+            if list_remove(&mut view.include, id) | list_remove(&mut view.exclude, id)
+                && !pruned.contains(id)
+            {
+                pruned.push(id.clone());
+            }
+        }
+    }
+    if !pruned.is_empty() {
+        views.updated_at = now_iso();
+        save_views(root, &views)?;
+    }
+    Ok(pruned)
+}
+
+fn list_remove(list: &mut Vec<String>, id: &str) -> bool {
+    let before = list.len();
+    list.retain(|existing| existing != id);
+    before != list.len()
 }
 
 pub fn edit_views(project: Option<&str>) -> Result<()> {
