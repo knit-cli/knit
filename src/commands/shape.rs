@@ -126,7 +126,14 @@ pub fn bundle_apply_view(
         .context("This bundle is not based on a project, so views cannot be applied.")?;
     let project = load_project_by_id(&active.root, &project_id)?;
     let view = resolve_active_view(&active.root, &project_id, Some(name))?;
-    let target = resolve_view_repos(&project, &[], false, view.as_ref(), &[], &[])?;
+    let target = resolve_view_repos(
+        &project,
+        &[],
+        false,
+        view.as_ref().map(|(name, view)| (name.as_str(), view)),
+        &[],
+        &[],
+    )?;
 
     let target_ids: Vec<String> = target.iter().map(|repo| repo.id.clone()).collect();
     let current_ids: Vec<String> = active.bundle.repos.iter().map(|r| r.id.clone()).collect();

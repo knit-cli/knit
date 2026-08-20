@@ -325,19 +325,20 @@ fn select_project_repos(
         &project,
         repo_ids,
         all_repos,
-        view.as_ref(),
+        view.as_ref().map(|(name, view)| (name.as_str(), view)),
         include,
         exclude,
     )
 }
 
 /// Resolve which named view to apply: an explicit `--view` name (which must
-/// exist), otherwise the user's saved default view, otherwise none.
+/// exist), otherwise the user's saved default view, otherwise none. Returns
+/// the view together with its name so warnings can point at the right view.
 pub(crate) fn resolve_active_view(
     root: &Path,
     project_id: &str,
     view_name: Option<&str>,
-) -> Result<Option<ProjectView>> {
+) -> Result<Option<(String, ProjectView)>> {
     let views = load_views(root, project_id)?;
     match view_name {
         Some(name) => {
@@ -349,13 +350,16 @@ pub(crate) fn resolve_active_view(
                     out::repo(&name)
                 )
             })?;
-            Ok(Some(view))
+            Ok(Some((name, view)))
         }
         // A dangling default is ignored rather than blocking `bundle start`.
-        None => Ok(views
-            .default_view
-            .as_ref()
-            .and_then(|name| views.views.get(name).cloned())),
+        None => Ok(views.default_view.as_ref().and_then(|name| {
+            views
+                .views
+                .get(name)
+                .cloned()
+                .map(|view| (name.clone(), view))
+        })),
     }
 }
 
@@ -368,7 +372,7 @@ pub(crate) fn resolve_view_repos(
     project: &KnitProject,
     repo_ids: &[String],
     all_repos: bool,
-    view: Option<&ProjectView>,
+    view: Option<(&str, &ProjectView)>,
     include: &[String],
     exclude: &[String],
 ) -> Result<Vec<ProjectRepoEntry>> {
@@ -389,19 +393,32 @@ pub(crate) fn resolve_view_repos(
     } else {
         // An absolute view (`base: none`) seeds empty; its include list is the
         // complete shape and never absorbs default-set changes.
-        if view.map_or(true, |view| view.base.is_default()) {
+        if view.map_or(true, |(_, view)| view.base.is_default()) {
             for repo in &project.repos {
                 if repo.include_by_default {
                     selected.insert(repo.id.clone());
                 }
             }
         }
-        if let Some(view) = view {
+        if let Some((view_name, view)) = view {
+            // Saved views are user data that can outlive project membership
+            // changes (a repo removed after the view was saved, or a synced
+            // teammate view naming a repo this project never tracked), so
+            // dangling entries are skipped with a warning instead of
+            // blocking bundle creation.
             for repo_id in &view.include {
-                selected.insert(project_repo(project, repo_id)?.id.clone());
+                if let Some(repo) = project_repo_opt(project, repo_id) {
+                    selected.insert(repo.id.clone());
+                } else {
+                    warn_dangling_view_repo(project, view_name, repo_id);
+                }
             }
             for repo_id in &view.exclude {
-                selected.remove(&project_repo(project, repo_id)?.id);
+                if let Some(repo) = project_repo_opt(project, repo_id) {
+                    selected.remove(&repo.id);
+                } else {
+                    warn_dangling_view_repo(project, view_name, repo_id);
+                }
             }
         }
     }
@@ -436,6 +453,27 @@ fn project_repo<'a>(project: &'a KnitProject, repo_id: &str) -> Result<&'a Proje
                 out::repo(&repo_id)
             )
         })
+}
+
+/// Like [`project_repo`] but tolerant: view deltas may reference repos the
+/// project no longer tracks, which callers surface as a warning rather than
+/// an error.
+fn project_repo_opt<'a>(project: &'a KnitProject, repo_id: &str) -> Option<&'a ProjectRepoEntry> {
+    let repo_id = slugify(repo_id);
+    project.repos.iter().find(|repo| repo.id == repo_id)
+}
+
+fn warn_dangling_view_repo(project: &KnitProject, view_name: &str, repo_id: &str) {
+    crate::human!(
+        "{} saved view {} references repo {}, which project {} no longer tracks; skipping. \
+         Remove it with `knit view unset {} {}`.",
+        out::warn("warning:"),
+        out::repo(view_name),
+        out::repo(repo_id),
+        out::repo(&project.id),
+        view_name,
+        repo_id
+    );
 }
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {

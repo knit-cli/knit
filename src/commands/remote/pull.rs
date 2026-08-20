@@ -372,6 +372,15 @@ fn reconcile_project_repositories(
         write_json(&project_path(root, &project.id), project)?;
     }
 
+    // Maintain saved views at the removal point: a membership removal must
+    // prune the repo from the user's views, not leave stale entries that
+    // resolution has to skip around.
+    let pruned_from_views = if removed.is_empty() {
+        Vec::new()
+    } else {
+        crate::commands::view::prune_removed_repos_from_views(root, &project.id, &removed)?
+    };
+
     for id in &added {
         println!(
             "{} {} {}",
@@ -386,6 +395,15 @@ fn reconcile_project_repositories(
             out::heading("Project repo:"),
             out::movement("removed"),
             out::repo(id)
+        );
+    }
+    for id in &pruned_from_views {
+        println!(
+            "{} {} {} {}",
+            out::heading("Views:"),
+            out::movement("pruned"),
+            out::repo(id),
+            out::muted("from saved view(s)")
         );
     }
     for (id, reason) in &failed {

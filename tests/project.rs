@@ -586,6 +586,100 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
 }
 
 #[test]
+fn views_skip_repos_removed_from_the_project() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    // core = defaults minus frontend; wide names frontend explicitly.
+    knit(
+        &workspace,
+        ["view", "save", "core", "--exclude", "frontend"],
+    );
+    knit(
+        &workspace,
+        ["view", "save", "wide", "--include", "frontend"],
+    );
+    knit(&workspace, ["view", "default", "core"]);
+
+    // frontend leaves the project after the views were saved; the removal
+    // maintains the views instead of leaving the entries to rot.
+    let removed = knit(
+        &workspace,
+        ["project", "remove", "demo", "--repo", "frontend"],
+    );
+    assert!(removed.contains("pruned"), "{removed}");
+    assert!(removed.contains("frontend"), "{removed}");
+    let core: Value = serde_json::from_str(&knit(&workspace, ["view", "show", "core"])).unwrap();
+    assert!(
+        !core.to_string().contains("frontend"),
+        "{}",
+        core.to_string()
+    );
+    let wide: Value = serde_json::from_str(&knit(&workspace, ["view", "show", "wide"])).unwrap();
+    assert!(
+        !wide.to_string().contains("frontend"),
+        "{}",
+        wide.to_string()
+    );
+
+    // With views maintained, bundle starts resolve cleanly — no warnings.
+    let started = knit(&workspace, ["bundle", "stale view feature"]);
+    assert!(!started.contains("no longer tracks"), "{started}");
+    assert_eq!(
+        bundle_repo_ids(&workspace, "stale-view-feature"),
+        vec!["backend"]
+    );
+
+    let named = knit(
+        &workspace,
+        ["bundle", "stale wide feature", "--view", "wide"],
+    );
+    assert!(!named.contains("no longer tracks"), "{named}");
+    assert_eq!(
+        bundle_repo_ids(&workspace, "stale-wide-feature"),
+        vec!["backend"]
+    );
+
+    // Ad-hoc flags still fail hard: the user just typed the repo id.
+    let error = knit_fails(
+        &workspace,
+        ["bundle", "ghost feature", "--include", "ghost"],
+    );
+    assert!(error.contains("has no repo named ghost"), "{error}");
+
+    // Tolerant resolution stays as the safety net for views synced in from
+    // other machines: a hand-written dangling entry warns but resolves.
+    let views_path = workspace.join(".knit/views/demo.views.json");
+    let mut views: Value = serde_json::from_str(&fs::read_to_string(&views_path).unwrap()).unwrap();
+    views["views"]["wide"]["exclude"] = json!(["frontend"]);
+    fs::write(&views_path, serde_json::to_string_pretty(&views).unwrap()).unwrap();
+    let shown = knit(&workspace, ["view", "show", "wide", "--repos"]);
+    assert!(shown.contains("no longer tracks"), "{shown}");
+    let repos: Vec<&str> = shown
+        .lines()
+        .filter(|line| !line.starts_with("warning:"))
+        .collect();
+    assert_eq!(repos, vec!["backend"], "{shown}");
+
+    // The warning's suggested command must be runnable as printed, even
+    // though the repo is no longer in the project.
+    assert!(shown.contains("knit view unset wide frontend"), "{shown}");
+    let unset = knit(&workspace, ["view", "unset", "wide", "frontend"]);
+    assert!(unset.contains("updated view"), "{unset}");
+    let reshown = knit(&workspace, ["view", "show", "wide", "--repos"]);
+    assert!(!reshown.contains("no longer tracks"), "{reshown}");
+
+    // Removing the whole project takes its saved views with it, so a future
+    // project with the same id starts from a clean slate.
+    let gone = knit(&workspace, ["project", "remove", "demo", "--force"]);
+    assert!(gone.contains("Removed views:"), "{gone}");
+    assert!(!views_path.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn absolute_views_ignore_the_default_set() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");

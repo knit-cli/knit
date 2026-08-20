@@ -2229,6 +2229,47 @@ fn pull_reconcile_applies_adds_and_removals_together() {
 }
 
 #[test]
+fn pull_reconcile_prunes_removed_repos_from_saved_views() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
+
+    // A saved view references oldrepo; the membership removal below must
+    // prune it, not leave a stale entry resolution has to skip around.
+    knit(&workspace, ["view", "save", "core", "--exclude", "oldrepo"]);
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(output.contains("removed"), "{output}");
+    assert!(output.contains("oldrepo"), "{output}");
+    assert!(output.contains("pruned"), "{output}");
+
+    let views_path = workspace.join(".knit/views/demo.views.json");
+    let views: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&views_path).unwrap()).unwrap();
+    let raw = views.to_string();
+    assert!(!raw.contains("oldrepo"), "{raw}");
+
+    // The pruned view starts bundles without warnings.
+    let started = knit(&workspace, ["bundle", "post pull feature"]);
+    assert!(!started.contains("no longer tracks"), "{started}");
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_reconcile_skips_removals_on_incomplete_export() {
     let root = unique_temp_dir();
     let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);

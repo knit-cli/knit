@@ -8,7 +8,7 @@ use crate::model::{
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, find_knit_root, load_config, project_path, read_json, save_config,
-    write_json,
+    views_path, write_json,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -269,6 +269,19 @@ pub fn remove_project(name: &str, force: bool) -> Result<()> {
     }
 
     fs::remove_file(&path).with_context(|| format!("failed to remove {}", path.display()))?;
+    // The project's saved views are meaningless without it; leaving the file
+    // behind would resurrect stale views if a project with the same id is
+    // created later.
+    let views_file = views_path(&root, &project_id);
+    if views_file.exists() {
+        fs::remove_file(&views_file)
+            .with_context(|| format!("failed to remove {}", views_file.display()))?;
+        println!(
+            "{} {}",
+            out::heading("Removed views:"),
+            out::path(views_file.display())
+        );
+    }
     let mut config = load_config(&root)?;
     if config.active_project.as_deref() == Some(project_id.as_str()) {
         config.active_project = None;
@@ -322,12 +335,26 @@ pub fn remove_project_repos(name: &str, repos: &[String]) -> Result<()> {
     project.updated_at = now_iso();
     write_json(&path, &project)?;
 
+    // Maintain saved views at the removal point so they never reference repos
+    // the project can no longer select.
+    let pruned =
+        crate::commands::view::prune_removed_repos_from_views(&root, &project_id, &targets)?;
+
     for target in &targets {
         println!(
             "{} {} {}",
             out::heading("Removed repo:"),
             out::repo(target),
             out::muted(format!("from project {project_id}"))
+        );
+    }
+    for target in &pruned {
+        println!(
+            "{} {} {} {}",
+            out::heading("Views:"),
+            out::movement("pruned"),
+            out::repo(target),
+            out::muted("from saved view(s)")
         );
     }
     Ok(())
