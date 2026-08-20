@@ -397,11 +397,24 @@ pub(crate) fn resolve_view_repos(
             }
         }
         if let Some(view) = view {
+            // Saved views are user data that can outlive project membership
+            // changes (a repo removed after the view was saved, or a synced
+            // teammate view naming a repo this project never tracked), so
+            // dangling entries are skipped with a warning instead of
+            // blocking bundle creation.
             for repo_id in &view.include {
-                selected.insert(project_repo(project, repo_id)?.id.clone());
+                if let Some(repo) = project_repo_opt(project, repo_id) {
+                    selected.insert(repo.id.clone());
+                } else {
+                    warn_dangling_view_repo(project, repo_id);
+                }
             }
             for repo_id in &view.exclude {
-                selected.remove(&project_repo(project, repo_id)?.id);
+                if let Some(repo) = project_repo_opt(project, repo_id) {
+                    selected.remove(&repo.id);
+                } else {
+                    warn_dangling_view_repo(project, repo_id);
+                }
             }
         }
     }
@@ -436,6 +449,25 @@ fn project_repo<'a>(project: &'a KnitProject, repo_id: &str) -> Result<&'a Proje
                 out::repo(&repo_id)
             )
         })
+}
+
+/// Like [`project_repo`] but tolerant: view deltas may reference repos the
+/// project no longer tracks, which callers surface as a warning rather than
+/// an error.
+fn project_repo_opt<'a>(project: &'a KnitProject, repo_id: &str) -> Option<&'a ProjectRepoEntry> {
+    let repo_id = slugify(repo_id);
+    project.repos.iter().find(|repo| repo.id == repo_id)
+}
+
+fn warn_dangling_view_repo(project: &KnitProject, repo_id: &str) {
+    crate::human!(
+        "{} saved view references repo {}, which project {} no longer tracks; skipping. \
+         Remove it with `knit view unset {}`.",
+        out::warn("warning:"),
+        out::repo(repo_id),
+        out::repo(&project.id),
+        repo_id
+    );
 }
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {

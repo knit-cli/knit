@@ -586,6 +586,68 @@ fn views_apply_default_and_named_shapes_on_bundle_start() {
 }
 
 #[test]
+fn views_skip_repos_removed_from_the_project() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    // core = defaults minus frontend; wide names frontend explicitly.
+    knit(
+        &workspace,
+        ["view", "save", "core", "--exclude", "frontend"],
+    );
+    knit(
+        &workspace,
+        ["view", "save", "wide", "--include", "frontend"],
+    );
+    knit(&workspace, ["view", "default", "core"]);
+
+    // frontend leaves the project after the views were saved; the saved
+    // entries now dangle.
+    knit(
+        &workspace,
+        ["project", "remove", "demo", "--repo", "frontend"],
+    );
+
+    // Default and named views skip the dangling entries with a warning
+    // instead of blocking bundle creation.
+    let started = knit(&workspace, ["bundle", "stale view feature"]);
+    assert!(started.contains("no longer tracks"), "{started}");
+    assert_eq!(
+        bundle_repo_ids(&workspace, "stale-view-feature"),
+        vec!["backend"]
+    );
+
+    let named = knit(
+        &workspace,
+        ["bundle", "stale wide feature", "--view", "wide"],
+    );
+    assert!(named.contains("no longer tracks"), "{named}");
+    assert_eq!(
+        bundle_repo_ids(&workspace, "stale-wide-feature"),
+        vec!["backend"]
+    );
+
+    // `view show --repos` resolves through the same tolerant path.
+    let shown = knit(&workspace, ["view", "show", "wide", "--repos"]);
+    assert!(shown.contains("no longer tracks"), "{shown}");
+    let repos: Vec<&str> = shown
+        .lines()
+        .filter(|line| !line.starts_with("warning:"))
+        .collect();
+    assert_eq!(repos, vec!["backend"], "{shown}");
+
+    // Ad-hoc flags still fail hard: the user just typed the repo id.
+    let error = knit_fails(
+        &workspace,
+        ["bundle", "ghost feature", "--include", "ghost"],
+    );
+    assert!(error.contains("has no repo named ghost"), "{error}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn absolute_views_ignore_the_default_set() {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
