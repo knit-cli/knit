@@ -48,7 +48,14 @@ pub fn show_view(name: Option<&str>, project: Option<&str>, repos: bool) -> Resu
     if repos {
         let project_artifact = load_project_by_id(&root, &project_id)?;
         let view = resolve_active_view(&root, &project_id, name)?;
-        let resolved = resolve_view_repos(&project_artifact, &[], false, view.as_ref(), &[], &[])?;
+        let resolved = resolve_view_repos(
+            &project_artifact,
+            &[],
+            false,
+            view.as_ref().map(|(name, view)| (name.as_str(), view)),
+            &[],
+            &[],
+        )?;
         if resolved.is_empty() {
             println!("{}", out::muted("(no repos)"));
         }
@@ -166,7 +173,7 @@ pub fn freeze_view(name: &str, project: Option<&str>) -> Result<()> {
         return Ok(());
     }
     let include: Vec<String> =
-        resolve_view_repos(&project_artifact, &[], false, Some(view), &[], &[])?
+        resolve_view_repos(&project_artifact, &[], false, Some((&name, view)), &[], &[])?
             .into_iter()
             .map(|repo| repo.id)
             .collect();
@@ -208,9 +215,17 @@ pub fn view_exclude(name: &str, repos: &[String], project: Option<&str>) -> Resu
 
 pub fn view_unset(name: &str, repos: &[String], project: Option<&str>) -> Result<()> {
     let (root, project_id) = resolve_project(project)?;
-    let project_artifact = load_project_by_id(&root, &project_id)?;
     let name = slugify(name);
-    let ids = normalize_ids(&project_artifact, repos)?;
+    // Unset is removal, so the repo need not still be in the project: this is
+    // exactly how a dangling view entry (repo removed from the project, or a
+    // view synced from another machine) gets cleaned up.
+    let mut ids: Vec<String> = Vec::new();
+    for repo in expand_repo_selectors(repos) {
+        let id = slugify(&repo);
+        if !ids.contains(&id) {
+            ids.push(id);
+        }
+    }
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;

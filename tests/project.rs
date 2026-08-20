@@ -662,6 +662,14 @@ fn views_skip_repos_removed_from_the_project() {
         .collect();
     assert_eq!(repos, vec!["backend"], "{shown}");
 
+    // The warning's suggested command must be runnable as printed, even
+    // though the repo is no longer in the project.
+    assert!(shown.contains("knit view unset wide frontend"), "{shown}");
+    let unset = knit(&workspace, ["view", "unset", "wide", "frontend"]);
+    assert!(unset.contains("updated view"), "{unset}");
+    let reshown = knit(&workspace, ["view", "show", "wide", "--repos"]);
+    assert!(!reshown.contains("no longer tracks"), "{reshown}");
+
     // Removing the whole project takes its saved views with it, so a future
     // project with the same id starts from a clean slate.
     let gone = knit(&workspace, ["project", "remove", "demo", "--force"]);
