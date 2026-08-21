@@ -267,19 +267,28 @@ pub fn sync_remote_helpers_command(name: &str) -> Result<()> {
     let remote_name = slugify(name);
     let remote = resolve_remote(&config, &remote_name)?;
     let token = resolve_token(&remote_name, remote)?;
-    let hosts = super::helpers::sync_remote_helpers(&remote_name, remote, &token)?;
-    if hosts.is_empty() {
-        println!(
-            "{} {}",
-            out::heading("Credential helpers:"),
-            out::muted("no connected forge hosts; stale entries removed")
-        );
-    } else {
-        println!(
-            "{} {}",
-            out::heading("Credential helpers:"),
-            hosts.iter().cloned().collect::<Vec<_>>().join(", ")
-        );
+    match super::helpers::sync_remote_helpers(&remote_name, remote, &token)? {
+        super::helpers::HelperSync::Configured(hosts) if hosts.is_empty() => {
+            println!(
+                "{} {}",
+                out::heading("Credential helpers:"),
+                out::muted("no connected forge hosts; stale entries removed")
+            );
+        }
+        super::helpers::HelperSync::Configured(hosts) => {
+            println!(
+                "{} {}",
+                out::heading("Credential helpers:"),
+                hosts.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
+        super::helpers::HelperSync::Unavailable => {
+            println!(
+                "{} {}",
+                out::heading("Credential helpers:"),
+                out::muted("unavailable for this token; stale entries removed")
+            );
+        }
     }
     Ok(())
 }

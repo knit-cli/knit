@@ -1874,6 +1874,11 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
     }
 
     let (status, response) = match (method.as_str(), path.as_str()) {
+        ("GET", "/api/v1/me/forge-credentials")
+            if dir.join("forbid-forge-credentials").exists() =>
+        {
+            (403, "{\"errors\":{\"detail\":\"Forbidden\"}}".to_string())
+        }
         ("GET", "/api/v1/me/forge-credentials") => (
             200,
             "{\"data\":[{\"forge\":\"test-forge\",\"hosts\":[\"code.example.test\"],\"connected\":true},{\"forge\":\"other\",\"hosts\":[\"off.example.test\"],\"connected\":false}]}"

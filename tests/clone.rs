@@ -196,6 +196,73 @@ fn absolute_project_url_clones_without_a_preconfigured_remote() {
 }
 
 #[test]
+fn clone_silently_falls_back_when_the_sync_token_cannot_broker_git_credentials() {
+    let root = unique_temp_dir();
+    let fake_dir = root.join("fake-remote");
+    let knit_home = root.join("knit-home");
+    let gitconfig = root.join("gitconfig");
+    fs::create_dir_all(&fake_dir).unwrap();
+    fs::write(fake_dir.join("forbid-forge-credentials"), "").unwrap();
+    fs::write(
+        &gitconfig,
+        concat!(
+            "[credential \"https://github.com\"]\n",
+            "\thelper = !'/old/knit' git-credential --remote 'hosted'\n",
+            "\thelper = osxkeychain\n",
+        ),
+    )
+    .unwrap();
+
+    let (export, _source) = partial_export(&root);
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let project_url = format!("{base_url}/acme/demo");
+    let target = root.join("workspace");
+    let env = [
+        ("KNIT_HOME", knit_home.to_str().unwrap()),
+        ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
+    ];
+
+    let added = knit_with_env(
+        &root,
+        [
+            "remote",
+            "add",
+            "hosted",
+            &base_url,
+            "--global",
+            "--token",
+            "legacy-token",
+        ],
+        &env,
+    );
+    assert!(added.contains("hosted"), "{added}");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            &project_url,
+            target.to_str().unwrap(),
+            "--no-worktree",
+        ],
+        &env,
+    );
+
+    assert!(success, "clone failed: {stderr}");
+    assert!(stdout.contains("cloned demo"), "{stdout}");
+    assert!(
+        !stdout.contains("credential helper setup skipped")
+            && !stderr.contains("credential helper setup skipped"),
+        "expected a clean fallback, stdout={stdout:?} stderr={stderr:?}"
+    );
+    let gitconfig = fs::read_to_string(&gitconfig).unwrap();
+    assert!(!gitconfig.contains("git-credential --remote 'hosted'"));
+    assert!(gitconfig.contains("osxkeychain"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn clone_human_output_mentions_dropped_bundles() {
     let root = unique_temp_dir();
     let (export, _source) = partial_export(&root);
