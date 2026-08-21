@@ -10,7 +10,7 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 
 Brew:
 ```sh
-brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+brew install knit-cli/tap/knit   # macOS / Linux binaries
 ```
 Cargo:
 ```sh
