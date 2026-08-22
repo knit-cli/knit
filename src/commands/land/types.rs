@@ -65,6 +65,10 @@ impl std::fmt::Display for LandStatus {
     }
 }
 
+fn terminal_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandPlan {
@@ -83,6 +87,14 @@ pub(super) struct LandPlan {
     pub(super) lane: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) target_branches: BTreeMap<String, String>,
+    /// Whether this plan's destination finishes the bundle. A terminal
+    /// landing archives the bundle and removes its generated worktrees; an
+    /// intermediate one (a staging lane, say) leaves it open for its next
+    /// destination. Resolved from the project's `terminal` declaration when
+    /// the plan is generated, and editable in the plan file. Plans written
+    /// before this field existed always landed on the configured bases.
+    #[serde(default = "terminal_default")]
+    pub(super) terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_project_id: Option<String>,
     pub(super) created_at: String,

@@ -723,7 +723,7 @@ fn build_annotation(
         .nodes
         .iter()
         .rev()
-        .find(|node| node.node_type == "feature.landed")
+        .find(|node| crate::model::is_terminal_landed_node(node))
     {
         if let Some(run_id) = landed.run_id.as_deref() {
             lines.push(format!("landed: run {run_id} ({})", landed.created_at));

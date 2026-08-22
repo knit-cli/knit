@@ -17,6 +17,15 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
     }
     println!(
         "{} {}",
+        out::heading("Bundle:"),
+        if plan.terminal {
+            "archived on success (terminal destination)"
+        } else {
+            "stays open on success (intermediate destination)"
+        }
+    );
+    println!(
+        "{} {}",
         out::heading("Plan file:"),
         out::path(path.display())
     );

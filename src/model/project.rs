@@ -110,6 +110,13 @@ pub struct ProjectLandingLane {
     pub default_branch: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub branches: BTreeMap<String, String>,
+    /// Whether landing into this lane finishes the bundle. A terminal lane is
+    /// the bundle's last stop: landing there archives it. An intermediate
+    /// lane (a staging environment, say) leaves the bundle open. When unset,
+    /// a lane is terminal only if it maps every repository to that
+    /// repository's configured base branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deployments: Vec<ProjectLandingDeployment>,
 }
@@ -117,6 +124,11 @@ pub struct ProjectLandingLane {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingTarget {
+    /// Whether landing into this branch finishes the bundle; see
+    /// [`ProjectLandingLane::terminal`]. When unset, the branch is terminal
+    /// only if it is the configured base branch of every merging repository.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal: Option<bool>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub deployments: Vec<ProjectLandingDeployment>,
 }

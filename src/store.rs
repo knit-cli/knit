@@ -595,7 +595,7 @@ fn is_open_bundle(bundle: &ChangeGroup) -> bool {
     let has_landed_node = bundle
         .nodes
         .iter()
-        .any(|node| node.node_type == "feature.landed");
+        .any(crate::model::is_terminal_landed_node);
     let has_open_publication = bundle.publications.iter().any(|publication| {
         !publication.state.eq_ignore_ascii_case("merged")
             && !publication.state.eq_ignore_ascii_case("closed")

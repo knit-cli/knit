@@ -75,6 +75,14 @@ pub(super) fn build_default_plan(
         }
     }
     let target_branches = resolve_lane_targets(project.as_ref(), landing, lane_name, &steps)?;
+    let terminal = resolve_terminal(
+        active,
+        landing,
+        target_branch,
+        lane_name,
+        &target_branches,
+        &steps,
+    );
     append_project_deployments(
         active,
         landing,
@@ -99,6 +107,7 @@ pub(super) fn build_default_plan(
         target_branch: target_branch.map(ToOwned::to_owned),
         lane: lane_name.map(ToOwned::to_owned),
         target_branches,
+        terminal,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
         on_failure: landing.and_then(|landing| landing.on_failure),
@@ -106,6 +115,97 @@ pub(super) fn build_default_plan(
             .map(|landing| landing.require_checks.clone())
             .unwrap_or_default(),
         steps,
+    })
+}
+
+/// Whether landing this plan finishes the bundle.
+///
+/// A bundle's work is done when it has reached every repository's configured
+/// base branch; any other destination is an environment the bundle passes
+/// through, so landing there must leave it open. A project can override that
+/// per lane or per branch-keyed target with `terminal`, which is how a
+/// release branch that is not a repo's configured base still ends the
+/// bundle's life.
+fn resolve_terminal(
+    active: &ActiveBundle,
+    landing: Option<&ProjectLandingPlan>,
+    target_branch: Option<&str>,
+    lane_name: Option<&str>,
+    lane_targets: &BTreeMap<String, String>,
+    steps: &[LandStep],
+) -> bool {
+    if let Some(lane_name) = lane_name {
+        let lane = landing.and_then(|landing| landing.lanes.get(lane_name));
+        if let Some(declared) = lane.and_then(|lane| lane.terminal) {
+            return declared;
+        }
+        let destinations = if lane_targets.is_empty() {
+            // A deploy-only lane plan has no merge steps to resolve, so judge
+            // the lane by the branches it maps the bundle's repos onto.
+            lane.map(|lane| {
+                active
+                    .bundle
+                    .repos
+                    .iter()
+                    .filter_map(|repo| {
+                        Some((repo.id.clone(), lane_branch(lane, &repo.id)?.to_string()))
+                    })
+                    .collect::<BTreeMap<_, _>>()
+            })
+            .unwrap_or_default()
+        } else {
+            lane_targets.clone()
+        };
+        // An unresolvable lane is not a claim that the bundle is finished.
+        return !destinations.is_empty()
+            && destinations_are_configured_bases(active, &destinations);
+    }
+
+    if let Some(target_branch) = target_branch {
+        if let Some(declared) = landing
+            .and_then(|landing| landing.targets.get(target_branch))
+            .and_then(|target| target.terminal)
+        {
+            return declared;
+        }
+        let destinations = merge_repo_ids(steps)
+            .map(|repo_id| (repo_id, target_branch.to_string()))
+            .collect::<BTreeMap<_, _>>();
+        return destinations_are_configured_bases(active, &destinations);
+    }
+
+    // Without an explicit destination each review keeps its recorded base.
+    let destinations = merge_repo_ids(steps)
+        .filter_map(|repo_id| {
+            let base = publication_for_repo(&active.bundle, &repo_id)?
+                .base_branch
+                .clone();
+            Some((repo_id, base))
+        })
+        .collect::<BTreeMap<_, _>>();
+    destinations_are_configured_bases(active, &destinations)
+}
+
+fn merge_repo_ids(steps: &[LandStep]) -> impl Iterator<Item = String> + '_ {
+    steps
+        .iter()
+        .filter(|step| step.step_type == LandStepKind::MergePr)
+        .filter_map(|step| step.repo_id.clone())
+}
+
+/// Whether every destination is the repository's own configured base branch.
+/// A deploy-only plan merges nothing and keeps its historical behavior.
+fn destinations_are_configured_bases(
+    active: &ActiveBundle,
+    destinations: &BTreeMap<String, String>,
+) -> bool {
+    destinations.iter().all(|(repo_id, branch)| {
+        active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| repo.id == *repo_id)
+            .is_some_and(|repo| repo.base_branch == *branch)
     })
 }
 

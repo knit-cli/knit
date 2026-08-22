@@ -850,6 +850,11 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
         plan.provider.clone(),
         repo_ids,
         publication_urls,
+        Some(crate::model::NodeLanding {
+            terminal: plan.terminal,
+            lane: plan.lane.clone(),
+            target_branch: plan.target_branch.clone(),
+        }),
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();

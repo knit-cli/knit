@@ -453,6 +453,49 @@ pub struct RepoChange {
     pub commit_details: BTreeMap<String, CommitDetail>,
 }
 
+/// Where a `feature.landed` node's landing went, and whether that
+/// destination finishes the bundle. Absent on nodes recorded before landing
+/// destinations were distinguished; those always landed on the configured
+/// project bases and were archived in the same run, so a missing value reads
+/// as terminal.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeLanding {
+    /// True when this destination is the bundle's last stop: the work is
+    /// finished and the bundle is archived. False for an intermediate
+    /// environment such as a staging lane, which leaves the bundle open.
+    pub terminal: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub lane: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+}
+
+impl NodeLanding {
+    /// How this landing reads in the ledger, in the log, and in history.
+    pub fn describe(&self) -> String {
+        let destination = match (self.lane.as_deref(), self.target_branch.as_deref()) {
+            (Some(lane), _) => format!("lane `{lane}`"),
+            (None, Some(branch)) => format!("branch `{branch}`"),
+            (None, None) => "the recorded review bases".to_string(),
+        };
+        if self.terminal {
+            format!("Bundle landed into {destination}")
+        } else {
+            format!("Bundle landed into {destination}; bundle stays open")
+        }
+    }
+}
+
+/// Whether a ledger node records a landing that finished the bundle. A
+/// landing into an intermediate destination is the same kind of node but
+/// leaves the bundle open, so callers asking "is this bundle done?" must go
+/// through here rather than matching on the node type.
+pub fn is_terminal_landed_node(node: &BundleNode) -> bool {
+    node.node_type == "feature.landed"
+        && node.landing.as_ref().is_none_or(|landing| landing.terminal)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleNode {
@@ -485,6 +528,10 @@ pub struct BundleNode {
     pub run_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
+    /// Landing destination of a `feature.landed` node. Additive: nodes of
+    /// other types and nodes written by older Knit versions omit it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub landing: Option<NodeLanding>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publication_urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -535,6 +582,7 @@ impl BundleNode {
             plan_id: None,
             run_id: None,
             provider: None,
+            landing: None,
             publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
@@ -669,6 +717,9 @@ impl BundleNode {
         }
     }
 
+    /// A completed landing run. `landing` records which destination the run
+    /// merged into and whether that destination finishes the bundle; only a
+    /// terminal landing closes the bundle's life.
     pub fn feature_landed(
         id: String,
         created_at: String,
@@ -677,12 +728,20 @@ impl BundleNode {
         provider: String,
         repo_ids: Vec<String>,
         publication_urls: Vec<String>,
+        landing: Option<NodeLanding>,
     ) -> Self {
         Self {
             repo_ids: Some(repo_ids),
             plan_id: Some(plan_id),
             run_id: Some(run_id),
             provider: Some(provider),
+            // Only annotate landings that went somewhere other than the plain
+            // configured bases, so existing artifacts stay byte-stable.
+            message: landing
+                .as_ref()
+                .filter(|landing| !landing.terminal || landing.lane.is_some())
+                .map(NodeLanding::describe),
+            landing,
             publication_urls,
             ..Self::base(id, "feature.landed", created_at)
         }

@@ -175,6 +175,7 @@ pub fn apply_land_plan(
     let plan: LandPlan = read_json(&path)?;
     ensure_requested_selection_matches_plan(target_branch.as_deref(), lane_name.as_deref(), &plan)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
+    ensure_tag_matches_destination(&plan, tag.as_deref())?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
     prepare_plan_publication_targets(&mut active, &plan)?;
@@ -188,6 +189,18 @@ pub fn apply_land_plan(
     let mut run = execute::new_run(&active, &plan, &path);
     write_json(&run_path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
+    // Only a terminal destination ends the bundle's life. An intermediate one
+    // — a staging lane, a preview branch — is a stop on the way, so the
+    // bundle, its worktrees, and its ledger stay live for the next landing.
+    if !plan.terminal {
+        crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
+            &mut active,
+            remote,
+            no_remote,
+        )?;
+        print_intermediate_landing_summary(&active, &plan);
+        return Ok(());
+    }
     let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
     crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
         &mut active,
@@ -197,6 +210,28 @@ pub fn apply_land_plan(
     print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
     tag_landed_bundle(&mut active, tag, no_tag, remote, no_remote);
     Ok(())
+}
+
+/// `knit tag` pins each repo's configured base branch, so it can only speak
+/// for a landing that went there. Refuse before executing rather than after
+/// merging, so the operator can decide without the merge already done.
+fn ensure_tag_matches_destination(plan: &LandPlan, tag: Option<&str>) -> Result<()> {
+    if plan.terminal || tag.is_none() {
+        return Ok(());
+    }
+    bail!(
+        "This plan lands into {}, which is not a terminal destination, and `knit tag` pins each repo's configured base branch. Land the bundle to its terminal destination first, or tag explicitly with `knit tag <name> --bundle {}`.",
+        plan_destination_label(plan),
+        plan.bundle_id
+    );
+}
+
+fn plan_destination_label(plan: &LandPlan) -> String {
+    match (plan.lane.as_deref(), plan.target_branch.as_deref()) {
+        (Some(lane), _) => format!("lane `{lane}`"),
+        (None, Some(branch)) => format!("branch `{branch}`"),
+        (None, None) => "the recorded review bases".to_string(),
+    }
 }
 
 fn normalize_target_branch(target_branch: Option<&str>) -> Result<Option<String>> {
@@ -473,6 +508,41 @@ fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Res
     save_active_bundle(active)?;
     crate::commands::bundle::clear_workspace_active_if_matches(&active.root, &active.bundle.id)?;
     Ok(summary.removed_worktrees)
+}
+
+/// Report a landing that did not finish the bundle: what moved, what is still
+/// open, and where the bundle goes next.
+fn print_intermediate_landing_summary(active: &ActiveBundle, plan: &LandPlan) {
+    println!(
+        "landed {} into {}; bundle stays open with its worktrees intact",
+        out::node(&active.bundle.id),
+        plan_destination_label(plan)
+    );
+    if crate::store::load_effective_config(&active.root)
+        .map(|config| config.auto_tag_enabled())
+        .unwrap_or(false)
+    {
+        println!(
+            "{} skipped automatic tag because this landing did not reach the configured project bases; `knit tag` pins those.",
+            out::warn("warning:")
+        );
+    }
+    if crate::store::load_effective_config(&active.root)
+        .map(|config| config.auto_tag_enabled())
+        .unwrap_or(false)
+    {
+        println!(
+            "{} skipped automatic tag because this landing is not terminal; `knit tag` pins configured project bases.",
+            out::warn("warning:")
+        );
+    }
+    advice::print(
+        &active.root,
+        format!(
+            "this destination is not terminal, so the bundle was not archived. Land it to its terminal destination when the work is done, or declare this one terminal in the project's landing config. Archive it by hand with `knit bundle archive {}` if it will go no further.",
+            active.bundle.id
+        ),
+    );
 }
 
 fn print_landed_summary(bundle_id: &str, removed_worktrees: usize, keep_worktrees: bool) {

@@ -2173,7 +2173,10 @@ fn pull_reconcile_keeps_removals_when_an_add_fails() {
 
     let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
     assert!(output.contains("Project repo add failed:"), "{output}");
-    assert!(output.contains("repository not found on the forge"), "{output}");
+    assert!(
+        output.contains("repository not found on the forge"),
+        "{output}"
+    );
     assert!(!output.contains("no HTTPS git access"), "{output}");
     assert!(
         output.contains("keeping 1 removed repo(s) locally: oldrepo"),
@@ -2212,7 +2215,10 @@ fn pull_reconcile_applies_adds_and_removals_together() {
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
     let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
-    assert!(output.contains("syncing membership from remote (+1 / -1)"), "{output}");
+    assert!(
+        output.contains("syncing membership from remote (+1 / -1)"),
+        "{output}"
+    );
     assert!(output.contains("added"), "{output}");
     assert!(output.contains("newrepo"), "{output}");
     assert!(output.contains("removed"), "{output}");

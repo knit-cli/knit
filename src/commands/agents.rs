@@ -570,7 +570,7 @@ Configured branch-target deployment steps (`landing.targets`):
 
 {target_deployments}
 
-Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan. A successful apply archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed.
+Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan. A successful apply into a terminal destination archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed; landing into an intermediate destination such as a staging lane leaves the bundle open.
 "#
     )
 }
