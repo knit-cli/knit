@@ -16,6 +16,10 @@ pub(super) const DEFAULT_LAND_PROVIDER: &str = "github";
 #[serde(rename_all = "snake_case")]
 pub(super) enum LandStepKind {
     MergePr,
+    /// Merge the bundle's feature branch into a destination branch and push
+    /// it. How a bundle reaches an environment it only passes through: the
+    /// review object stays where it is, pointed at the terminal destination.
+    MergeBranch,
     WaitChecks,
     Run,
     Deploy,
@@ -25,6 +29,7 @@ impl LandStepKind {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             LandStepKind::MergePr => "merge_pr",
+            LandStepKind::MergeBranch => "merge_branch",
             LandStepKind::WaitChecks => "wait_checks",
             LandStepKind::Run => "run",
             LandStepKind::Deploy => "deploy",
@@ -119,6 +124,9 @@ pub(super) struct LandStep {
     pub(super) needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) repo_id: Option<String>,
+    /// Destination branch of a `merge_branch` step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) method: Option<crate::model::MergeMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -184,6 +192,10 @@ pub(super) struct LandRunStep {
     pub(super) status: LandStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) repo_id: Option<String>,
+    /// Destination branch of a `merge_branch` step, carried from the plan so
+    /// the run record says where the work went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) publication_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

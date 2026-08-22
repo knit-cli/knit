@@ -400,6 +400,105 @@ fn prepare_merge_step(
     })
 }
 
+/// Merge one repo's feature branch into a branch target and push it, from a
+/// managed `.knit/merge-worktrees/<branch>/<repo>/` checkout. This is the git
+/// half of a merge run, exposed for callers that own their own run record —
+/// landing a bundle into an environment merges branches this way instead of
+/// spending the bundle's review objects on a stop it only passes through.
+pub(crate) fn merge_branch_into_target(
+    root: &Path,
+    repo: &RepoEntry,
+    source_ref: &str,
+    branch: &str,
+    push: bool,
+) -> Result<BranchMergeOutcome> {
+    let repo_root = PathBuf::from(&repo.path);
+    // Refresh from origin when the destination lives there. A destination that
+    // exists only locally still merges; one that exists nowhere is a
+    // configuration mistake worth naming.
+    let on_origin = crate::git::remote_ref_sha(&repo_root, "origin", branch)
+        .unwrap_or(None)
+        .is_some();
+    if !on_origin && !branch_exists(&repo_root, branch) {
+        bail!(
+            "{}: destination branch {} does not exist locally or on origin. Create it before landing there, for example `git branch {branch} origin/{}` and `git push -u origin {branch}`.",
+            repo.id,
+            out::branch(branch),
+            repo.base_branch
+        );
+    }
+    let checkout = prepare_branch_checkout(root, repo, branch, on_origin)?;
+    ensure_ref_exists(&checkout, source_ref)
+        .with_context(|| format!("{}: source ref {source_ref} was not found", repo.id))?;
+    let status = git_output(&checkout, ["status", "--porcelain"])?;
+    if !status.trim().is_empty() {
+        bail!(
+            "{}: merge checkout is not clean at {}.",
+            repo.id,
+            checkout.display()
+        );
+    }
+    let before_sha = rev_parse(&checkout, "HEAD")?;
+    if is_ancestor(&checkout, source_ref, "HEAD") {
+        // Already contained: a repeated landing into the same environment is a
+        // no-op rather than an empty merge commit.
+        return Ok(BranchMergeOutcome {
+            after_sha: before_sha,
+            merged: false,
+        });
+    }
+
+    let merge_result = git_output(
+        &checkout,
+        [
+            OsString::from("merge"),
+            OsString::from("--no-ff"),
+            OsString::from("--no-edit"),
+            OsString::from(source_ref),
+        ],
+    );
+    if let Err(error) = merge_result {
+        let conflicted = merge_in_progress(&checkout) || has_unmerged_paths(&checkout);
+        abort_merge_if_needed(&checkout);
+        let _ = hard_reset(&checkout, &before_sha);
+        if conflicted {
+            bail!(
+                "{}: {source_ref} conflicts with {branch}. Merge {branch} into the feature branch first (`knit land update`), then land again. Details: {error:#}",
+                repo.id
+            );
+        }
+        return Err(error);
+    }
+    let after_sha = rev_parse(&checkout, "HEAD")?;
+
+    if push {
+        git_output(
+            &checkout,
+            [
+                OsString::from("push"),
+                OsString::from("origin"),
+                OsString::from(branch),
+            ],
+        )
+        .map_err(|error| {
+            // The merge stays in the managed checkout so a retry pushes it.
+            anyhow::anyhow!("{}: failed to push origin/{branch}: {error:#}", repo.id)
+        })?;
+    }
+
+    Ok(BranchMergeOutcome {
+        after_sha,
+        merged: true,
+    })
+}
+
+/// What one branch merge did, for the caller's own run record.
+pub(crate) struct BranchMergeOutcome {
+    pub(crate) after_sha: String,
+    /// False when the target already contained the source ref.
+    pub(crate) merged: bool,
+}
+
 fn prepare_branch_checkout(
     root: &Path,
     repo: &RepoEntry,

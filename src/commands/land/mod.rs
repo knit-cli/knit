@@ -100,11 +100,28 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
         if target_branch.is_some() || lane_name.is_some() {
             let plan_path = resolve_stored_path(&active.root, &run.plan_path);
             let plan: LandPlan = read_json(&plan_path)?;
-            ensure_requested_selection_matches_plan(
+            // A bundle that landed into one environment goes on to the next
+            // one, so a finished run for another destination is history, not a
+            // conflict: plan the requested destination instead of reporting it.
+            let same_destination = ensure_requested_selection_matches_plan(
                 target_branch.as_deref(),
                 lane_name.as_deref(),
                 &plan,
-            )?;
+            );
+            if same_destination.is_err()
+                && run.status == LandStatus::Succeeded
+                && run.rolled_back_at.is_none()
+            {
+                drop(active);
+                return generate_land_plan(
+                    None,
+                    None,
+                    true,
+                    target_branch.as_deref(),
+                    lane_name.as_deref(),
+                );
+            }
+            same_destination?;
         }
         display::print_run_status(&active, &run, &path);
         if run.status == LandStatus::Succeeded {
@@ -800,6 +817,7 @@ mod tests {
             step_type: LandStepKind::Run,
             needs: needs.iter().map(|need| need.to_string()).collect(),
             repo_id: None,
+            target_branch: None,
             method: None,
             wait_for_checks: None,
             required_checks_only: None,
@@ -875,6 +893,7 @@ mod tests {
                 step_type: LandStepKind::Run,
                 status: LandStatus::Failed,
                 repo_id: None,
+                target_branch: None,
                 publication_url: None,
                 started_at: None,
                 finished_at: None,

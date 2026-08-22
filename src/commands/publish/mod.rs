@@ -21,6 +21,7 @@ use remote::{
     apply_artifact_publish_result, apply_publish_remote_result, publish_repo_remote,
     publish_repo_remote_from_artifact, ArtifactPublishResult, PublishJob, PublishRemoteResult,
 };
+pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
     filter_indexes_by_provider, resolve_publish_repo_indexes,
     resolve_publish_repo_indexes_for_bundle, BaseOverrides,

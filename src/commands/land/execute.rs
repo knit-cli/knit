@@ -412,10 +412,58 @@ fn execute_step(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Resu
     }
     match step.step_type {
         LandStepKind::MergePr => execute_merge_pr(active, plan, step),
+        LandStepKind::MergeBranch => execute_merge_branch(active, step),
         LandStepKind::WaitChecks => execute_wait_checks(active, step),
         LandStepKind::Run => execute_run_command(active, step),
         LandStepKind::Deploy => execute_deployment(active, step),
     }
+}
+
+/// Put the bundle's feature branch on a destination branch it passes through.
+/// No review object is spent: the bundle's PR stays open against the
+/// destination that ends its life, and this branch merge is what an
+/// environment actually deploys from.
+fn execute_merge_branch(active: &ActiveBundle, step: &LandStep) -> Result<StepOutcome> {
+    let repo_id = required_repo_id(step)?;
+    let repo = active
+        .bundle
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("{repo_id}: not tracked in this bundle"))?
+        .clone();
+    let branch = step
+        .target_branch
+        .as_deref()
+        .with_context(|| format!("{}: merge_branch step has no targetBranch", step.id))?;
+    let feature_branch = repo.feature_branch.as_deref().with_context(|| {
+        format!("{repo_id}: no feature branch recorded. Run `knit bundle worktree`.")
+    })?;
+
+    let outcome = crate::commands::merge::merge_branch_into_target(
+        &active.root,
+        &repo,
+        feature_branch,
+        branch,
+        true,
+    )?;
+    let detail = if outcome.merged {
+        format!(
+            "merged {feature_branch} into {branch} ({}) and pushed",
+            &outcome.after_sha[..outcome.after_sha.len().min(8)]
+        )
+    } else {
+        format!("{branch} already contains {feature_branch}")
+    };
+    Ok(StepOutcome {
+        success: true,
+        detail,
+        publication_url: None,
+        stdout: None,
+        stderr: None,
+        exit_code: None,
+        publication_update: None,
+    })
 }
 
 fn execute_merge_pr(
@@ -883,6 +931,7 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
                 step_type: step.step_type,
                 status: LandStatus::Pending,
                 repo_id: step.repo_id.clone(),
+                target_branch: step.target_branch.clone(),
                 publication_url: step_publication(active, step).map(|publication| publication.url),
                 started_at: None,
                 finished_at: None,

@@ -48,7 +48,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
         let merge_repos = plan
             .steps
             .iter()
-            .filter(|step| step.step_type == LandStepKind::MergePr)
+            .filter(|step| super::plan::is_merge_step(step))
             .filter_map(|step| step.repo_id.as_ref())
             .collect::<BTreeSet<_>>();
         for (repo_id, branch) in &plan.target_branches {
@@ -76,6 +76,17 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
         match step.step_type {
             LandStepKind::MergePr => {
                 required_repo_id(step)?;
+            }
+            LandStepKind::MergeBranch => {
+                required_repo_id(step)?;
+                if step
+                    .target_branch
+                    .as_deref()
+                    .map(str::trim)
+                    .is_none_or(str::is_empty)
+                {
+                    bail!("merge_branch step `{}` must provide targetBranch", step.id);
+                }
             }
             LandStepKind::WaitChecks => {
                 required_repo_id(step)?;

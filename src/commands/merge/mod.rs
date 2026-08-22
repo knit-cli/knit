@@ -8,6 +8,8 @@
 mod report;
 mod run;
 
+pub(crate) use run::merge_branch_into_target;
+
 use crate::checkout::is_in_place;
 use crate::git::{current_branch, git_output, git_output_optional, ref_exists};
 use crate::ids::slugify;
