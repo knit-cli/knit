@@ -76,7 +76,7 @@ pub(super) fn resolve_publish_repo_indexes(
     Ok(indexes)
 }
 
-pub(super) fn publish_scope_repo_ids(bundle: &ChangeGroup) -> BTreeSet<String> {
+pub(crate) fn publish_scope_repo_ids(bundle: &ChangeGroup) -> BTreeSet<String> {
     let mut repo_ids = recorded_work_repo_ids(bundle);
     repo_ids.extend(
         bundle

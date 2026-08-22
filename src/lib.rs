@@ -545,6 +545,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 keep_worktrees,
                 tag,
                 no_tag,
+                terminal,
+                intermediate,
             }) => match from_artifact {
                 Some(path) => {
                     if tag.is_some() || no_tag {
@@ -552,12 +554,18 @@ pub fn run(cli: Cli) -> Result<()> {
                             "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
                         );
                     }
+                    let declared_terminal = match (terminal, intermediate) {
+                        (true, _) => Some(true),
+                        (_, true) => Some(false),
+                        _ => None,
+                    };
                     commands::apply_land_from_artifact(
                         &path,
                         out.as_deref(),
                         target.as_deref(),
                         lane.as_deref(),
                         &repo_targets,
+                        declared_terminal,
                     )
                 }
                 None => {

@@ -36,7 +36,10 @@ knit commit --all -m "Add my feature"   # one logical commit, recorded across re
 knit check run ci                       # record a test verdict pinned to these exact commits
 knit publish create                     # one PR per repo, cross-linked
 knit land --lane staging                # resolve each repo's staging branch from the project
-knit land --lane staging apply          # retarget, check, merge, deploy, archive
+knit land --lane staging apply          # merge the feature branches into staging, deploy there;
+                                        # the PRs stay open and the bundle stays open, because
+                                        # staging is not its final destination
+knit land --lane production apply       # terminal: merge the PRs, deploy, archive the bundle
 knit land --target staging apply        # compatibility: one raw branch for every repo
 knit land && knit land apply            # default: keep recorded PR bases
 

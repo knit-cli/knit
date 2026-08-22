@@ -105,6 +105,7 @@ pub(super) fn rollback_merged_steps(
     run: &mut LandRun,
     run_path: &Path,
 ) -> Result<Option<String>> {
+    report_unrevertable_branch_merges(run);
     let merged = merged_steps(run);
     if merged.is_empty() {
         return Ok(None);
@@ -121,6 +122,34 @@ pub(super) fn rollback_merged_steps(
     run.updated_at = now_iso();
     write_json(run_path, run)?;
     Ok(Some(group_id))
+}
+
+/// Rollback compensates by opening revert PRs, which only exists for review
+/// merges. A branch merge into an environment has no review to revert, so say
+/// so plainly instead of reporting "nothing to roll back".
+fn report_unrevertable_branch_merges(run: &LandRun) {
+    let branch_merges = run
+        .steps
+        .iter()
+        .filter(|step| {
+            step.step_type == LandStepKind::MergeBranch && step.status == LandStatus::Succeeded
+        })
+        .filter_map(|step| Some((step.repo_id.as_deref()?, step.target_branch.as_deref()?)))
+        .collect::<Vec<_>>();
+    if branch_merges.is_empty() {
+        return;
+    }
+    println!(
+        "{} this run merged feature branches into destination branches; those merges are not reverted automatically:",
+        out::warn("warning:")
+    );
+    for (repo_id, branch) in branch_merges {
+        println!("  {} -> {}", out::repo(repo_id), out::branch(branch));
+    }
+    println!(
+        "{}",
+        out::muted("Revert them in those branches yourself if the environment must go back.")
+    );
 }
 
 /// The `(repo id, PR url)` pairs for every merge step the run completed. A

@@ -1282,6 +1282,14 @@ pub enum LandCommand {
         /// Do not auto-tag even when the `auto-tag` config default is on.
         #[arg(long, conflicts_with = "tag")]
         no_tag: bool,
+        /// Artifact landing only: this destination finishes the bundle. Local
+        /// landings read `terminal` from the project's landing config instead.
+        #[arg(long, requires = "from_artifact")]
+        terminal: bool,
+        /// Artifact landing only: this destination is an intermediate stop and
+        /// leaves the bundle open.
+        #[arg(long, requires = "from_artifact", conflicts_with = "terminal")]
+        intermediate: bool,
     },
     /// Create revert PRs for the merge steps a failed landing run completed.
     Rollback {

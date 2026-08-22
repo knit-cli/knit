@@ -43,6 +43,10 @@ pub(super) struct PruneAssessment {
     pub(super) saw_open_publication: bool,
     pub(super) saw_merged_publication: bool,
     pub(super) saw_unpublished_commits: bool,
+    /// The bundle's last landing went to an intermediate destination (a
+    /// staging lane), so its reviews are merged but its work is still in
+    /// flight towards a terminal destination.
+    pub(super) landed_intermediate: bool,
     pub(super) pending: Pending,
 }
 
@@ -52,6 +56,12 @@ impl PruneAssessment {
     /// untracked files no longer hold the bundle back.
     pub(super) fn candidate_reason(&self, untracked: bool) -> Option<String> {
         if self.saw_open_publication || self.pending.tracked || self.saw_unpublished_commits {
+            return None;
+        }
+        // Merged reviews normally mean the work is over. After a landing into
+        // an intermediate destination they mean the opposite: the bundle
+        // reached staging and is waiting for its next destination.
+        if self.landed_intermediate {
             return None;
         }
         if self.pending.untracked && !untracked {
@@ -83,6 +93,8 @@ impl PruneAssessment {
     pub(super) fn pr_basis(&self) -> &'static str {
         if self.saw_open_publication {
             "open PR(s)"
+        } else if self.landed_intermediate {
+            "landed into an intermediate destination"
         } else if self.saw_merged_publication {
             "recorded PRs are merged"
         } else if self.saw_publication {
@@ -338,8 +350,20 @@ fn assess_bundle(
         saw_open_publication,
         saw_merged_publication,
         saw_unpublished_commits,
+        landed_intermediate: landed_intermediate(bundle),
         pending,
     })
+}
+
+/// Whether the bundle's most recent landing left it open on purpose.
+fn landed_intermediate(bundle: &ChangeGroup) -> bool {
+    bundle
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == "feature.landed")
+        .and_then(|node| node.landing.as_ref())
+        .is_some_and(|landing| !landing.terminal)
 }
 
 struct RepoPruneSignals {

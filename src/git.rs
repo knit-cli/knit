@@ -307,7 +307,11 @@ pub fn remote_ref_sha(cwd: &Path, remote: &str, reference: &str) -> Result<Optio
 /// `GIT_TERMINAL_PROMPT=0` keeps a missing credential from turning the probe
 /// into an interactive hang.
 pub fn remote_repo_reachable(cwd: &Path, url: &str) -> std::result::Result<(), String> {
-    match git_output_with_env(cwd, ["ls-remote", url, "HEAD"], &[("GIT_TERMINAL_PROMPT", "0")]) {
+    match git_output_with_env(
+        cwd,
+        ["ls-remote", url, "HEAD"],
+        &[("GIT_TERMINAL_PROMPT", "0")],
+    ) {
         Ok(_) => Ok(()),
         Err(error) => Err(format!("{error:#}")),
     }

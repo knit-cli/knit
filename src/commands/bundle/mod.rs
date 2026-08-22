@@ -279,11 +279,14 @@ pub fn bundle_state(bundle: &ChangeGroup) -> BundleStatus {
     }
 }
 
+/// Whether the bundle recorded a landing that finished it. A landing into an
+/// intermediate destination (a staging lane) is recorded the same way but
+/// leaves the bundle open, so it does not count here.
 fn has_landed_node(bundle: &ChangeGroup) -> bool {
     bundle
         .nodes
         .iter()
-        .any(|node| node.node_type == "feature.landed")
+        .any(crate::model::is_terminal_landed_node)
 }
 
 fn has_closed_node(bundle: &ChangeGroup) -> bool {

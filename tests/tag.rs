@@ -504,7 +504,11 @@ fn alternate_target_landing_does_not_auto_tag_configured_project_bases() {
     );
     assert!(apply.contains("skipped automatic tag"), "{apply}");
 
+    // `staging` is nobody's configured base, so the landing is not terminal:
+    // the bundle stays open and nothing claims the bases are known-good.
+    assert!(apply.contains("bundle stays open"), "{apply}");
     let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["state"].as_str(), Some("open"));
     assert!(tag_nodes(&bundle, "venue-capacity").is_empty());
 }
 

@@ -17,6 +17,28 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
     }
     println!(
         "{} {}",
+        out::heading("Bundle:"),
+        if plan.terminal {
+            "archived on success (terminal destination)"
+        } else {
+            "stays open on success (intermediate destination)"
+        }
+    );
+    println!(
+        "{} {}",
+        out::heading("Merges:"),
+        if plan
+            .steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::MergeBranch)
+        {
+            "feature branches into the destination; review objects stay open"
+        } else {
+            "the recorded review objects"
+        }
+    );
+    println!(
+        "{} {}",
         out::heading("Plan file:"),
         out::path(path.display())
     );
@@ -24,8 +46,8 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
         active,
         plan.steps
             .iter()
-            .filter(|step| step.step_type == LandStepKind::MergePr)
-            .filter_map(|step| step.repo_id.as_ref()),
+            .filter(|step| super::plan::is_merge_step(step))
+            .filter_map(|step| Some((step.repo_id.as_ref()?, step.target_branch.as_deref()))),
         plan.target_branch.as_deref(),
         &plan.target_branches,
         plan.steps
@@ -72,8 +94,13 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
         active,
         run.steps
             .iter()
-            .filter(|step| step.step_type == LandStepKind::MergePr)
-            .filter_map(|step| step.repo_id.as_ref()),
+            .filter(|step| {
+                matches!(
+                    step.step_type,
+                    LandStepKind::MergePr | LandStepKind::MergeBranch
+                )
+            })
+            .filter_map(|step| Some((step.repo_id.as_ref()?, step.target_branch.as_deref()))),
         None,
         &BTreeMap::new(),
         run.steps
@@ -88,6 +115,12 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
             out::status(&format!("{:<9}", step.status)),
             step.detail.as_deref().unwrap_or("")
         );
+        if step.step_type == LandStepKind::MergeBranch {
+            if let (Some(repo_id), Some(branch)) = (&step.repo_id, &step.target_branch) {
+                println!("  {} -> {}", out::repo(repo_id), out::branch(branch));
+            }
+            continue;
+        }
         if let Some(repo_id) = &step.repo_id {
             print_pr_status(active, repo_id, step.publication_url.as_deref());
         }
@@ -116,8 +149,8 @@ pub(super) fn print_plan_landing_targets(active: &ActiveBundle, plan: &LandPlan)
         active,
         plan.steps
             .iter()
-            .filter(|step| step.step_type == LandStepKind::MergePr)
-            .filter_map(|step| step.repo_id.as_ref()),
+            .filter(|step| super::plan::is_merge_step(step))
+            .filter_map(|step| Some((step.repo_id.as_ref()?, step.target_branch.as_deref()))),
         plan.target_branch.as_deref(),
         &plan.target_branches,
         plan.steps
@@ -128,20 +161,21 @@ pub(super) fn print_plan_landing_targets(active: &ActiveBundle, plan: &LandPlan)
 
 fn print_landing_targets<'a>(
     active: &ActiveBundle,
-    repo_ids: impl IntoIterator<Item = &'a String>,
+    repo_ids: impl IntoIterator<Item = (&'a String, Option<&'a str>)>,
     explicit_target: Option<&str>,
     repo_targets: &BTreeMap<String, String>,
     has_deployment_steps: bool,
 ) {
     let targets = repo_ids
         .into_iter()
-        .filter_map(|repo_id| {
-            let publication = publication_for_repo(&active.bundle, repo_id)?;
-            let base_branch = repo_targets
-                .get(repo_id.as_str())
-                .map(String::as_str)
+        .filter_map(|(repo_id, step_target)| {
+            // A branch merge names its own destination; a review merge takes
+            // the lane's branch, the raw target, or the base it published to.
+            let publication = publication_for_repo(&active.bundle, repo_id);
+            let base_branch = step_target
+                .or_else(|| repo_targets.get(repo_id.as_str()).map(String::as_str))
                 .or(explicit_target)
-                .unwrap_or(&publication.base_branch);
+                .or(publication.map(|publication| publication.base_branch.as_str()))?;
             let is_alternate = active
                 .bundle
                 .repos
@@ -177,6 +211,19 @@ fn print_landing_targets<'a>(
 
 fn planned_step_target(step: &LandStep) -> String {
     match step.step_type {
+        LandStepKind::MergeBranch => {
+            let repo = step
+                .repo_id
+                .as_deref()
+                .map(out::repo)
+                .unwrap_or_else(|| out::muted("repo"));
+            let branch = step
+                .target_branch
+                .as_deref()
+                .map(out::branch)
+                .unwrap_or_else(|| out::muted("branch"));
+            format!("{repo} -> {branch}")
+        }
         LandStepKind::Deploy => {
             let repo = step
                 .repo_id

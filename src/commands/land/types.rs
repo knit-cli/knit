@@ -16,6 +16,10 @@ pub(super) const DEFAULT_LAND_PROVIDER: &str = "github";
 #[serde(rename_all = "snake_case")]
 pub(super) enum LandStepKind {
     MergePr,
+    /// Merge the bundle's feature branch into a destination branch and push
+    /// it. How a bundle reaches an environment it only passes through: the
+    /// review object stays where it is, pointed at the terminal destination.
+    MergeBranch,
     WaitChecks,
     Run,
     Deploy,
@@ -25,6 +29,7 @@ impl LandStepKind {
     pub(super) fn as_str(self) -> &'static str {
         match self {
             LandStepKind::MergePr => "merge_pr",
+            LandStepKind::MergeBranch => "merge_branch",
             LandStepKind::WaitChecks => "wait_checks",
             LandStepKind::Run => "run",
             LandStepKind::Deploy => "deploy",
@@ -65,6 +70,10 @@ impl std::fmt::Display for LandStatus {
     }
 }
 
+fn terminal_default() -> bool {
+    true
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandPlan {
@@ -83,6 +92,14 @@ pub(super) struct LandPlan {
     pub(super) lane: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) target_branches: BTreeMap<String, String>,
+    /// Whether this plan's destination finishes the bundle. A terminal
+    /// landing archives the bundle and removes its generated worktrees; an
+    /// intermediate one (a staging lane, say) leaves it open for its next
+    /// destination. Resolved from the project's `terminal` declaration when
+    /// the plan is generated, and editable in the plan file. Plans written
+    /// before this field existed always landed on the configured bases.
+    #[serde(default = "terminal_default")]
+    pub(super) terminal: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) source_project_id: Option<String>,
     pub(super) created_at: String,
@@ -107,6 +124,9 @@ pub(super) struct LandStep {
     pub(super) needs: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) repo_id: Option<String>,
+    /// Destination branch of a `merge_branch` step.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) method: Option<crate::model::MergeMethod>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -172,6 +192,10 @@ pub(super) struct LandRunStep {
     pub(super) status: LandStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) repo_id: Option<String>,
+    /// Destination branch of a `merge_branch` step, carried from the plan so
+    /// the run record says where the work went.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) target_branch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) publication_url: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

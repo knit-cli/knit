@@ -23,6 +23,7 @@ pub fn apply_land_from_artifact(
     target_branch: Option<&str>,
     lane_name: Option<&str>,
     repo_targets: &[String],
+    declared_terminal: Option<bool>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let target_branch = normalize_target_branch(target_branch)?;
@@ -172,6 +173,26 @@ pub fn apply_land_from_artifact(
         );
     }
 
+    // A caller with project metadata (a trusted host resolving a lane) states
+    // whether this destination finishes the bundle; otherwise judge it the way
+    // a local plan does, by whether every repo landed on its configured base.
+    let terminal = declared_terminal.unwrap_or_else(|| {
+        merged_repo_ids.iter().all(|repo_id| {
+            let destination = repo_targets
+                .get(repo_id)
+                .map(String::as_str)
+                .or(target_branch.as_deref())
+                .or_else(|| {
+                    publication_for_repo(&bundle, repo_id).map(|pub_| pub_.base_branch.as_str())
+                });
+            bundle
+                .repos
+                .iter()
+                .find(|repo| repo.id == *repo_id)
+                .is_some_and(|repo| destination == Some(repo.base_branch.as_str()))
+        })
+    });
+
     // Record a landed node in the artifact without writing land plan/run files.
     let node = BundleNode::feature_landed(
         node_id("land"),
@@ -181,6 +202,11 @@ pub fn apply_land_from_artifact(
         DEFAULT_LAND_PROVIDER.to_string(),
         merged_repo_ids,
         publication_urls,
+        Some(crate::model::NodeLanding {
+            terminal,
+            lane: lane_name.clone(),
+            target_branch: target_branch.clone(),
+        }),
     );
     bundle.nodes.push(node);
     bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());

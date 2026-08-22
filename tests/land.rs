@@ -822,6 +822,7 @@ fn named_lane_resolves_per_repo_targets_and_lane_deployments() {
         "provider": "github",
         "lanes": {
             "production": {
+                "terminal": true,
                 "branches": {
                     "backend": "stable",
                     "frontend": "master"
@@ -1617,6 +1618,353 @@ fn land_apply_treats_no_required_checks_as_ready() {
     assert!(run_status.contains("checks passed (no required checks)"));
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
     assert_eq!(order.trim(), "backend");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Two published repos on `main` with a project landing template whose lanes
+/// come from the caller, so each test can vary only the destination's declared
+/// or inferred lifecycle.
+fn publish_lane_bundle(
+    root: &Path,
+    bundle_title: &str,
+    lanes: Value,
+    environment_branches: &[&str],
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(root, "frontend");
+    for checkout in [&backend, &frontend] {
+        for branch in environment_branches {
+            git(checkout, ["branch", branch, "main"]);
+            git(checkout, ["push", "origin", branch]);
+        }
+    }
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github", "lanes": lanes });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", bundle_title]);
+    let slug = bundle_title.replace(' ', "-");
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees")
+                .join(&slug)
+                .join(repo_id)
+                .join("app.txt"),
+            "lane change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Lane change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+fn read_named_bundle(workspace: &Path, slug: &str) -> Value {
+    let path = workspace.join(format!(".knit/bundles/{slug}.bundle.json"));
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn intermediate_lane_land_keeps_the_bundle_open() {
+    let root = unique_temp_dir();
+    let deployed = root.join("deployed-staging.txt");
+    let deploy_staging = format!(
+        "printf '%s:%s' \"$KNIT_LAND_LANE\" \"$KNIT_LAND_TARGET_BRANCH\" > '{}'",
+        deployed.display()
+    );
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "staging work",
+        json!({
+            "staging": {
+                "defaultBranch": "staging",
+                "deployments": [{
+                    "id": "deploy-staging",
+                    "repoId": "backend",
+                    "command": ["sh", "-c", deploy_staging]
+                }]
+            }
+        }),
+        &["staging"],
+    );
+
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        plan.contains("stays open on success (intermediate destination)"),
+        "{plan}"
+    );
+
+    assert!(
+        plan.contains("feature branches into the destination"),
+        "{plan}"
+    );
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("bundle stays open"), "{apply}");
+
+    // The environment was deployed to after its branches moved.
+    assert_eq!(fs::read_to_string(&deployed).unwrap(), "staging:staging");
+
+    // The environment got the work by branch merge, and the review object was
+    // left alone: it still points at the destination that ends the bundle.
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+    for repo_id in ["backend", "frontend"] {
+        let remote = root.join(format!("{repo_id}.git"));
+        let staging = git(&remote, ["log", "--oneline", "staging"]);
+        assert!(staging.contains("Lane change"), "{staging}");
+        let main = git(&remote, ["log", "--oneline", "main"]);
+        assert!(!main.contains("Lane change"), "{main}");
+    }
+    let publications = read_named_bundle(&workspace, "staging-work")["publications"]
+        .as_array()
+        .unwrap()
+        .clone();
+    assert_eq!(publications.len(), 2);
+    for publication in &publications {
+        assert_eq!(publication["baseBranch"].as_str(), Some("main"));
+        assert_eq!(publication["state"].as_str(), Some("OPEN"));
+    }
+
+    let bundle = read_named_bundle(&workspace, "staging-work");
+    assert_eq!(bundle["state"].as_str(), Some("open"));
+    assert!(
+        !bundle["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["type"].as_str() == Some("feature.archived")),
+        "{bundle}"
+    );
+    let landed = latest_node_of_type(&bundle, "feature.landed");
+    assert_eq!(landed["landing"]["terminal"].as_bool(), Some(false));
+    assert_eq!(landed["landing"]["lane"].as_str(), Some("staging"));
+
+    // The bundle keeps everything it needs to reach its next destination.
+    assert!(workspace
+        .join(".knit/worktrees/staging-work/backend")
+        .exists());
+    assert!(workspace
+        .join(".knit/worktrees/staging-work/frontend")
+        .exists());
+    let status = knit(&workspace, ["bundle"]);
+    assert!(status.contains("staging-work"), "{status}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lane_declared_terminal_archives_the_bundle() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "release work",
+        json!({ "production": { "defaultBranch": "stable", "terminal": true } }),
+        &[],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed release-work"), "{apply}");
+    assert!(apply.contains("removed 2 worktree(s)"), "{apply}");
+
+    let bundle = read_named_bundle(&workspace, "release-work");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let landed = latest_node_of_type(&bundle, "feature.landed");
+    assert_eq!(landed["landing"]["terminal"].as_bool(), Some(true));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn lane_on_configured_bases_is_terminal_without_declaring_it() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "base work",
+        json!({ "production": { "defaultBranch": "main" } }),
+        &[],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed base-work"), "{apply}");
+
+    let bundle = read_named_bundle(&workspace, "base-work");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tagging_is_refused_when_the_destination_is_not_terminal() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "tagged staging",
+        json!({ "staging": { "defaultBranch": "staging" } }),
+        &["staging"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        [
+            "land",
+            "--lane",
+            "staging",
+            "apply",
+            "--no-remote",
+            "--tag",
+            "verified",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(failure.contains("not a terminal destination"), "{failure}");
+
+    // Refused before anything merged, so the bundle is untouched.
+    let bundle = read_named_bundle(&workspace, "tagged-staging");
+    assert_eq!(bundle["state"].as_str(), Some("open"));
+    assert!(
+        !bundle["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["type"].as_str() == Some("feature.landed")),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_lands_into_staging_then_production() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "two stop work",
+        json!({
+            "staging": { "defaultBranch": "staging" },
+            "production": { "defaultBranch": "main" }
+        }),
+        &["staging"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let staging = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(staging.contains("bundle stays open"), "{staging}");
+
+    // The finished staging run is history: asking for the next environment
+    // plans it instead of reporting the old run.
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(plan.contains("Lane: production"), "{plan}");
+    assert!(
+        plan.contains("archived on success (terminal destination)"),
+        "{plan}"
+    );
+    assert!(plan.contains("the recorded review objects"), "{plan}");
+
+    let production = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "production", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(production.contains("landed two-stop-work"), "{production}");
+
+    let bundle = read_named_bundle(&workspace, "two-stop-work");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let landings = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"].as_str() == Some("feature.landed"))
+        .collect::<Vec<_>>();
+    assert_eq!(landings.len(), 2);
+    assert_eq!(landings[0]["landing"]["lane"].as_str(), Some("staging"));
+    assert_eq!(landings[0]["landing"]["terminal"].as_bool(), Some(false));
+    assert_eq!(landings[1]["landing"]["lane"].as_str(), Some("production"));
+    assert_eq!(landings[1]["landing"]["terminal"].as_bool(), Some(true));
 
     fs::remove_dir_all(root).unwrap();
 }

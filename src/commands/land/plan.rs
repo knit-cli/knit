@@ -33,6 +33,32 @@ pub(super) fn build_default_plan(
         .unwrap_or_else(|| inferred_plan_provider(active));
     ensure_provider(&provider)?;
     let merge = landing.map(|landing| &landing.merge);
+
+    // Every repo this bundle actually changed, in the project's merge order.
+    // Review merges narrow this to the repos that have a review recorded;
+    // branch merges use it whole, because reaching an environment does not
+    // require a review at all.
+    let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
+    let scope = ordered_merge_repos(active, merge)
+        .into_iter()
+        .filter(|repo| changed_repo_ids.contains(&repo.id))
+        .collect::<Vec<_>>();
+    let lane = resolve_lane(project.as_ref(), landing, lane_name)?;
+    let destinations = resolve_destinations(&scope, lane_name, lane, target_branch, active)?;
+    let terminal = resolve_terminal(
+        active,
+        landing,
+        target_branch,
+        lane_name,
+        lane,
+        &destinations,
+    );
+
+    // An environment the bundle only passes through is reached by merging its
+    // feature branches, so the bundle's review objects stay open against the
+    // destination that ends its life. `--target <branch>` keeps its narrower
+    // meaning: retarget the recorded reviews and merge them there.
+    let branch_merges = !terminal && lane_name.is_some();
     let mut steps = Vec::new();
     let ordered_ids: BTreeSet<String> = merge
         .map(|m| m.repo_order.iter().cloned().collect())
@@ -40,8 +66,8 @@ pub(super) fn build_default_plan(
     let empty_needs = BTreeMap::new();
     let merge_needs = merge.map(|m| &m.needs).unwrap_or(&empty_needs);
     let mut previous_ordered: Option<String> = None;
-    for repo in ordered_merge_repos(active, merge) {
-        if publication_for_repo(&active.bundle, &repo.id).is_none() {
+    for repo in &scope {
+        if !branch_merges && publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
         let id = format!("merge-{}", repo.id);
@@ -52,29 +78,81 @@ pub(super) fn build_default_plan(
         } else {
             Vec::new()
         };
-        steps.push(LandStep {
-            id: id.clone(),
-            step_type: LandStepKind::MergePr,
-            needs,
-            repo_id: Some(repo.id.clone()),
-            method: Some(merge_method(merge)),
-            wait_for_checks: Some(merge_wait_for_checks(merge)),
-            required_checks_only: Some(merge_required_checks_only(merge)),
-            delete_branch: Some(merge_delete_branch(merge)),
-            required_only: None,
-            timeout_seconds: Some(merge_timeout_seconds(merge)),
-            interval_seconds: Some(merge_interval_seconds(merge)),
-            cwd: None,
-            command: Vec::new(),
-            env: BTreeMap::new(),
-            deployment_mode: None,
-            checkout: None,
-        });
+        if let Some(lane_name) = lane_name {
+            if !destinations.contains_key(&repo.id) {
+                bail!(
+                    "Landing lane `{lane_name}` has no branch for repository `{}`. Add landing.lanes.{lane_name}.branches.{} or defaultBranch.",
+                    repo.id,
+                    repo.id
+                );
+            }
+        }
+        let step = if branch_merges {
+            let destination = destinations
+                .get(&repo.id)
+                .cloned()
+                .expect("destination was checked above");
+            LandStep {
+                id: id.clone(),
+                step_type: LandStepKind::MergeBranch,
+                needs,
+                repo_id: Some(repo.id.clone()),
+                target_branch: Some(destination),
+                method: None,
+                wait_for_checks: None,
+                required_checks_only: None,
+                delete_branch: None,
+                required_only: None,
+                timeout_seconds: None,
+                interval_seconds: None,
+                cwd: None,
+                command: Vec::new(),
+                env: BTreeMap::new(),
+                deployment_mode: None,
+                checkout: None,
+            }
+        } else {
+            LandStep {
+                id: id.clone(),
+                step_type: LandStepKind::MergePr,
+                needs,
+                repo_id: Some(repo.id.clone()),
+                target_branch: None,
+                method: Some(merge_method(merge)),
+                wait_for_checks: Some(merge_wait_for_checks(merge)),
+                required_checks_only: Some(merge_required_checks_only(merge)),
+                delete_branch: Some(merge_delete_branch(merge)),
+                required_only: None,
+                timeout_seconds: Some(merge_timeout_seconds(merge)),
+                interval_seconds: Some(merge_interval_seconds(merge)),
+                cwd: None,
+                command: Vec::new(),
+                env: BTreeMap::new(),
+                deployment_mode: None,
+                checkout: None,
+            }
+        };
+        steps.push(step);
         if ordered_ids.contains(&repo.id) {
             previous_ordered = Some(id);
         }
     }
-    let target_branches = resolve_lane_targets(project.as_ref(), landing, lane_name, &steps)?;
+
+    // The stored lane projection covers exactly the repos this plan moves.
+    let target_branches = if lane_name.is_some() {
+        steps
+            .iter()
+            .filter(|step| is_merge_step(step))
+            .filter_map(|step| step.repo_id.clone())
+            .filter_map(|repo_id| {
+                destinations
+                    .get(&repo_id)
+                    .map(|branch| (repo_id, branch.clone()))
+            })
+            .collect::<BTreeMap<_, _>>()
+    } else {
+        BTreeMap::new()
+    };
     append_project_deployments(
         active,
         landing,
@@ -99,6 +177,7 @@ pub(super) fn build_default_plan(
         target_branch: target_branch.map(ToOwned::to_owned),
         lane: lane_name.map(ToOwned::to_owned),
         target_branches,
+        terminal,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
         on_failure: landing.and_then(|landing| landing.on_failure),
@@ -109,14 +188,109 @@ pub(super) fn build_default_plan(
     })
 }
 
-fn resolve_lane_targets(
-    project: Option<&KnitProject>,
-    landing: Option<&ProjectLandingPlan>,
+pub(super) fn is_merge_step(step: &LandStep) -> bool {
+    matches!(
+        step.step_type,
+        LandStepKind::MergePr | LandStepKind::MergeBranch
+    )
+}
+
+/// Where each repository's work is headed in this landing: the lane's branch
+/// for it, the one raw target branch, or the base its review already records.
+fn resolve_destinations(
+    scope: &[&RepoEntry],
     lane_name: Option<&str>,
-    steps: &[LandStep],
+    lane: Option<&ProjectLandingLane>,
+    target_branch: Option<&str>,
+    active: &ActiveBundle,
 ) -> Result<BTreeMap<String, String>> {
+    if let (Some(_), Some(lane)) = (lane_name, lane) {
+        // Leniently: a repo the lane does not map is only a problem if this
+        // plan actually merges it, and the step loop says so by name.
+        return Ok(scope
+            .iter()
+            .filter_map(|repo| Some((repo.id.clone(), lane_branch(lane, &repo.id)?.to_string())))
+            .collect());
+    }
+    if let Some(target_branch) = target_branch {
+        return Ok(scope
+            .iter()
+            .map(|repo| (repo.id.clone(), target_branch.to_string()))
+            .collect());
+    }
+    Ok(scope
+        .iter()
+        .filter_map(|repo| {
+            let base = publication_for_repo(&active.bundle, &repo.id)?
+                .base_branch
+                .clone();
+            Some((repo.id.clone(), base))
+        })
+        .collect())
+}
+
+/// Whether landing this plan finishes the bundle.
+///
+/// A bundle's work is done when it has reached every repository's configured
+/// base branch; any other destination is an environment the bundle passes
+/// through, so landing there must leave it open. A project can override that
+/// per lane or per branch-keyed target with `terminal`, which is how a
+/// release branch that is not a repo's configured base still ends the
+/// bundle's life.
+fn resolve_terminal(
+    active: &ActiveBundle,
+    landing: Option<&ProjectLandingPlan>,
+    target_branch: Option<&str>,
+    lane_name: Option<&str>,
+    lane: Option<&ProjectLandingLane>,
+    destinations: &BTreeMap<String, String>,
+) -> bool {
+    if lane_name.is_some() {
+        if let Some(declared) = lane.and_then(|lane| lane.terminal) {
+            return declared;
+        }
+        // An unresolvable lane is not a claim that the bundle is finished.
+        return !destinations.is_empty() && destinations_are_configured_bases(active, destinations);
+    }
+
+    if let Some(target_branch) = target_branch {
+        if let Some(declared) = landing
+            .and_then(|landing| landing.targets.get(target_branch))
+            .and_then(|target| target.terminal)
+        {
+            return declared;
+        }
+        return destinations_are_configured_bases(active, destinations);
+    }
+
+    // Without an explicit destination each review keeps its recorded base.
+    destinations_are_configured_bases(active, destinations)
+}
+
+/// Whether every destination is the repository's own configured base branch.
+/// A deploy-only plan merges nothing and keeps its historical behavior.
+fn destinations_are_configured_bases(
+    active: &ActiveBundle,
+    destinations: &BTreeMap<String, String>,
+) -> bool {
+    destinations.iter().all(|(repo_id, branch)| {
+        active
+            .bundle
+            .repos
+            .iter()
+            .find(|repo| repo.id == *repo_id)
+            .is_some_and(|repo| repo.base_branch == *branch)
+    })
+}
+
+/// Look up and validate the project lane a landing was asked for.
+fn resolve_lane<'a>(
+    project: Option<&'a KnitProject>,
+    landing: Option<&'a ProjectLandingPlan>,
+    lane_name: Option<&str>,
+) -> Result<Option<&'a ProjectLandingLane>> {
     let Some(lane_name) = lane_name else {
-        return Ok(BTreeMap::new());
+        return Ok(None);
     };
     let project = project.ok_or_else(|| {
         anyhow::anyhow!(
@@ -137,20 +311,7 @@ fn resolve_lane_targets(
         }
     })?;
     validate_lane(project, lane_name, lane)?;
-
-    steps
-        .iter()
-        .filter(|step| step.step_type == LandStepKind::MergePr)
-        .filter_map(|step| step.repo_id.as_ref())
-        .map(|repo_id| {
-            let branch = lane_branch(lane, repo_id).ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Landing lane `{lane_name}` has no branch for repository `{repo_id}`. Add landing.lanes.{lane_name}.branches.{repo_id} or defaultBranch."
-                )
-            })?;
-            Ok((repo_id.clone(), branch.to_string()))
-        })
-        .collect()
+    Ok(Some(lane))
 }
 
 fn validate_lane(project: &KnitProject, lane_name: &str, lane: &ProjectLandingLane) -> Result<()> {
@@ -294,12 +455,12 @@ fn append_project_deployments(
     };
     let merge_step_ids = steps
         .iter()
-        .filter(|step| step.step_type == LandStepKind::MergePr)
+        .filter(|step| is_merge_step(step))
         .filter_map(|step| Some((step.repo_id.clone()?, step.id.clone())))
         .collect::<BTreeMap<_, _>>();
     let all_merge_ids = steps
         .iter()
-        .filter(|step| step.step_type == LandStepKind::MergePr)
+        .filter(|step| is_merge_step(step))
         .map(|step| step.id.clone())
         .collect::<Vec<_>>();
     if let Some(lane_name) = lane_name {
@@ -462,6 +623,7 @@ fn append_project_deployment(
         step_type: LandStepKind::Deploy,
         needs,
         repo_id: deployment.repo_id.clone(),
+        target_branch: None,
         method: None,
         wait_for_checks: None,
         required_checks_only: None,

@@ -859,6 +859,7 @@ mod tests {
                 "github".to_string(),
                 vec!["backend".to_string()],
                 Vec::new(),
+                None,
             ),
             BundleNode::feature_archived(
                 "node-archived".to_string(),
