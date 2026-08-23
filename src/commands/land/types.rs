@@ -4,7 +4,7 @@
 use crate::model::{DeployCheckoutUpdate, DeployMode, RepoEntry};
 use crate::providers::PullRequest;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(super) const LAND_PLAN_KIND: &str = "KnitLandPlan";
 pub(super) const LAND_RUN_KIND: &str = "KnitLandRun";
@@ -92,6 +92,11 @@ pub(super) struct LandPlan {
     pub(super) lane: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) target_branches: BTreeMap<String, String>,
+    /// Repositories this bundle changed that the lane declares absent. They
+    /// get no step here and wait for the terminal landing. Recorded so a
+    /// repository skipped on purpose does not read like one dropped by a bug.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) lane_absent: BTreeSet<String>,
     /// Whether this plan's destination finishes the bundle. A terminal
     /// landing archives the bundle and removes its generated worktrees; an
     /// intermediate one (a staging lane, say) leaves it open for its next
@@ -174,6 +179,14 @@ pub(super) struct LandRun {
     pub(super) provider: String,
     pub(super) plan_path: String,
     pub(super) status: LandStatus,
+    /// Named project lane this run landed through, carried from the plan so
+    /// the run record can say which environment it was aimed at.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) lane: Option<String>,
+    /// Repositories the lane declares absent, carried from the plan so status
+    /// output does not read like their steps went missing.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) lane_absent: BTreeSet<String>,
     pub(super) created_at: String,
     pub(super) updated_at: String,
     /// Set when `knit land rollback` (or `onFailure: rollback`) created revert

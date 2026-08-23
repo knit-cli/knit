@@ -44,7 +44,23 @@ pub(super) fn build_default_plan(
         .filter(|repo| changed_repo_ids.contains(&repo.id))
         .collect::<Vec<_>>();
     let lane = resolve_lane(project.as_ref(), landing, lane_name)?;
-    let destinations = resolve_destinations(&scope, lane_name, lane, target_branch, active)?;
+    let (destinations, lane_absent) =
+        resolve_destinations(&scope, lane_name, lane, target_branch, active)?;
+    if let Some(lane_name) = lane_name {
+        // Every repository this bundle changed sits outside the lane, so there
+        // is no environment for this work to reach. Say that, rather than fall
+        // through to the unrelated "nothing published" message below.
+        if !scope.is_empty() && destinations.is_empty() && lane_absent.len() == scope.len() {
+            bail!(
+                "Landing lane `{lane_name}` carries none of the repositories this bundle changed ({}). Those repositories are declared absent from the lane, so this bundle has nothing to land there.",
+                lane_absent
+                    .iter()
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
     let terminal = resolve_terminal(
         active,
         landing,
@@ -52,6 +68,7 @@ pub(super) fn build_default_plan(
         lane_name,
         lane,
         &destinations,
+        &lane_absent,
     );
 
     // An environment the bundle only passes through is reached by merging its
@@ -79,9 +96,16 @@ pub(super) fn build_default_plan(
             Vec::new()
         };
         if let Some(lane_name) = lane_name {
+            // Declared absent: this repository has no place in this
+            // environment, so it keeps its work for the terminal landing.
+            if lane_absent.contains(&repo.id) {
+                continue;
+            }
             if !destinations.contains_key(&repo.id) {
                 bail!(
-                    "Landing lane `{lane_name}` has no branch for repository `{}`. Add landing.lanes.{lane_name}.branches.{} or defaultBranch.",
+                    "Landing lane `{lane_name}` has no branch for repository `{}`. Add landing.lanes.{lane_name}.branches.{} or defaultBranch. If `{}` has no {lane_name} environment at all, declare it absent with `\"{}\": null`.",
+                    repo.id,
+                    repo.id,
                     repo.id,
                     repo.id
                 );
@@ -92,7 +116,13 @@ pub(super) fn build_default_plan(
                 .get(&repo.id)
                 .cloned()
                 .expect("destination was checked above");
-            ensure_branch_merge_spares_review(active, lane_name, &repo.id, &destination)?;
+            ensure_branch_merge_spares_review(
+                active,
+                lane_name,
+                &repo.id,
+                &destination,
+                &lane_absent,
+            )?;
             LandStep {
                 id: id.clone(),
                 step_type: LandStepKind::MergeBranch,
@@ -178,6 +208,7 @@ pub(super) fn build_default_plan(
         target_branch: target_branch.map(ToOwned::to_owned),
         lane: lane_name.map(ToOwned::to_owned),
         target_branches,
+        lane_absent,
         terminal,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
@@ -200,6 +231,7 @@ pub(super) fn ensure_branch_merge_spares_review(
     lane_name: Option<&str>,
     repo_id: &str,
     destination: &str,
+    lane_absent: &BTreeSet<String>,
 ) -> Result<()> {
     let Some(publication) = publication_for_repo(&active.bundle, repo_id) else {
         return Ok(());
@@ -208,8 +240,23 @@ pub(super) fn ensure_branch_merge_spares_review(
         return Ok(());
     }
     let lane = lane_name.unwrap_or("this landing");
+    // "Declare the lane terminal" is only a way out when the lane could be
+    // terminal. A lane that skips repositories cannot, so pointing at it would
+    // send the reader into the next error instead of out of this one.
+    let way_out = if lane_absent.is_empty() {
+        format!("Point the lane at a different branch for `{repo_id}`, or declare the lane terminal so Knit merges the review itself.")
+    } else {
+        format!(
+            "Point the lane at a different branch for `{repo_id}`. This lane cannot be terminal instead, because it skips {}, and a bundle's last stop has to carry every repository.",
+            lane_absent
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        )
+    };
     bail!(
-        "Landing lane `{lane}` sends `{repo_id}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. Point the lane at a different branch for `{repo_id}`, or declare the lane terminal so Knit merges the review itself.",
+        "Landing lane `{lane}` sends `{repo_id}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. {way_out}",
         publication.url
     );
 }
@@ -223,36 +270,57 @@ pub(super) fn is_merge_step(step: &LandStep) -> bool {
 
 /// Where each repository's work is headed in this landing: the lane's branch
 /// for it, the one raw target branch, or the base its review already records.
+///
+/// The second half of the answer is the repositories a lane deliberately does
+/// not carry. They are not destinations and not mistakes, so they travel
+/// separately and end up named in the plan rather than silently missing.
 fn resolve_destinations(
     scope: &[&RepoEntry],
     lane_name: Option<&str>,
     lane: Option<&ProjectLandingLane>,
     target_branch: Option<&str>,
     active: &ActiveBundle,
-) -> Result<BTreeMap<String, String>> {
+) -> Result<(BTreeMap<String, String>, BTreeSet<String>)> {
     if let (Some(_), Some(lane)) = (lane_name, lane) {
-        // Leniently: a repo the lane does not map is only a problem if this
-        // plan actually merges it, and the step loop says so by name.
-        return Ok(scope
-            .iter()
-            .filter_map(|repo| Some((repo.id.clone(), lane_branch(lane, &repo.id)?.to_string())))
-            .collect());
+        let mut destinations = BTreeMap::new();
+        let mut absent = BTreeSet::new();
+        for repo in scope {
+            match lane_destination(lane, &repo.id) {
+                LaneDestination::Branch(branch) => {
+                    destinations.insert(repo.id.clone(), branch.to_string());
+                }
+                LaneDestination::Absent => {
+                    absent.insert(repo.id.clone());
+                }
+                // Leniently: a repo the lane never mentions is only a problem
+                // if this plan actually merges it, and the step loop says so
+                // by name.
+                LaneDestination::Unmapped => {}
+            }
+        }
+        return Ok((destinations, absent));
     }
     if let Some(target_branch) = target_branch {
-        return Ok(scope
-            .iter()
-            .map(|repo| (repo.id.clone(), target_branch.to_string()))
-            .collect());
+        return Ok((
+            scope
+                .iter()
+                .map(|repo| (repo.id.clone(), target_branch.to_string()))
+                .collect(),
+            BTreeSet::new(),
+        ));
     }
-    Ok(scope
-        .iter()
-        .filter_map(|repo| {
-            let base = publication_for_repo(&active.bundle, &repo.id)?
-                .base_branch
-                .clone();
-            Some((repo.id.clone(), base))
-        })
-        .collect())
+    Ok((
+        scope
+            .iter()
+            .filter_map(|repo| {
+                let base = publication_for_repo(&active.bundle, &repo.id)?
+                    .base_branch
+                    .clone();
+                Some((repo.id.clone(), base))
+            })
+            .collect(),
+        BTreeSet::new(),
+    ))
 }
 
 /// Whether landing this plan finishes the bundle.
@@ -270,10 +338,16 @@ fn resolve_terminal(
     lane_name: Option<&str>,
     lane: Option<&ProjectLandingLane>,
     destinations: &BTreeMap<String, String>,
+    lane_absent: &BTreeSet<String>,
 ) -> bool {
     if lane_name.is_some() {
         if let Some(declared) = lane.and_then(|lane| lane.terminal) {
             return declared;
+        }
+        // A destination this bundle's work does not all reach cannot be where
+        // that work ends, however the branches happen to line up.
+        if !lane_absent.is_empty() {
+            return false;
         }
         // An unresolvable lane is not a claim that the bundle is finished.
         return !destinations.is_empty() && destinations_are_configured_bases(active, destinations);
@@ -351,29 +425,92 @@ fn validate_lane(project: &KnitProject, lane_name: &str, lane: &ProjectLandingLa
     if let (Some(default), Some(wildcard)) =
         (lane.default_branch.as_deref(), lane.branches.get("*"))
     {
-        if default != wildcard {
-            bail!(
+        match wildcard.as_deref() {
+            Some(wildcard) if wildcard != default => bail!(
                 "landing lane `{lane_name}` declares conflicting defaultBranch `{default}` and branches.* `{wildcard}`"
-            );
+            ),
+            // A null wildcard says repositories are absent unless named, which
+            // is the opposite of what a defaultBranch says.
+            None => bail!(
+                "landing lane `{lane_name}` declares defaultBranch `{default}` and a null branches.*, which contradict each other. Keep the defaultBranch, or drop it and name the repositories that are in this lane."
+            ),
+            Some(_) => {}
         }
     }
     for (repo_id, branch) in &lane.branches {
-        if branch.trim().is_empty() {
-            bail!("landing.lanes.{lane_name}.branches.{repo_id} must not be empty");
+        if branch
+            .as_deref()
+            .is_some_and(|branch| branch.trim().is_empty())
+        {
+            bail!("landing.lanes.{lane_name}.branches.{repo_id} must not be empty. Use null to declare `{repo_id}` absent from this lane.");
         }
         if repo_id != "*" && !project.repos.iter().any(|repo| repo.id == *repo_id) {
             bail!("landing lane `{lane_name}` maps unknown project repository `{repo_id}`");
         }
     }
+    // The terminal destination is where the bundle's work ends, so every
+    // repository has to reach it. A lane that skips one cannot be the last
+    // stop: archiving there would strand that repository's review open.
+    if lane.terminal == Some(true) {
+        let absent = lane
+            .branches
+            .iter()
+            .filter(|(_, branch)| branch.is_none())
+            .map(|(repo_id, _)| repo_id.as_str())
+            .collect::<Vec<_>>();
+        if !absent.is_empty() {
+            bail!(
+                "landing lane `{lane_name}` is declared terminal but skips {}. A bundle's last stop has to carry every repository, or those reviews stay open after it is archived. Give them a branch, or drop `\"terminal\": true`.",
+                absent.join(", ")
+            );
+        }
+    }
+    // A lane cannot both skip a repository and deploy it: one of the two is a
+    // mistake, and guessing which would hide it.
+    for deployment in &lane.deployments {
+        let Some(repo_id) = deployment.repo_id.as_deref() else {
+            continue;
+        };
+        if matches!(lane_destination(lane, repo_id), LaneDestination::Absent) {
+            bail!(
+                "landing lane `{lane_name}` declares `{repo_id}` absent but its deployment `{}` targets that repository. Give `{repo_id}` a branch in this lane, or move the deployment.",
+                deployment.id
+            );
+        }
+    }
     Ok(())
 }
 
-fn lane_branch<'a>(lane: &'a ProjectLandingLane, repo_id: &str) -> Option<&'a str> {
-    lane.branches
-        .get(repo_id)
-        .or_else(|| lane.branches.get("*"))
-        .map(String::as_str)
-        .or(lane.default_branch.as_deref())
+/// Where a lane sends one repository. A lane is an environment, so there are
+/// three answers, not two: a branch, "this repository has no place in this
+/// environment", and "the lane never says".
+enum LaneDestination<'a> {
+    Branch(&'a str),
+    Absent,
+    Unmapped,
+}
+
+fn lane_destination<'a>(lane: &'a ProjectLandingLane, repo_id: &str) -> LaneDestination<'a> {
+    // An explicit entry wins over the wildcard and the default, including when
+    // it is null: that is how a repo opts out of a lane everything else joins.
+    if let Some(entry) = lane.branches.get(repo_id) {
+        return match entry {
+            Some(branch) => LaneDestination::Branch(branch.as_str()),
+            None => LaneDestination::Absent,
+        };
+    }
+    // A wildcard entry answers for every repo the lane does not name, so a
+    // null wildcard is an allow-list: only the named repos are in this lane.
+    if let Some(wildcard) = lane.branches.get("*") {
+        return match wildcard {
+            Some(branch) => LaneDestination::Branch(branch.as_str()),
+            None => LaneDestination::Absent,
+        };
+    }
+    match lane.default_branch.as_deref() {
+        Some(branch) => LaneDestination::Branch(branch),
+        None => LaneDestination::Unmapped,
+    }
 }
 
 fn inferred_plan_provider(active: &ActiveBundle) -> String {

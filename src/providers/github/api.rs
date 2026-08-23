@@ -5,7 +5,8 @@
 use super::transport::{github_api_output, native_github_api_output, use_native_github_api};
 use super::CLI;
 use crate::providers::{
-    cli_output, parse_pr_url, pr_number_from_url, CheckRun, PrTarget, PullRequest,
+    cli_output, parse_pr_url, pr_number_from_url, BranchMergeStatus, CheckRun, PrTarget,
+    PullRequest,
 };
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -188,6 +189,41 @@ pub(super) fn edit_base(
     let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
     github_api_output(target, "PATCH", &endpoint, Some(&payload))?;
     Ok(())
+}
+
+/// Merge `head` into `base` on the host with GitHub's branch merge endpoint,
+/// which needs no checkout. 201 created a merge commit, 204 means `base`
+/// already contained `head`, and 409 is a real conflict a human must resolve.
+pub(super) fn merge_branch(
+    target: &PrTarget,
+    repo_full_name: &str,
+    base: &str,
+    head: &str,
+) -> Result<BranchMergeStatus> {
+    let payload = serde_json::to_string(&json!({
+        "base": base,
+        "head": head,
+        "commit_message": format!("Merge {head} into {base}"),
+    }))
+    .context("failed to encode GitHub branch merge payload")?;
+    let endpoint = format!("repos/{repo_full_name}/merges");
+    match github_api_output(target, "POST", &endpoint, Some(&payload)) {
+        // A 204 has no body, which is how the host says there was nothing to
+        // merge: this environment already has the feature branch.
+        Ok(body) if body.trim().is_empty() => Ok(BranchMergeStatus::AlreadyContained),
+        Ok(_) => Ok(BranchMergeStatus::Merged),
+        Err(error) if is_merge_conflict(&error) => Err(anyhow::anyhow!(
+            "{head} conflicts with {base} in {repo_full_name}. Merge {base} into the feature branch first (`knit land update`), then land again. Details: {error:#}"
+        )),
+        Err(error) => Err(error),
+    }
+}
+
+/// Both transports report the host's status in their message: the native one
+/// formats `HTTP 409`, `gh api` prints its own 409 line.
+fn is_merge_conflict(error: &anyhow::Error) -> bool {
+    let text = format!("{error:#}").to_ascii_lowercase();
+    text.contains("409") || text.contains("merge conflict")
 }
 
 pub(super) fn merge(

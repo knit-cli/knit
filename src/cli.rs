@@ -356,6 +356,17 @@ pub enum Commands {
             conflicts_with = "target"
         )]
         repo_targets: Vec<String>,
+        /// Repository the lane deliberately does not carry, used with artifact
+        /// landing. Repeat per repository. Hosted Knit resolves these from the
+        /// project's `landing.lanes.<name>.branches` null entries.
+        #[arg(
+            long = "repo-absent",
+            global = true,
+            value_name = "REPO",
+            requires = "lane",
+            conflicts_with = "target"
+        )]
+        repo_absent: Vec<String>,
         #[command(subcommand)]
         command: Option<LandCommand>,
     },

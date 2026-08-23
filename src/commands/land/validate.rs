@@ -94,6 +94,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                     plan.lane.as_deref(),
                     repo_id,
                     destination,
+                    &plan.lane_absent,
                 )?;
             }
             LandStepKind::WaitChecks => {

@@ -1608,3 +1608,26 @@ fn project_schema_accepts_terminal_on_lanes_and_targets() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A lane branch may be null, which is how a project says a repository has no
+/// such environment. The same `additionalProperties: false` that made a
+/// missing `terminal` a validation failure applies here.
+#[test]
+fn project_schema_accepts_a_null_lane_branch() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let printed = knit(&workspace, ["schema", "print", "project"]);
+    let schema: Value = serde_json::from_str(&printed).unwrap();
+    let branches = &schema["properties"]["landing"]["properties"]["lanes"]["additionalProperties"]
+        ["properties"]["branches"]["additionalProperties"];
+
+    assert_eq!(
+        branches["type"],
+        serde_json::json!(["string", "null"]),
+        "a lane branch must accept null: {branches}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
