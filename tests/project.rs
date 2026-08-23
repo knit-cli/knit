@@ -1581,3 +1581,30 @@ fn bundle_agents_are_written_at_bundle_root_not_in_repo_checkouts() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The published project schema is what a project author validates against, so
+/// a landing property the code and docs support must be expressible there.
+#[test]
+fn project_schema_accepts_terminal_on_lanes_and_targets() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    let printed = knit(&workspace, ["schema", "print", "project"]);
+    let schema: Value = serde_json::from_str(&printed).unwrap();
+    let landing = &schema["properties"]["landing"]["properties"];
+
+    for section in ["lanes", "targets"] {
+        let entry = &landing[section]["additionalProperties"];
+        assert_eq!(
+            entry["properties"]["terminal"]["type"].as_str(),
+            Some("boolean"),
+            "{section} is missing `terminal`: {entry}"
+        );
+        // The section rejects unknown keys, so an omitted property is not a
+        // documentation gap but a project JSON that fails validation.
+        assert_eq!(entry["additionalProperties"].as_bool(), Some(false));
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}

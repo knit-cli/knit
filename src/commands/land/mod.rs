@@ -544,15 +544,6 @@ fn print_intermediate_landing_summary(active: &ActiveBundle, plan: &LandPlan) {
             out::warn("warning:")
         );
     }
-    if crate::store::load_effective_config(&active.root)
-        .map(|config| config.auto_tag_enabled())
-        .unwrap_or(false)
-    {
-        println!(
-            "{} skipped automatic tag because this landing is not terminal; `knit tag` pins configured project bases.",
-            out::warn("warning:")
-        );
-    }
     advice::print(
         &active.root,
         format!(
