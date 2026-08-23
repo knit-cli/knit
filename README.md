@@ -10,14 +10,11 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 
 Brew:
 ```sh
-brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+brew install knit-cli/tap/knit   # macOS / Linux binaries
 ```
-Cargo:
+From source:
 ```sh
-cargo install knit-cli --version 0.1.0-alpha.5   # from crates.io (the binary is named `knit`;
-                                                 # cargo needs the explicit version while only pre-releases exist)
-# or from a checkout:
-cargo install --path .
+cargo install --path .   # the installed binary is named `knit`
 ```
 
 ## The loop
