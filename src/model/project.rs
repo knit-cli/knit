@@ -108,8 +108,13 @@ pub struct ProjectLandingLane {
     /// shorthand.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
+    /// Where each repository's work goes in this lane. A `null` value means
+    /// the repository is not part of this environment at all: a library or a
+    /// script bag has nowhere to be deployed, so the lane skips it instead of
+    /// inventing a branch for it. Absence is written per repository on
+    /// purpose — a missing entry is also what a typo looks like.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
-    pub branches: BTreeMap<String, String>,
+    pub branches: BTreeMap<String, Option<String>>,
     /// Whether landing into this lane finishes the bundle. A terminal lane is
     /// the bundle's last stop: landing there archives it. An intermediate
     /// lane (a staging environment, say) leaves the bundle open. When unset,

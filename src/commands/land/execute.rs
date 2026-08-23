@@ -920,6 +920,8 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
         provider: plan.provider.clone(),
         plan_path: display_path_for_storage(&active.root, plan_path),
         status: LandStatus::Running,
+        lane: plan.lane.clone(),
+        lane_absent: plan.lane_absent.clone(),
         created_at: now.clone(),
         updated_at: now,
         rolled_back_at: None,

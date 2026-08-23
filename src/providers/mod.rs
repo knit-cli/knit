@@ -104,6 +104,14 @@ impl PrTarget {
     }
 }
 
+/// What a host-side branch merge did. Landing into the same environment twice
+/// is a no-op, not an error, so "already contained" is an outcome.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BranchMergeStatus {
+    Merged,
+    AlreadyContained,
+}
+
 /// A code host that exposes review objects through a CLI tool.
 pub trait Forge {
     /// Stable provider id recorded on publications, e.g. `github`.
@@ -147,6 +155,21 @@ pub trait Forge {
         delete_branch: bool,
         match_head: Option<&str>,
     ) -> Result<()>;
+    /// Merge one branch into another on the host, without a review object and
+    /// without a local checkout. How a bundle reaches an environment when the
+    /// caller has only the bundle artifact: the feature branch goes into the
+    /// environment branch and the review stays open where it is.
+    fn merge_branch(
+        &self,
+        _target: &PrTarget,
+        _base: &str,
+        _head: &str,
+    ) -> Result<BranchMergeStatus> {
+        bail!(
+            "{} cannot merge one branch into another from a bundle artifact in Knit yet. Land this lane from a workspace with `knit land --lane`, which merges in a local checkout instead.",
+            self.id()
+        )
+    }
     fn revert_pull_request(
         &self,
         _target: &PrTarget,

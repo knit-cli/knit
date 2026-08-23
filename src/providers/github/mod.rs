@@ -7,8 +7,8 @@ mod api;
 mod transport;
 
 use super::{
-    cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
-    PULL_REQUEST_KIND,
+    cli_output, parse_pr_url, repo_scoped_args, BranchMergeStatus, CheckRun, Forge, PrTarget,
+    PullRequest, PULL_REQUEST_KIND,
 };
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
@@ -174,6 +174,15 @@ impl Forge for GitHub {
         );
         cli_output(CLI, &target.cwd, args, None)?;
         Ok(())
+    }
+
+    fn merge_branch(&self, target: &PrTarget, base: &str, head: &str) -> Result<BranchMergeStatus> {
+        let repo_full_name = target.repo_full_name.as_deref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "merging `{head}` into `{base}` needs the GitHub repository name; the bundle artifact records no remote for it"
+            )
+        })?;
+        api::merge_branch(target, repo_full_name, base, head)
     }
 
     fn merge(

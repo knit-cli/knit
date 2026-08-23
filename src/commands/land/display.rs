@@ -6,7 +6,7 @@ use crate::model::DeployMode;
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
 use crate::store::ActiveBundle;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
@@ -54,6 +54,7 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
             .iter()
             .any(|step| step.step_type == LandStepKind::Deploy),
     );
+    print_lane_absences(plan.lane.as_deref(), &plan.lane_absent);
     println!();
     for step in &plan.steps {
         println!(
@@ -107,6 +108,7 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
             .iter()
             .any(|step| step.step_type == LandStepKind::Deploy),
     );
+    print_lane_absences(run.lane.as_deref(), &run.lane_absent);
     println!();
     for step in &run.steps {
         println!(
@@ -207,6 +209,25 @@ fn print_landing_targets<'a>(
             );
         }
     }
+}
+
+/// Name the repositories this bundle changed that the lane deliberately does
+/// not carry. Without this the plan just has fewer steps than the bundle has
+/// repos, which reads exactly like something went missing.
+fn print_lane_absences(lane: Option<&str>, absent: &BTreeSet<String>) {
+    let (Some(lane), false) = (lane, absent.is_empty()) else {
+        return;
+    };
+    println!("{}", out::heading("Not in this lane:"));
+    for repo_id in absent {
+        println!("  {}", out::repo(repo_id));
+    }
+    println!(
+        "  {}",
+        out::muted(format!(
+            "declared absent from `{lane}`; their changes reach no environment until the terminal landing"
+        ))
+    );
 }
 
 fn planned_step_target(step: &LandStep) -> String {

@@ -23,14 +23,36 @@ pub fn apply_land_from_artifact(
     target_branch: Option<&str>,
     lane_name: Option<&str>,
     repo_targets: &[String],
+    repo_absent: &[String],
     declared_terminal: Option<bool>,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let target_branch = normalize_target_branch(target_branch)?;
     let lane_name = normalize_lane_name(lane_name)?;
     let repo_targets = parse_repo_targets(repo_targets)?;
+    let repo_absent = parse_repo_absent(repo_absent)?;
     if lane_name.is_none() && !repo_targets.is_empty() {
         bail!("--repo-target requires --lane");
+    }
+    if lane_name.is_none() && !repo_absent.is_empty() {
+        bail!("--repo-absent requires --lane");
+    }
+    if let Some(repo_id) = repo_absent.iter().find(|id| repo_targets.contains_key(*id)) {
+        bail!(
+            "Repository `{repo_id}` is given both a lane branch and declared absent from the lane. One of the two is a mistake."
+        );
+    }
+    // The bundle's last stop has to carry every repository, or the skipped
+    // ones keep an open review after the bundle is archived.
+    if declared_terminal == Some(true) && !repo_absent.is_empty() {
+        bail!(
+            "This landing is declared terminal but skips {}. A bundle's last stop has to carry every repository, or those reviews stay open after it is archived.",
+            repo_absent
+                .iter()
+                .map(String::as_str)
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
     }
     let mut bundle: crate::model::ChangeGroup = read_json(artifact_path)
         .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
@@ -52,15 +74,64 @@ pub fn apply_land_from_artifact(
                 bail!("--repo-target names unpublished or unknown repository `{repo_id}`");
             }
         }
-        for repo_id in published_repo_ids {
-            if !repo_targets.contains_key(repo_id) {
+        for repo_id in &repo_absent {
+            if !published_repo_ids.contains(repo_id.as_str()) {
+                bail!("--repo-absent names unpublished or unknown repository `{repo_id}`");
+            }
+        }
+        for repo_id in &published_repo_ids {
+            if !repo_targets.contains_key(*repo_id) && !repo_absent.contains(*repo_id) {
                 bail!(
-                    "Landing lane `{}` has no resolved artifact target for repository `{repo_id}`. Pass `--repo-target {repo_id}=BRANCH`.",
+                    "Landing lane `{}` has no resolved artifact target for repository `{repo_id}`. Pass `--repo-target {repo_id}=BRANCH`, or `--repo-absent {repo_id}` if it has no {} environment.",
+                    lane_name.as_deref().unwrap_or_default(),
                     lane_name.as_deref().unwrap_or_default()
                 );
             }
         }
+        if published_repo_ids
+            .iter()
+            .all(|repo_id| repo_absent.contains(*repo_id))
+        {
+            bail!(
+                "Landing lane `{}` carries none of this bundle's published repositories; they are all declared absent, so there is nothing to land there.",
+                lane_name.as_deref().unwrap_or_default()
+            );
+        }
     }
+
+    // Decided before anything moves, because it decides what moves: a
+    // terminal landing merges the reviews, an intermediate lane merges the
+    // feature branches and leaves the reviews open. A caller with project
+    // metadata (a trusted host resolving a lane) states the answer; otherwise
+    // judge it the way a local plan does, by whether every repository is
+    // headed for its own configured base.
+    let terminal = declared_terminal.unwrap_or_else(|| {
+        // Same rule as a local plan: a destination this bundle's work does not
+        // all reach cannot be where that work ends.
+        if !repo_absent.is_empty() {
+            return false;
+        }
+        bundle
+            .repos
+            .iter()
+            .filter(|repo| publication_for_repo(&bundle, &repo.id).is_some())
+            .filter(|repo| !repo_absent.contains(&repo.id))
+            .all(|repo| {
+                let destination = repo_targets
+                    .get(&repo.id)
+                    .map(String::as_str)
+                    .or(target_branch.as_deref())
+                    .or_else(|| {
+                        publication_for_repo(&bundle, &repo.id)
+                            .map(|pub_| pub_.base_branch.as_str())
+                    });
+                destination == Some(repo.base_branch.as_str())
+            })
+    });
+    // Mirrors the local plan: only a lane reaches an environment by merging
+    // branches. `--target` keeps its narrower meaning at any destination —
+    // retarget the recorded reviews and merge them there.
+    let branch_merges = !terminal && lane_name.is_some();
 
     let started_at = now_iso();
     let mut merged_repo_ids = Vec::new();
@@ -74,6 +145,30 @@ pub fn apply_land_from_artifact(
         };
         let forge = providers::for_repo(repo)?;
         let target = artifact_target(&cwd, forge.as_ref(), repo)?;
+
+        if repo_absent.contains(&repo.id) {
+            println!(
+                "{} {} {}",
+                out::muted("not in this lane"),
+                out::repo(&repo.id),
+                out::muted("keeps its work for the terminal landing")
+            );
+            continue;
+        }
+
+        if branch_merges {
+            merge_feature_branch_into_lane(
+                forge.as_ref(),
+                &target,
+                repo,
+                &publication,
+                repo_targets.get(&repo.id).map(String::as_str),
+                lane_name.as_deref(),
+            )?;
+            merged_repo_ids.push(repo.id.clone());
+            publication_urls.push(publication.url.clone());
+            continue;
+        }
 
         let mut pr = forge.view(&target, &publication.url)?;
         let repo_target = repo_targets
@@ -173,26 +268,6 @@ pub fn apply_land_from_artifact(
         );
     }
 
-    // A caller with project metadata (a trusted host resolving a lane) states
-    // whether this destination finishes the bundle; otherwise judge it the way
-    // a local plan does, by whether every repo landed on its configured base.
-    let terminal = declared_terminal.unwrap_or_else(|| {
-        merged_repo_ids.iter().all(|repo_id| {
-            let destination = repo_targets
-                .get(repo_id)
-                .map(String::as_str)
-                .or(target_branch.as_deref())
-                .or_else(|| {
-                    publication_for_repo(&bundle, repo_id).map(|pub_| pub_.base_branch.as_str())
-                });
-            bundle
-                .repos
-                .iter()
-                .find(|repo| repo.id == *repo_id)
-                .is_some_and(|repo| destination == Some(repo.base_branch.as_str()))
-        })
-    });
-
     // Record a landed node in the artifact without writing land plan/run files.
     let node = BundleNode::feature_landed(
         node_id("land"),
@@ -221,6 +296,81 @@ pub fn apply_land_from_artifact(
             Ok(())
         }
     }
+}
+
+/// Send one repository's feature branch into the lane's branch on the host,
+/// leaving its review untouched. The review-base guard is the same rule the
+/// local plan enforces, re-checked here because a review can be retargeted
+/// onto the lane's branch after the host resolved the lane.
+fn merge_feature_branch_into_lane(
+    forge: &dyn providers::Forge,
+    target: &providers::PrTarget,
+    repo: &crate::model::RepoEntry,
+    publication: &crate::model::PublicationEntry,
+    destination: Option<&str>,
+    lane_name: Option<&str>,
+) -> Result<()> {
+    let destination = destination.with_context(|| {
+        format!(
+            "{}: landing lane has no resolved branch for this repository",
+            repo.id
+        )
+    })?;
+    let feature_branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: the bundle artifact records no feature branch to merge into `{destination}`",
+            repo.id
+        )
+    })?;
+
+    let pr = forge.view(target, &publication.url)?;
+    let live_base = pr
+        .base_ref_name
+        .as_deref()
+        .unwrap_or(&publication.base_branch);
+    if live_base == destination {
+        let lane = lane_name.unwrap_or("this landing");
+        bail!(
+            "Landing lane `{lane}` sends `{}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. Point the lane at a different branch for `{}`, or declare the lane terminal so Knit merges the review itself.",
+            repo.id,
+            publication.url,
+            repo.id
+        );
+    }
+
+    let status = forge
+        .merge_branch(target, destination, feature_branch)
+        .with_context(|| format!("{}: merging {feature_branch} into {destination}", repo.id))?;
+    match status {
+        providers::BranchMergeStatus::Merged => println!(
+            "{} {} {} -> {}",
+            out::ok("merged"),
+            out::repo(&repo.id),
+            out::branch(feature_branch),
+            out::branch(destination)
+        ),
+        providers::BranchMergeStatus::AlreadyContained => println!(
+            "{} {} {}",
+            out::ok("already there"),
+            out::repo(&repo.id),
+            out::muted(format!("{destination} already contains {feature_branch}"))
+        ),
+    }
+    Ok(())
+}
+
+fn parse_repo_absent(values: &[String]) -> Result<BTreeSet<String>> {
+    let mut absent = BTreeSet::new();
+    for value in values {
+        let repo_id = value.trim();
+        if repo_id.is_empty() {
+            bail!("Invalid --repo-absent `{value}`; repository must be non-empty");
+        }
+        if !absent.insert(repo_id.to_string()) {
+            bail!("Duplicate --repo-absent for repository `{repo_id}`");
+        }
+    }
+    Ok(absent)
 }
 
 fn parse_repo_targets(values: &[String]) -> Result<BTreeMap<String, String>> {

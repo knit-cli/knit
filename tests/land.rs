@@ -169,6 +169,10 @@ fn artifact_land_apply_accepts_a_server_resolved_lane_map() {
             artifact.to_string_lossy().to_string(),
             "--out".into(),
             out.to_string_lossy().to_string(),
+            // A host holding the project metadata states the lifecycle rather
+            // than letting Knit infer it. Terminal is what makes this landing
+            // merge the review, which is what this test is about.
+            "--terminal".into(),
         ],
         &fake_bin,
         &fake_gh_dir,
@@ -2006,6 +2010,528 @@ fn intermediate_lane_refuses_to_land_on_its_own_review_base() {
     assert!(!workspace
         .join(".knit/land-plans/colliding-lane.land.json")
         .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_lane_skips_repositories_declared_absent_from_it() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "absent lane work",
+        json!({
+            "staging": {
+                "branches": { "backend": "staging", "frontend": null }
+            }
+        }),
+        &["staging"],
+    );
+
+    let planned = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(planned.contains("backend -> staging"), "{planned}");
+    assert!(planned.contains("Not in this lane:"), "{planned}");
+    assert!(
+        planned.contains("merge-backend"),
+        "backend should still merge: {planned}"
+    );
+    assert!(
+        !planned.contains("merge-frontend"),
+        "an absent repo gets no step: {planned}"
+    );
+
+    let plan: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/land-plans/absent-lane-work.land.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan["laneAbsent"], json!(["frontend"]));
+    assert_eq!(plan["targetBranches"], json!({ "backend": "staging" }));
+    assert_eq!(plan["terminal"], json!(false));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_lane_that_carries_nothing_this_bundle_changed_is_refused() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "all absent work",
+        json!({
+            "staging": {
+                "branches": { "backend": null, "frontend": null }
+            }
+        }),
+        &["staging"],
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("carries none of the repositories this bundle changed"),
+        "{failure}"
+    );
+    assert!(failure.contains("backend"), "{failure}");
+    assert!(failure.contains("frontend"), "{failure}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn an_unmapped_lane_repository_still_errors_and_offers_absence() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "unmapped lane work",
+        json!({
+            "staging": {
+                "branches": { "backend": "staging" }
+            }
+        }),
+        &["staging"],
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("has no branch for repository `frontend`"),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("\"frontend\": null"),
+        "the error should offer absence as a way out: {failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_lane_cannot_both_skip_a_repository_and_deploy_it() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "absent deploy work",
+        json!({
+            "staging": {
+                "branches": { "backend": "staging", "frontend": null },
+                "deployments": [{
+                    "id": "deploy-frontend",
+                    "repoId": "frontend",
+                    "command": ["sh", "-c", "true"]
+                }]
+            }
+        }),
+        &["staging"],
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("declares `frontend` absent") && failure.contains("deploy-frontend"),
+        "{failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Artifact landing is the hosted path, and an intermediate lane must behave
+/// there exactly as it does locally: merge the feature branch into the
+/// environment, leave the review open against the destination that ends the
+/// bundle's life.
+#[test]
+fn artifact_intermediate_lane_merges_the_branch_and_spares_the_review() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact staging"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let artifact = workspace.join(".knit/bundles/artifact-staging.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-staging",
+        "state": "OPEN",
+        "title": "artifact staging (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-staging.out.bundle.json");
+    let landed = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-target".into(),
+            "backend=staging".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--intermediate".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+        ],
+    );
+
+    assert!(
+        landed.contains("merged backend knit/artifact-staging -> staging"),
+        "{landed}"
+    );
+    assert!(
+        !landed.contains("retargeted"),
+        "an intermediate lane must not move the review: {landed}"
+    );
+    // The host merged the branch, not the pull request.
+    assert!(fake_gh_dir.join("api-backend-merges.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-merge.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-edit.json").exists());
+
+    let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(landed_payload["publications"][0]["baseBranch"], "main");
+    assert_eq!(landed_payload["publications"][0]["state"], "OPEN");
+    let landing = &landed_payload["nodes"].as_array().unwrap().last().unwrap()["landing"];
+    assert_eq!(landing["terminal"], json!(false));
+    assert_eq!(landing["lane"], json!("staging"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The same rule the local plan enforces, enforced on the hosted path: a lane
+/// that sends a repository to the branch its review is based on would close
+/// that review, so it cannot claim to be a stop along the way.
+#[test]
+fn artifact_intermediate_lane_refuses_to_merge_into_the_review_base() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact collide"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let artifact = workspace.join(".knit/bundles/artifact-collide.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-collide",
+        "state": "OPEN",
+        "title": "artifact collide (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-collide.out.bundle.json");
+    let failure = knit_fails_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-target".into(),
+            "backend=main".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--intermediate".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+        ],
+    );
+
+    assert!(
+        failure.contains("which is the base of its recorded review"),
+        "{failure}"
+    );
+    assert!(!fake_gh_dir.join("api-backend-merges.json").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A repository the lane does not carry is skipped on the hosted path too,
+/// and the landing still refuses when nothing is left to carry.
+#[test]
+fn artifact_lane_accepts_absent_repositories() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact absent"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let artifact = workspace.join(".knit/bundles/artifact-absent.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-absent",
+        "state": "OPEN",
+        "title": "artifact absent (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-absent.out.bundle.json");
+    let env = [
+        ("GH_TOKEN", "gho_fake_token"),
+        ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+        ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+    ];
+    let failure = knit_fails_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-absent".into(),
+            "backend".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--intermediate".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &env,
+    );
+    assert!(
+        failure.contains("carries none of this bundle's published repositories"),
+        "{failure}"
+    );
+
+    // Naming a repository both ways is a contradiction, not a preference.
+    let contradiction = knit_fails_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-target".into(),
+            "backend=staging".into(),
+            "--repo-absent".into(),
+            "backend".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--intermediate".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &env,
+    );
+    assert!(
+        contradiction.contains("both a lane branch and declared absent"),
+        "{contradiction}"
+    );
+
+    // The hosted path enforces the same rule as a local plan: a last stop has
+    // to carry everything.
+    let terminal_with_absence = knit_fails_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-absent".into(),
+            "backend".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--terminal".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &env,
+    );
+    assert!(
+        terminal_with_absence.contains("declared terminal but skips backend"),
+        "{terminal_with_absence}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A destination that does not carry all of a bundle's work cannot be where
+/// that work ends: archiving there would leave the skipped repositories'
+/// reviews open forever.
+#[test]
+fn a_lane_that_skips_a_repository_is_never_terminal() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "absent terminal work",
+        json!({
+            // Every carried repo lands on its own configured base, which is
+            // the shape that otherwise infers "terminal".
+            "release": {
+                "branches": { "backend": "main", "frontend": null }
+            }
+        }),
+        &[],
+    );
+
+    // The reviews sit on a release branch, so `main` is each repo's configured
+    // base but not its review base: the shape that otherwise reads "terminal".
+    let bundle_path = workspace.join(".knit/bundles/absent-terminal-work.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    for publication in bundle["publications"].as_array_mut().unwrap() {
+        publication["baseBranch"] = json!("release");
+    }
+    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+
+    let planned = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "release"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        planned.contains("stays open on success (intermediate destination)"),
+        "{planned}"
+    );
+
+    let plan: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/land-plans/absent-terminal-work.land.json"))
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(plan["terminal"], json!(false));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The way out an error offers has to be a way out. A lane that skips
+/// repositories cannot be declared terminal, so the collision error must not
+/// send the reader there.
+#[test]
+fn the_review_base_collision_error_does_not_suggest_an_impossible_fix() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "absent collide work",
+        json!({
+            "release": {
+                "branches": { "backend": "main", "frontend": null }
+            }
+        }),
+        &[],
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "release"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("which is the base of its recorded review"),
+        "{failure}"
+    );
+    assert!(
+        failure.contains("cannot be terminal instead, because it skips frontend"),
+        "{failure}"
+    );
+    assert!(
+        !failure.contains("declare the lane terminal so Knit merges"),
+        "the impossible fix must not be offered: {failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_terminal_lane_cannot_declare_a_repository_absent() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "terminal absent work",
+        json!({
+            "release": {
+                "terminal": true,
+                "branches": { "backend": "main", "frontend": null }
+            }
+        }),
+        &[],
+    );
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "release"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("declared terminal but skips frontend"),
+        "{failure}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

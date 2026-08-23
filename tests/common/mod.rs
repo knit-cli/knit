@@ -1301,6 +1301,33 @@ fn handle_fake_github_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             }
             (200, fake_github_pr_json(dir, number))
         }
+        ("POST", ["repos", "acme", repo, "merges"]) => {
+            // Branch merge, the endpoint an intermediate lane landing uses.
+            // `conflict-<repo>` opts into 409; a repeated merge of the same
+            // head answers 204, the host's way of saying nothing to do.
+            fs::write(dir.join(format!("api-{repo}-merges.json")), &body).unwrap();
+            let head = serde_json::from_str::<serde_json::Value>(&body)
+                .ok()
+                .and_then(|payload| {
+                    payload
+                        .get("head")
+                        .and_then(|value| value.as_str())
+                        .map(ToOwned::to_owned)
+                })
+                .unwrap_or_default();
+            let marker = dir.join(format!("merged-branch-{repo}-{}", head.replace('/', "-")));
+            if dir.join(format!("conflict-{repo}")).exists() {
+                (409, "{\"message\":\"Merge conflict\"}".to_string())
+            } else if marker.exists() {
+                (204, String::new())
+            } else {
+                fs::write(&marker, "").unwrap();
+                (
+                    201,
+                    "{\"sha\":\"branch-merge-sha\",\"merged\":true}".to_string(),
+                )
+            }
+        }
         ("GET", ["repos", "acme", repo, "commits", _, "check-runs"]) => {
             // Marker files opt a repo into non-empty commit CI: `ci-pass-<repo>`
             // serves one passing run, `ci-fail-<repo>` one failing run. Without

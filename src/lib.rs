@@ -507,12 +507,13 @@ pub fn run(cli: Cli) -> Result<()> {
             target,
             lane,
             repo_targets,
+            repo_absent,
             command,
         } => match command {
             None => {
-                if !repo_targets.is_empty() {
+                if !repo_targets.is_empty() || !repo_absent.is_empty() {
                     anyhow::bail!(
-                        "--repo-target is only used with `knit land apply --from-artifact`"
+                        "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
                     );
                 }
                 commands::land_default(target.as_deref(), lane.as_deref())
@@ -522,9 +523,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 out,
                 force,
             }) => {
-                if !repo_targets.is_empty() {
+                if !repo_targets.is_empty() || !repo_absent.is_empty() {
                     anyhow::bail!(
-                        "--repo-target is only used with `knit land apply --from-artifact`"
+                        "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
                     );
                 }
                 commands::generate_land_plan(
@@ -565,13 +566,14 @@ pub fn run(cli: Cli) -> Result<()> {
                         target.as_deref(),
                         lane.as_deref(),
                         &repo_targets,
+                        &repo_absent,
                         declared_terminal,
                     )
                 }
                 None => {
-                    if !repo_targets.is_empty() {
+                    if !repo_targets.is_empty() || !repo_absent.is_empty() {
                         anyhow::bail!(
-                            "--repo-target is only used with `knit land apply --from-artifact`"
+                            "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
                         );
                     }
                     commands::apply_land_plan(
@@ -588,7 +590,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             },
             Some(LandCommand::Rollback { run, apply }) => {
-                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                if target.is_some()
+                    || lane.is_some()
+                    || !repo_targets.is_empty()
+                    || !repo_absent.is_empty()
+                {
                     anyhow::bail!("--target/--lane cannot be changed during rollback; the selection is stored in the landing plan.");
                 }
                 commands::rollback_land_run(run.as_deref(), apply)
@@ -599,19 +605,31 @@ pub fn run(cli: Cli) -> Result<()> {
                 no_remote,
                 skip_checks,
             }) => {
-                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                if target.is_some()
+                    || lane.is_some()
+                    || !repo_targets.is_empty()
+                    || !repo_absent.is_empty()
+                {
                     anyhow::bail!("--target/--lane cannot be changed during resume; the selection is stored in the landing plan.");
                 }
                 commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks)
             }
             Some(LandCommand::Status { run }) => {
-                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                if target.is_some()
+                    || lane.is_some()
+                    || !repo_targets.is_empty()
+                    || !repo_absent.is_empty()
+                {
                     anyhow::bail!("--target/--lane are not used by land status; inspect the stored plan instead.");
                 }
                 commands::show_land_status(run.as_deref())
             }
             Some(LandCommand::Check) => {
-                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                if target.is_some()
+                    || lane.is_some()
+                    || !repo_targets.is_empty()
+                    || !repo_absent.is_empty()
+                {
                     anyhow::bail!("--target/--lane are applied during land apply; `knit land check` reports current review bases.");
                 }
                 commands::check_landing()
@@ -623,7 +641,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 set_upstream,
                 continue_merge,
             }) => {
-                if target.is_some() || lane.is_some() || !repo_targets.is_empty() {
+                if target.is_some()
+                    || lane.is_some()
+                    || !repo_targets.is_empty()
+                    || !repo_absent.is_empty()
+                {
                     anyhow::bail!("--target/--lane are not used by land update; apply the plan once to retarget reviews, then run update.");
                 }
                 commands::update_land_branches(&repos, all, push, set_upstream, continue_merge)

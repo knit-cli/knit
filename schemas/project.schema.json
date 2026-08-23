@@ -131,7 +131,7 @@
               "defaultBranch": { "type": "string", "minLength": 1 },
               "branches": {
                 "type": "object",
-                "additionalProperties": { "type": "string", "minLength": 1 }
+                "additionalProperties": { "type": ["string", "null"], "minLength": 1 }
               },
               "terminal": { "type": "boolean" },
               "deployments": {
