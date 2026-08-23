@@ -92,6 +92,7 @@ pub(super) fn build_default_plan(
                 .get(&repo.id)
                 .cloned()
                 .expect("destination was checked above");
+            ensure_branch_merge_spares_review(active, lane_name, &repo.id, &destination)?;
             LandStep {
                 id: id.clone(),
                 step_type: LandStepKind::MergeBranch,
@@ -186,6 +187,31 @@ pub(super) fn build_default_plan(
             .unwrap_or_default(),
         steps,
     })
+}
+
+/// A branch merge only leaves the review open if it goes somewhere the review
+/// is not already pointed at. When a lane maps a repository onto that repo's
+/// own review base, merging the feature branch there puts the review's commits
+/// into its base, and the forge closes it as merged — silently spending the
+/// one review the bundle has, in a landing that claims to be a stop along the
+/// way. Refuse instead, and name both ways out.
+pub(super) fn ensure_branch_merge_spares_review(
+    active: &ActiveBundle,
+    lane_name: Option<&str>,
+    repo_id: &str,
+    destination: &str,
+) -> Result<()> {
+    let Some(publication) = publication_for_repo(&active.bundle, repo_id) else {
+        return Ok(());
+    };
+    if publication.base_branch != destination {
+        return Ok(());
+    }
+    let lane = lane_name.unwrap_or("this landing");
+    bail!(
+        "Landing lane `{lane}` sends `{repo_id}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. Point the lane at a different branch for `{repo_id}`, or declare the lane terminal so Knit merges the review itself.",
+        publication.url
+    );
 }
 
 pub(super) fn is_merge_step(step: &LandStep) -> bool {

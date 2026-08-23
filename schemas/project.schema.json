@@ -114,6 +114,7 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
+              "terminal": { "type": "boolean" },
               "deployments": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/deployment" }
@@ -132,6 +133,7 @@
                 "type": "object",
                 "additionalProperties": { "type": "string", "minLength": 1 }
               },
+              "terminal": { "type": "boolean" },
               "deployments": {
                 "type": "array",
                 "items": { "$ref": "#/$defs/deployment" }

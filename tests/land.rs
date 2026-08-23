@@ -1968,3 +1968,44 @@ fn bundle_lands_into_staging_then_production() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn intermediate_lane_refuses_to_land_on_its_own_review_base() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "colliding lane",
+        json!({ "staging": { "defaultBranch": "master" } }),
+        &["master"],
+    );
+
+    // Publish the reviews against the same branch the lane merges into.
+    let bundle_path = workspace.join(".knit/bundles/colliding-lane.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    for publication in bundle["publications"].as_array_mut().unwrap() {
+        publication["baseBranch"] = json!("master");
+    }
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+
+    let failure = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failure.contains("which is the base of its recorded review"),
+        "{failure}"
+    );
+    assert!(failure.contains("declare the lane terminal"), "{failure}");
+    assert!(!workspace
+        .join(".knit/land-plans/colliding-lane.land.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}

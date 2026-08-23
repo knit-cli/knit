@@ -78,15 +78,23 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                 required_repo_id(step)?;
             }
             LandStepKind::MergeBranch => {
-                required_repo_id(step)?;
-                if step
+                let repo_id = required_repo_id(step)?;
+                let Some(destination) = step
                     .target_branch
                     .as_deref()
                     .map(str::trim)
-                    .is_none_or(str::is_empty)
-                {
+                    .filter(|branch| !branch.is_empty())
+                else {
                     bail!("merge_branch step `{}` must provide targetBranch", step.id);
-                }
+                };
+                // Re-checked here, not just at plan time: a review can be
+                // retargeted onto this branch after the plan was written.
+                super::plan::ensure_branch_merge_spares_review(
+                    active,
+                    plan.lane.as_deref(),
+                    repo_id,
+                    destination,
+                )?;
             }
             LandStepKind::WaitChecks => {
                 required_repo_id(step)?;

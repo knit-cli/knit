@@ -502,7 +502,9 @@ fn alternate_target_landing_does_not_auto_tag_configured_project_bases() {
         &fake_bin,
         &fake_gh_dir,
     );
-    assert!(apply.contains("skipped automatic tag"), "{apply}");
+    // Exactly once: the intermediate summary owns this warning, and the
+    // terminal tag path must not print its own alongside it.
+    assert_eq!(apply.matches("skipped automatic tag").count(), 1, "{apply}");
 
     // `staging` is nobody's configured base, so the landing is not terminal:
     // the bundle stays open and nothing claims the bases are known-good.
