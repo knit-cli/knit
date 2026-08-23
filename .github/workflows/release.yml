@@ -64,7 +64,7 @@ jobs:
     needs: upload-assets
     runs-on: ubuntu-latest
     env:
-      TAP_REPO: marc-merino/homebrew-knit
+      TAP_REPO: knit-cli/homebrew-tap
       TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
     steps:
       - name: Skip when tap token is not configured

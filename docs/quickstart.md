@@ -5,15 +5,13 @@ This walkthrough takes you from install to a landed multi-repo change in about t
 ## 1. Install
 Brew:
 ```sh
-brew tap marc-merino/knit && brew install knit   # macOS / Linux binaries
+brew install knit-cli/tap/knit   # macOS / Linux binaries
 ```
-Cargo:
+From source:
 ```sh
-cargo install knit-cli --version 0.1.0-alpha.6   # from crates.io (the binary is named `knit`;
-                                                 # cargo needs the explicit version while only pre-releases exist)
-# or from a checkout:
-cargo install --path .
+cargo install --path .   # the installed binary is named `knit`
 ```
+crates.io carries only the earliest `knit-cli` alphas and is not part of the release; Homebrew and source are the supported install paths.
 
 After that, `knit` is available anywhere your shell can see `~/.cargo/bin`.
 
