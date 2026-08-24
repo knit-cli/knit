@@ -97,6 +97,13 @@ pub(super) struct LandPlan {
     /// repository skipped on purpose does not read like one dropped by a bug.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(super) lane_absent: BTreeSet<String>,
+    /// Configured deployments this landing does not run, keyed by deployment
+    /// id, with the repositories each one watches. A deployment runs when
+    /// something it depends on changed; recorded here so one left out on
+    /// purpose does not read like one dropped by a bug.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) deployments_skipped: BTreeMap<String, Vec<String>>,
+
     /// Whether this plan's destination finishes the bundle. A terminal
     /// landing archives the bundle and removes its generated worktrees; an
     /// intermediate one (a staging lane, say) leaves it open for its next
@@ -187,6 +194,13 @@ pub(super) struct LandRun {
     /// output does not read like their steps went missing.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub(super) lane_absent: BTreeSet<String>,
+    /// Configured deployments this landing does not run, keyed by deployment
+    /// id, with the repositories each one watches. A deployment runs when
+    /// something it depends on changed; recorded here so one left out on
+    /// purpose does not read like one dropped by a bug.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) deployments_skipped: BTreeMap<String, Vec<String>>,
+
     pub(super) created_at: String,
     pub(super) updated_at: String,
     /// Set when `knit land rollback` (or `onFailure: rollback`) created revert

@@ -184,13 +184,17 @@ pub(super) fn build_default_plan(
     } else {
         BTreeMap::new()
     };
+    let mut deployments_skipped = BTreeMap::new();
     append_project_deployments(
         active,
+        project.as_ref(),
         landing,
         target_branch,
         lane_name,
         &target_branches,
+        &changed_repo_ids,
         &mut steps,
+        &mut deployments_skipped,
     )?;
 
     if steps.is_empty() {
@@ -209,6 +213,7 @@ pub(super) fn build_default_plan(
         lane: lane_name.map(ToOwned::to_owned),
         target_branches,
         lane_absent,
+        deployments_skipped,
         terminal,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
@@ -605,13 +610,17 @@ fn merge_interval_seconds(merge: Option<&ProjectLandingMergePlan>) -> u64 {
     merge.and_then(|merge| merge.interval_seconds).unwrap_or(10)
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_project_deployments(
     active: &ActiveBundle,
+    project: Option<&KnitProject>,
     landing: Option<&ProjectLandingPlan>,
     explicit_target: Option<&str>,
     lane_name: Option<&str>,
     lane_targets: &BTreeMap<String, String>,
+    changed_repo_ids: &BTreeSet<String>,
     steps: &mut Vec<LandStep>,
+    skipped: &mut BTreeMap<String, Vec<String>>,
 ) -> Result<()> {
     let Some(landing) = landing else {
         return Ok(());
@@ -639,12 +648,15 @@ fn append_project_deployments(
                 .map(String::as_str);
             append_project_deployment(
                 active,
+                project,
                 steps,
+                skipped,
                 deployment,
                 target_branch,
                 Some(lane_name),
                 &merge_step_ids,
                 &all_merge_ids,
+                changed_repo_ids,
             )?;
         }
         return Ok(());
@@ -699,12 +711,15 @@ fn append_project_deployments(
         for deployment in &landing.deployments {
             append_project_deployment(
                 active,
+                project,
                 steps,
+                skipped,
                 deployment,
                 None,
                 None,
                 &merge_step_ids,
                 &all_merge_ids,
+                changed_repo_ids,
             )?;
         }
     }
@@ -723,12 +738,15 @@ fn append_project_deployments(
             }
             append_project_deployment(
                 active,
+                project,
                 steps,
+                skipped,
                 deployment,
                 Some(branch),
                 None,
                 &merge_step_ids,
                 &all_merge_ids,
+                changed_repo_ids,
             )?;
         }
     }
@@ -736,17 +754,73 @@ fn append_project_deployments(
     Ok(())
 }
 
+/// The repositories whose changes make `deployment` run, or `None` when it
+/// always runs.
+///
+/// A deployment usually watches the repository it deploys. It may watch more:
+/// an image that builds another repository's binary into itself has to
+/// redeploy when that repository changes, or it ships a stale one. A step with
+/// no repository of its own cannot be scoped, and is refused by validation
+/// before it ever runs.
+///
+/// An unknown repository id is refused rather than ignored. Silently watching
+/// a repository that does not exist means never deploying, and a typo is
+/// exactly what that looks like.
+fn deployment_watches(
+    project: Option<&KnitProject>,
+    deployment: &crate::model::ProjectLandingDeployment,
+) -> Result<Option<Vec<String>>> {
+    let Some(declared) = &deployment.when_changed else {
+        return Ok(deployment.repo_id.clone().map(|repo_id| vec![repo_id]));
+    };
+    if declared.iter().any(|repo_id| repo_id == "*") {
+        return Ok(None);
+    }
+    if let Some(project) = project {
+        for repo_id in declared {
+            if !project.repos.iter().any(|repo| repo.id == *repo_id) {
+                bail!(
+                    "landing deployment `{}` watches unknown repository `{repo_id}` in `whenChanged`. Use a repository id from this project, or `\"*\"` to deploy on every landing.",
+                    deployment.id
+                );
+            }
+        }
+    }
+    Ok(Some(declared.clone()))
+}
+
+#[allow(clippy::too_many_arguments)]
 fn append_project_deployment(
     active: &ActiveBundle,
+    project: Option<&KnitProject>,
     steps: &mut Vec<LandStep>,
+    skipped: &mut BTreeMap<String, Vec<String>>,
     deployment: &crate::model::ProjectLandingDeployment,
     target_branch: Option<&str>,
     lane_name: Option<&str>,
     merge_step_ids: &BTreeMap<String, String>,
     all_merge_ids: &[String],
+    changed_repo_ids: &BTreeSet<String>,
 ) -> Result<()> {
     if let Some(repo_id) = &deployment.repo_id {
         if !active.bundle.repos.iter().any(|repo| repo.id == *repo_id) {
+            return Ok(());
+        }
+    }
+    let watched = deployment_watches(project, deployment)?;
+    // A bundle that recorded no work at all is a deploy-only plan: there is no
+    // change set to scope against, so scoping has nothing to say and the
+    // configured deployments stand. Scoping only narrows a landing that
+    // actually carries changes.
+    if let Some(watched) = &watched {
+        if !changed_repo_ids.is_empty()
+            && !watched
+                .iter()
+                .any(|repo_id| changed_repo_ids.contains(repo_id))
+        {
+            // Recorded rather than dropped: a deployment left out on purpose
+            // must not read like one lost to a bug. See `lane_absent`.
+            skipped.insert(deployment.id.clone(), watched.clone());
             return Ok(());
         }
     }

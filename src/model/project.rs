@@ -167,6 +167,16 @@ pub struct ProjectLandingDeployment {
     pub id: String,
     #[serde(default, alias = "repo", skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
+    /// Which repositories' changes make this deployment run. A deployment
+    /// usually watches the repository it deploys, but not always: an image
+    /// that builds another repository's binary into itself has to redeploy
+    /// when *that* repository changes, or it ships a stale one.
+    ///
+    /// Absent means the deployment's own `repoId`, which every deploy step
+    /// has. A literal `"*"` always runs, as in
+    /// `landing.lanes.<name>.branches`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_changed: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mode: Option<super::DeployMode>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

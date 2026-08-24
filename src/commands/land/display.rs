@@ -55,6 +55,7 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
             .any(|step| step.step_type == LandStepKind::Deploy),
     );
     print_lane_absences(plan.lane.as_deref(), &plan.lane_absent);
+    print_skipped_deployments(&plan.deployments_skipped);
     println!();
     for step in &plan.steps {
         println!(
@@ -109,6 +110,7 @@ pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path
             .any(|step| step.step_type == LandStepKind::Deploy),
     );
     print_lane_absences(run.lane.as_deref(), &run.lane_absent);
+    print_skipped_deployments(&run.deployments_skipped);
     println!();
     for step in &run.steps {
         println!(
@@ -228,6 +230,26 @@ fn print_lane_absences(lane: Option<&str>, absent: &BTreeSet<String>) {
             "declared absent from `{lane}`; their changes reach no environment until the terminal landing"
         ))
     );
+}
+
+/// Deployments the plan leaves out because nothing they watch changed.
+/// Printed for the same reason lane absences are: a step missing on purpose
+/// has to be distinguishable from one missing by accident.
+fn print_skipped_deployments(skipped: &BTreeMap<String, Vec<String>>) {
+    if skipped.is_empty() {
+        return;
+    }
+    println!("{}", out::heading("Deployments not run:"));
+    for (id, watched) in skipped {
+        println!("  {id}");
+        println!(
+            "    {}",
+            out::muted(format!(
+                "watches {}; unchanged in this bundle",
+                watched.join(", ")
+            ))
+        );
+    }
 }
 
 fn planned_step_target(step: &LandStep) -> String {
