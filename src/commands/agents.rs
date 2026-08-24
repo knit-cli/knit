@@ -610,8 +610,21 @@ fn landing_deployment_agents_line(deployment: &ProjectLandingDeployment) -> Stri
     } else {
         String::new()
     };
+    // What makes the step run at all. Reading only "repo `x`" invites the
+    // assumption that every configured deployment runs on every landing.
+    let watches = match &deployment.when_changed {
+        Some(watched) if watched.iter().any(|repo_id| repo_id == "*") => {
+            ", runs on every landing".to_string()
+        }
+        Some(watched) => format!(", when `{}` changed", watched.join("`, `")),
+        None => deployment
+            .repo_id
+            .as_deref()
+            .map(|repo| format!(", when `{repo}` changed"))
+            .unwrap_or_else(|| ", runs on every landing".to_string()),
+    };
     format!(
-        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}",
+        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}{watches}",
         id = deployment.id
     )
 }

@@ -922,6 +922,7 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
         status: LandStatus::Running,
         lane: plan.lane.clone(),
         lane_absent: plan.lane_absent.clone(),
+        deployments_skipped: plan.deployments_skipped.clone(),
         created_at: now.clone(),
         updated_at: now,
         rolled_back_at: None,

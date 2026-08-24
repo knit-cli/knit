@@ -2535,3 +2535,312 @@ fn a_terminal_lane_cannot_declare_a_repository_absent() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// Two repositories, a landing template, and commits in only the repos named.
+/// Returns the workspace plus the fake-gh pair, so a caller can plan or apply.
+fn publish_scoped_deployment_bundle(
+    root: &Path,
+    bundle_title: &str,
+    landing: Value,
+    changed: &[&str],
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = landing;
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    // Both repositories are tracked; only some of them are touched. That gap
+    // is the whole point: bundle membership is not evidence of change.
+    knit(&workspace, ["bundle", bundle_title]);
+    let slug = bundle_title.replace(' ', "-");
+    for repo_id in changed {
+        append_line(
+            &workspace
+                .join(".knit/worktrees")
+                .join(&slug)
+                .join(repo_id)
+                .join("app.txt"),
+            "scoped change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Scoped change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+fn plan_step_ids(plan: &Value) -> Vec<String> {
+    plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|step| step["id"].as_str().unwrap().to_string())
+        .collect()
+}
+
+fn read_land_plan(workspace: &Path, slug: &str) -> Value {
+    let path = workspace.join(format!(".knit/land-plans/{slug}.land.json"));
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+#[test]
+fn a_deployment_is_not_planned_for_a_repository_the_bundle_did_not_change() {
+    let root = unique_temp_dir();
+    let landing = json!({
+        "provider": "github",
+        "deployments": [
+            { "id": "deploy-backend", "repoId": "backend", "mode": "push" },
+            { "id": "deploy-frontend", "repoId": "frontend", "mode": "push" }
+        ]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "backend only", landing, &["backend"]);
+
+    let output = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan = read_land_plan(&workspace, "backend-only");
+    let ids = plan_step_ids(&plan);
+
+    assert!(ids.contains(&"deploy-backend".to_string()));
+    assert!(
+        !ids.contains(&"deploy-frontend".to_string()),
+        "frontend is in the bundle but unchanged, so it must not be deployed: {ids:?}"
+    );
+    assert_eq!(
+        plan["deploymentsSkipped"]["deploy-frontend"],
+        json!(["frontend"])
+    );
+    // Recorded and printed, so a step left out on purpose is legible.
+    assert!(output.contains("Deployments not run:"), "{output}");
+    assert!(output.contains("deploy-frontend"), "{output}");
+}
+
+#[test]
+fn a_deployment_runs_for_a_change_in_another_repository_it_watches() {
+    let root = unique_temp_dir();
+    // The frontend image builds the backend's client into itself, so a
+    // backend-only change still has to redeploy it.
+    let landing = json!({
+        "provider": "github",
+        "deployments": [
+            {
+                "id": "deploy-frontend",
+                "repoId": "frontend",
+                "whenChanged": ["frontend", "backend"],
+                "mode": "push"
+            }
+        ]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "watched fanout", landing, &["backend"]);
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan = read_land_plan(&workspace, "watched-fanout");
+
+    assert!(plan_step_ids(&plan).contains(&"deploy-frontend".to_string()));
+    assert!(plan["deploymentsSkipped"]
+        .as_object()
+        .is_none_or(|skipped| skipped.is_empty()));
+}
+
+#[test]
+fn a_star_deployment_runs_on_every_landing() {
+    let root = unique_temp_dir();
+    let landing = json!({
+        "provider": "github",
+        "deployments": [
+            {
+                "id": "notify",
+                "repoId": "frontend",
+                "whenChanged": ["*"],
+                "mode": "push"
+            }
+        ]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "always notify", landing, &["backend"]);
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan = read_land_plan(&workspace, "always-notify");
+
+    assert!(plan_step_ids(&plan).contains(&"notify".to_string()));
+}
+
+#[test]
+fn a_deployment_watching_an_unknown_repository_is_refused() {
+    let root = unique_temp_dir();
+    let landing = json!({
+        "provider": "github",
+        "deployments": [
+            {
+                "id": "deploy-backend",
+                "repoId": "backend",
+                "whenChanged": ["backend", "bakcend"],
+                "mode": "push"
+            }
+        ]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "typo watch", landing, &["backend"]);
+
+    let output = knit_fails_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    assert!(output.contains("deploy-backend"), "{output}");
+    assert!(output.contains("bakcend"), "{output}");
+    assert!(output.contains("whenChanged"), "{output}");
+}
+
+#[test]
+fn a_lane_deploys_only_the_applications_this_bundle_changed() {
+    let root = unique_temp_dir();
+    let lanes = json!({
+        "staging": {
+            "branches": { "backend": "staging", "frontend": "staging" },
+            "deployments": [
+                { "id": "stage-backend", "repoId": "backend", "mode": "push" },
+                { "id": "stage-frontend", "repoId": "frontend", "mode": "push" }
+            ]
+        }
+    });
+    let landing = json!({ "provider": "github", "lanes": lanes });
+
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    for checkout in [&backend, &frontend] {
+        git(checkout, ["branch", "staging", "main"]);
+        git(checkout, ["push", "origin", "staging"]);
+    }
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = landing;
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "stage backend"]);
+    append_line(
+        &workspace.join(".knit/worktrees/stage-backend/backend/app.txt"),
+        "backend only",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Backend only"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plan = read_land_plan(&workspace, "stage-backend");
+    let ids = plan_step_ids(&plan);
+
+    assert!(ids.contains(&"stage-backend".to_string()));
+    assert!(
+        !ids.contains(&"stage-frontend".to_string()),
+        "an unchanged application must not be redeployed into staging: {ids:?}"
+    );
+    assert_eq!(
+        plan["deploymentsSkipped"]["stage-frontend"],
+        json!(["frontend"])
+    );
+}
+
+#[test]
+fn a_bundle_with_no_recorded_work_still_runs_its_deployments() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    let marker = root.join("deploy-only-ran");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-backend",
+            "repoId": "backend",
+            "timeoutSeconds": 60,
+            "command": ["sh", "-c", format!("touch '{}'", marker.display())]
+        }]
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    // No commits, no reviews: a deploy-only plan. Scoping has no change set to
+    // narrow against here, so it must not narrow the plan down to nothing.
+    knit(&workspace, ["bundle", "deploy only"]);
+    knit(&workspace, ["land", "plan"]);
+    let plan = read_land_plan(&workspace, "deploy-only");
+
+    assert!(plan_step_ids(&plan).contains(&"deploy-backend".to_string()));
+
+    knit(&workspace, ["land", "apply"]);
+    assert!(
+        marker.exists(),
+        "deploy-only plan did not run its deployment"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
