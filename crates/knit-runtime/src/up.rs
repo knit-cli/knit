@@ -516,6 +516,11 @@ pub(crate) fn run_up_stacks(
     Ok(())
 }
 
+/// Build the `KNIT_*` environment contract for a runtime: bundle identity,
+/// per-repo checkout paths and revisions, allocated ports, and the resolved
+/// database. Covers every project repo plus any ad-hoc bundle repos; a repo
+/// tracked in the bundle resolves to its bundle checkout, anything else to its
+/// source checkout.
 fn runtime_env(
     ctx: &RuntimeContext,
     project_name: &str,
@@ -683,6 +688,8 @@ fn can_reuse_recorded_port(
     !used_by_other_bundles.contains(&port) && (current_project_running || port_available(port))
 }
 
+/// Allocate one free host port per contract-mode service pool, stepping all
+/// pools together so one bundle's ports stay a recognisable cohort.
 fn allocate_service_ports(
     used: &BTreeSet<u16>,
     bases: &BTreeMap<String, u16>,

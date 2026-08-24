@@ -168,6 +168,8 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
     )
 }
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn apply_land_plan(
     plan_path: Option<&Path>,
     remote: &[String],
@@ -206,26 +208,66 @@ pub fn apply_land_plan(
     let mut run = execute::new_run(&active, &plan, &path);
     write_json(&run_path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
+    finish_successful_land(
+        &mut active,
+        &plan,
+        &FinishLandOptions {
+            remote,
+            no_remote,
+            keep_worktrees,
+            tag,
+            no_tag,
+        },
+    )
+}
+
+/// What a finished landing still has to do, once every step has succeeded.
+struct FinishLandOptions<'a> {
+    remote: &'a [String],
+    no_remote: bool,
+    keep_worktrees: bool,
+    tag: Option<String>,
+    no_tag: bool,
+}
+
+/// Everything that happens after the last step succeeds.
+///
+/// Shared by `knit land apply` and `knit land resume` on purpose. When resume
+/// had its own ending, a resumed terminal landing merged every review and then
+/// left the bundle open, unarchived, still pointed at by the workspace and
+/// untagged — so the forge said the work had landed and the local ledger said
+/// it had not.
+fn finish_successful_land(
+    active: &mut ActiveBundle,
+    plan: &LandPlan,
+    options: &FinishLandOptions<'_>,
+) -> Result<()> {
     // Only a terminal destination ends the bundle's life. An intermediate one
     // — a staging lane, a preview branch — is a stop on the way, so the
     // bundle, its worktrees, and its ledger stay live for the next landing.
     if !plan.terminal {
         crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
-            &mut active,
-            remote,
-            no_remote,
+            active,
+            options.remote,
+            options.no_remote,
         )?;
-        print_intermediate_landing_summary(&active, &plan);
+        print_intermediate_landing_summary(active, plan);
         return Ok(());
     }
-    let removed_worktrees = archive_landed_bundle(&mut active, keep_worktrees)?;
+    let removed_worktrees = archive_landed_bundle(active, options.keep_worktrees)?;
     crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
-        &mut active,
-        remote,
-        no_remote,
+        active,
+        options.remote,
+        options.no_remote,
     )?;
-    print_landed_summary(&active.bundle.id, removed_worktrees, keep_worktrees);
-    tag_landed_bundle(&mut active, tag, no_tag, remote, no_remote);
+    print_landed_summary(&active.bundle.id, removed_worktrees, options.keep_worktrees);
+    tag_landed_bundle(
+        active,
+        options.tag.clone(),
+        options.no_tag,
+        options.remote,
+        options.no_remote,
+    );
     Ok(())
 }
 
@@ -456,6 +498,9 @@ pub fn resume_land_run(
     remote: &[String],
     no_remote: bool,
     skip_checks: bool,
+    keep_worktrees: bool,
+    tag: Option<String>,
+    no_tag: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
@@ -481,12 +526,22 @@ pub fn resume_land_run(
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
     validate::preflight_publications(&active, &plan, Some(&run))?;
+    ensure_tag_matches_destination(&plan, tag.as_deref())?;
     run.status = LandStatus::Running;
     run.updated_at = now_iso();
     write_json(&path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &path)?;
-    crate::commands::remote::sync_bundle_to_remote_if_enabled(remote, no_remote)?;
-    Ok(())
+    finish_successful_land(
+        &mut active,
+        &plan,
+        &FinishLandOptions {
+            remote,
+            no_remote,
+            keep_worktrees,
+            tag,
+            no_tag,
+        },
+    )
 }
 
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
@@ -879,6 +934,8 @@ mod tests {
             lane: None,
             lane_absent: Default::default(),
             deployments_skipped: Default::default(),
+            changed_repos: Default::default(),
+            bundle_heads: Default::default(),
             created_at: now_iso(),
             updated_at: now_iso(),
             rolled_back_at: None,
@@ -1023,6 +1080,8 @@ mod tests {
             lane: None,
             lane_absent: Default::default(),
             deployments_skipped: Default::default(),
+            changed_repos: Default::default(),
+            bundle_heads: Default::default(),
             created_at: now_iso(),
             updated_at: now_iso(),
             rolled_back_at: None,

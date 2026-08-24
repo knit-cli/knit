@@ -59,16 +59,20 @@ pub fn apply_land_from_artifact(
     if bundle.repos.is_empty() {
         bail!("Bundle artifact has no repos.");
     }
-    if bundle.publications.is_empty() {
+    if bundle.publications.is_empty() && lane_name.is_none() {
         bail!("Bundle artifact has no review publications. Run publish first.");
     }
     if lane_name.is_some() {
+        let changed = crate::commands::publish::publish_scope_repo_ids(&bundle);
         let published_repo_ids = bundle
             .repos
             .iter()
-            .filter(|repo| publication_for_repo(&bundle, &repo.id).is_some())
+            .filter(|repo| changed.contains(&repo.id))
             .map(|repo| repo.id.as_str())
             .collect::<BTreeSet<_>>();
+        if published_repo_ids.is_empty() {
+            bail!("Bundle artifact records no changed repositories to land into a lane.");
+        }
         for repo_id in repo_targets.keys() {
             if !published_repo_ids.contains(repo_id.as_str()) {
                 bail!("--repo-target names unpublished or unknown repository `{repo_id}`");
@@ -139,10 +143,18 @@ pub fn apply_land_from_artifact(
 
     let repos = bundle.repos.clone();
 
+    let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&bundle);
     for repo in &repos {
-        let Some(publication) = publication_for_repo(&bundle, &repo.id).cloned() else {
+        let publication = publication_for_repo(&bundle, &repo.id).cloned();
+        // Review merges need a review. Branch merges need recorded work, which
+        // is the same scope a local lane landing uses.
+        if branch_merges {
+            if !changed_repo_ids.contains(&repo.id) {
+                continue;
+            }
+        } else if publication.is_none() {
             continue;
-        };
+        }
         let forge = providers::for_repo(repo)?;
         let target = artifact_target(&cwd, forge.as_ref(), repo)?;
 
@@ -161,15 +173,18 @@ pub fn apply_land_from_artifact(
                 forge.as_ref(),
                 &target,
                 repo,
-                &publication,
+                publication.as_ref(),
                 repo_targets.get(&repo.id).map(String::as_str),
                 lane_name.as_deref(),
             )?;
             merged_repo_ids.push(repo.id.clone());
-            publication_urls.push(publication.url.clone());
+            if let Some(publication) = &publication {
+                publication_urls.push(publication.url.clone());
+            }
             continue;
         }
 
+        let publication = publication.expect("review merges are skipped without a publication");
         let mut pr = forge.view(&target, &publication.url)?;
         let repo_target = repo_targets
             .get(&repo.id)
@@ -302,11 +317,15 @@ pub fn apply_land_from_artifact(
 /// leaving its review untouched. The review-base guard is the same rule the
 /// local plan enforces, re-checked here because a review can be retargeted
 /// onto the lane's branch after the host resolved the lane.
+/// `publication` is optional on purpose: reaching an environment is a branch
+/// merge, which does not need a review. It is consulted only to refuse a
+/// landing that would merge a feature branch into its own review's base, and a
+/// repository with no review has none to spend.
 fn merge_feature_branch_into_lane(
     forge: &dyn providers::Forge,
     target: &providers::PrTarget,
     repo: &crate::model::RepoEntry,
-    publication: &crate::model::PublicationEntry,
+    publication: Option<&crate::model::PublicationEntry>,
     destination: Option<&str>,
     lane_name: Option<&str>,
 ) -> Result<()> {
@@ -323,19 +342,21 @@ fn merge_feature_branch_into_lane(
         )
     })?;
 
-    let pr = forge.view(target, &publication.url)?;
-    let live_base = pr
-        .base_ref_name
-        .as_deref()
-        .unwrap_or(&publication.base_branch);
-    if live_base == destination {
-        let lane = lane_name.unwrap_or("this landing");
-        bail!(
+    if let Some(publication) = publication {
+        let pr = forge.view(target, &publication.url)?;
+        let live_base = pr
+            .base_ref_name
+            .as_deref()
+            .unwrap_or(&publication.base_branch);
+        if live_base == destination {
+            let lane = lane_name.unwrap_or("this landing");
+            bail!(
             "Landing lane `{lane}` sends `{}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. Point the lane at a different branch for `{}`, or declare the lane terminal so Knit merges the review itself.",
             repo.id,
             publication.url,
             repo.id
         );
+        }
     }
 
     let status = forge

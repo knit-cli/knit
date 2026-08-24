@@ -184,6 +184,15 @@ pub(super) fn build_default_plan(
     } else {
         BTreeMap::new()
     };
+    ensure_terminal_plan_covers_changed_repos(
+        active,
+        terminal,
+        &changed_repo_ids,
+        &scope,
+        &steps,
+        merge,
+    )?;
+
     let mut deployments_skipped = BTreeMap::new();
     append_project_deployments(
         active,
@@ -191,7 +200,6 @@ pub(super) fn build_default_plan(
         landing,
         target_branch,
         lane_name,
-        &target_branches,
         &changed_repo_ids,
         &mut steps,
         &mut deployments_skipped,
@@ -214,6 +222,8 @@ pub(super) fn build_default_plan(
         target_branches,
         lane_absent,
         deployments_skipped,
+        changed_repos: changed_repo_ids.clone(),
+        bundle_heads: bundle_heads(active),
         terminal,
         source_project_id: project.as_ref().map(|project| project.id.clone()),
         created_at: now_iso(),
@@ -223,6 +233,105 @@ pub(super) fn build_default_plan(
             .unwrap_or_default(),
         steps,
     })
+}
+
+/// Each tracked repository's recorded head, which is what a plan is pinned to.
+///
+/// `head_sha` is maintained by `knit commit` and by the observed-movement
+/// tracking, so it moves whenever the bundle's work does.
+pub(super) fn bundle_heads(active: &ActiveBundle) -> BTreeMap<String, String> {
+    active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| Some((repo.id.clone(), repo.head_sha.clone()?)))
+        .collect()
+}
+
+/// A terminal landing is the bundle's last stop: it merges, archives the
+/// bundle and removes its worktrees. So it has to carry everything the bundle
+/// changed, or work is stranded on a branch nobody will land — the bundle is
+/// closed, its worktrees are gone, and the forge says the feature shipped.
+///
+/// Two ways a changed repository falls out of a terminal plan, and they need
+/// different fixes, so name which one happened:
+///   - it has no recorded review, because `knit publish create` never ran for
+///     it or its review was closed;
+///   - the project's merge order excludes it, via `includeUnlisted: false`.
+///
+/// Intermediate destinations are deliberately allowed to carry a subset: a
+/// lane can declare a repository absent, and the work waits for the terminal
+/// landing. That is what `laneAbsent` records.
+fn ensure_terminal_plan_covers_changed_repos(
+    active: &ActiveBundle,
+    terminal: bool,
+    changed_repo_ids: &BTreeSet<String>,
+    scope: &[&RepoEntry],
+    steps: &[LandStep],
+    merge: Option<&ProjectLandingMergePlan>,
+) -> Result<()> {
+    if !terminal {
+        return Ok(());
+    }
+    let merged: BTreeSet<&str> = steps
+        .iter()
+        .filter(|step| is_merge_step(step))
+        .filter_map(|step| step.repo_id.as_deref())
+        .collect();
+    let in_scope: BTreeSet<&str> = scope.iter().map(|repo| repo.id.as_str()).collect();
+
+    let mut unpublished = Vec::new();
+    let mut excluded = Vec::new();
+    for repo_id in changed_repo_ids {
+        if merged.contains(repo_id.as_str()) {
+            continue;
+        }
+        // A repository the bundle no longer tracks cannot be landed and is not
+        // this check's business.
+        if !active.bundle.repos.iter().any(|repo| repo.id == *repo_id) {
+            continue;
+        }
+        if in_scope.contains(repo_id.as_str()) {
+            unpublished.push(repo_id.as_str());
+        } else {
+            excluded.push(repo_id.as_str());
+        }
+    }
+    if unpublished.is_empty() && excluded.is_empty() {
+        return Ok(());
+    }
+
+    let mut reasons = Vec::new();
+    if !unpublished.is_empty() {
+        reasons.push(format!(
+            "{} {} no recorded review — run `knit publish create` first",
+            unpublished.join(", "),
+            if unpublished.len() == 1 {
+                "has"
+            } else {
+                "have"
+            }
+        ));
+    }
+    if !excluded.is_empty() {
+        let include_unlisted = merge
+            .and_then(|merge| merge.include_unlisted)
+            .unwrap_or(true);
+        reasons.push(if include_unlisted {
+            format!("{} is not in this plan's merge scope", excluded.join(", "))
+        } else {
+            format!(
+                "{} {} excluded by the project's `merge.repoOrder` with `includeUnlisted: false` — add {} to the order, or allow unlisted repositories",
+                excluded.join(", "),
+                if excluded.len() == 1 { "is" } else { "are" },
+                if excluded.len() == 1 { "it" } else { "them" }
+            )
+        });
+    }
+    bail!(
+        "This landing archives the bundle, but it does not carry every repository the bundle changed: {}. Landing now would strand that work on its feature branch.",
+        reasons.join("; ")
+    );
 }
 
 /// A branch merge only leaves the review open if it goes somewhere the review
@@ -617,7 +726,6 @@ fn append_project_deployments(
     landing: Option<&ProjectLandingPlan>,
     explicit_target: Option<&str>,
     lane_name: Option<&str>,
-    lane_targets: &BTreeMap<String, String>,
     changed_repo_ids: &BTreeSet<String>,
     steps: &mut Vec<LandStep>,
     skipped: &mut BTreeMap<String, Vec<String>>,
@@ -625,6 +733,7 @@ fn append_project_deployments(
     let Some(landing) = landing else {
         return Ok(());
     };
+    let mut pending: Vec<PendingDeployment<'_>> = Vec::new();
     let merge_step_ids = steps
         .iter()
         .filter(|step| is_merge_step(step))
@@ -641,25 +750,28 @@ fn append_project_deployments(
             .get(lane_name)
             .expect("lane was resolved before deployments");
         for deployment in &lane.deployments {
-            let target_branch = deployment
-                .repo_id
-                .as_ref()
-                .and_then(|repo_id| lane_targets.get(repo_id))
-                .map(String::as_str);
-            append_project_deployment(
+            // Resolved from the lane declaration itself, not from this plan's
+            // merge steps or its resolved destinations: both cover only the
+            // repositories this bundle changed. A deployment triggered by
+            // another repository's change has no merge of its own and is
+            // outside that set, yet it still deploys into a real branch.
+            let target_branch = deployment.repo_id.as_deref().and_then(|repo_id| {
+                match lane_destination(lane, repo_id) {
+                    LaneDestination::Branch(branch) => Some(branch),
+                    LaneDestination::Absent | LaneDestination::Unmapped => None,
+                }
+            });
+            push_pending_deployment(
                 active,
                 project,
-                steps,
-                skipped,
+                &mut pending,
                 deployment,
                 target_branch,
                 Some(lane_name),
-                &merge_step_ids,
-                &all_merge_ids,
                 changed_repo_ids,
             )?;
         }
-        return Ok(());
+        return finish_deployments(&pending, steps, skipped, &merge_step_ids, &all_merge_ids);
     }
     let target_by_repo = active
         .bundle
@@ -709,16 +821,13 @@ fn append_project_deployments(
     // bases declares it. Deploy-only plans also retain their legacy behavior.
     if target_by_repo.is_empty() || (!has_declared_target && all_merges_use_configured_bases) {
         for deployment in &landing.deployments {
-            append_project_deployment(
+            push_pending_deployment(
                 active,
                 project,
-                steps,
-                skipped,
+                &mut pending,
                 deployment,
                 None,
                 None,
-                &merge_step_ids,
-                &all_merge_ids,
                 changed_repo_ids,
             )?;
         }
@@ -729,77 +838,60 @@ fn append_project_deployments(
             continue;
         };
         for deployment in &target.deployments {
-            if deployment
-                .repo_id
-                .as_ref()
-                .is_some_and(|repo_id| target_by_repo.get(repo_id) != Some(branch))
+            // "Does this repository land into this branch?" only decides
+            // anything for a deployment that fires on its own repository. One
+            // triggered by another repository's change has no merge of its own
+            // to match against, and discarding it here would drop it silently.
+            let fires_on_own_repo =
+                deployment_watches(project, deployment)?.is_some_and(|watched| {
+                    watched
+                        .iter()
+                        .all(|id| Some(id) == deployment.repo_id.as_ref())
+                });
+            if fires_on_own_repo
+                && deployment
+                    .repo_id
+                    .as_ref()
+                    .is_some_and(|repo_id| target_by_repo.get(repo_id) != Some(branch))
             {
                 continue;
             }
-            append_project_deployment(
+            push_pending_deployment(
                 active,
                 project,
-                steps,
-                skipped,
+                &mut pending,
                 deployment,
                 Some(branch),
                 None,
-                &merge_step_ids,
-                &all_merge_ids,
                 changed_repo_ids,
             )?;
         }
     }
 
-    Ok(())
+    finish_deployments(&pending, steps, skipped, &merge_step_ids, &all_merge_ids)
 }
 
-/// The repositories whose changes make `deployment` run, or `None` when it
-/// always runs.
-///
-/// A deployment usually watches the repository it deploys. It may watch more:
-/// an image that builds another repository's binary into itself has to
-/// redeploy when that repository changes, or it ships a stale one. A step with
-/// no repository of its own cannot be scoped, and is refused by validation
-/// before it ever runs.
-///
-/// An unknown repository id is refused rather than ignored. Silently watching
-/// a repository that does not exist means never deploying, and a typo is
-/// exactly what that looks like.
-fn deployment_watches(
-    project: Option<&KnitProject>,
-    deployment: &crate::model::ProjectLandingDeployment,
-) -> Result<Option<Vec<String>>> {
-    let Some(declared) = &deployment.when_changed else {
-        return Ok(deployment.repo_id.clone().map(|repo_id| vec![repo_id]));
-    };
-    if declared.iter().any(|repo_id| repo_id == "*") {
-        return Ok(None);
-    }
-    if let Some(project) = project {
-        for repo_id in declared {
-            if !project.repos.iter().any(|repo| repo.id == *repo_id) {
-                bail!(
-                    "landing deployment `{}` watches unknown repository `{repo_id}` in `whenChanged`. Use a repository id from this project, or `\"*\"` to deploy on every landing.",
-                    deployment.id
-                );
-            }
-        }
-    }
-    Ok(Some(declared.clone()))
+/// A deployment selected for this landing, before skips and dependencies are
+/// resolved. Selection and materialisation are separate passes because a
+/// deployment nothing triggers can still be required by one that fires.
+struct PendingDeployment<'a> {
+    deployment: &'a crate::model::ProjectLandingDeployment,
+    target_branch: Option<String>,
+    lane_name: Option<String>,
+    /// The repositories it watches, or `None` when it always runs.
+    watched: Option<Vec<String>>,
+    /// Whether its own trigger fired.
+    triggered: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
-fn append_project_deployment(
+fn push_pending_deployment<'a>(
     active: &ActiveBundle,
     project: Option<&KnitProject>,
-    steps: &mut Vec<LandStep>,
-    skipped: &mut BTreeMap<String, Vec<String>>,
-    deployment: &crate::model::ProjectLandingDeployment,
+    pending: &mut Vec<PendingDeployment<'a>>,
+    deployment: &'a crate::model::ProjectLandingDeployment,
     target_branch: Option<&str>,
     lane_name: Option<&str>,
-    merge_step_ids: &BTreeMap<String, String>,
-    all_merge_ids: &[String],
     changed_repo_ids: &BTreeSet<String>,
 ) -> Result<()> {
     if let Some(repo_id) = &deployment.repo_id {
@@ -807,29 +899,126 @@ fn append_project_deployment(
             return Ok(());
         }
     }
-    let watched = deployment_watches(project, deployment)?;
-    // A bundle that recorded no work at all is a deploy-only plan: there is no
-    // change set to scope against, so scoping has nothing to say and the
-    // configured deployments stand. Scoping only narrows a landing that
-    // actually carries changes.
-    if let Some(watched) = &watched {
-        if !changed_repo_ids.is_empty()
-            && !watched
-                .iter()
-                .any(|repo_id| changed_repo_ids.contains(repo_id))
-        {
-            // Recorded rather than dropped: a deployment left out on purpose
-            // must not read like one lost to a bug. See `lane_absent`.
-            skipped.insert(deployment.id.clone(), watched.clone());
-            return Ok(());
-        }
-    }
-    if steps.iter().any(|step| step.id == deployment.id) {
+    if pending
+        .iter()
+        .any(|entry| entry.deployment.id == deployment.id)
+    {
         bail!(
             "landing step id `{}` is selected more than once; use unique deployment ids across landing targets",
             deployment.id
         );
     }
+    let watched = deployment_watches(project, deployment)?;
+    ensure_push_deployment_is_not_cross_repo(deployment, watched.as_deref())?;
+    // A bundle that recorded no work at all is a deploy-only plan: there is no
+    // change set to scope against, so scoping has nothing to say and the
+    // configured deployments stand.
+    let triggered = match &watched {
+        None => true,
+        Some(_) if changed_repo_ids.is_empty() => true,
+        Some(watched) => watched
+            .iter()
+            .any(|repo_id| changed_repo_ids.contains(repo_id)),
+    };
+    pending.push(PendingDeployment {
+        deployment,
+        target_branch: target_branch.map(ToOwned::to_owned),
+        lane_name: lane_name.map(ToOwned::to_owned),
+        watched,
+        triggered,
+    });
+    Ok(())
+}
+
+/// A push deployment means "the merge of my repository triggered this"; the
+/// executor reports exactly that and does no work of its own. Letting it watch
+/// another repository would make it claim a merge that never happened, so the
+/// configuration is refused rather than the report quietly made false.
+fn ensure_push_deployment_is_not_cross_repo(
+    deployment: &crate::model::ProjectLandingDeployment,
+    watched: Option<&[String]>,
+) -> Result<()> {
+    let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
+        DeployMode::Push
+    } else {
+        DeployMode::Command
+    });
+    if mode != DeployMode::Push {
+        return Ok(());
+    }
+    let own_repo_only = watched.is_some_and(|watched| {
+        watched
+            .iter()
+            .all(|id| Some(id) == deployment.repo_id.as_ref())
+    });
+    if own_repo_only {
+        return Ok(());
+    }
+    bail!(
+        "landing deployment `{}` uses push mode but watches another repository. A push deployment only reports that its own repository's merge triggered it, so it cannot be triggered by someone else's change. Give it `mode: \"command\"`, or drop the extra `whenChanged` entries.",
+        deployment.id
+    )
+}
+
+/// Materialise the selected deployments, resolving skips against the `needs`
+/// graph first.
+///
+/// A deployment nothing triggers is skipped — unless a deployment that *is*
+/// running needs it. "B needs A" means A has to run, so a skipped A that B
+/// depends on is reinstated, transitively. Otherwise the plan would carry a
+/// step whose dependency does not exist, and `ordered_step_ids` would refuse
+/// the whole landing.
+fn finish_deployments(
+    pending: &[PendingDeployment<'_>],
+    steps: &mut Vec<LandStep>,
+    skipped: &mut BTreeMap<String, Vec<String>>,
+    merge_step_ids: &BTreeMap<String, String>,
+    all_merge_ids: &[String],
+) -> Result<()> {
+    let mut running: BTreeSet<&str> = pending
+        .iter()
+        .filter(|entry| entry.triggered)
+        .map(|entry| entry.deployment.id.as_str())
+        .collect();
+
+    loop {
+        let mut added = false;
+        for entry in pending {
+            if !running.contains(entry.deployment.id.as_str()) {
+                continue;
+            }
+            for need in &entry.deployment.needs {
+                if let Some(required) = pending
+                    .iter()
+                    .find(|candidate| candidate.deployment.id == *need)
+                {
+                    if running.insert(required.deployment.id.as_str()) {
+                        added = true;
+                    }
+                }
+            }
+        }
+        if !added {
+            break;
+        }
+    }
+
+    for entry in pending {
+        if running.contains(entry.deployment.id.as_str()) {
+            steps.push(deployment_step(entry, merge_step_ids, all_merge_ids));
+        } else if let Some(watched) = &entry.watched {
+            skipped.insert(entry.deployment.id.clone(), watched.clone());
+        }
+    }
+    Ok(())
+}
+
+fn deployment_step(
+    entry: &PendingDeployment<'_>,
+    merge_step_ids: &BTreeMap<String, String>,
+    all_merge_ids: &[String],
+) -> LandStep {
+    let deployment = entry.deployment;
     let mode = deployment.mode.unwrap_or(if deployment.command.is_empty() {
         DeployMode::Push
     } else {
@@ -846,16 +1035,13 @@ fn append_project_deployment(
         update: checkout.update,
     });
     let mut env = deployment.env.clone();
-    if let Some(target_branch) = target_branch {
-        env.insert(
-            "KNIT_LAND_TARGET_BRANCH".to_string(),
-            target_branch.to_string(),
-        );
+    if let Some(target_branch) = &entry.target_branch {
+        env.insert("KNIT_LAND_TARGET_BRANCH".to_string(), target_branch.clone());
     }
-    if let Some(lane_name) = lane_name {
-        env.insert("KNIT_LAND_LANE".to_string(), lane_name.to_string());
+    if let Some(lane_name) = &entry.lane_name {
+        env.insert("KNIT_LAND_LANE".to_string(), lane_name.clone());
     }
-    steps.push(LandStep {
+    LandStep {
         id: deployment.id.clone(),
         step_type: LandStepKind::Deploy,
         needs,
@@ -877,8 +1063,65 @@ fn append_project_deployment(
         env,
         deployment_mode: Some(mode),
         checkout,
-    });
-    Ok(())
+    }
+}
+
+/// The repositories whose changes make `deployment` run, or `None` when it
+/// always runs.
+///
+/// A deployment usually watches the repository it deploys. It may watch more:
+/// an image that builds another repository's binary into itself has to
+/// redeploy when that repository changes, or it ships a stale one. A step with
+/// no repository of its own cannot be scoped, and is refused by validation
+/// before it ever runs.
+///
+/// An unknown repository id is refused rather than ignored. Silently watching
+/// a repository that does not exist means never deploying, and a typo is
+/// exactly what that looks like.
+fn deployment_watches(
+    project: Option<&KnitProject>,
+    deployment: &crate::model::ProjectLandingDeployment,
+) -> Result<Option<Vec<String>>> {
+    let Some(declared) = &deployment.when_changed else {
+        return Ok(deployment.repo_id.clone().map(|repo_id| vec![repo_id]));
+    };
+    if declared.is_empty() {
+        bail!(
+            "landing deployment `{}` has an empty `whenChanged`, which can never match and would silently never deploy. List the repositories it depends on, or remove the field to watch its own repository.",
+            deployment.id
+        );
+    }
+    let unique: BTreeSet<&String> = declared.iter().collect();
+    if unique.len() != declared.len() {
+        bail!(
+            "landing deployment `{}` repeats a repository in `whenChanged`.",
+            deployment.id
+        );
+    }
+    // `"*"` is checked *after* the ids, not before: short-circuiting on it let
+    // a typo travel alongside it unvalidated, in the one field whose whole job
+    // is to catch typos.
+    let wildcard = declared.iter().any(|repo_id| repo_id == "*");
+    if wildcard && declared.len() > 1 {
+        bail!(
+            "landing deployment `{}` combines `\"*\"` with named repositories in `whenChanged`. `\"*\"` already means every landing, so the extra entries change nothing and one of them is probably meant to stand alone.",
+            deployment.id
+        );
+    }
+    if let Some(project) = project {
+        for repo_id in declared.iter().filter(|repo_id| *repo_id != "*") {
+            if !project.repos.iter().any(|repo| repo.id == *repo_id) {
+                bail!(
+                    "landing deployment `{}` watches unknown repository `{repo_id}` in `whenChanged`. Use a repository id from this project, or `\"*\"` to deploy on every landing.",
+                    deployment.id
+                );
+            }
+        }
+    }
+    if wildcard {
+        return Ok(None);
+    }
+    Ok(Some(declared.clone()))
 }
 
 pub(super) fn default_deployment_needs(

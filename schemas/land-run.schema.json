@@ -2,12 +2,161 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Knit land run",
   "type": "object",
-  "required": ["schemaVersion", "kind", "id", "planId", "bundleId", "status", "steps"],
+  "required": [
+    "schemaVersion",
+    "kind",
+    "id",
+    "planId",
+    "bundleId",
+    "status",
+    "steps"
+  ],
   "properties": {
-    "schemaVersion": { "const": "0.1" },
-    "kind": { "const": "KnitLandRun" },
-    "status": { "type": "string" },
-    "rolledBackAt": { "type": "string" },
-    "steps": { "type": "array" }
-  }
+    "schemaVersion": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "KnitLandRun"
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1
+    },
+    "planId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "bundleId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "provider": {
+      "enum": [
+        "github",
+        "gitlab",
+        "forgejo",
+        "bitbucket"
+      ]
+    },
+    "planPath": {
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "pending",
+        "running",
+        "succeeded",
+        "failed",
+        "skipped",
+        "rolled_back"
+      ]
+    },
+    "lane": {
+      "type": "string",
+      "minLength": 1
+    },
+    "laneAbsent": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "deploymentsSkipped": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "array",
+        "items": {
+          "type": "string"
+        }
+      }
+    },
+    "changedRepos": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true
+    },
+    "bundleHeads": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "type": "string"
+    },
+    "rolledBackAt": {
+      "type": "string"
+    },
+    "steps": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": [
+          "id",
+          "type",
+          "status"
+        ],
+        "additionalProperties": false,
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1
+          },
+          "type": {
+            "enum": [
+              "merge_pr",
+              "merge_branch",
+              "wait_checks",
+              "run",
+              "deploy"
+            ]
+          },
+          "status": {
+            "enum": [
+              "pending",
+              "running",
+              "succeeded",
+              "failed",
+              "skipped",
+              "rolled_back"
+            ]
+          },
+          "repoId": {
+            "type": "string"
+          },
+          "targetBranch": {
+            "type": "string"
+          },
+          "publicationUrl": {
+            "type": "string"
+          },
+          "startedAt": {
+            "type": "string"
+          },
+          "finishedAt": {
+            "type": "string"
+          },
+          "detail": {
+            "type": "string"
+          },
+          "stdout": {
+            "type": "string"
+          },
+          "stderr": {
+            "type": "string"
+          },
+          "exitCode": {
+            "type": "integer"
+          }
+        }
+      }
+    }
+  },
+  "additionalProperties": false
 }

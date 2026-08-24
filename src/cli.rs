@@ -1325,6 +1325,15 @@ pub enum LandCommand {
         /// Skip the remote bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
+        /// Keep generated bundle worktrees after a successful land.
+        #[arg(long = "keep-worktrees")]
+        keep_worktrees: bool,
+        /// After a successful land, tag the configured project bases as known-good. Optionally name it; defaults to the bundle slug.
+        #[arg(long, value_name = "NAME", num_args = 0..=1, default_missing_value = "")]
+        tag: Option<String>,
+        /// Do not auto-tag even when the `auto-tag` config default is on.
+        #[arg(long, conflicts_with = "tag")]
+        no_tag: bool,
     },
     /// Show the latest landing run or default plan status.
     Status {

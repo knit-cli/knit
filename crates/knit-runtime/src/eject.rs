@@ -371,7 +371,7 @@ fn parameterize_database(config: &mut Value, inputs: &EjectInputs) -> Option<Str
                     .filter_map(Value::as_str)
                     .map(str::to_string)
                     .collect();
-                if names.iter().any(|entry| *entry == service_name) {
+                if names.contains(&service_name) {
                     let mut map = Map::new();
                     for entry in names {
                         let optional = entry == service_name;
@@ -672,11 +672,7 @@ fn replace_in_strings(values: &mut Map<String, Value>, from: &str, to: &str) {
 
 fn replace_in_value(value: &mut Value, from: &str, to: &str) {
     match value {
-        Value::String(text) => {
-            if text.contains(from) {
-                *text = text.replace(from, to);
-            }
-        }
+        Value::String(text) => *text = text.replace(from, to),
         Value::Array(items) => {
             for item in items {
                 replace_in_value(item, from, to);

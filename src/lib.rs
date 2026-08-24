@@ -604,6 +604,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 remote,
                 no_remote,
                 skip_checks,
+                keep_worktrees,
+                tag,
+                no_tag,
             }) => {
                 if target.is_some()
                     || lane.is_some()
@@ -612,7 +615,15 @@ pub fn run(cli: Cli) -> Result<()> {
                 {
                     anyhow::bail!("--target/--lane cannot be changed during resume; the selection is stored in the landing plan.");
                 }
-                commands::resume_land_run(run.as_deref(), &remote, no_remote, skip_checks)
+                commands::resume_land_run(
+                    run.as_deref(),
+                    &remote,
+                    no_remote,
+                    skip_checks,
+                    keep_worktrees,
+                    tag,
+                    no_tag,
+                )
             }
             Some(LandCommand::Status { run }) => {
                 if target.is_some()

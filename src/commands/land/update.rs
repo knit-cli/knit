@@ -93,6 +93,13 @@ pub(super) fn run_branch_update(
         );
     }
 
+    // Moving the feature branches is exactly what this command is for, so the
+    // heads a generated plan was pinned to are now stale by design. Re-pin it
+    // here rather than making the operator regenerate a plan they already
+    // inspected — otherwise the documented "base moved, run land update, land
+    // again" recovery dead-ends on its own state check.
+    repin_default_land_plan(&active)?;
+
     if push {
         push_update_targets(&targets, set_upstream)?;
         refresh_update_publications(&mut active, &targets)?;
@@ -107,6 +114,23 @@ pub(super) fn run_branch_update(
         )?;
     }
 
+    Ok(())
+}
+
+/// Refresh the recorded heads of the bundle's default land plan, if one has
+/// been generated. The changed-repository set is deliberately left alone: an
+/// integration merge moves heads, it does not add work to a new repository.
+fn repin_default_land_plan(active: &ActiveBundle) -> Result<()> {
+    let path = super::default_plan_path(active);
+    if !path.exists() {
+        return Ok(());
+    }
+    let mut plan: super::LandPlan = crate::store::read_json(&path)?;
+    if plan.bundle_id != active.bundle.id || plan.bundle_heads.is_empty() {
+        return Ok(());
+    }
+    plan.bundle_heads = super::plan::bundle_heads(active);
+    crate::store::write_json(&path, &plan)?;
     Ok(())
 }
 

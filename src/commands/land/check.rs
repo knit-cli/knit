@@ -136,14 +136,16 @@ pub(crate) fn print_readiness_row(r: &LandReadiness) {
     } else {
         out::ok(&r.verdict)
     };
+    let number = format!("#{}", r.number);
+    let state = r.state.to_lowercase();
     println!(
-        "{}  {}  {}  {}  {}  {}  {}",
+        "{}  {}  {}  {:<10}  {:<9}  {:<9}  {}",
         out::repo_field(&r.repo_id, 16),
-        out::sha(format!("{:<6}", format!("#{}", r.number))),
-        out::status(&format!("{:<8}", r.state.to_lowercase())),
-        format!("{:<10}", r.mergeable),
-        format!("{:<9}", r.checks),
-        format!("{:<9}", r.review),
+        out::sha(format!("{number:<6}")),
+        out::status(&format!("{state:<8}")),
+        r.mergeable,
+        r.checks,
+        r.review,
         verdict
     );
 }

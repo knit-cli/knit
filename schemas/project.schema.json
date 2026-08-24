@@ -2,33 +2,62 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "title": "Knit project",
   "type": "object",
-  "required": ["schemaVersion", "kind", "id", "createdAt", "updatedAt", "repos"],
+  "required": [
+    "schemaVersion",
+    "kind",
+    "id",
+    "createdAt",
+    "updatedAt",
+    "repos"
+  ],
   "properties": {
-    "schemaVersion": { "const": "0.1" },
-    "kind": { "const": "KnitProject" },
-    "id": { "type": "string" },
-    "createdAt": { "type": "string" },
-    "updatedAt": { "type": "string" },
-    "repos": { "type": "array" },
+    "schemaVersion": {
+      "const": "0.1"
+    },
+    "kind": {
+      "const": "KnitProject"
+    },
+    "id": {
+      "type": "string"
+    },
+    "createdAt": {
+      "type": "string"
+    },
+    "updatedAt": {
+      "type": "string"
+    },
+    "repos": {
+      "type": "array"
+    },
     "commands": {
       "type": "object",
       "additionalProperties": {
         "type": "object",
-        "required": ["command"],
+        "required": [
+          "command"
+        ],
         "properties": {
           "repos": {
             "type": "array",
-            "items": { "type": "string" }
+            "items": {
+              "type": "string"
+            }
           },
-          "cwd": { "type": "string" },
+          "cwd": {
+            "type": "string"
+          },
           "command": {
             "type": "array",
-            "items": { "type": "string" },
+            "items": {
+              "type": "string"
+            },
             "minItems": 1
           },
           "env": {
             "type": "object",
-            "additionalProperties": { "type": "string" }
+            "additionalProperties": {
+              "type": "string"
+            }
           }
         }
       }
@@ -36,25 +65,68 @@
     "runtime": {
       "type": "object",
       "properties": {
-        "kind": { "type": "string" },
-        "stackRepo": { "type": "string" },
-        "composeFile": { "type": "string" },
-        "mode": { "enum": ["transform", "contract"] },
-        "profilePath": { "type": "string" },
-        "projectConfigFile": { "type": "string" },
+        "kind": {
+          "type": "string"
+        },
+        "stackRepo": {
+          "type": "string"
+        },
+        "composeFile": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "transform",
+            "contract"
+          ]
+        },
+        "profilePath": {
+          "type": "string"
+        },
+        "projectConfigFile": {
+          "type": "string"
+        },
         "database": {
           "type": "object",
           "properties": {
-            "mode": { "enum": ["shared", "bundle"] },
-            "host": { "type": "string" },
-            "port": { "type": "integer" },
-            "name": { "type": "string" },
-            "nameTemplate": { "type": "string" },
-            "portBase": { "type": "integer" },
+            "mode": {
+              "enum": [
+                "shared",
+                "bundle"
+              ]
+            },
+            "host": {
+              "type": "string"
+            },
+            "port": {
+              "type": "integer"
+            },
+            "name": {
+              "type": "string"
+            },
+            "nameTemplate": {
+              "type": "string"
+            },
+            "portBase": {
+              "type": "integer"
+            },
             "startCommand": {
               "type": "array",
-              "items": { "type": "string" },
+              "items": {
+                "type": "string"
+              },
               "minItems": 1
+            },
+            "service": {
+              "type": "string",
+              "minLength": 1,
+              "description": "Compose service that provides the database."
+            },
+            "containerPort": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 65535,
+              "description": "Port the database listens on inside its container."
             }
           },
           "additionalProperties": false
@@ -62,15 +134,31 @@
         "ports": {
           "type": "object",
           "properties": {
-            "backendBase": { "type": "integer" },
-            "frontendBase": { "type": "integer" },
-            "step": { "type": "integer" },
+            "backendBase": {
+              "type": "integer"
+            },
+            "frontendBase": {
+              "type": "integer"
+            },
+            "step": {
+              "type": "integer"
+            },
             "services": {
               "type": "object",
-              "additionalProperties": { "type": "integer" }
+              "additionalProperties": {
+                "type": "integer"
+              }
             }
           },
           "additionalProperties": false
+        },
+        "stacks": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Repositories whose compose stacks make up this runtime."
         }
       },
       "additionalProperties": false
@@ -78,46 +166,95 @@
     "landing": {
       "type": "object",
       "properties": {
-        "provider": { "enum": ["github", "gitlab", "forgejo", "bitbucket"] },
-        "onFailure": { "enum": ["resume", "rollback"], "default": "resume" },
-        "requireChecks": { "type": "array", "items": { "type": "string" } },
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab",
+            "forgejo",
+            "bitbucket"
+          ]
+        },
+        "onFailure": {
+          "enum": [
+            "resume",
+            "rollback"
+          ],
+          "default": "resume"
+        },
+        "requireChecks": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "merge": {
           "type": "object",
           "properties": {
             "repoOrder": {
               "type": "array",
-              "items": { "type": "string" }
+              "items": {
+                "type": "string"
+              }
             },
             "needs": {
               "type": "object",
               "additionalProperties": {
                 "type": "array",
-                "items": { "type": "string" }
+                "items": {
+                  "type": "string"
+                }
               }
             },
-            "includeUnlisted": { "type": "boolean" },
-            "method": { "enum": ["squash", "merge", "rebase"], "default": "merge" },
-            "waitForChecks": { "type": "boolean" },
-            "requiredChecksOnly": { "type": "boolean" },
-            "deleteBranch": { "type": "boolean" },
-            "timeoutSeconds": { "type": "integer", "minimum": 1 },
-            "intervalSeconds": { "type": "integer", "minimum": 1 }
+            "includeUnlisted": {
+              "type": "boolean"
+            },
+            "method": {
+              "enum": [
+                "squash",
+                "merge",
+                "rebase"
+              ],
+              "default": "merge"
+            },
+            "waitForChecks": {
+              "type": "boolean"
+            },
+            "requiredChecksOnly": {
+              "type": "boolean"
+            },
+            "deleteBranch": {
+              "type": "boolean"
+            },
+            "timeoutSeconds": {
+              "type": "integer",
+              "minimum": 1
+            },
+            "intervalSeconds": {
+              "type": "integer",
+              "minimum": 1
+            }
           },
           "additionalProperties": false
         },
         "deployments": {
           "type": "array",
-          "items": { "$ref": "#/$defs/deployment" }
+          "items": {
+            "$ref": "#/$defs/deployment"
+          }
         },
         "targets": {
           "type": "object",
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "terminal": { "type": "boolean" },
+              "terminal": {
+                "type": "boolean"
+              },
               "deployments": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/deployment" }
+                "items": {
+                  "$ref": "#/$defs/deployment"
+                }
               }
             },
             "additionalProperties": false
@@ -128,15 +265,28 @@
           "additionalProperties": {
             "type": "object",
             "properties": {
-              "defaultBranch": { "type": "string", "minLength": 1 },
+              "defaultBranch": {
+                "type": "string",
+                "minLength": 1
+              },
               "branches": {
                 "type": "object",
-                "additionalProperties": { "type": ["string", "null"], "minLength": 1 }
+                "additionalProperties": {
+                  "type": [
+                    "string",
+                    "null"
+                  ],
+                  "minLength": 1
+                }
               },
-              "terminal": { "type": "boolean" },
+              "terminal": {
+                "type": "boolean"
+              },
               "deployments": {
                 "type": "array",
-                "items": { "$ref": "#/$defs/deployment" }
+                "items": {
+                  "$ref": "#/$defs/deployment"
+                }
               }
             },
             "additionalProperties": false
@@ -149,31 +299,97 @@
   "$defs": {
     "deployment": {
       "type": "object",
-      "required": ["id"],
+      "required": [
+        "id"
+      ],
       "anyOf": [
-        { "required": ["repoId"] },
-        { "required": ["repo"] }
+        {
+          "required": [
+            "repoId"
+          ]
+        },
+        {
+          "required": [
+            "repo"
+          ]
+        }
       ],
       "properties": {
-        "id": { "type": "string", "minLength": 1 },
-        "repoId": { "type": "string" },
-        "repo": { "type": "string" },
-        "mode": { "enum": ["command", "push"] },
-        "needs": { "type": "array", "items": { "type": "string" } },
+        "id": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repoId": {
+          "type": "string"
+        },
+        "repo": {
+          "type": "string"
+        },
+        "mode": {
+          "enum": [
+            "command",
+            "push"
+          ]
+        },
+        "needs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
         "checkout": {
           "type": "object",
-          "required": ["branch"],
+          "required": [
+            "branch"
+          ],
           "properties": {
-            "branch": { "type": "string", "minLength": 1 },
-            "remote": { "type": "string" },
-            "update": { "enum": ["fetch", "pull", "none"] }
+            "branch": {
+              "type": "string",
+              "minLength": 1
+            },
+            "remote": {
+              "type": "string"
+            },
+            "update": {
+              "enum": [
+                "fetch",
+                "pull",
+                "none"
+              ]
+            }
           },
           "additionalProperties": false
         },
-        "cwd": { "type": "string" },
-        "timeoutSeconds": { "type": "integer", "minimum": 1 },
-        "command": { "type": "array", "items": { "type": "string" }, "minItems": 1 },
-        "env": { "type": "object", "additionalProperties": { "type": "string" } }
+        "cwd": {
+          "type": "string"
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "command": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "whenChanged": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Repositories whose changes make this deployment run. Omit to watch the deployment's own repoId. A single \"*\" runs it on every landing and cannot be combined with named repositories."
+        }
       },
       "additionalProperties": false
     }

@@ -95,9 +95,8 @@ fn print_closed_summary(active: &crate::store::ActiveBundle, state: BundleStatus
     }
     println!();
     println!(
-        "{} {}",
-        out::heading("Closed:"),
-        "ledger marker only; generated worktrees and local feature branches are preserved."
+        "{} ledger marker only; generated worktrees and local feature branches are preserved.",
+        out::heading("Closed:")
     );
     advice::print(
         &active.root,

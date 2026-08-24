@@ -56,9 +56,12 @@ curl -sL https://github.com/knit-cli/knit/releases/download/v0.1.0-alpha.8/knit-
 
 ## Updating versions
 
-1. Bump `version` in `Cargo.toml`, land it
+1. Bump `version` in `Cargo.toml`, `crates/knit-runtime/Cargo.toml`, and the
+   `knit-runtime` dependency entry; land it
 2. Tag `v<version>` and push; wait for the Release workflow
-3. `cargo publish`
-4. Homebrew: merge the automatically opened tap PR, or manually bump the formula `version` stanza, refresh the four sha256s, and push to the tap
-5. Scoop: bump version + hash (`autoupdate` handles URLs)
-6. Winget: submit a new manifest for the new version
+3. Homebrew: merge the automatically opened tap PR, or manually bump the formula `version` stanza, refresh the four sha256s, and push to the tap
+4. Scoop: bump version + hash (`autoupdate` handles URLs)
+5. Winget: submit a new manifest for the new version
+
+There is deliberately no `cargo publish` step; see the note in the release flow
+above.

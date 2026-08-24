@@ -130,10 +130,11 @@ pub fn list_remotes(global: bool) -> Result<()> {
         } else {
             "no token"
         };
-        let sync_label = sync_remotes
-            .contains(&name)
-            .then_some("sync")
-            .unwrap_or("not sync");
+        let sync_label = if sync_remotes.contains(&name) {
+            "sync"
+        } else {
+            "not sync"
+        };
         println!(
             "{} {} {} {} {}",
             out::repo(name),

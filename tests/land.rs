@@ -1330,7 +1330,28 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     assert!(resumed.contains("Feature landed"));
     let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
     assert_eq!(order.lines().collect::<Vec<_>>(), vec!["backend"]);
-    let status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
+
+    // A resumed terminal landing has to finish the bundle exactly as an
+    // applied one does. It used to merge everything and then leave the bundle
+    // open, unarchived and still active, so the forge said the work had landed
+    // and the local ledger said it had not.
+    let landed = read_bundle(&workspace);
+    assert_eq!(landed["state"].as_str(), Some("archived"));
+    assert_eq!(
+        latest_node_of_type(&landed, "feature.landed")["landing"]["terminal"].as_bool(),
+        Some(true)
+    );
+    latest_node_of_type(&landed, "feature.archived");
+    assert!(!workspace
+        .join(".knit/worktrees/venue-capacity/backend")
+        .exists());
+
+    let status = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", "venue-capacity", "land", "status"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     assert!(status.contains("succeeded"));
     assert!(status.contains("deploy"));
 
@@ -2655,7 +2676,8 @@ fn a_deployment_runs_for_a_change_in_another_repository_it_watches() {
                 "id": "deploy-frontend",
                 "repoId": "frontend",
                 "whenChanged": ["frontend", "backend"],
-                "mode": "push"
+                "timeoutSeconds": 60,
+                "command": ["sh", "-c", "true"]
             }
         ]
     });
@@ -2681,7 +2703,8 @@ fn a_star_deployment_runs_on_every_landing() {
                 "id": "notify",
                 "repoId": "frontend",
                 "whenChanged": ["*"],
-                "mode": "push"
+                "timeoutSeconds": 60,
+                "command": ["sh", "-c", "true"]
             }
         ]
     });
@@ -2840,6 +2863,427 @@ fn a_bundle_with_no_recorded_work_still_runs_its_deployments() {
     assert!(
         marker.exists(),
         "deploy-only plan did not run its deployment"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_terminal_landing_refuses_to_strand_a_repository_with_no_review() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _c1) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _c2) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    for (id, path) in [("backend", &backend), ("frontend", &frontend)] {
+        knit(&workspace, ["project", "add", id, path.to_str().unwrap()]);
+    }
+    knit(&workspace, ["bundle", "both changed"]);
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/both-changed")
+                .join(repo_id)
+                .join("app.txt"),
+            "changed",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Both changed"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    // Only one of the two changed repositories gets a review.
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync", "backend"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    // Landing now would merge backend, archive the bundle, and remove the
+    // worktrees — stranding the frontend commit on a branch nobody will land.
+    let failed = knit_fails_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(failed.contains("archives the bundle"), "{failed}");
+    assert!(failed.contains("frontend"), "{failed}");
+    assert!(failed.contains("knit publish create"), "{failed}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_terminal_landing_refuses_a_repository_its_merge_order_excludes() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _c1) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _c2) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    for (id, path) in [("backend", &backend), ("frontend", &frontend)] {
+        knit(&workspace, ["project", "add", id, path.to_str().unwrap()]);
+    }
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "merge": { "repoOrder": ["backend"], "includeUnlisted": false }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "excluded repo"]);
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/excluded-repo")
+                .join(repo_id)
+                .join("app.txt"),
+            "changed",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Both changed"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let failed = knit_fails_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(failed.contains("frontend"), "{failed}");
+    assert!(failed.contains("includeUnlisted"), "{failed}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn committing_after_planning_refuses_the_stale_plan() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "first");
+    knit(&workspace, ["commit", "--all", "-m", "First"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    // The plan describes the bundle as it was. More work makes it a
+    // description of the past.
+    append_line(&feature.join("app.txt"), "second");
+    knit(&workspace, ["commit", "--all", "-m", "Second"]);
+
+    let failed = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(failed.contains("different head"), "{failed}");
+    assert!(failed.contains("knit land plan --force"), "{failed}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_update_repins_the_plan_it_prepared() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/backend/app.txt"),
+        "feature",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Feature"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    fs::write(backend_collaborator.join("base.txt"), "base moved\n").unwrap();
+    git(&backend_collaborator, ["add", "base.txt"]);
+    git(&backend_collaborator, ["commit", "-m", "Base moved"]);
+    git(&backend_collaborator, ["push", "origin", "main"]);
+
+    // `knit land update` moves the feature head on purpose. The documented
+    // recovery is update-then-land, so the plan's own state check must not
+    // turn that into a dead end.
+    knit_with_fake_gh(&workspace, ["land", "update"], &fake_bin, &fake_gh_dir);
+    let applied = knit_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(applied.contains("Feature landed"), "{applied}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_skipped_deployment_a_running_one_needs_is_reinstated() {
+    let root = unique_temp_dir();
+    let landing = json!({
+        "provider": "github",
+        "deployments": [
+            {
+                "id": "migrate-frontend",
+                "repoId": "frontend",
+                "timeoutSeconds": 60,
+                "command": ["sh", "-c", "true"]
+            },
+            {
+                "id": "deploy-backend",
+                "repoId": "backend",
+                "needs": ["migrate-frontend"],
+                "timeoutSeconds": 60,
+                "command": ["sh", "-c", "true"]
+            }
+        ]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "needs skipped", landing, &["backend"]);
+
+    // frontend is unchanged, so its deployment would be skipped — but the
+    // backend deployment that does run declares it as a dependency. Dropping
+    // it used to make the whole plan refuse with "needs unknown step".
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan = read_land_plan(&workspace, "needs-skipped");
+    let ids = plan_step_ids(&plan);
+
+    assert!(ids.contains(&"deploy-backend".to_string()), "{ids:?}");
+    assert!(ids.contains(&"migrate-frontend".to_string()), "{ids:?}");
+    assert!(plan["deploymentsSkipped"]
+        .as_object()
+        .is_none_or(|skipped| skipped.is_empty()));
+}
+
+#[test]
+fn a_cross_repo_trigger_still_receives_its_lane_target_branch() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _c1) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _c2) = init_remote_repo(&root, "frontend");
+    for checkout in [&backend, &frontend] {
+        git(checkout, ["branch", "staging", "main"]);
+        git(checkout, ["push", "origin", "staging"]);
+    }
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    for (id, path) in [("backend", &backend), ("frontend", &frontend)] {
+        knit(&workspace, ["project", "add", id, path.to_str().unwrap()]);
+    }
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "lanes": {
+            "staging": {
+                "branches": { "backend": "staging", "frontend": "staging" },
+                "deployments": [{
+                    "id": "stage-frontend",
+                    "repoId": "frontend",
+                    "whenChanged": ["frontend", "backend"],
+                    "timeoutSeconds": 60,
+                    "command": ["sh", "-c", "true"]
+                }]
+            }
+        }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "cross lane"]);
+    append_line(
+        &workspace.join(".knit/worktrees/cross-lane/backend/app.txt"),
+        "backend only",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Backend only"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let plan = read_land_plan(&workspace, "cross-lane");
+    let step = plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|step| step["id"].as_str() == Some("stage-frontend"))
+        .expect("the triggered deployment is planned");
+    // frontend has no merge step in this landing, so its branch has to come
+    // from the lane rather than from this plan's merge projection.
+    assert_eq!(
+        step["env"]["KNIT_LAND_TARGET_BRANCH"].as_str(),
+        Some("staging")
+    );
+    assert_eq!(step["env"]["KNIT_LAND_LANE"].as_str(), Some("staging"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_cross_repo_push_deployment_is_refused() {
+    let root = unique_temp_dir();
+    let landing = json!({
+        "provider": "github",
+        "deployments": [{
+            "id": "deploy-frontend",
+            "repoId": "frontend",
+            "whenChanged": ["frontend", "backend"],
+            "mode": "push"
+        }]
+    });
+    let (workspace, fake_bin, fake_gh_dir) =
+        publish_scoped_deployment_bundle(&root, "cross push", landing, &["backend"]);
+
+    // A push deployment only reports that its own repository's merge triggered
+    // it; watching another repository would make that report false.
+    let failed = knit_fails_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(failed.contains("deploy-frontend"), "{failed}");
+    assert!(failed.contains("push mode"), "{failed}");
+}
+
+#[test]
+fn when_changed_rejects_wildcards_mixed_with_names_empties_and_repeats() {
+    for (case, when_changed, expected) in [
+        ("typo beside a wildcard", json!(["*", "bakcend"]), "*"),
+        ("empty list", json!([]), "empty"),
+        ("repeated entry", json!(["backend", "backend"]), "repeats"),
+    ] {
+        let root = unique_temp_dir();
+        let landing = json!({
+            "provider": "github",
+            "deployments": [{
+                "id": "deploy-backend",
+                "repoId": "backend",
+                "whenChanged": when_changed,
+                "timeoutSeconds": 60,
+                "command": ["sh", "-c", "true"]
+            }]
+        });
+        let (workspace, fake_bin, fake_gh_dir) =
+            publish_scoped_deployment_bundle(&root, "bad watch", landing, &["backend"]);
+
+        let failed = knit_fails_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+        assert!(
+            failed.contains("deploy-backend") && failed.contains(expected),
+            "{case}: {failed}"
+        );
+    }
+}
+
+#[test]
+fn a_cross_repo_trigger_survives_branch_target_selection() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _c1) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _c2) = init_remote_repo(&root, "frontend");
+    for checkout in [&backend, &frontend] {
+        git(checkout, ["branch", "release", "main"]);
+        git(checkout, ["push", "origin", "release"]);
+    }
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    for (id, path) in [("backend", &backend), ("frontend", &frontend)] {
+        knit(&workspace, ["project", "add", id, path.to_str().unwrap()]);
+    }
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({
+        "provider": "github",
+        "targets": {
+            "release": {
+                "deployments": [{
+                    "id": "release-frontend",
+                    "repoId": "frontend",
+                    "whenChanged": ["frontend", "backend"],
+                    "timeoutSeconds": 60,
+                    "command": ["sh", "-c", "true"]
+                }]
+            }
+        }
+    });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "target trigger"]);
+    append_line(
+        &workspace.join(".knit/worktrees/target-trigger/backend/app.txt"),
+        "backend only",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Backend only"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--base",
+            "release",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    let plan = read_land_plan(&workspace, "target-trigger");
+    // "does this repository land into this branch?" is not a question a
+    // deployment triggered by *another* repository can answer, and answering
+    // it first used to discard the step before the trigger was considered.
+    assert!(
+        plan_step_ids(&plan).contains(&"release-frontend".to_string()),
+        "{:?}",
+        plan_step_ids(&plan)
     );
 
     fs::remove_dir_all(root).unwrap();

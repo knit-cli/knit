@@ -16,7 +16,7 @@ use crate::store::{
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(crate) use apply::{create_provider_revert_prs, provider_revert_context};
 
@@ -184,7 +184,7 @@ fn plan_path(active: &ActiveBundle, target_node_id: &str) -> PathBuf {
         .join(format!("{target_node_id}.json"))
 }
 
-fn print_plan(plan: &RevertPlan, path: &PathBuf) {
+fn print_plan(plan: &RevertPlan, path: &Path) {
     println!("{} {}", out::heading("Revert plan"), out::node(&plan.id));
     println!(
         "{} {} -> {} ({})",

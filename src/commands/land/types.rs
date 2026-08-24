@@ -103,6 +103,15 @@ pub(super) struct LandPlan {
     /// purpose does not read like one dropped by a bug.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) deployments_skipped: BTreeMap<String, Vec<String>>,
+    /// The repositories this bundle had changed when the plan was generated.
+    /// A plan describes one state of the bundle; committing more work makes it
+    /// a description of the past. Empty on plans written before this existed,
+    /// which are accepted unpinned rather than retroactively refused.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) changed_repos: BTreeSet<String>,
+    /// Each tracked repository's head when the plan was generated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) bundle_heads: BTreeMap<String, String>,
 
     /// Whether this plan's destination finishes the bundle. A terminal
     /// landing archives the bundle and removes its generated worktrees; an
@@ -200,6 +209,15 @@ pub(super) struct LandRun {
     /// purpose does not read like one dropped by a bug.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(super) deployments_skipped: BTreeMap<String, Vec<String>>,
+    /// The repositories this bundle had changed when the plan was generated.
+    /// A plan describes one state of the bundle; committing more work makes it
+    /// a description of the past. Empty on plans written before this existed,
+    /// which are accepted unpinned rather than retroactively refused.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub(super) changed_repos: BTreeSet<String>,
+    /// Each tracked repository's head when the plan was generated.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(super) bundle_heads: BTreeMap<String, String>,
 
     pub(super) created_at: String,
     pub(super) updated_at: String,

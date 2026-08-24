@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub(super) fn apply_local_revert(
     active: &mut ActiveBundle,
@@ -291,7 +291,7 @@ pub(super) fn preflight_plan(active: &ActiveBundle, plan: &RevertPlan) -> Result
     Ok(())
 }
 
-fn verify_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
+fn verify_operation(worktree: &Path, repo_id: &str, operation: &RevertOperation) -> Result<()> {
     if !matches!(
         operation.kind,
         RevertOpKind::Revert | RevertOpKind::CherryPick
@@ -361,7 +361,7 @@ fn preflight_provider_revert(
     Ok(())
 }
 
-fn apply_operation(worktree: &PathBuf, repo_id: &str, operation: &RevertOperation) -> Result<()> {
+fn apply_operation(worktree: &Path, repo_id: &str, operation: &RevertOperation) -> Result<()> {
     let sha = operation_sha(operation)?;
     match operation.kind {
         RevertOpKind::Revert => git_output(

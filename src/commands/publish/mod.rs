@@ -29,6 +29,8 @@ use scope::{
 use std::path::Path;
 use sync::{sync_publications_for_indexes, sync_publications_for_indexes_from_artifact};
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn create_publications(
     selectors: &[String],
     all: bool,
@@ -149,6 +151,8 @@ pub fn create_publications(
     Ok(())
 }
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn create_publications_from_artifact(
     artifact_path: &Path,
     out_path: Option<&Path>,

@@ -135,15 +135,13 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
     }
 
     match node.node_type.as_str() {
-        "feature.created" => {
-            if node.title.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record title", node.id));
-            }
+        "feature.created" if node.title.as_deref().unwrap_or("").trim().is_empty() => {
+            errors.push(format!("node `{}` must record title", node.id));
         }
-        "repo.added" | "repo.removed" | "worktree.materialized" => {
-            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
-                errors.push(format!("node `{}` must record repoIds", node.id));
-            }
+        "repo.added" | "repo.removed" | "worktree.materialized"
+            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) =>
+        {
+            errors.push(format!("node `{}` must record repoIds", node.id));
         }
         "commit.group" | "revert.group" => {
             if node
@@ -175,10 +173,8 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record targetNodeId", node.id));
             }
         }
-        "git.observed" => {
-            if node.repo_changes.is_empty() {
-                errors.push(format!("node `{}` must record repoChanges", node.id));
-            }
+        "git.observed" if node.repo_changes.is_empty() => {
+            errors.push(format!("node `{}` must record repoChanges", node.id));
         }
         "land.update" => {
             if node.repo_changes.is_empty() {
@@ -188,10 +184,8 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
                 errors.push(format!("node `{}` must record provider", node.id));
             }
         }
-        "checkpoint" => {
-            if node.message.as_deref().unwrap_or("").trim().is_empty() {
-                errors.push(format!("node `{}` must record message", node.id));
-            }
+        "checkpoint" if node.message.as_deref().unwrap_or("").trim().is_empty() => {
+            errors.push(format!("node `{}` must record message", node.id));
         }
         "check.recorded" | "tag.created" => {
             if node.title.as_deref().unwrap_or("").trim().is_empty() {

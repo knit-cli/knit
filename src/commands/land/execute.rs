@@ -349,31 +349,6 @@ fn indent(text: &str, prefix: &str) -> String {
         .join("\n")
 }
 
-#[cfg(test)]
-mod tests {
-    use super::stream_excerpt;
-
-    #[test]
-    fn stream_excerpt_prefers_early_diagnostic_in_recent_output() {
-        let mut output = String::new();
-        for index in 0..20 {
-            output.push_str(&format!("#{index} compiling dependency\n"));
-        }
-        output.push_str("#21 14.95 error: cannot find macro `cfg_select` in this scope\n");
-        output.push_str("#21 15.02 error: could not compile `libsqlite3-sys`\n");
-        for index in 0..50 {
-            output.push_str(&format!("#{index} later build output\n"));
-        }
-        output.push_str("Error: failed to fetch an image or build from source: error building\n");
-
-        let excerpt = stream_excerpt(&output).expect("excerpt");
-
-        assert!(excerpt.contains("cannot find macro `cfg_select`"));
-        assert!(excerpt.contains("later line(s) omitted"));
-        assert!(!excerpt.contains("Error: failed to fetch an image"));
-    }
-}
-
 pub(super) fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec<String>>> {
     let mut waves = Vec::new();
     let mut satisfied = BTreeSet::new();
@@ -923,6 +898,8 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
         lane: plan.lane.clone(),
         lane_absent: plan.lane_absent.clone(),
         deployments_skipped: plan.deployments_skipped.clone(),
+        changed_repos: plan.changed_repos.clone(),
+        bundle_heads: plan.bundle_heads.clone(),
         created_at: now.clone(),
         updated_at: now,
         rolled_back_at: None,
@@ -950,4 +927,29 @@ pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) 
 fn step_publication(active: &ActiveBundle, step: &LandStep) -> Option<PublicationEntry> {
     let repo_id = step.repo_id.as_deref()?;
     publication_for_repo(&active.bundle, repo_id).cloned()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::stream_excerpt;
+
+    #[test]
+    fn stream_excerpt_prefers_early_diagnostic_in_recent_output() {
+        let mut output = String::new();
+        for index in 0..20 {
+            output.push_str(&format!("#{index} compiling dependency\n"));
+        }
+        output.push_str("#21 14.95 error: cannot find macro `cfg_select` in this scope\n");
+        output.push_str("#21 15.02 error: could not compile `libsqlite3-sys`\n");
+        for index in 0..50 {
+            output.push_str(&format!("#{index} later build output\n"));
+        }
+        output.push_str("Error: failed to fetch an image or build from source: error building\n");
+
+        let excerpt = stream_excerpt(&output).expect("excerpt");
+
+        assert!(excerpt.contains("cannot find macro `cfg_select`"));
+        assert!(excerpt.contains("later line(s) omitted"));
+        assert!(!excerpt.contains("Error: failed to fetch an image"));
+    }
 }

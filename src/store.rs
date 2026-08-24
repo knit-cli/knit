@@ -579,9 +579,8 @@ pub fn bundle_is_open(bundle: &ChangeGroup) -> bool {
 }
 
 fn is_open_bundle(bundle: &ChangeGroup) -> bool {
-    match bundle.state {
-        Some(BundleState::Archived | BundleState::Closed | BundleState::Deleted) => return false,
-        _ => {}
+    if let Some(BundleState::Archived | BundleState::Closed | BundleState::Deleted) = bundle.state {
+        return false;
     }
     let explicitly_open = bundle.state == Some(BundleState::Open);
     if !explicitly_open
