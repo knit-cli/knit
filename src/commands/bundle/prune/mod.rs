@@ -29,6 +29,8 @@ pub(super) fn print_prune_warning(message: impl std::fmt::Display) {
     eprintln!("{}", out::warn(message));
 }
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn prune_merged_bundles(
     apply: bool,
     delete: bool,

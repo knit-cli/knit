@@ -720,6 +720,8 @@ impl BundleNode {
     /// A completed landing run. `landing` records which destination the run
     /// merged into and whether that destination finishes the bundle; only a
     /// terminal landing closes the bundle's life.
+    // Mirrors the node's own fields; grouping them would just rename the list.
+    #[allow(clippy::too_many_arguments)]
     pub fn feature_landed(
         id: String,
         created_at: String,

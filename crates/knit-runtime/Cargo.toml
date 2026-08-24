@@ -9,7 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 description = "Per-bundle docker-compose runtime for knit cross-repo bundles."
 repository = "https://github.com/knit-cli/knit"
-rust-version = "1.74"
+rust-version = "1.86"
 
 [dependencies]
 anyhow = "1"

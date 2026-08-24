@@ -159,7 +159,7 @@ pub fn repo_worktree_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<Path
 }
 
 fn build_repo_change(
-    worktree_dir: &PathBuf,
+    worktree_dir: &Path,
     repo_id: String,
     before_sha: Option<String>,
     after_sha: String,

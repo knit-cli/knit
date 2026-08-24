@@ -34,6 +34,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
         );
     }
     ensure_provider(&plan.provider)?;
+    ensure_plan_matches_bundle_state(active, plan)?;
     ordered_step_ids(&plan.steps)?;
     if plan.target_branch.is_some() && plan.lane.is_some() {
         bail!("land plan cannot contain both targetBranch and lane");
@@ -224,6 +225,67 @@ fn ensure_checks_ready(repo_id: &str, runs: &[CheckRun]) -> Result<()> {
     });
     if pending {
         bail!("{repo_id}: required checks are pending.");
+    }
+    Ok(())
+}
+
+/// A plan describes the bundle as it was when the plan was generated. Once
+/// more work is committed, applying that plan lands a description of the past:
+/// the new repository never merges, and deployments are scoped to a change set
+/// that no longer exists. Both apply and resume run this, so neither can
+/// execute a stale plan.
+///
+/// Plans written before pinning existed carry no pin and stay acceptable —
+/// refusing them retroactively would strand in-flight landings on upgrade.
+pub(super) fn ensure_plan_matches_bundle_state(
+    active: &ActiveBundle,
+    plan: &LandPlan,
+) -> Result<()> {
+    if plan.changed_repos.is_empty() && plan.bundle_heads.is_empty() {
+        return Ok(());
+    }
+    let changed_now = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
+    if changed_now != plan.changed_repos {
+        let added = changed_now
+            .difference(&plan.changed_repos)
+            .cloned()
+            .collect::<Vec<_>>();
+        let removed = plan
+            .changed_repos
+            .difference(&changed_now)
+            .cloned()
+            .collect::<Vec<_>>();
+        let mut detail = Vec::new();
+        if !added.is_empty() {
+            detail.push(format!(
+                "{} now has work it did not before",
+                added.join(", ")
+            ));
+        }
+        if !removed.is_empty() {
+            detail.push(format!(
+                "{} no longer has recorded work",
+                removed.join(", ")
+            ));
+        }
+        bail!(
+            "This land plan was generated for a different set of changed repositories ({}). Regenerate it with `knit land plan --force` and inspect it before applying.",
+            detail.join("; ")
+        );
+    }
+
+    let heads_now = super::plan::bundle_heads(active);
+    let moved = plan
+        .bundle_heads
+        .iter()
+        .filter(|(repo_id, planned)| heads_now.get(*repo_id) != Some(*planned))
+        .map(|(repo_id, _)| repo_id.as_str())
+        .collect::<Vec<_>>();
+    if !moved.is_empty() {
+        bail!(
+            "This land plan was generated at a different head for {}. If you ran `knit land update`, that moved the feature branches on purpose; otherwise new work was committed. Either way, regenerate the plan with `knit land plan --force` and inspect it before applying.",
+            moved.join(", ")
+        );
     }
     Ok(())
 }

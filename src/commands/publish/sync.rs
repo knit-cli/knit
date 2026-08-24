@@ -11,6 +11,9 @@ use crate::store::{save_active_bundle, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
 
+// One per repository in a bounded fetch, so the variant spread is not worth
+// an extra allocation on the common path.
+#[allow(clippy::large_enum_variant)]
 enum SyncFetchResult {
     NoReviewObject,
     Summary {
@@ -155,7 +158,6 @@ pub(super) fn sync_publications_for_indexes(
 
     let active_read = &*active;
     let fetched: Vec<(String, Result<SyncFetchResult>)> = std::thread::scope(|scope| {
-        let active_read = active_read;
         let handles: Vec<_> = jobs
             .iter()
             .map(|(repo_index, repo)| {
@@ -210,7 +212,6 @@ pub(super) fn sync_publications_for_indexes(
 
     let active_read = &*active;
     let body_results: Vec<(String, Result<SyncBodyResult>)> = std::thread::scope(|scope| {
-        let active_read = active_read;
         let handles: Vec<_> = synced_repo_indexes
             .iter()
             .map(|&repo_index| {

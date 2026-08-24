@@ -106,10 +106,8 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
     if dir.exists() {
         entries.extend(bundle_json_paths(&dir)?);
     }
-    if all || deleted {
-        if deleted_dir.exists() {
-            entries.extend(bundle_json_paths(&deleted_dir)?);
-        }
+    if (all || deleted) && deleted_dir.exists() {
+        entries.extend(bundle_json_paths(&deleted_dir)?);
     }
     entries.sort();
 

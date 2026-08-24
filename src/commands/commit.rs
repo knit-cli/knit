@@ -247,7 +247,6 @@ fn repos_with_staged_changes(active: &ActiveBundle) -> Result<Vec<CommitTarget>>
     }
 
     let results: Vec<Result<Option<CommitTarget>>> = std::thread::scope(|scope| {
-        let active = active;
         let handles: Vec<_> = candidates
             .iter()
             .map(|(repo_index, worktree_abs)| {

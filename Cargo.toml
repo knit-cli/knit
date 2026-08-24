@@ -11,7 +11,7 @@ homepage = "https://github.com/knit-cli/knit"
 readme = "README.md"
 keywords = ["git", "monorepo", "worktree", "cross-repo", "orchestration"]
 categories = ["command-line-utilities", "development-tools"]
-rust-version = "1.74"
+rust-version = "1.86"
 
 [lib]
 name = "knit"
@@ -38,3 +38,6 @@ url = "2"
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+[dev-dependencies]
+jsonschema = { version = "0.33.0", default-features = false }

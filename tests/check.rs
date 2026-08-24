@@ -226,6 +226,19 @@ fn land_apply_gates_on_required_checks() {
         &workspace,
         ["commit", "--all", "-m", "Move past the verdict"],
     );
+    // Committing also moves the head the plan was pinned to, which apply now
+    // refuses first. Regenerate the plan — what an operator would do — and
+    // restore the hand-edited requirement the regeneration drops, so this test
+    // still exercises the check-freshness gate rather than the pin.
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "plan", "--force"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    plan["requireChecks"] = serde_json::json!(["ci"]);
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
     let stale = knit_fails_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote"],

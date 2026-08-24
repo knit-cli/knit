@@ -146,6 +146,9 @@ struct SourcePlan {
     refs_by_repo: BTreeMap<String, String>,
 }
 
+// One short-lived local per run; never collected, so the variant spread
+// costs a stack slot rather than memory per element.
+#[allow(clippy::large_enum_variant)]
 enum TargetPlan {
     Branch {
         label: String,
@@ -196,6 +199,8 @@ impl TargetPlan {
     }
 }
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn merge_command(
     source: Option<&str>,
     into: Option<&str>,

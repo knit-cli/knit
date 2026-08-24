@@ -46,6 +46,15 @@ pub struct ServicePort {
     pub source_host: Option<u16>,
 }
 
+/// Maps a service's original published host port to the one this bundle's
+/// runtime should publish instead. Threaded as a callback because allocation
+/// spans every stack in a run, not just the one being transformed.
+pub type PortAllocator<'a> = &'a mut dyn FnMut(&str, u16, Option<u16>) -> Result<u16>;
+
+/// A transformed stack's published ports, plus the `(old_host, new_host)`
+/// remapping sibling stacks need to rewire references to it.
+pub type ComposeTransform = (Vec<ServicePort>, Vec<(u16, u16)>);
+
 /// Transform a resolved compose config (the JSON output of `docker compose
 /// config --format json`) in place. `repo_map` maps canonical source repo
 /// paths to bundle checkouts; `allocate` maps a service's original published
@@ -55,8 +64,8 @@ pub struct ServicePort {
 pub fn transform_compose(
     config: &mut Value,
     repo_map: &[(PathBuf, PathBuf)],
-    allocate: &mut dyn FnMut(&str, u16, Option<u16>) -> Result<u16>,
-) -> Result<(Vec<ServicePort>, Vec<(u16, u16)>)> {
+    allocate: PortAllocator<'_>,
+) -> Result<ComposeTransform> {
     strip_stack_identity(config);
 
     let Some(services) = config
@@ -425,7 +434,7 @@ fn transform_volume(volume: &mut Value, repo_map: &[(PathBuf, PathBuf)]) {
 fn transform_port(
     service: &str,
     entry: &mut Value,
-    allocate: &mut dyn FnMut(&str, u16, Option<u16>) -> Result<u16>,
+    allocate: PortAllocator<'_>,
 ) -> Result<Option<(u16, u16, Option<u16>)>> {
     match entry {
         Value::Object(port) => {

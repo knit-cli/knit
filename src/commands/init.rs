@@ -393,7 +393,7 @@ pub(crate) fn resolve_view_repos(
     } else {
         // An absolute view (`base: none`) seeds empty; its include list is the
         // complete shape and never absorbs default-set changes.
-        if view.map_or(true, |(_, view)| view.base.is_default()) {
+        if view.is_none_or(|(_, view)| view.base.is_default()) {
             for repo in &project.repos {
                 if repo.include_by_default {
                     selected.insert(repo.id.clone());

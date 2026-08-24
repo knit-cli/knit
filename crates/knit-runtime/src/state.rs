@@ -233,11 +233,8 @@ pub(crate) fn run_status(ctx: &RuntimeContext) -> Result<()> {
     Ok(())
 }
 
-/// Build the `KNIT_*` environment contract for a runtime: bundle identity,
-/// per-repo checkout paths and revisions, allocated ports, and the resolved
-/// database. Covers every project repo plus any ad-hoc bundle repos; a repo
-/// tracked in the bundle resolves to its bundle checkout, anything else to
-
+/// The isolated Compose project name a bundle's runtime runs under, so two
+/// bundles can bring the same stack up side by side.
 pub(crate) fn compose_project_name(bundle_id: &str) -> String {
     format!("knit-run-{bundle_id}")
 }
@@ -298,8 +295,8 @@ fn parse_compose_ps(text: &str) -> Vec<(String, String)> {
         .collect()
 }
 
-/// Allocate one free host port per contract-mode service pool, stepping all
-
+/// How to describe the database in `knit run status`: a bundle-owned database
+/// reports its container's state, a shared one is only ever pointed at.
 fn database_status_label(database: &StateDatabase, services: &[(String, String)]) -> &'static str {
     if database.mode == DatabaseMode::Bundle {
         let running = services

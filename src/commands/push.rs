@@ -200,8 +200,8 @@ fn read_upstream(cwd: &Path) -> Option<String> {
 }
 
 /// Ensure an open bundle's feature branches are on git `origin` before its
-/// artifact is allowed onto a sync remote: "pushing a bundle" means branches
-/// + artifact, always. Branches that are missing or stale on origin are
+/// artifact is allowed onto a sync remote: "pushing a bundle" always means
+/// branches and artifact together. Branches that are missing or stale on origin are
 /// pushed (plain, never forced) from the bundle's checkout; when no checkout
 /// exists the branch is only verified against the bundle's recorded head.
 /// Terminal-state bundles (closed/archived/deleted) are a no-op — their

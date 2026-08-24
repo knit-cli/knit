@@ -166,6 +166,8 @@ pub fn archive_dead_bundle(
     Ok(())
 }
 
+// Command entry point: these arguments are the subcommand's flags.
+#[allow(clippy::too_many_arguments)]
 pub fn delete_bundle(
     bundle_id: &str,
     force: bool,
