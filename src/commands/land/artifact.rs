@@ -1,6 +1,7 @@
-//! Artifact-mode landing: merge every recorded PR straight from a bundle
-//! artifact JSON (no local workspace, no plan/run files) and append the
-//! landed node to the artifact.
+//! Artifact-mode landing: land a bundle straight from its artifact JSON (no
+//! local workspace, no plan/run files) and append the landed node to the
+//! artifact. A terminal landing merges the recorded reviews; an intermediate
+//! one merges the feature branches on the host and leaves the reviews open.
 
 use super::types::DEFAULT_LAND_PROVIDER;
 use super::{
@@ -147,10 +148,11 @@ pub fn apply_land_from_artifact(
             destination == Some(repo.base_branch.as_str())
         })
     });
-    // Mirrors the local plan: only a lane reaches an environment by merging
-    // branches. `--target` keeps its narrower meaning at any destination —
-    // retarget the recorded reviews and merge them there.
-    let branch_merges = !terminal && lane_name.is_some();
+    // Mirrors the local plan: an intermediate explicit destination, lane or
+    // raw target, is reached by merging the feature branches; the terminal
+    // destination merges the reviews. Without either, each review is merged
+    // where it already points.
+    let branch_merges = !terminal && (lane_name.is_some() || target_branch.is_some());
 
     let started_at = now_iso();
     let mut merged_repo_ids = Vec::new();
@@ -183,12 +185,15 @@ pub fn apply_land_from_artifact(
         }
 
         if branch_merges {
-            merge_feature_branch_into_lane(
+            merge_feature_branch_into_destination(
                 forge.as_ref(),
                 &target,
                 repo,
                 publication.as_ref(),
-                repo_targets.get(&repo.id).map(String::as_str),
+                repo_targets
+                    .get(&repo.id)
+                    .map(String::as_str)
+                    .or(target_branch.as_deref()),
                 lane_name.as_deref(),
             )?;
             merged_repo_ids.push(repo.id.clone());
@@ -327,15 +332,16 @@ pub fn apply_land_from_artifact(
     }
 }
 
-/// Send one repository's feature branch into the lane's branch on the host,
-/// leaving its review untouched. The review-base guard is the same rule the
-/// local plan enforces, re-checked here because a review can be retargeted
-/// onto the lane's branch after the host resolved the lane.
+/// Send one repository's feature branch into its destination branch on the
+/// host — the lane's branch for it, or the one raw target — leaving its
+/// review untouched. The review-base guard is the same rule the local plan
+/// enforces, re-checked here because a review can be retargeted onto the
+/// destination after the host resolved it.
 /// `publication` is optional on purpose: reaching an environment is a branch
 /// merge, which does not need a review. It is consulted only to refuse a
 /// landing that would merge a feature branch into its own review's base, and a
 /// repository with no review has none to spend.
-fn merge_feature_branch_into_lane(
+fn merge_feature_branch_into_destination(
     forge: &dyn providers::Forge,
     target: &providers::PrTarget,
     repo: &crate::model::RepoEntry,
@@ -345,7 +351,7 @@ fn merge_feature_branch_into_lane(
 ) -> Result<()> {
     let destination = destination.with_context(|| {
         format!(
-            "{}: landing lane has no resolved branch for this repository",
+            "{}: this landing has no resolved destination branch for this repository",
             repo.id
         )
     })?;
@@ -363,13 +369,26 @@ fn merge_feature_branch_into_lane(
             .as_deref()
             .unwrap_or(&publication.base_branch);
         if live_base == destination {
-            let lane = lane_name.unwrap_or("this landing");
+            let (landing, way_out) = match lane_name {
+                Some(lane) => (
+                    format!(
+                        "Landing lane `{lane}` sends `{}` to `{destination}`, which is",
+                        repo.id
+                    ),
+                    format!(
+                        "Point the lane at a different branch for `{}`, or declare the lane terminal so Knit merges the review itself.",
+                        repo.id
+                    ),
+                ),
+                None => (
+                    format!("Landing into `{destination}` sends `{}` to", repo.id),
+                    "Land into a different branch, or declare this landing terminal so Knit merges the review itself.".to_string(),
+                ),
+            };
             bail!(
-            "Landing lane `{lane}` sends `{}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. Point the lane at a different branch for `{}`, or declare the lane terminal so Knit merges the review itself.",
-            repo.id,
-            publication.url,
-            repo.id
-        );
+                "{landing} the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. {way_out}",
+                publication.url
+            );
         }
     }
 

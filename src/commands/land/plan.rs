@@ -71,11 +71,17 @@ pub(super) fn build_default_plan(
         &lane_absent,
     );
 
-    // An environment the bundle only passes through is reached by merging its
-    // feature branches, so the bundle's review objects stay open against the
-    // destination that ends its life. `--target <branch>` keeps its narrower
-    // meaning: retarget the recorded reviews and merge them there.
-    let branch_merges = !terminal && lane_name.is_some();
+    // One rule for every explicit destination: an environment the bundle only
+    // passes through is reached by merging its feature branches, so the
+    // bundle's review objects stay open against the destination that ends its
+    // life; the terminal destination merges the reviews themselves. `--target
+    // <branch>` is an ad-hoc lane that sends every changed repository to the
+    // same branch, and follows the same rule. A bare request names no
+    // destination of its own — it lands each review where it already points —
+    // so it always merges the reviews, and warns below if that does not
+    // finish the bundle.
+    let explicit_destination = lane_name.is_some() || target_branch.is_some();
+    let branch_merges = !terminal && explicit_destination;
     let mut steps = Vec::new();
     let ordered_ids: BTreeSet<String> = merge
         .map(|m| m.repo_order.iter().cloned().collect())
@@ -353,24 +359,39 @@ pub(super) fn ensure_branch_merge_spares_review(
     if publication.base_branch != destination {
         return Ok(());
     }
-    let lane = lane_name.unwrap_or("this landing");
-    // "Declare the lane terminal" is only a way out when the lane could be
-    // terminal. A lane that skips repositories cannot, so pointing at it would
-    // send the reader into the next error instead of out of this one.
-    let way_out = if lane_absent.is_empty() {
-        format!("Point the lane at a different branch for `{repo_id}`, or declare the lane terminal so Knit merges the review itself.")
-    } else {
-        format!(
-            "Point the lane at a different branch for `{repo_id}`. This lane cannot be terminal instead, because it skips {}, and a bundle's last stop has to carry every repository.",
-            lane_absent
-                .iter()
-                .map(String::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )
+    let (landing, way_out) = match lane_name {
+        Some(lane) => {
+            // "Declare the lane terminal" is only a way out when the lane could
+            // be terminal. A lane that skips repositories cannot, so pointing
+            // at it would send the reader into the next error instead of out
+            // of this one.
+            let way_out = if lane_absent.is_empty() {
+                format!("Point the lane at a different branch for `{repo_id}`, or declare the lane terminal so Knit merges the review itself.")
+            } else {
+                format!(
+                    "Point the lane at a different branch for `{repo_id}`. This lane cannot be terminal instead, because it skips {}, and a bundle's last stop has to carry every repository.",
+                    lane_absent
+                        .iter()
+                        .map(String::as_str)
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            };
+            (
+                format!("Landing lane `{lane}` sends `{repo_id}` to `{destination}`, which is"),
+                way_out,
+            )
+        }
+        // An ad-hoc `--target` landing: every repository goes to the one
+        // branch, so the only ways out are another branch or declaring this
+        // one terminal.
+        None => (
+            format!("Landing into `{destination}` sends `{repo_id}` to"),
+            format!("Land into a different branch, or declare `landing.targets.{destination}.terminal: true` so Knit merges the review itself."),
+        ),
     };
     bail!(
-        "Landing lane `{lane}` sends `{repo_id}` to `{destination}`, which is the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. {way_out}",
+        "{landing} the base of its recorded review {}. Merging the feature branch there would put the review's own commits into its base and the forge would close it as merged, so this landing cannot leave the review open. {way_out}",
         publication.url
     );
 }
@@ -773,24 +794,26 @@ fn append_project_deployments(
         }
         return finish_deployments(&pending, steps, skipped, &merge_step_ids, &all_merge_ids);
     }
-    let target_by_repo = active
-        .bundle
-        .repos
+    // Where each merge step actually sends its repository. A branch merge
+    // names its destination on the step and needs no review, so read it from
+    // there; a review merge goes to the raw target or the base it published
+    // to.
+    let target_by_repo = steps
         .iter()
-        .filter(|repo| merge_step_ids.contains_key(&repo.id))
-        .filter_map(|repo| {
-            Some((
-                repo.id.clone(),
-                publication_for_repo(&active.bundle, &repo.id)?
-                    .base_branch
-                    .clone(),
-            ))
-        })
-        .map(|(repo_id, recorded_target)| {
-            (
-                repo_id,
-                explicit_target.unwrap_or(&recorded_target).to_string(),
-            )
+        .filter(|step| is_merge_step(step))
+        .filter_map(|step| {
+            let repo_id = step.repo_id.clone()?;
+            let branch = match step.step_type {
+                LandStepKind::MergeBranch => step.target_branch.clone()?,
+                _ => explicit_target.map(ToOwned::to_owned).or_else(|| {
+                    Some(
+                        publication_for_repo(&active.bundle, &repo_id)?
+                            .base_branch
+                            .clone(),
+                    )
+                })?,
+            };
+            Some((repo_id, branch))
         })
         .collect::<BTreeMap<_, _>>();
     let target_branches = active
