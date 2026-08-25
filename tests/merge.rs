@@ -268,3 +268,116 @@ fn merge_fetch_push_status_and_target_locks_work() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+fn bundle_with_feature_commit(
+    root: &std::path::Path,
+    backend: &std::path::Path,
+) -> std::path::PathBuf {
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "feature x"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/feature-x/backend/app.txt"),
+        "feature x\n",
+    )
+    .unwrap();
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-x",
+            "commit",
+            "--all",
+            "-m",
+            "Feature X",
+        ],
+    );
+    workspace
+}
+
+/// A branch target merges in a detached managed checkout. When the local
+/// branch exists and no checkout holds it, the merge still moves the branch,
+/// so `knit merge --into <local-branch>` without `--push` keeps its meaning.
+#[test]
+fn a_local_merge_target_moves_when_no_checkout_holds_it() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+    let staging_before = git(&backend, ["rev-parse", "refs/heads/staging"]);
+    let source_head_before = git(&backend, ["rev-parse", "HEAD"]);
+
+    let merged = knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
+    assert!(merged.contains("Merged"), "{merged}");
+    assert!(!merged.contains("left alone"), "{merged}");
+
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    assert_eq!(git(&managed, ["branch", "--show-current"]).trim(), "");
+    let merge_sha = git(&managed, ["rev-parse", "HEAD"]);
+    assert_ne!(merge_sha, staging_before);
+    assert_eq!(
+        git(&backend, ["rev-parse", "refs/heads/staging"]),
+        merge_sha
+    );
+    assert_eq!(
+        git(&backend, ["show", "refs/heads/staging:app.txt"]),
+        "feature x\n"
+    );
+
+    // The source clone stayed on main where it was.
+    assert_eq!(git(&backend, ["branch", "--show-current"]).trim(), "main");
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), source_head_before);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// When the user's own clone has the target branch checked out, the merge is
+/// made in the detached managed checkout and the clone is left exactly as it
+/// was, dirty working tree included, with one line saying so.
+#[test]
+fn a_local_merge_target_is_left_alone_when_a_checkout_holds_it() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+
+    git(&backend, ["checkout", "staging"]);
+    let source_head_before = git(&backend, ["rev-parse", "HEAD"]);
+    append_line(&backend.join("app.txt"), "uncommitted local edit");
+    let source_app_before = fs::read_to_string(backend.join("app.txt")).unwrap();
+
+    let merged = knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
+    assert!(merged.contains("Merged"), "{merged}");
+    assert!(
+        merged.contains("local staging is checked out in") && merged.contains("left alone"),
+        "{merged}"
+    );
+    assert!(merged.contains("the merge lives only in"), "{merged}");
+
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    assert_eq!(git(&managed, ["branch", "--show-current"]).trim(), "");
+    assert_eq!(
+        fs::read_to_string(managed.join("app.txt")).unwrap(),
+        "feature x\n"
+    );
+
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "staging"
+    );
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), source_head_before);
+    assert_eq!(
+        git(&backend, ["rev-parse", "refs/heads/staging"]),
+        source_head_before
+    );
+    assert_eq!(
+        fs::read_to_string(backend.join("app.txt")).unwrap(),
+        source_app_before
+    );
+    assert!(git(&backend, ["status", "--porcelain"]).contains(" M app.txt"));
+
+    fs::remove_dir_all(root).unwrap();
+}

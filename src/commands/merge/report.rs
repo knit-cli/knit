@@ -1,12 +1,13 @@
 //! Read-side merge commands: `knit merge status` / `show`, and pushing a
 //! recorded merge run's branch-target steps to their remotes.
 
+use super::run::settle_local_branches;
 use super::{
     acquire_run_locks, latest_merge_run, resolve_stored_path, short_or_dash, short_sha, MergeRun,
     MergeRunStatus, MergeStepStatus, MergeTargetKind,
 };
 use crate::advice;
-use crate::git::{git_output, rev_parse};
+use crate::git::{branch_exists, git_output, rev_parse};
 use crate::ids::slugify;
 use crate::output as out;
 use crate::store::{read_json, write_json};
@@ -95,6 +96,7 @@ pub(super) fn push_recorded_merge_run(
     )?;
     let _locks = acquire_run_locks(root, &run)?;
     push_merge_run_steps(root, &mut run, repos, set_upstream)?;
+    settle_local_branches(root, &run)?;
     run.status = MergeRunStatus::Succeeded;
     run.updated_at = now_iso();
     write_json(&path, &run)?;
@@ -149,18 +151,32 @@ pub(super) fn push_merge_run_steps(
             ));
             continue;
         }
-        let mut args = vec![std::ffi::OsString::from("push")];
-        if set_upstream {
-            args.push(std::ffi::OsString::from("-u"));
-        }
-        args.push(std::ffi::OsString::from("origin"));
-        args.push(std::ffi::OsString::from(&step.target));
-        match git_output(&checkout, args) {
+        // The managed checkout is detached: push its HEAD to the branch on
+        // origin. `push -u` sets nothing from a detached HEAD, so upstream
+        // tracking is recorded on the local branch by hand below.
+        let refspec = format!("HEAD:refs/heads/{}", step.target);
+        match git_output(&checkout, ["push", "origin", refspec.as_str()]) {
             Ok(_) => {
                 let now = now_iso();
                 step.pushed_at = Some(now);
                 step.pushed_sha = Some(after_sha.clone());
                 step.push_remote = Some("origin".to_string());
+                if set_upstream {
+                    let repo_root = Path::new(&step.repo_path);
+                    if branch_exists(repo_root, &step.target) {
+                        let upstream = format!("--set-upstream-to=origin/{}", step.target);
+                        if let Err(error) = git_output(
+                            repo_root,
+                            ["branch", upstream.as_str(), step.target.as_str()],
+                        ) {
+                            failures.push(format!(
+                                "{}: pushed, but failed to set upstream of {}: {error:#}",
+                                step.repo_id, step.target
+                            ));
+                            continue;
+                        }
+                    }
+                }
                 println!(
                     "{}: {} origin/{} {}",
                     out::repo(&step.repo_id),
