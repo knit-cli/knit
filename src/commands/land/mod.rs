@@ -97,32 +97,33 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
     let lane_name = normalize_lane_name(lane_name)?;
     if let Some(path) = resolve_land_run_path(&active, None)? {
         let run: LandRun = read_json(&path)?;
-        if target_branch.is_some() || lane_name.is_some() {
-            let plan_path = resolve_stored_path(&active.root, &run.plan_path);
-            let plan: LandPlan = read_json(&plan_path)?;
-            // A bundle that landed into one environment goes on to the next
-            // one, so a finished run for another destination is history, not a
-            // conflict: plan the requested destination instead of reporting it.
-            let same_destination = ensure_requested_selection_matches_plan(
+        let plan_path = resolve_stored_path(&active.root, &run.plan_path);
+        let plan: LandPlan = read_json(&plan_path)?;
+        // A bundle that landed into one environment goes on to the next
+        // one, so a finished run for another destination is history, not a
+        // conflict: plan the requested destination instead of reporting it.
+        // A bare request asks for the recorded review bases, which is a
+        // destination of its own, so a finished lane or target run does not
+        // answer it either.
+        let same_destination = ensure_requested_selection_matches_plan(
+            target_branch.as_deref(),
+            lane_name.as_deref(),
+            &plan,
+        );
+        if same_destination.is_err()
+            && run.status == LandStatus::Succeeded
+            && run.rolled_back_at.is_none()
+        {
+            drop(active);
+            return generate_land_plan(
+                None,
+                None,
+                true,
                 target_branch.as_deref(),
                 lane_name.as_deref(),
-                &plan,
             );
-            if same_destination.is_err()
-                && run.status == LandStatus::Succeeded
-                && run.rolled_back_at.is_none()
-            {
-                drop(active);
-                return generate_land_plan(
-                    None,
-                    None,
-                    true,
-                    target_branch.as_deref(),
-                    lane_name.as_deref(),
-                );
-            }
-            same_destination?;
         }
+        same_destination?;
         display::print_run_status(&active, &run, &path);
         if run.status == LandStatus::Succeeded {
             return Ok(());
@@ -207,6 +208,7 @@ pub fn apply_land_plan(
     }
     let mut run = execute::new_run(&active, &plan, &path);
     write_json(&run_path, &run)?;
+    display::warn_if_reviews_merge_without_finishing(&plan);
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
     finish_successful_land(
         &mut active,
@@ -337,6 +339,20 @@ fn ensure_requested_selection_matches_plan(
         bail!(
             "Land plan targets {planned}, not `{requested_target}`. Regenerate it with `knit land --target {requested_target} plan --force`, inspect it, then apply again."
         )
+    }
+    // A bare request means the recorded review bases. That is a destination
+    // of its own, so a plan for a lane or an explicit target does not match
+    // it: applying such a plan bare would land somewhere the operator did not
+    // ask for.
+    if let Some(planned_lane) = plan.lane.as_deref() {
+        bail!(
+            "Land plan is for lane `{planned_lane}`, not the recorded review bases. Pass `--lane {planned_lane}` to use it, or regenerate it with `knit land plan --force`."
+        );
+    }
+    if let Some(planned_target) = plan.target_branch.as_deref() {
+        bail!(
+            "Land plan targets `{planned_target}`, not the recorded review bases. Pass `--target {planned_target}` to use it, or regenerate it with `knit land plan --force`."
+        );
     }
     Ok(())
 }

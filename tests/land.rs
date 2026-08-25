@@ -1817,6 +1817,111 @@ fn intermediate_lane_land_keeps_the_bundle_open() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A lane merge whose push is rejected (someone else moved the shared
+/// environment branch, a hook said no) must leave the managed checkout on the
+/// tip it was fetched at. It used to keep the merge commit, so `knit land
+/// resume` refused the checkout for "local commits not in origin" -- a commit
+/// Knit itself had made -- and the run could never be resumed.
+#[cfg(unix)]
+#[test]
+fn a_lane_push_failure_undoes_the_merge_and_resume_pushes_it() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "staging work",
+        json!({ "staging": { "defaultBranch": "staging" } }),
+        &["staging"],
+    );
+
+    // Reject pushes into backend's origin while the marker exists.
+    let marker = root.join("reject-push");
+    fs::write(&marker, "reject\n").unwrap();
+    let backend_remote = root.join("backend.git");
+    let hook = backend_remote.join("hooks/pre-receive");
+    fs::create_dir_all(hook.parent().unwrap()).unwrap();
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\nif [ -f {} ]; then\n  echo 'staging moved under you' >&2\n  exit 1\nfi\nexit 0\n",
+            shell_quote(&marker.to_string_lossy())
+        ),
+    )
+    .unwrap();
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    let staging_before = git(&backend_remote, ["rev-parse", "staging"]);
+    let feature_sha = git(
+        &workspace.join(".knit/worktrees/staging-work/backend"),
+        ["rev-parse", "HEAD"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let failed = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failed.contains("backend: failed to push origin/staging"),
+        "{failed}"
+    );
+    assert!(failed.contains("staging moved under you"), "{failed}");
+    assert!(failed.contains("The local merge was undone"), "{failed}");
+    assert!(failed.contains("knit land resume"), "{failed}");
+
+    // The rejected merge did not reach origin, and the managed checkout is
+    // back on the tip it fetched, not one merge commit ahead of it.
+    assert_eq!(
+        git(&backend_remote, ["rev-parse", "staging"]),
+        staging_before
+    );
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    assert!(managed.exists(), "{}", managed.display());
+    assert_eq!(
+        git(&managed, ["rev-parse", "HEAD"]),
+        git(&managed, ["rev-parse", "origin/staging"])
+    );
+    assert_eq!(git(&managed, ["status", "--porcelain"]), "");
+
+    // Let the push through and resume: the step merges again and pushes.
+    // The lane is stored in the plan, so resume takes no `--lane`.
+    fs::remove_file(&marker).unwrap();
+    let resumed = knit_with_fake_gh(
+        &workspace,
+        ["land", "resume", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        resumed.contains("into staging") && resumed.contains("and pushed"),
+        "{resumed}"
+    );
+    assert!(!resumed.contains("already contains"), "{resumed}");
+    assert!(resumed.contains("bundle stays open"), "{resumed}");
+
+    let staging_after = git(&backend_remote, ["rev-parse", "staging"]);
+    assert_ne!(staging_after, staging_before);
+    assert!(
+        git_success(
+            &backend_remote,
+            ["merge-base", "--is-ancestor", feature_sha.trim(), "staging"]
+        ),
+        "origin/staging does not contain the feature tip {feature_sha}"
+    );
+    assert_eq!(git(&managed, ["rev-parse", "HEAD"]), staging_after);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn lane_declared_terminal_archives_the_bundle() {
     let root = unique_temp_dir();
@@ -1990,6 +2095,215 @@ fn bundle_lands_into_staging_then_production() {
     assert_eq!(landings[0]["landing"]["terminal"].as_bool(), Some(false));
     assert_eq!(landings[1]["landing"]["lane"].as_str(), Some("production"));
     assert_eq!(landings[1]["landing"]["terminal"].as_bool(), Some(true));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bare_land_after_a_lane_landing_plans_the_terminal_destination() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "bare after lane",
+        json!({ "staging": { "defaultBranch": "staging" } }),
+        &["staging"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let staging = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(staging.contains("bundle stays open"), "{staging}");
+
+    // A bare request means the recorded review bases. The finished staging
+    // run is history for that destination too, so it gets planned rather
+    // than reported.
+    let plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(
+        plan.contains("archived on success (terminal destination)"),
+        "{plan}"
+    );
+    assert!(plan.contains("the recorded review objects"), "{plan}");
+    assert!(!plan.contains("Land run"), "{plan}");
+
+    let production = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        production.contains("landed bare-after-lane"),
+        "{production}"
+    );
+
+    let bundle = read_named_bundle(&workspace, "bare-after-lane");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let landings = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"].as_str() == Some("feature.landed"))
+        .collect::<Vec<_>>();
+    assert_eq!(landings.len(), 2, "{bundle}");
+    assert_eq!(landings[0]["landing"]["lane"].as_str(), Some("staging"));
+    assert_eq!(landings[0]["landing"]["terminal"].as_bool(), Some(false));
+    assert_eq!(landings[1]["landing"]["terminal"].as_bool(), Some(true));
+    assert!(landings[1]["landing"]["lane"].is_null(), "{}", landings[1]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_bare_request_does_not_match_a_lane_plan() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "lane plan only",
+        json!({ "staging": { "defaultBranch": "staging" } }),
+        &["staging"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    // The plan is for the staging lane; a bare apply asks for the recorded
+    // review bases, which is a different destination.
+    let mismatched =
+        knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(mismatched.contains("lane `staging`"), "{mismatched}");
+    assert!(mismatched.contains("--lane staging"), "{mismatched}");
+
+    // Nothing moved.
+    for repo_id in ["backend", "frontend"] {
+        let remote = root.join(format!("{repo_id}.git"));
+        let staging = git(&remote, ["log", "--oneline", "staging"]);
+        assert!(!staging.contains("Lane change"), "{staging}");
+        let main = git(&remote, ["log", "--oneline", "main"]);
+        assert!(!main.contains("Lane change"), "{main}");
+    }
+    let bundle = read_named_bundle(&workspace, "lane-plan-only");
+    assert_eq!(bundle["state"].as_str(), Some("open"));
+    assert!(
+        !bundle["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|node| node["type"].as_str() == Some("feature.landed")),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_target_that_merges_reviews_without_finishing_the_bundle_warns() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    git(&backend, ["branch", "staging", "main"]);
+    git(&backend, ["push", "origin", "staging"]);
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github" });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "dead end target"]);
+    let feature = workspace.join(".knit/worktrees/dead-end-target/backend");
+    append_line(&feature.join("app.txt"), "staging change");
+    knit(&workspace, ["commit", "--all", "-m", "Staging change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    // `staging` is not backend's configured base and nothing declares it
+    // terminal, so this plan merges the review and leaves the bundle open.
+    let warning = "merges the review objects into a destination that does not finish the bundle";
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        plan.contains("stays open on success (intermediate destination)"),
+        "{plan}"
+    );
+    assert!(plan.contains("the recorded review objects"), "{plan}");
+    assert!(plan.contains("warning:"), "{plan}");
+    assert!(plan.contains(warning), "{plan}");
+    assert!(
+        plan.contains("knit bundle archive dead-end-target"),
+        "{plan}"
+    );
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains(warning), "{apply}");
+    assert!(apply.contains("bundle stays open"), "{apply}");
+
+    // A terminal plan does not carry the warning.
+    let (_other_remote, other, _other_collaborator) = init_remote_repo(&root, "other");
+    let other_workspace = root.join("other-workspace");
+    fs::create_dir_all(&other_workspace).unwrap();
+    knit(&other_workspace, ["init", "demo"]);
+    knit(
+        &other_workspace,
+        ["project", "add", "other", other.to_str().unwrap()],
+    );
+    knit(&other_workspace, ["bundle", "plain landing"]);
+    append_line(
+        &other_workspace.join(".knit/worktrees/plain-landing/other/app.txt"),
+        "plain change",
+    );
+    knit(&other_workspace, ["commit", "--all", "-m", "Plain change"]);
+    knit_with_fake_gh(
+        &other_workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plain = knit_with_fake_gh(&other_workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(
+        plain.contains("archived on success (terminal destination)"),
+        "{plain}"
+    );
+    assert!(!plain.contains(warning), "{plain}");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2435,6 +2749,79 @@ fn artifact_lane_accepts_absent_repositories() {
         terminal_with_absence.contains("declared terminal but skips backend"),
         "{terminal_with_absence}"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A lane is an environment, reached by merging branches, so it does not need
+/// a review. Without one, nothing about the landing may read as terminal:
+/// an empty set of reviewed repositories is not "every repository reaches its
+/// base", and the changed repositories still have to move.
+#[test]
+fn artifact_lane_without_reviews_is_intermediate_and_merges_branches() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact unreviewed"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    append_line(
+        &workspace.join(".knit/worktrees/artifact-unreviewed/backend/app.txt"),
+        "unreviewed",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "Unreviewed change"]);
+    let artifact = workspace.join(".knit/bundles/artifact-unreviewed.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    assert!(
+        payload["publications"]
+            .as_array()
+            .is_none_or(|publications| publications.is_empty()),
+        "this bundle must not carry a review: {payload}"
+    );
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-unreviewed.out.bundle.json");
+    let landed = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--lane".into(),
+            "staging".into(),
+            "--repo-target".into(),
+            "backend=staging".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+        ],
+    );
+
+    assert!(
+        landed.contains("merged backend knit/artifact-unreviewed -> staging")
+            || landed.contains("already there backend"),
+        "the lane must merge the feature branch: {landed}"
+    );
+    assert!(fake_gh_dir.join("api-backend-merges.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-merge.json").exists());
+
+    let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    let landing = &latest_node_of_type(&landed_payload, "feature.landed")["landing"];
+    assert_eq!(landing["terminal"], json!(false));
+    assert_eq!(landing["lane"], json!("staging"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2998,6 +3385,49 @@ fn committing_after_planning_refuses_the_stale_plan() {
 
     let failed = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
     assert!(failed.contains("different head"), "{failed}");
+    assert!(failed.contains("knit land plan --force"), "{failed}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The ledger only moves when Knit records a commit. A plain `git commit` in
+/// the worktree leaves it untouched, so the plan's pins still match and the
+/// landing would apply against work the plan never saw.
+#[test]
+fn a_plain_git_commit_after_planning_refuses_the_stale_plan() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "first");
+    knit(&workspace, ["commit", "--all", "-m", "First"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+
+    // Committed with git directly: the ledger does not know about it.
+    append_line(&feature.join("app.txt"), "second");
+    git(&feature, ["add", "app.txt"]);
+    git(&feature, ["commit", "-m", "Second"]);
+
+    let failed = knit_fails_with_fake_gh(&workspace, ["land", "apply"], &fake_bin, &fake_gh_dir);
+    assert!(
+        failed.contains("backend have commits in their worktrees that Knit has not recorded"),
+        "{failed}"
+    );
+    assert!(failed.contains("knit sync"), "{failed}");
     assert!(failed.contains("knit land plan --force"), "{failed}");
 
     fs::remove_dir_all(root).unwrap();

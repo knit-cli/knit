@@ -244,6 +244,20 @@ pub(super) fn ensure_plan_matches_bundle_state(
     if plan.changed_repos.is_empty() && plan.bundle_heads.is_empty() {
         return Ok(());
     }
+    // The pins below compare against the ledger, which only moves when Knit
+    // records a commit. A plain `git commit` in a worktree leaves it untouched,
+    // so ask the worktrees themselves before trusting the pins.
+    let unrecorded = crate::tracking::detect_unrecorded_changes(active)?;
+    if !unrecorded.is_empty() {
+        bail!(
+            "{} have commits in their worktrees that Knit has not recorded, so this plan does not describe them. Run `knit sync` to record them, then regenerate the plan with `knit land plan --force`.",
+            unrecorded
+                .iter()
+                .map(|change| change.repo_id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        );
+    }
     let changed_now = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
     if changed_now != plan.changed_repos {
         let added = changed_now

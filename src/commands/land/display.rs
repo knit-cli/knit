@@ -56,6 +56,7 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
     );
     print_lane_absences(plan.lane.as_deref(), &plan.lane_absent);
     print_skipped_deployments(&plan.deployments_skipped);
+    warn_if_reviews_merge_without_finishing(plan);
     println!();
     for step in &plan.steps {
         println!(
@@ -78,6 +79,26 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
         ),
         (None, None) => println!("{} knit land apply", out::heading("Apply:")),
     }
+}
+
+/// A plan that merges the review objects into a destination that does not
+/// finish the bundle is a dead end: there is one review per repository, a
+/// merged review cannot be merged again, and `publish create` refuses a
+/// second one. Say so before the operator applies it, and again as it runs.
+pub(super) fn warn_if_reviews_merge_without_finishing(plan: &LandPlan) {
+    if plan.terminal
+        || !plan
+            .steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::MergePr)
+    {
+        return;
+    }
+    println!(
+        "{} this landing merges the review objects into a destination that does not finish the bundle. Merged reviews cannot be landed again, so afterwards the bundle can only be archived by hand with `knit bundle archive {}`.",
+        out::warn("warning:"),
+        plan.bundle_id
+    );
 }
 
 pub(super) fn print_run_status(active: &ActiveBundle, run: &LandRun, path: &Path) {

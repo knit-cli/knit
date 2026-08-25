@@ -220,10 +220,15 @@ pub(super) fn merge_branch(
 }
 
 /// Both transports report the host's status in their message: the native one
-/// formats `HTTP 409`, `gh api` prints its own 409 line.
+/// formats `HTTP 409`, `gh api` prints `(HTTP 409)`. Only that status marker
+/// counts; a bare `409` can be part of a branch or bundle name in the message.
 fn is_merge_conflict(error: &anyhow::Error) -> bool {
-    let text = format!("{error:#}").to_ascii_lowercase();
-    text.contains("409") || text.contains("merge conflict")
+    is_merge_conflict_text(&format!("{error:#}"))
+}
+
+fn is_merge_conflict_text(text: &str) -> bool {
+    let text = text.to_ascii_lowercase();
+    text.contains("http 409") || text.contains("merge conflict")
 }
 
 pub(super) fn merge(
@@ -510,5 +515,16 @@ mod tests {
         assert_eq!(value["title"], "feature title");
         assert_eq!(value["body"], "Body line one\nBody line two");
         assert_eq!(value["draft"], true);
+    }
+
+    #[test]
+    fn merge_conflict_detection_matches_the_status_not_a_bare_409() {
+        assert!(is_merge_conflict_text(
+            "GitHub API request failed during merge: HTTP 409: Merge conflict"
+        ));
+        assert!(is_merge_conflict_text("gh: Merge conflict (HTTP 409)"));
+        assert!(!is_merge_conflict_text(
+            "GitHub API request failed during merge: HTTP 404: Branch knit/mgx-61409 not found"
+        ));
     }
 }
