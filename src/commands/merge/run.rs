@@ -6,8 +6,9 @@ use super::report::push_merge_run_steps;
 use super::{
     abort_merge_if_needed, acquire_merge_locks, acquire_run_locks, checkout_path_for,
     ensure_checkout_on_branch, ensure_ref_exists, hard_reset, has_unmerged_paths, latest_merge_run,
-    load_bundle, merge_in_progress, merge_run_path, resolve_stored_path, MergeRun, MergeRunStatus,
-    MergeRunStep, MergeStepStatus, SourcePlan, TargetPlan, MERGE_RUN_KIND,
+    load_bundle, merge_in_progress, merge_run_path, resolve_stored_path, settle_local_branch,
+    MergeRun, MergeRunStatus, MergeRunStep, MergeStepStatus, MergeTargetKind, SourcePlan,
+    TargetPlan, MERGE_RUN_KIND,
 };
 use crate::advice;
 use crate::git::{
@@ -176,6 +177,7 @@ fn apply_pending_merge_steps(
                 bail!("Merge succeeded locally, but push failed:\n{error:#}");
             }
         }
+        settle_local_branches(root, run)?;
         run.status = MergeRunStatus::Succeeded;
         run.updated_at = now_iso();
         write_json(run_path, run)?;
@@ -187,6 +189,29 @@ fn apply_pending_merge_steps(
         );
     }
 
+    Ok(())
+}
+
+/// After a run's branch-target steps all merged (and pushed, when asked), move
+/// each repo's local `refs/heads/<target>` up to the merge where that is safe.
+/// The managed checkout is detached, so nothing else moves the branch.
+pub(super) fn settle_local_branches(root: &Path, run: &MergeRun) -> Result<()> {
+    for step in &run.steps {
+        if step.target_kind != MergeTargetKind::Branch {
+            continue;
+        }
+        let Some(after_sha) = &step.after_sha else {
+            continue;
+        };
+        settle_local_branch(
+            Path::new(&step.repo_path),
+            &step.repo_id,
+            &step.target,
+            after_sha,
+            step.pushed_sha.as_deref() == Some(after_sha.as_str()),
+            &resolve_stored_path(root, &step.checkout_path),
+        )?;
+    }
     Ok(())
 }
 
@@ -472,12 +497,14 @@ pub(crate) fn merge_branch_into_target(
     let after_sha = rev_parse(&checkout, "HEAD")?;
 
     if push {
+        // The managed checkout is detached, so the merge is pushed from HEAD
+        // straight to the branch on origin.
         let push_result = git_output(
             &checkout,
             [
                 OsString::from("push"),
                 OsString::from("origin"),
-                OsString::from(branch),
+                OsString::from(format!("HEAD:refs/heads/{branch}")),
             ],
         );
         if let Err(error) = push_result {
@@ -499,6 +526,7 @@ pub(crate) fn merge_branch_into_target(
             );
         }
     }
+    settle_local_branch(&repo_root, &repo.id, branch, &after_sha, push, &checkout)?;
 
     Ok(BranchMergeOutcome {
         after_sha,
@@ -513,6 +541,13 @@ pub(crate) struct BranchMergeOutcome {
     pub(crate) merged: bool,
 }
 
+/// Create or reuse the managed `.knit/merge-worktrees/<branch>/<repo>/`
+/// checkout for a branch target. It is always a detached checkout: Knit
+/// merges there and pushes `HEAD:refs/heads/<branch>`, so it never needs to
+/// own the branch and never runs inside the user's source checkout, whatever
+/// branch that checkout sits on. When fetching, the checkout starts from (or
+/// is fast-forwarded to) `origin/<branch>`; otherwise it starts from the
+/// local branch, falling back to the cached `origin/<branch>`.
 fn prepare_branch_checkout(
     root: &Path,
     repo: &RepoEntry,
@@ -536,19 +571,32 @@ fn prepare_branch_checkout(
                 worktree_path.display()
             );
         }
-        let current =
-            current_branch(&worktree_path)?.unwrap_or_else(|| "(detached HEAD)".to_string());
-        if current != branch {
-            bail!(
-                "{}: merge checkout {} is on {}, expected {}.",
+        match current_branch(&worktree_path)?.as_deref() {
+            None => {}
+            Some(current) if current == branch => {
+                // A checkout from before managed checkouts were detached still
+                // holds the branch. Detach it in place so the branch is free
+                // for the user again; HEAD stays where it is.
+                git_output(&worktree_path, ["checkout", "--detach"]).with_context(|| {
+                    format!(
+                        "{}: failed to detach merge checkout {}",
+                        repo.id,
+                        worktree_path.display()
+                    )
+                })?;
+            }
+            Some(current) => bail!(
+                "{}: merge checkout {} is on {}, expected a detached checkout of {}. Remove it with `git worktree remove` and retry.",
                 repo.id,
                 worktree_path.display(),
                 out::branch(current),
                 out::branch(branch)
-            );
+            ),
         }
         if fetch {
             fast_forward_target(&worktree_path, &repo.id, branch)?;
+        } else if branch_exists(&repo_root, branch) {
+            fast_forward_to_local_branch(&worktree_path, &repo.id, branch)?;
         }
         return Ok(worktree_path);
     }
@@ -558,38 +606,12 @@ fn prepare_branch_checkout(
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
 
-    if branch_exists(&repo_root, branch) {
-        match git_output(
-            &repo_root,
-            [
-                OsString::from("worktree"),
-                OsString::from("add"),
-                worktree_path.as_os_str().to_os_string(),
-                OsString::from(branch),
-            ],
-        ) {
-            Ok(_) => {
-                if fetch {
-                    fast_forward_target(&worktree_path, &repo.id, branch)?;
-                }
-                return Ok(worktree_path);
-            }
-            Err(error) => {
-                if current_branch(&repo_root)?.as_deref() == Some(branch) {
-                    if fetch {
-                        fast_forward_target(&repo_root, &repo.id, branch)?;
-                    }
-                    return Ok(repo_root);
-                }
-                return Err(error).with_context(|| {
-                    format!("{}: failed to create merge worktree for {branch}", repo.id)
-                });
-            }
-        }
-    }
-
-    let base_ref = resolve_base_ref(&repo_root, branch);
-    if !ref_exists(&repo_root, &base_ref) {
+    let start_ref = if fetch {
+        format!("origin/{branch}")
+    } else {
+        resolve_base_ref(&repo_root, branch)
+    };
+    if !ref_exists(&repo_root, &start_ref) {
         bail!(
             "{}: target branch {} does not exist locally or as origin/{}.",
             repo.id,
@@ -602,16 +624,12 @@ fn prepare_branch_checkout(
         [
             OsString::from("worktree"),
             OsString::from("add"),
-            OsString::from("-b"),
-            OsString::from(branch),
+            OsString::from("--detach"),
             worktree_path.as_os_str().to_os_string(),
-            OsString::from(base_ref),
+            OsString::from(start_ref),
         ],
     )
     .with_context(|| format!("{}: failed to create merge worktree for {branch}", repo.id))?;
-    if fetch {
-        fast_forward_target(&worktree_path, &repo.id, branch)?;
-    }
     Ok(worktree_path)
 }
 
@@ -622,16 +640,38 @@ fn fetch_target_branch(repo_root: &Path, repo_id: &str, branch: &str) -> Result<
     Ok(())
 }
 
+/// Put the detached managed checkout on the freshly fetched `origin/<branch>`.
+/// A checkout ahead of origin holds a merge Knit made and never pushed; that
+/// is named rather than discarded.
 fn fast_forward_target(checkout: &Path, repo_id: &str, branch: &str) -> Result<()> {
     let remote = format!("origin/{branch}");
     let head = rev_parse(checkout, "HEAD")?;
     let fetched = rev_parse(checkout, &remote)?;
     if head != fetched {
         if !is_ancestor(checkout, &head, &fetched) {
-            bail!("{repo_id}: {branch} has local commits not in origin/{branch}.");
+            bail!(
+                "{repo_id}: merge checkout {} has commits not in origin/{branch}. Push them with `knit merge push` or remove the checkout with `git worktree remove`.",
+                checkout.display()
+            );
         }
         git_output(checkout, ["reset", "--hard", remote.as_str()]).with_context(|| {
-            format!("{repo_id}: failed to fast-forward {branch} from origin/{branch}")
+            format!("{repo_id}: failed to fast-forward merge checkout to origin/{branch}")
+        })?;
+    }
+    Ok(())
+}
+
+/// Without a fetch, pick up work the user put on the local branch since the
+/// managed checkout last merged. Only a fast-forward: a checkout that is
+/// ahead of the local branch (an earlier merge the branch could not take) is
+/// left where it is.
+fn fast_forward_to_local_branch(checkout: &Path, repo_id: &str, branch: &str) -> Result<()> {
+    let local = format!("refs/heads/{branch}");
+    let head = rev_parse(checkout, "HEAD")?;
+    let target = rev_parse(checkout, &local)?;
+    if head != target && is_ancestor(checkout, &head, &target) {
+        git_output(checkout, ["reset", "--hard", local.as_str()]).with_context(|| {
+            format!("{repo_id}: failed to fast-forward merge checkout to local {branch}")
         })?;
     }
     Ok(())

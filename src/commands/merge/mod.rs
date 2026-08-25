@@ -11,7 +11,10 @@ mod run;
 pub(crate) use run::merge_branch_into_target;
 
 use crate::checkout::is_in_place;
-use crate::git::{current_branch, git_output, git_output_optional, ref_exists};
+use crate::git::{
+    branch_checkout_path, current_branch, git_output, git_output_optional, is_ancestor,
+    ref_commit_sha, ref_exists,
+};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
@@ -19,6 +22,7 @@ use crate::store::{acquire_named_lock, bundle_path, find_knit_root, read_json, K
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -404,6 +408,64 @@ fn abort_merge_if_needed(cwd: &Path) {
 
 fn hard_reset(cwd: &Path, reference: &str) -> Result<()> {
     git_output(cwd, ["reset", "--hard", reference]).map(|_| ())
+}
+
+/// Bring the user's local `refs/heads/<branch>` up to a merge Knit made in a
+/// detached managed checkout. The ref moves only when it is safe: it exists,
+/// no worktree has it checked out, and the move is a fast-forward. A branch
+/// some checkout holds -- the user's own clone, say -- is never touched: Knit
+/// does not mutate a working copy it does not own, so it says where the
+/// merge actually is instead. `pushed` names that place honestly.
+fn settle_local_branch(
+    repo_root: &Path,
+    repo_id: &str,
+    branch: &str,
+    after_sha: &str,
+    pushed: bool,
+    managed_checkout: &Path,
+) -> Result<()> {
+    let full_ref = format!("refs/heads/{branch}");
+    let Some(local_sha) = ref_commit_sha(repo_root, &full_ref)? else {
+        return Ok(());
+    };
+    if local_sha == after_sha {
+        return Ok(());
+    }
+    let merge_location = if pushed {
+        format!("origin/{branch} has the merge")
+    } else {
+        format!("the merge lives only in {}", managed_checkout.display())
+    };
+    if let Some(holder) = branch_checkout_path(repo_root, branch)? {
+        println!(
+            "{}",
+            out::muted(format!(
+                "{repo_id}: local {branch} is checked out in {} and was left alone; {merge_location}.",
+                holder.display()
+            ))
+        );
+        return Ok(());
+    }
+    if !is_ancestor(repo_root, &local_sha, after_sha) {
+        println!(
+            "{}",
+            out::muted(format!(
+                "{repo_id}: local {branch} has commits the merge does not contain and was left alone; {merge_location}."
+            ))
+        );
+        return Ok(());
+    }
+    git_output(
+        repo_root,
+        [
+            OsString::from("update-ref"),
+            OsString::from(&full_ref),
+            OsString::from(after_sha),
+            OsString::from(&local_sha),
+        ],
+    )
+    .with_context(|| format!("{repo_id}: failed to move local {branch} to {after_sha}"))?;
+    Ok(())
 }
 
 fn short_sha(sha: &str) -> &str {

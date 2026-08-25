@@ -3718,3 +3718,82 @@ fn a_cross_repo_trigger_survives_branch_target_selection() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The lane merge runs in a detached managed checkout and pushes its HEAD to
+/// the lane branch. A source clone that happens to sit on that branch -- as a
+/// team's clones do on their staging branch -- is never entered: it keeps its
+/// commit and its uncommitted edits. Knit used to fall back to merging inside
+/// that clone when `git worktree add <branch>` was refused.
+#[test]
+fn a_lane_landing_never_touches_a_source_checkout_on_the_lane_branch() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "staging work",
+        json!({ "staging": { "defaultBranch": "staging" } }),
+        &["staging"],
+    );
+
+    let backend = root.join("backend");
+    git(&backend, ["checkout", "staging"]);
+    let source_sha_before = git(&backend, ["rev-parse", "HEAD"]);
+    append_line(&backend.join("app.txt"), "uncommitted local edit");
+    let source_app_before = fs::read_to_string(backend.join("app.txt")).unwrap();
+    assert!(git(&backend, ["status", "--porcelain"]).contains(" M app.txt"));
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("bundle stays open"), "{apply}");
+    assert!(apply.contains("left alone"), "{apply}");
+
+    // Origin got the merge.
+    let backend_remote = root.join("backend.git");
+    let staging_log = git(&backend_remote, ["log", "--oneline", "staging"]);
+    assert!(staging_log.contains("Lane change"), "{staging_log}");
+
+    // The source clone was not entered: same branch, same commit, same
+    // uncommitted edit.
+    assert_eq!(
+        git(&backend, ["branch", "--show-current"]).trim(),
+        "staging"
+    );
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]), source_sha_before);
+    assert_eq!(
+        fs::read_to_string(backend.join("app.txt")).unwrap(),
+        source_app_before
+    );
+    assert!(git(&backend, ["status", "--porcelain"]).contains(" M app.txt"));
+
+    // The merge was made in a detached managed checkout.
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    assert!(managed.exists(), "{}", managed.display());
+    assert!(!git_success(&managed, ["symbolic-ref", "-q", "HEAD"]));
+    assert_eq!(
+        git(&managed, ["rev-parse", "--abbrev-ref", "HEAD"]).trim(),
+        "HEAD"
+    );
+    assert_eq!(
+        git(&managed, ["rev-parse", "HEAD"]),
+        git(&backend_remote, ["rev-parse", "staging"])
+    );
+
+    // A local lane branch no checkout holds still follows the merge.
+    let frontend = root.join("frontend");
+    assert_eq!(git(&frontend, ["branch", "--show-current"]).trim(), "main");
+    assert_eq!(
+        git(&frontend, ["rev-parse", "refs/heads/staging"]),
+        git(&root.join("frontend.git"), ["rev-parse", "staging"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

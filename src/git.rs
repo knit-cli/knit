@@ -170,6 +170,26 @@ pub fn is_git_worktree(path: &Path) -> bool {
     git_success(path, ["rev-parse", "--is-inside-work-tree"])
 }
 
+/// The worktree (main checkout or linked worktree) that currently has
+/// `refs/heads/<branch>` checked out, if any. Parses `git worktree list
+/// --porcelain`, whose `branch` line names the checked-out ref; detached
+/// worktrees carry no such line. A branch held by a worktree must not be
+/// moved with `update-ref`/`branch -f`: git refuses the checkout later and
+/// the working copy silently disagrees with its ref.
+pub fn branch_checkout_path(repo: &Path, branch: &str) -> Result<Option<PathBuf>> {
+    let output = git_output(repo, ["worktree", "list", "--porcelain"])?;
+    let wanted = format!("refs/heads/{branch}");
+    let mut current: Option<PathBuf> = None;
+    for line in output.lines() {
+        if let Some(path) = line.strip_prefix("worktree ") {
+            current = Some(PathBuf::from(path));
+        } else if line.strip_prefix("branch ") == Some(wanted.as_str()) {
+            return Ok(current);
+        }
+    }
+    Ok(None)
+}
+
 pub fn rev_parse(cwd: &Path, reference: &str) -> Result<String> {
     Ok(git_output(cwd, ["rev-parse", reference])?
         .trim()
