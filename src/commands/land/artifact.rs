@@ -62,12 +62,13 @@ pub fn apply_land_from_artifact(
     if bundle.publications.is_empty() && lane_name.is_none() {
         bail!("Bundle artifact has no review publications. Run publish first.");
     }
+    // The repositories with recorded work or a review: what a lane moves.
+    let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&bundle);
     if lane_name.is_some() {
-        let changed = crate::commands::publish::publish_scope_repo_ids(&bundle);
         let published_repo_ids = bundle
             .repos
             .iter()
-            .filter(|repo| changed.contains(&repo.id))
+            .filter(|repo| changed_repo_ids.contains(&repo.id))
             .map(|repo| repo.id.as_str())
             .collect::<BTreeSet<_>>();
         if published_repo_ids.is_empty() {
@@ -115,22 +116,36 @@ pub fn apply_land_from_artifact(
         if !repo_absent.is_empty() {
             return false;
         }
-        bundle
+        // Judge the repositories that will actually move. A lane carries the
+        // changed repositories whether or not they have a review; the other
+        // destinations merge reviews, so only reviewed repositories count.
+        let judged = bundle
             .repos
             .iter()
-            .filter(|repo| publication_for_repo(&bundle, &repo.id).is_some())
-            .filter(|repo| !repo_absent.contains(&repo.id))
-            .all(|repo| {
-                let destination = repo_targets
-                    .get(&repo.id)
-                    .map(String::as_str)
-                    .or(target_branch.as_deref())
-                    .or_else(|| {
-                        publication_for_repo(&bundle, &repo.id)
-                            .map(|pub_| pub_.base_branch.as_str())
-                    });
-                destination == Some(repo.base_branch.as_str())
+            .filter(|repo| {
+                if lane_name.is_some() {
+                    changed_repo_ids.contains(&repo.id)
+                } else {
+                    publication_for_repo(&bundle, &repo.id).is_some()
+                }
             })
+            .filter(|repo| !repo_absent.contains(&repo.id))
+            .collect::<Vec<_>>();
+        // Nothing to judge is not "everything reaches its base": an empty
+        // landing cannot be the bundle's last stop.
+        if judged.is_empty() {
+            return false;
+        }
+        judged.iter().all(|repo| {
+            let destination = repo_targets
+                .get(&repo.id)
+                .map(String::as_str)
+                .or(target_branch.as_deref())
+                .or_else(|| {
+                    publication_for_repo(&bundle, &repo.id).map(|pub_| pub_.base_branch.as_str())
+                });
+            destination == Some(repo.base_branch.as_str())
+        })
     });
     // Mirrors the local plan: only a lane reaches an environment by merging
     // branches. `--target` keeps its narrower meaning at any destination —
@@ -143,7 +158,6 @@ pub fn apply_land_from_artifact(
 
     let repos = bundle.repos.clone();
 
-    let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&bundle);
     for repo in &repos {
         let publication = publication_for_repo(&bundle, &repo.id).cloned();
         // Review merges need a review. Branch merges need recorded work, which

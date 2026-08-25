@@ -472,18 +472,32 @@ pub(crate) fn merge_branch_into_target(
     let after_sha = rev_parse(&checkout, "HEAD")?;
 
     if push {
-        git_output(
+        let push_result = git_output(
             &checkout,
             [
                 OsString::from("push"),
                 OsString::from("origin"),
                 OsString::from(branch),
             ],
-        )
-        .map_err(|error| {
-            // The merge stays in the managed checkout so a retry pushes it.
-            anyhow::anyhow!("{}: failed to push origin/{branch}: {error:#}", repo.id)
-        })?;
+        );
+        if let Err(error) = push_result {
+            // Undo the local merge. Leaving it in place would make the next
+            // attempt's fast-forward from origin/<branch> refuse the checkout
+            // for "local commits not in origin", blaming the user for a merge
+            // commit Knit made. Back on the fetched tip, a retry fetches the
+            // branch's new tip, merges again and pushes.
+            hard_reset(&checkout, &before_sha).with_context(|| {
+                format!(
+                    "{}: failed to push origin/{branch} ({error:#}) and then failed to undo the local merge in {}",
+                    repo.id,
+                    checkout.display()
+                )
+            })?;
+            bail!(
+                "{}: failed to push origin/{branch}: {error:#}. The local merge was undone; run `knit land resume` to fetch the branch's new tip, merge again and push.",
+                repo.id
+            );
+        }
     }
 
     Ok(BranchMergeOutcome {
