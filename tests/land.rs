@@ -72,6 +72,10 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
             artifact.to_string_lossy().to_string(),
             "--out".to_string(),
             out.to_string_lossy().to_string(),
+            // `staging` is not the artifact's recorded base, so without this
+            // the landing would be intermediate and merge the branch instead
+            // of the review. This test exercises the review path's transport.
+            "--terminal".to_string(),
         ],
         &fake_bin,
         &fake_gh_dir,
@@ -685,7 +689,9 @@ fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
 #[test]
 fn alternate_base_plan_selects_declared_target_deployments() {
     let root = unique_temp_dir();
-    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    git(&backend, ["branch", "staging", "main"]);
+    git(&backend, ["push", "origin", "staging"]);
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
@@ -751,12 +757,21 @@ fn alternate_base_plan_selects_declared_target_deployments() {
         output.contains("matching `landing.targets.<branch>` deployment steps are included"),
         "{output}"
     );
+    // `staging` is not backend's configured base, so this target is an
+    // intermediate destination: reached by branch merge, reviews untouched.
+    assert!(
+        output.contains("feature branches into the destination; review objects stay open"),
+        "{output}"
+    );
     let plan_path = workspace.join(".knit/land-plans/staging-target.land.json");
     let plan: Value = serde_json::from_str(&fs::read_to_string(plan_path).unwrap()).unwrap();
     let steps = plan["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 2);
     assert_eq!(plan["targetBranch"].as_str(), Some("staging"));
+    assert_eq!(plan["terminal"].as_bool(), Some(false));
     assert_eq!(steps[0]["id"].as_str(), Some("merge-backend"));
+    assert_eq!(steps[0]["type"].as_str(), Some("merge_branch"));
+    assert_eq!(steps[0]["targetBranch"].as_str(), Some("staging"));
     assert_eq!(steps[1]["id"].as_str(), Some("deploy-staging"));
     assert_eq!(
         steps[1]["env"]["KNIT_LAND_TARGET_BRANCH"].as_str(),
@@ -784,15 +799,21 @@ fn alternate_base_plan_selects_declared_target_deployments() {
         &fake_bin,
         &fake_gh_dir,
     );
-    assert!(apply.contains("retargeted"), "{apply}");
     assert!(apply.contains("deploy-staging"), "{apply}");
+    assert!(apply.contains("bundle stays open"), "{apply}");
     assert_eq!(fs::read_to_string(&deployed_target).unwrap(), "staging");
+    // The environment got the work by branch merge; the review was neither
+    // retargeted nor merged, so it still points at the terminal destination.
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+    assert!(!fake_gh_dir.join("merged-backend").exists());
     assert_eq!(
         fs::read_to_string(fake_gh_dir.join("create-backend.base"))
             .unwrap()
             .trim(),
-        "staging"
+        "main"
     );
+    let staging = git(&backend_remote, ["log", "--oneline", "staging"]);
+    assert!(staging.contains("Staging change"), "{staging}");
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -992,6 +1013,11 @@ fn alternate_base_plan_without_declared_target_keeps_deployment_explicit() {
     let steps = plan["steps"].as_array().unwrap();
     assert_eq!(steps.len(), 1);
     assert_eq!(steps[0]["id"].as_str(), Some("merge-backend"));
+    // An undeclared, non-base target is an intermediate destination, so the
+    // one step is a branch merge into it.
+    assert_eq!(steps[0]["type"].as_str(), Some("merge_branch"));
+    assert_eq!(steps[0]["targetBranch"].as_str(), Some("preproduction"));
+    assert_eq!(plan["terminal"].as_bool(), Some(false));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2209,7 +2235,7 @@ fn a_bare_request_does_not_match_a_lane_plan() {
 }
 
 #[test]
-fn a_target_that_merges_reviews_without_finishing_the_bundle_warns() {
+fn a_hand_edited_plan_that_merges_reviews_without_finishing_the_bundle_warns() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
     git(&backend, ["branch", "staging", "main"]);
@@ -2248,8 +2274,48 @@ fn a_target_that_merges_reviews_without_finishing_the_bundle_warns() {
     );
 
     // `staging` is not backend's configured base and nothing declares it
-    // terminal, so this plan merges the review and leaves the bundle open.
+    // terminal, so the generated plan merges the feature branch there and
+    // leaves the review alone: nothing to warn about.
     let warning = "merges the review objects into a destination that does not finish the bundle";
+    let fresh = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        fresh.contains("stays open on success (intermediate destination)"),
+        "{fresh}"
+    );
+    assert!(
+        fresh.contains("feature branches into the destination; review objects stay open"),
+        "{fresh}"
+    );
+    assert!(!fresh.contains(warning), "{fresh}");
+
+    // The plan file is editable. Turn the branch merge into a review merge by
+    // hand: that is the dead end, and it is what the warning is for.
+    let plan_path = workspace.join(".knit/land-plans/dead-end-target.land.json");
+    let mut plan_json: Value =
+        serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    assert_eq!(plan_json["steps"][0]["type"].as_str(), Some("merge_branch"));
+    plan_json["steps"][0] = json!({
+        "id": "merge-backend",
+        "type": "merge_pr",
+        "repoId": "backend",
+        "method": "merge",
+        "waitForChecks": true,
+        "requiredChecksOnly": true,
+        "deleteBranch": false,
+        "timeoutSeconds": 1800,
+        "intervalSeconds": 10
+    });
+    fs::write(
+        &plan_path,
+        format!("{}\n", serde_json::to_string_pretty(&plan_json).unwrap()),
+    )
+    .unwrap();
+
     let plan = knit_with_fake_gh(
         &workspace,
         ["land", "--target", "staging"],
@@ -2275,7 +2341,9 @@ fn a_target_that_merges_reviews_without_finishing_the_bundle_warns() {
         &fake_gh_dir,
     );
     assert!(apply.contains(warning), "{apply}");
+    assert!(apply.contains("retargeted"), "{apply}");
     assert!(apply.contains("bundle stays open"), "{apply}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
 
     // A terminal plan does not carry the warning.
     let (_other_remote, other, _other_collaborator) = init_remote_repo(&root, "other");
@@ -3715,6 +3783,299 @@ fn a_cross_repo_trigger_survives_branch_target_selection() {
         "{:?}",
         plan_step_ids(&plan)
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `--target <branch>` is an ad-hoc lane. When the branch is not the bundle's
+/// terminal destination, landing there is a stop along the way: the feature
+/// branches are merged into it, the reviews stay open against the terminal
+/// destination, and the bundle goes on to land there afterwards.
+#[test]
+fn an_intermediate_target_merges_branches_and_keeps_the_bundle_open() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    git(&backend, ["branch", "staging", "main"]);
+    git(&backend, ["push", "origin", "staging"]);
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github" });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "staging pass"]);
+    let feature = workspace.join(".knit/worktrees/staging-pass/backend");
+    append_line(&feature.join("app.txt"), "staging change");
+    knit(&workspace, ["commit", "--all", "-m", "Staging change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let warning = "merges the review objects into a destination that does not finish the bundle";
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        plan.contains("stays open on success (intermediate destination)"),
+        "{plan}"
+    );
+    assert!(
+        plan.contains("feature branches into the destination; review objects stay open"),
+        "{plan}"
+    );
+    assert!(plan.contains("backend -> staging"), "{plan}");
+    assert!(!plan.contains(warning), "{plan}");
+    let plan_json = read_land_plan(&workspace, "staging-pass");
+    assert_eq!(plan_json["targetBranch"].as_str(), Some("staging"));
+    assert_eq!(plan_json["terminal"].as_bool(), Some(false));
+    assert!(plan_json["targetBranches"].is_null() || plan_json["targetBranches"] == json!({}));
+    assert_eq!(plan_json["steps"][0]["type"].as_str(), Some("merge_branch"));
+    assert_eq!(
+        plan_json["steps"][0]["targetBranch"].as_str(),
+        Some("staging")
+    );
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("bundle stays open"), "{apply}");
+    assert!(!apply.contains(warning), "{apply}");
+    assert!(!apply.contains("retargeted"), "{apply}");
+
+    // The environment got the work by branch merge; the review was neither
+    // retargeted nor merged.
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+    assert!(!fake_gh_dir.join("merge-order.txt").exists());
+    assert!(!fake_gh_dir.join("merged-backend").exists());
+    let staging = git(&backend_remote, ["log", "--oneline", "staging"]);
+    assert!(staging.contains("Staging change"), "{staging}");
+    let main = git(&backend_remote, ["log", "--oneline", "main"]);
+    assert!(!main.contains("Staging change"), "{main}");
+
+    let bundle = read_named_bundle(&workspace, "staging-pass");
+    assert_eq!(bundle["state"].as_str(), Some("open"));
+    assert_eq!(
+        bundle["publications"][0]["baseBranch"].as_str(),
+        Some("main")
+    );
+    assert_eq!(bundle["publications"][0]["state"].as_str(), Some("OPEN"));
+    let landed = latest_node_of_type(&bundle, "feature.landed");
+    assert_eq!(landed["landing"]["terminal"].as_bool(), Some(false));
+    assert_eq!(landed["landing"]["targetBranch"].as_str(), Some("staging"));
+    assert!(landed["landing"]["lane"].is_null(), "{landed}");
+    assert!(workspace
+        .join(".knit/worktrees/staging-pass/backend")
+        .exists());
+
+    // The bundle then lands at its terminal destination: a bare request plans
+    // the recorded review bases and merges the review.
+    let next = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    assert!(
+        next.contains("archived on success (terminal destination)"),
+        "{next}"
+    );
+    assert!(next.contains("the recorded review objects"), "{next}");
+    let finish = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(finish.contains("landed staging-pass"), "{finish}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
+    let bundle = read_named_bundle(&workspace, "staging-pass");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let landings = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"].as_str() == Some("feature.landed"))
+        .collect::<Vec<_>>();
+    assert_eq!(landings.len(), 2, "{bundle}");
+    assert_eq!(landings[1]["landing"]["terminal"].as_bool(), Some(true));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The other half of the rule: a `--target` that is the bundle's terminal
+/// destination merges the recorded reviews and archives the bundle.
+#[test]
+fn a_terminal_target_still_merges_the_reviews() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github" });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "main target"]);
+    let feature = workspace.join(".knit/worktrees/main-target/backend");
+    append_line(&feature.join("app.txt"), "main change");
+    knit(&workspace, ["commit", "--all", "-m", "Main change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        plan.contains("archived on success (terminal destination)"),
+        "{plan}"
+    );
+    assert!(plan.contains("the recorded review objects"), "{plan}");
+    let plan_json = read_land_plan(&workspace, "main-target");
+    assert_eq!(plan_json["targetBranch"].as_str(), Some("main"));
+    assert_eq!(plan_json["terminal"].as_bool(), Some(true));
+    assert_eq!(plan_json["steps"][0]["type"].as_str(), Some("merge_pr"));
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed main-target"), "{apply}");
+    // The review already pointed at main, so it was merged without a retarget.
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+    assert!(fake_gh_dir.join("merged-backend").exists());
+    // The fake forge merges nothing in git; the branch itself was not merged
+    // by Knit into main.
+    let main = git(&backend_remote, ["log", "--oneline", "main"]);
+    assert!(!main.contains("Main change"), "{main}");
+
+    let bundle = read_named_bundle(&workspace, "main-target");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+    let landed = latest_node_of_type(&bundle, "feature.landed");
+    assert_eq!(landed["landing"]["terminal"].as_bool(), Some(true));
+    assert_eq!(landed["landing"]["targetBranch"].as_str(), Some("main"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The artifact path follows the same rule: an intermediate `--target` merges
+/// the feature branch on the host and leaves the review untouched.
+#[test]
+fn artifact_intermediate_target_merges_the_branch_and_spares_the_review() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact target"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let artifact = workspace.join(".knit/bundles/artifact-target.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-target",
+        "state": "OPEN",
+        "title": "artifact target (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-target.out.bundle.json");
+    let landed = knit_with_fake_gh_env(
+        &root,
+        vec![
+            "land".into(),
+            "--target".into(),
+            "staging".into(),
+            "apply".into(),
+            "--from-artifact".into(),
+            artifact.to_string_lossy().to_string(),
+            "--out".into(),
+            out.to_string_lossy().to_string(),
+            "--intermediate".into(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+        &[
+            ("GH_TOKEN", "gho_fake_token"),
+            ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+            ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+        ],
+    );
+
+    assert!(
+        landed.contains("merged backend knit/artifact-target -> staging"),
+        "{landed}"
+    );
+    assert!(
+        !landed.contains("retargeted"),
+        "an intermediate target must not move the review: {landed}"
+    );
+    // The host merged the branch, not the pull request.
+    assert!(fake_gh_dir.join("api-backend-merges.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-merge.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-edit.json").exists());
+
+    let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(landed_payload["publications"][0]["baseBranch"], "main");
+    assert_eq!(landed_payload["publications"][0]["state"], "OPEN");
+    let landing = &landed_payload["nodes"].as_array().unwrap().last().unwrap()["landing"];
+    assert_eq!(landing["terminal"], json!(false));
+    assert_eq!(landing["targetBranch"], json!("staging"));
+    assert!(landing["lane"].is_null(), "{landing}");
 
     fs::remove_dir_all(root).unwrap();
 }

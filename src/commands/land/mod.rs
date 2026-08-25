@@ -358,7 +358,9 @@ fn ensure_requested_selection_matches_plan(
 }
 
 /// Apply the plan's native target contract to the recorded review objects
-/// before target-specific readiness checks and merge execution. Each
+/// before target-specific readiness checks and merge execution. Only review
+/// merges are retargeted: a branch merge reaches its destination without
+/// touching the review, which stays open against the terminal one. Each
 /// successful retarget is recorded immediately so a partially interrupted
 /// provider operation remains resumable and the bundle never lies about the
 /// remote PR base.
