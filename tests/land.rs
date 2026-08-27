@@ -1421,6 +1421,65 @@ fn latest_land_run(workspace: &Path) -> (std::path::PathBuf, Value) {
     (path, run)
 }
 
+/// A run records the steps of the plan it started from. Regenerating the plan
+/// in between (`knit land plan --force` after more work, say) gives it a
+/// different step list; resuming used to panic on the mismatch instead of
+/// saying what happened.
+#[test]
+fn land_resume_refuses_a_run_whose_plan_was_regenerated() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    write_half_failing_plan(&workspace, None);
+
+    let failed = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(failed.contains("stopped at step gate"), "{failed}");
+
+    // The plan is rewritten underneath the run: the gate it recorded is gone,
+    // and a step it never recorded is appended.
+    let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
+    let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
+    let steps = plan["steps"].as_array_mut().unwrap();
+    steps.retain(|step| step["id"].as_str() != Some("gate"));
+    for step in steps.iter_mut() {
+        if step["id"].as_str() == Some("merge-frontend") {
+            step["needs"] = json!(["merge-backend"]);
+        }
+    }
+    steps.push(json!({
+        "id": "smoke",
+        "type": "run",
+        "cwd": ".",
+        "command": ["sh", "-c", "true"],
+        "needs": ["merge-frontend"]
+    }));
+    fs::write(&plan_path, serde_json::to_string_pretty(&plan).unwrap()).unwrap();
+
+    let resume = knit_fails_with_fake_gh(&workspace, ["land", "resume"], &fake_bin, &fake_gh_dir);
+    assert!(
+        resume.contains("recorded against a different plan"),
+        "{resume}"
+    );
+    assert!(resume.contains("smoke"), "{resume}");
+    assert!(resume.contains("gate"), "{resume}");
+    assert!(resume.contains("knit land apply"), "{resume}");
+    assert!(!resume.contains("panicked"), "{resume}");
+
+    // Nothing moved: backend merged during apply, frontend still has not, and
+    // the run was left as it was.
+    let order = fs::read_to_string(fake_gh_dir.join("merge-order.txt")).unwrap();
+    assert_eq!(order.lines().collect::<Vec<_>>(), vec!["backend"]);
+    let (_, run) = latest_land_run(&workspace);
+    assert_eq!(run["status"].as_str(), Some("failed"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn land_rollback_creates_revert_prs_for_merged_steps_of_failed_run() {
     let root = unique_temp_dir();
@@ -2125,6 +2184,65 @@ fn bundle_lands_into_staging_then_production() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A finished run is an answer only while its plan still describes the
+/// bundle. After more work is committed, asking for the same lane again is a
+/// request to land that work, not to hear about the old run.
+#[test]
+fn landing_the_same_lane_again_after_new_work_plans_the_new_work() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_lane_bundle(
+        &root,
+        "staging twice",
+        json!({
+            "staging": { "defaultBranch": "staging" },
+            "production": { "defaultBranch": "main" }
+        }),
+        &["staging"],
+    );
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let first = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(first.contains("bundle stays open"), "{first}");
+
+    append_line(
+        &workspace.join(".knit/worktrees/staging-twice/backend/app.txt"),
+        "more staging work",
+    );
+    knit(&workspace, ["commit", "--all", "-m", "More staging work"]);
+
+    let plan = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(plan.contains("Lane: staging"), "{plan}");
+    assert!(plan.contains("stays open on success"), "{plan}");
+    assert!(!plan.contains("Land run"), "{plan}");
+
+    let again = knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(again.contains("bundle stays open"), "{again}");
+    let staging = git(&root.join("backend.git"), ["log", "--oneline", "staging"]);
+    assert!(staging.contains("More staging work"), "{staging}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn bare_land_after_a_lane_landing_plans_the_terminal_destination() {
     let root = unique_temp_dir();
@@ -2817,6 +2935,121 @@ fn artifact_lane_accepts_absent_repositories() {
         terminal_with_absence.contains("declared terminal but skips backend"),
         "{terminal_with_absence}"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The hosted path enforces the local plan's rule: a terminal landing archives
+/// the bundle, so every changed repository needs a review to merge, or its
+/// work is stranded on a branch nobody will land.
+#[test]
+fn artifact_terminal_landing_refuses_to_strand_an_unpublished_repository() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _c1) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _c2) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact strand"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/artifact-strand")
+                .join(repo_id)
+                .join("app.txt"),
+            "artifact strand change",
+        );
+    }
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Artifact strand change"],
+    );
+
+    let artifact = workspace.join(".knit/bundles/artifact-strand.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    for repo in payload["repos"].as_array_mut().unwrap() {
+        let id = repo["id"].as_str().unwrap().to_string();
+        repo["remote"] = json!(format!("https://github.com/acme/{id}.git"));
+    }
+    // Both repositories have recorded work; only backend has a review.
+    payload["publications"] = json!([{
+        "repoId": "backend",
+        "provider": "github",
+        "kind": "pull_request",
+        "number": 101,
+        "url": "https://github.com/acme/backend/pull/101",
+        "baseBranch": "main",
+        "headBranch": "knit/artifact-strand",
+        "state": "OPEN",
+        "title": "artifact strand (backend)",
+        "updatedAt": "2026-06-06T00:00:00.000Z"
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let api_base = spawn_fake_github_api(&fake_gh_dir);
+    let out = root.join("artifact-strand.out.bundle.json");
+    let env = [
+        ("GH_TOKEN", "gho_fake_token"),
+        ("KNIT_GITHUB_API_TRANSPORT", "curl-ipv4"),
+        ("KNIT_GITHUB_API_BASE", api_base.as_str()),
+    ];
+    let args = |lifecycle: Option<&str>| {
+        let mut args = vec![
+            "land".to_string(),
+            "apply".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+        ];
+        args.extend(lifecycle.map(str::to_string));
+        args
+    };
+
+    let declared = knit_fails_with_fake_gh_env(
+        &root,
+        args(Some("--terminal")),
+        &fake_bin,
+        &fake_gh_dir,
+        &env,
+    );
+    assert!(
+        declared.contains("frontend has no recorded review"),
+        "{declared}"
+    );
+    assert!(declared.contains("archive the bundle"), "{declared}");
+    assert!(
+        declared.contains("land into an intermediate destination"),
+        "{declared}"
+    );
+    // Refused before anything moved: no merge, no retarget, no output.
+    assert!(!fake_gh_dir.join("api-backend-merge.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-edit.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-merges.json").exists());
+    assert!(!out.exists());
+
+    // Without a declared answer, the review on the configured base makes the
+    // landing terminal, and the same rule applies.
+    let inferred = knit_fails_with_fake_gh_env(&root, args(None), &fake_bin, &fake_gh_dir, &env);
+    assert!(
+        inferred.contains("frontend has no recorded review"),
+        "{inferred}"
+    );
+    assert!(!fake_gh_dir.join("api-backend-merge.json").exists());
+    assert!(!fake_gh_dir.join("api-backend-edit.json").exists());
+    assert!(!out.exists());
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -148,6 +148,28 @@ pub fn apply_land_from_artifact(
             destination == Some(repo.base_branch.as_str())
         })
     });
+    // The bundle's last stop has to carry everything the bundle changed, the
+    // rule the local plan enforces too: a terminal landing archives the
+    // bundle, so a changed repository with no review to merge would be left
+    // stranded on its feature branch while the forge says the feature
+    // shipped. Refused before anything moves.
+    if terminal {
+        let unpublished = changed_repo_ids
+            .iter()
+            .filter(|repo_id| bundle.repos.iter().any(|repo| repo.id == **repo_id))
+            .filter(|repo_id| publication_for_repo(&bundle, repo_id).is_none())
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        if !unpublished.is_empty() {
+            let one = unpublished.len() == 1;
+            bail!(
+                "This landing is terminal and would archive the bundle, but {} {} no recorded review. Landing now would strand that work on its feature branch. Publish {} first, or land into an intermediate destination.",
+                unpublished.join(", "),
+                if one { "has" } else { "have" },
+                if one { "it" } else { "them" }
+            );
+        }
+    }
     // Mirrors the local plan: an intermediate explicit destination, lane or
     // raw target, is reached by merging the feature branches; the terminal
     // destination merges the reviews. Without either, each review is merged
