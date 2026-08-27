@@ -38,16 +38,18 @@ pub(super) fn execute_run(
     for wave in &waves {
         let mut pending: Vec<(&LandStep, usize)> = Vec::new();
         for step_id in wave {
-            let step = plan
-                .steps
-                .iter()
-                .find(|s| &s.id == step_id)
-                .expect("validated plan order references a real step");
-            let run_index = run
-                .steps
-                .iter()
-                .position(|run_step| run_step.id == step.id)
-                .expect("run contains every plan step");
+            let Some(step) = plan.steps.iter().find(|s| &s.id == step_id) else {
+                bail!(
+                    "land plan order references step `{step_id}`, which the plan does not contain"
+                );
+            };
+            let Some(run_index) = run.steps.iter().position(|run_step| run_step.id == step.id)
+            else {
+                bail!(
+                    "land run does not record step `{}`; the plan was changed after the run started, so start a new landing with `knit land apply`",
+                    step.id
+                );
+            };
             if run.steps[run_index].status == LandStatus::Succeeded {
                 continue;
             }
@@ -360,10 +362,11 @@ pub(super) fn step_waves(steps: &[LandStep], order: &[String]) -> Result<Vec<Vec
             if !remaining.contains(step_id) {
                 continue;
             }
-            let step = steps
-                .iter()
-                .find(|s| &s.id == step_id)
-                .expect("order references a real step");
+            let Some(step) = steps.iter().find(|s| &s.id == step_id) else {
+                bail!(
+                    "land plan order references step `{step_id}`, which the plan does not contain"
+                );
+            };
             if step.needs.iter().all(|need| satisfied.contains(need)) {
                 wave.push(step_id.clone());
             }

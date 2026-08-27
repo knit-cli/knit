@@ -40,6 +40,7 @@ use crate::store::{
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeSet;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -110,18 +111,25 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
             lane_name.as_deref(),
             &plan,
         );
-        if same_destination.is_err()
-            && run.status == LandStatus::Succeeded
-            && run.rolled_back_at.is_none()
-        {
-            drop(active);
-            return generate_land_plan(
-                None,
-                None,
-                true,
-                target_branch.as_deref(),
-                lane_name.as_deref(),
-            );
+        if run.status == LandStatus::Succeeded && run.rolled_back_at.is_none() {
+            // The same destination asked for again after more work was
+            // committed is the same situation: the finished run's plan no
+            // longer describes the bundle, so the operator is asking to land
+            // the new work, not to hear about the old run. A plan written
+            // before pinning existed carries no pin and still reads as the
+            // finished run.
+            let stale_for_same_destination = same_destination.is_ok()
+                && validate::ensure_plan_matches_bundle_state(&active, &plan).is_err();
+            if same_destination.is_err() || stale_for_same_destination {
+                drop(active);
+                return generate_land_plan(
+                    None,
+                    None,
+                    true,
+                    target_branch.as_deref(),
+                    lane_name.as_deref(),
+                );
+            }
         }
         same_destination?;
         display::print_run_status(&active, &run, &path);
@@ -540,6 +548,7 @@ pub fn resume_land_run(
     }
     let plan_path = resolve_stored_path(&active.root, &run.plan_path);
     let plan: LandPlan = read_json(&plan_path)?;
+    ensure_run_matches_plan(&run, &plan)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
@@ -560,6 +569,41 @@ pub fn resume_land_run(
             no_tag,
         },
     )
+}
+
+/// A run records the steps of the plan it was started from. If that plan file
+/// was regenerated since (`knit land plan --force` after committing more work,
+/// which the stale-pin check tells the operator to do), its steps no longer
+/// describe the run: continuing would execute steps the run never recorded, or
+/// wait on steps that no longer exist. Refuse instead of panicking on the
+/// mismatch, and name what differs.
+fn ensure_run_matches_plan(run: &LandRun, plan: &LandPlan) -> Result<()> {
+    let run_ids: BTreeSet<&str> = run.steps.iter().map(|step| step.id.as_str()).collect();
+    let plan_ids: BTreeSet<&str> = plan.steps.iter().map(|step| step.id.as_str()).collect();
+    if run_ids == plan_ids {
+        return Ok(());
+    }
+    let added = plan_ids.difference(&run_ids).copied().collect::<Vec<_>>();
+    let removed = run_ids.difference(&plan_ids).copied().collect::<Vec<_>>();
+    let mut detail = Vec::new();
+    if !added.is_empty() {
+        detail.push(format!(
+            "the plan now has {} {}, which the run never recorded",
+            if added.len() == 1 { "step" } else { "steps" },
+            added.join(", ")
+        ));
+    }
+    if !removed.is_empty() {
+        detail.push(format!(
+            "the run recorded {} {}, which the plan no longer has",
+            if removed.len() == 1 { "step" } else { "steps" },
+            removed.join(", ")
+        ));
+    }
+    bail!(
+        "This run was recorded against a different plan: {}. The plan was regenerated after the run started, so the run cannot continue. Start a new landing with `knit land apply`; steps whose reviews already merged are recognised as already landed.",
+        detail.join("; ")
+    );
 }
 
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
