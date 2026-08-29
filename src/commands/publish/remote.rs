@@ -21,9 +21,24 @@ pub(super) struct PublishJob {
     pub(super) base_branch: String,
 }
 
+#[derive(Clone)]
 pub(super) struct PushedInfo {
     sha: String,
     branch: String,
+}
+
+/// What a publish worker reports while it runs. `Pushed` fires as soon as the
+/// branch is on origin, before the review object is looked up or created, so
+/// the caller can print progress per step instead of per joined worker.
+pub(super) enum PublishEvent {
+    Pushed {
+        repo_id: String,
+        pushed: PushedInfo,
+    },
+    Done {
+        repo_id: String,
+        result: Box<Result<PublishRemoteResult>>,
+    },
 }
 
 pub(super) enum PublishStatus {
@@ -35,7 +50,6 @@ pub(super) enum PublishStatus {
 pub(super) struct PublishRemoteResult {
     pub(super) repo_index: usize,
     repo_id: String,
-    pushed: PushedInfo,
     status: PublishStatus,
 }
 
@@ -52,6 +66,7 @@ pub(super) fn publish_repo_remote(
     draft: bool,
     renew: bool,
     set_upstream: bool,
+    on_pushed: &dyn Fn(PushedInfo),
 ) -> Result<PublishRemoteResult> {
     let repo = &job.repo;
     let base_branch = &job.base_branch;
@@ -77,6 +92,7 @@ pub(super) fn publish_repo_remote(
         sha,
         branch: format!("origin/{branch}"),
     };
+    on_pushed(pushed.clone());
 
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
         if existing.base_branch != *base_branch {
@@ -90,7 +106,6 @@ pub(super) fn publish_repo_remote(
             return Ok(PublishRemoteResult {
                 repo_index: job.repo_index,
                 repo_id: repo.id.clone(),
-                pushed,
                 status: PublishStatus::ExistsRecorded(existing.url.clone()),
             });
         }
@@ -110,7 +125,6 @@ pub(super) fn publish_repo_remote(
             return Ok(PublishRemoteResult {
                 repo_index: job.repo_index,
                 repo_id: repo.id.clone(),
-                pushed,
                 status: PublishStatus::FoundExisting(existing),
             });
         }
@@ -136,7 +150,6 @@ pub(super) fn publish_repo_remote(
     Ok(PublishRemoteResult {
         repo_index: job.repo_index,
         repo_id: repo.id.clone(),
-        pushed,
         status: PublishStatus::Created(summary),
     })
 }
@@ -228,54 +241,63 @@ pub(super) fn publish_repo_remote_from_artifact(
     })
 }
 
+/// Print the `pushed` line for a repo whose branch just reached origin.
+pub(super) fn report_pushed(repo_id: &str, pushed: &PushedInfo) {
+    println!(
+        "{}: {} {} {}",
+        out::repo(repo_id),
+        out::movement("pushed"),
+        out::branch(&pushed.branch),
+        out::sha(short_sha(&pushed.sha))
+    );
+}
+
+/// Print the review-object line for one repo. `progress` is the streamed
+/// ` (done/total)` tail from [`out::progress`].
+fn report_status(repo_id: &str, status: &PublishStatus, progress: &str) {
+    match status {
+        PublishStatus::ExistsRecorded(url) => println!(
+            "{}: {} {}{progress}",
+            out::repo(repo_id),
+            out::movement("exists"),
+            url
+        ),
+        PublishStatus::FoundExisting(summary) => println!(
+            "{}: {} {}{progress}",
+            out::repo(repo_id),
+            out::movement("exists"),
+            summary.url
+        ),
+        PublishStatus::Created(summary) => println!(
+            "{}: {} #{} {}{progress}",
+            out::repo(repo_id),
+            out::movement("created"),
+            summary.number,
+            summary.url
+        ),
+    }
+}
+
+pub(super) fn report_publish_remote_result(outcome: &PublishRemoteResult, progress: &str) {
+    report_status(&outcome.repo_id, &outcome.status, progress);
+}
+
+/// Record a worker's outcome on the bundle. Reporting is separate
+/// ([`report_publish_remote_result`]) because the bundle is still borrowed by
+/// the other workers while results stream in.
 pub(super) fn apply_publish_remote_result(
     active: &mut ActiveBundle,
     outcome: &PublishRemoteResult,
 ) -> Result<bool> {
-    println!(
-        "{}: {} {} {}",
-        out::repo(&outcome.repo_id),
-        out::movement("pushed"),
-        out::branch(&outcome.pushed.branch),
-        out::sha(short_sha(&outcome.pushed.sha))
-    );
-
     let repo = active.bundle.repos[outcome.repo_index].clone();
-    let mut changed = false;
     match &outcome.status {
-        PublishStatus::ExistsRecorded(url) => {
-            println!(
-                "{}: {} {}",
-                out::repo(&outcome.repo_id),
-                out::movement("exists"),
-                url
-            );
-        }
+        PublishStatus::ExistsRecorded(_) => Ok(false),
         PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) => {
             let forge = providers::for_repo(&repo)?;
             providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), summary);
-            let pr = publication_for_repo(&active.bundle, &outcome.repo_id)
-                .expect("publication was just inserted");
-            match &outcome.status {
-                PublishStatus::FoundExisting(_) => println!(
-                    "{}: {} {}",
-                    out::repo(&outcome.repo_id),
-                    out::movement("exists"),
-                    pr.url
-                ),
-                PublishStatus::Created(_) => println!(
-                    "{}: {} #{} {}",
-                    out::repo(&outcome.repo_id),
-                    out::movement("created"),
-                    pr.number,
-                    pr.url
-                ),
-                PublishStatus::ExistsRecorded(_) => unreachable!(),
-            }
-            changed = true;
+            Ok(true)
         }
     }
-    Ok(changed)
 }
 
 fn ensure_review_can_be_renewed(
@@ -333,39 +355,14 @@ fn review_is_terminal(review: &PullRequest) -> bool {
 pub(super) fn apply_artifact_publish_result(
     bundle: &mut ChangeGroup,
     outcome: &ArtifactPublishResult,
+    progress: &str,
 ) {
+    report_status(&outcome.repo_id, &outcome.status, progress);
     let repo = bundle.repos[outcome.repo_index].clone();
-    match &outcome.status {
-        PublishStatus::ExistsRecorded(url) => {
-            println!(
-                "{}: {} {}",
-                out::repo(&outcome.repo_id),
-                out::movement("exists"),
-                url
-            );
-        }
-        PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) => {
-            let forge = providers::for_repo(&repo).expect("forge resolves for published repo");
-            providers::upsert_publication(bundle, &repo, forge.as_ref(), summary);
-            let pr = publication_for_repo(bundle, &outcome.repo_id)
-                .expect("publication was just inserted");
-            match &outcome.status {
-                PublishStatus::FoundExisting(_) => println!(
-                    "{}: {} {}",
-                    out::repo(&outcome.repo_id),
-                    out::movement("exists"),
-                    pr.url
-                ),
-                PublishStatus::Created(_) => println!(
-                    "{}: {} #{} {}",
-                    out::repo(&outcome.repo_id),
-                    out::movement("created"),
-                    pr.number,
-                    pr.url
-                ),
-                PublishStatus::ExistsRecorded(_) => unreachable!(),
-            }
-        }
+    if let PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) = &outcome.status
+    {
+        let forge = providers::for_repo(&repo).expect("forge resolves for published repo");
+        providers::upsert_publication(bundle, &repo, forge.as_ref(), summary);
     }
 }
 

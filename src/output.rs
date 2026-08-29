@@ -49,6 +49,17 @@ pub fn muted(text: impl Display) -> String {
     paint(text, Style::Dim)
 }
 
+/// Progress tail for streamed multi-repo output: ` (done/total)` in muted
+/// style, or nothing when a single repo is reported and a count adds no
+/// information.
+pub fn progress(done: usize, total: usize) -> String {
+    if total <= 1 {
+        String::new()
+    } else {
+        muted(format!(" ({done}/{total})"))
+    }
+}
+
 pub fn path(text: impl Display) -> String {
     paint(text, Style::Dim)
 }
@@ -156,5 +167,19 @@ fn code(style: Style) -> &'static str {
         Style::CyanBold => "\x1b[1;36m",
         Style::BlueBold => "\x1b[1;34m",
         Style::Magenta => "\x1b[35m",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::progress;
+
+    #[test]
+    fn progress_tail_is_empty_for_a_single_repo_and_counts_otherwise() {
+        std::env::set_var("NO_COLOR", "1");
+        assert_eq!(progress(1, 1), "");
+        assert_eq!(progress(1, 0), "");
+        assert_eq!(progress(1, 3), " (1/3)");
+        assert_eq!(progress(3, 3), " (3/3)");
     }
 }
