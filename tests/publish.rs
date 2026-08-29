@@ -43,6 +43,12 @@ fn pr_create_pushes_creates_records_and_syncs_cross_links() {
     assert!(create.contains("frontend"));
     assert!(create.contains("created"));
     assert!(create.contains("synced"));
+    // Multi-repo publishing streams: a header up front, one `pushed` line per
+    // repo as its branch reaches origin, and a done/total tail per review.
+    assert!(create.contains("publishing 2 repo(s)"), "{create}");
+    assert_eq!(create.matches(": pushed ").count(), 2, "{create}");
+    assert!(create.contains("(1/2)"), "{create}");
+    assert!(create.contains("(2/2)"), "{create}");
 
     assert_eq!(
         git(

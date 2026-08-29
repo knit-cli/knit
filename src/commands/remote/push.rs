@@ -680,7 +680,10 @@ fn push_active_bundle_to_remote(
         .context("No project selected. Pass --project or run `knit init <name>`.")?;
     // Say that the sync has started: the branch pushes above finish in
     // seconds, and a silent minute after them read as a hang.
-    println!("{}", out::muted(format!("syncing {} to {remote_name}…", active.bundle.id)));
+    println!(
+        "{}",
+        out::muted(format!("syncing {} to {remote_name}…", active.bundle.id))
+    );
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&active.root, &project_id)?;

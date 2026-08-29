@@ -663,14 +663,20 @@ fn no_workspace_fallback_names_the_open_bundles_instead_of_asking_for_a_new_one(
         let mut config: Value =
             serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
         config.as_object_mut().unwrap().remove("activeBundle");
-        fs::write(&config_path, format!("{}\n", serde_json::to_string_pretty(&config).unwrap()))
-            .unwrap();
+        fs::write(
+            &config_path,
+            format!("{}\n", serde_json::to_string_pretty(&config).unwrap()),
+        )
+        .unwrap();
     };
     clear_fallback();
     let one = knit_fails(&workspace, ["status"]);
     assert!(one.contains("Bundle `fix-a` is open"), "{one}");
     assert!(one.contains("--bundle fix-a"), "{one}");
-    assert!(!one.contains("feature title"), "told to create a bundle while one is open: {one}");
+    assert!(
+        !one.contains("feature title"),
+        "told to create a bundle while one is open: {one}"
+    );
 
     // Several open: list them all, ask for --bundle, never "create one".
     knit(&workspace, ["bundle", "fix b"]);
@@ -686,7 +692,10 @@ fn no_workspace_fallback_names_the_open_bundles_instead_of_asking_for_a_new_one(
     fs::create_dir_all(&empty).unwrap();
     knit(&empty, ["init", "demo"]);
     let none = knit_fails(&empty, ["status"]);
-    assert!(none.contains("Run `knit bundle \"feature title\"` first"), "{none}");
+    assert!(
+        none.contains("Run `knit bundle \"feature title\"` first"),
+        "{none}"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

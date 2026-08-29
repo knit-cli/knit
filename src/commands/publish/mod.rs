@@ -19,7 +19,8 @@ use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use anyhow::{bail, Context, Result};
 use remote::{
     apply_artifact_publish_result, apply_publish_remote_result, publish_repo_remote,
-    publish_repo_remote_from_artifact, ArtifactPublishResult, PublishJob, PublishRemoteResult,
+    publish_repo_remote_from_artifact, report_publish_remote_result, report_pushed, PublishEvent,
+    PublishJob, PublishRemoteResult,
 };
 pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
@@ -70,44 +71,79 @@ pub fn create_publications(
         })
         .collect();
 
-    let results: Vec<(String, Result<PublishRemoteResult>)> = std::thread::scope(|scope| {
+    let total = jobs.len();
+    if total > 1 {
+        println!("{}", out::muted(format!("publishing {total} repo(s)…")));
+    }
+
+    // Workers stream their steps over a channel so every repo's push and
+    // review object are printed the moment they exist, not after the slowest
+    // worker joined. The bundle is updated afterwards, once the workers have
+    // released their borrow of it.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
         let active = &active;
         let bundle = &bundle_snapshot;
-        let handles: Vec<_> = jobs
-            .iter()
-            .map(|job| {
-                let job = job.clone();
+        for job in &jobs {
+            let job = job.clone();
+            let tx = tx.clone();
+            scope.spawn(move || {
                 let repo_id = job.repo.id.clone();
-                scope.spawn(move || {
-                    (
-                        repo_id,
-                        publish_repo_remote(active, bundle, &job, draft, renew, set_upstream),
-                    )
-                })
-            })
-            .collect();
+                let on_pushed = |pushed| {
+                    let _ = tx.send(PublishEvent::Pushed {
+                        repo_id: repo_id.clone(),
+                        pushed,
+                    });
+                };
+                let result = publish_repo_remote(
+                    active,
+                    bundle,
+                    &job,
+                    draft,
+                    renew,
+                    set_upstream,
+                    &on_pushed,
+                );
+                // The receiver outlives every worker; a send cannot fail.
+                let _ = tx.send(PublishEvent::Done {
+                    repo_id,
+                    result: Box::new(result),
+                });
+            });
+        }
+        drop(tx);
 
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("publish worker thread panicked"))
-            .collect()
-    });
-
-    for (repo_id, result) in results {
-        match result {
-            Ok(outcome) => {
-                if apply_publish_remote_result(&mut active, &outcome)? {
-                    bundle_changed = true;
+        let mut outcomes = Vec::new();
+        let mut done = 0;
+        for event in rx {
+            match event {
+                PublishEvent::Pushed { repo_id, pushed } => report_pushed(&repo_id, &pushed),
+                PublishEvent::Done { repo_id, result } => {
+                    done += 1;
+                    let progress = out::progress(done, total);
+                    match *result {
+                        Ok(outcome) => {
+                            report_publish_remote_result(&outcome, &progress);
+                            outcomes.push(outcome);
+                        }
+                        Err(error) => {
+                            println!(
+                                "{}: {}{progress}",
+                                out::repo(&repo_id),
+                                out::danger("PR create failed")
+                            );
+                            failures.push(format!("{repo_id}: {error:#}"));
+                        }
+                    }
                 }
             }
-            Err(error) => {
-                println!(
-                    "{}: {}",
-                    out::repo(&repo_id),
-                    out::danger("PR create failed")
-                );
-                failures.push(format!("{repo_id}: {error:#}"));
-            }
+        }
+        outcomes
+    });
+
+    for outcome in &outcomes {
+        if apply_publish_remote_result(&mut active, outcome)? {
+            bundle_changed = true;
         }
     }
 
@@ -196,46 +232,44 @@ pub fn create_publications_from_artifact(
         })
         .collect();
 
-    let results: Vec<(String, Result<ArtifactPublishResult>)> = std::thread::scope(|scope| {
+    let total = jobs.len();
+    if total > 1 {
+        println!("{}", out::muted(format!("publishing {total} repo(s)…")));
+    }
+
+    // Same streaming shape as the worktree path: workers publish against the
+    // snapshot while the live artifact is updated as each result arrives.
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
         let cwd = cwd.as_ref();
-        let bundle = &bundle_snapshot;
-        let handles: Vec<_> = jobs
-            .iter()
-            .map(|job| {
-                let job = job.clone();
+        let snapshot = &bundle_snapshot;
+        for job in &jobs {
+            let job = job.clone();
+            let tx = tx.clone();
+            scope.spawn(move || {
                 let repo_id = job.repo.id.clone();
-                scope.spawn(move || {
-                    (
-                        repo_id,
-                        publish_repo_remote_from_artifact(cwd, bundle, &job, draft, renew),
-                    )
-                })
-            })
-            .collect();
+                let result = publish_repo_remote_from_artifact(cwd, snapshot, &job, draft, renew);
+                // The receiver outlives every worker; a send cannot fail.
+                let _ = tx.send((repo_id, result));
+            });
+        }
+        drop(tx);
 
-        handles
-            .into_iter()
-            .map(|handle| {
-                handle
-                    .join()
-                    .expect("artifact publish worker thread panicked")
-            })
-            .collect()
-    });
-
-    for (repo_id, result) in results {
-        match result {
-            Ok(outcome) => apply_artifact_publish_result(&mut bundle, &outcome),
-            Err(error) => {
-                println!(
-                    "{}: {}",
-                    out::repo(&repo_id),
-                    out::danger("PR create failed")
-                );
-                failures.push(format!("{repo_id}: {error:#}"));
+        for (done, (repo_id, result)) in rx.into_iter().enumerate() {
+            let progress = out::progress(done + 1, total);
+            match result {
+                Ok(outcome) => apply_artifact_publish_result(&mut bundle, &outcome, &progress),
+                Err(error) => {
+                    println!(
+                        "{}: {}{progress}",
+                        out::repo(&repo_id),
+                        out::danger("PR create failed")
+                    );
+                    failures.push(format!("{repo_id}: {error:#}"));
+                }
             }
         }
-    }
+    });
 
     if failures.is_empty() && sync {
         failures.extend(sync_publications_for_indexes_from_artifact(

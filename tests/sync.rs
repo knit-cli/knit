@@ -465,6 +465,11 @@ fn push_sends_selected_feature_branches_in_parallel() {
     let push = knit(&workspace, ["push", "backend", "frontend"]);
     assert!(push.contains("backend"));
     assert!(push.contains("frontend"));
+    // Multi-repo pushes stream: a header up front and a done/total tail on
+    // each repo's line as it finishes, so a slow origin never looks like a hang.
+    assert!(push.contains("pushing 2 repo(s)"), "{push}");
+    assert!(push.contains("(1/2)"), "{push}");
+    assert!(push.contains("(2/2)"), "{push}");
     assert_eq!(
         git(
             &backend_remote,
@@ -2401,8 +2406,15 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
     // Nothing changed: the second push makes no history request at all, and
     // still reports what the remote holds.
     let second = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
-    assert!(second.contains(&format!("{} event(s)", initial.len())), "{second}");
-    assert_eq!(common::recorded_history_pushes(&fake_dir).len(), 1, "an unchanged ledger was pushed again");
+    assert!(
+        second.contains(&format!("{} event(s)", initial.len())),
+        "{second}"
+    );
+    assert_eq!(
+        common::recorded_history_pushes(&fake_dir).len(),
+        1,
+        "an unchanged ledger was pushed again"
+    );
 
     // One more commit: only the events it added ride in the third push.
     append_line(&feature.join("app.txt"), "second");
@@ -2426,7 +2438,11 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
     let other_dir = root.join("other-remote");
     let other_url = spawn_fake_remote_push_api(&other_dir);
     knit(&workspace, ["remote", "add", "mirror", &other_url]);
-    knit_with_env(&workspace, ["sync", "push", "--history", "--remote", "mirror"], &env);
+    knit_with_env(
+        &workspace,
+        ["sync", "push", "--history", "--remote", "mirror"],
+        &env,
+    );
     let mirror = common::recorded_history_pushes(&other_dir);
     assert_eq!(mirror.len(), 1, "{mirror:?}");
     assert_eq!(mirror[0].len(), initial.len() + pushes[1].len());

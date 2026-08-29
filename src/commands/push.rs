@@ -72,41 +72,54 @@ pub fn push_repos(
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
-    let results: Vec<(String, Result<PushSuccess>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = indexes
-            .iter()
-            .map(|&index| {
-                let active = &active;
-                let repo = &active.bundle.repos[index];
-                let repo_id = repo.id.clone();
-                scope.spawn(move || (repo_id, push_repo(active, repo, set_upstream, force)))
-            })
-            .collect();
+    let total = indexes.len();
+    if total > 1 {
+        println!("{}", out::muted(format!("pushing {total} repo(s)…")));
+    }
 
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("push worker thread panicked"))
-            .collect()
-    });
+    // Report each repo the moment its push finishes rather than after the
+    // slowest one: with many repos and a slow origin, a report batched after
+    // the last join reads as a hang.
+    let (tx, rx) = std::sync::mpsc::channel();
+    let failures: Vec<String> = std::thread::scope(|scope| {
+        for &index in &indexes {
+            let active = &active;
+            let repo = &active.bundle.repos[index];
+            let repo_id = repo.id.clone();
+            let tx = tx.clone();
+            scope.spawn(move || {
+                let result = push_repo(active, repo, set_upstream, force);
+                // The receiver outlives every worker; a send cannot fail.
+                let _ = tx.send((repo_id, result));
+            });
+        }
+        drop(tx);
 
-    let mut failures = Vec::new();
-    for (repo_id, result) in results {
-        match result {
-            Ok(success) => {
-                println!(
-                    "{}: {} {} {}",
-                    out::repo(&repo_id),
-                    out::movement("pushed"),
-                    out::branch(success.upstream),
-                    out::sha(short_sha(&success.sha))
-                );
-            }
-            Err(error) => {
-                println!("{}: {}", out::repo(&repo_id), out::danger("push failed"));
-                failures.push(format!("{repo_id}: {error:#}"));
+        let mut failures = Vec::new();
+        for (done, (repo_id, result)) in rx.into_iter().enumerate() {
+            let progress = out::progress(done + 1, total);
+            match result {
+                Ok(success) => {
+                    println!(
+                        "{}: {} {} {}{progress}",
+                        out::repo(&repo_id),
+                        out::movement("pushed"),
+                        out::branch(success.upstream),
+                        out::sha(short_sha(&success.sha))
+                    );
+                }
+                Err(error) => {
+                    println!(
+                        "{}: {}{progress}",
+                        out::repo(&repo_id),
+                        out::danger("push failed")
+                    );
+                    failures.push(format!("{repo_id}: {error:#}"));
+                }
             }
         }
-    }
+        failures
+    });
 
     if !failures.is_empty() {
         bail!("push failed:\n{}", failures.join("\n"));

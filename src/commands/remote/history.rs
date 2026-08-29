@@ -130,12 +130,22 @@ pub(super) fn push_project_history_events(
                     let path = path.as_str();
                     scope.spawn(move || {
                         let payload = json!({ "events": batch });
-                        request_json::<RemoteHistoryPush>(remote, token, "POST", path, Some(&payload))
+                        request_json::<RemoteHistoryPush>(
+                            remote,
+                            token,
+                            "POST",
+                            path,
+                            Some(&payload),
+                        )
                     })
                 })
                 .collect();
             for handle in started {
-                handles.push(handle.join().unwrap_or_else(|_| Err(anyhow::anyhow!("history push thread panicked"))));
+                handles.push(
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(anyhow::anyhow!("history push thread panicked"))),
+                );
             }
         }
         handles
@@ -210,7 +220,9 @@ pub(super) fn plan_history_push(
     encoded_lines: &[String],
     cursor: Option<&HistorySyncCursor>,
 ) -> HistoryPushPlan {
-    let Some(cursor) = cursor else { return HistoryPushPlan::Full };
+    let Some(cursor) = cursor else {
+        return HistoryPushPlan::Full;
+    };
     if cursor.event_count == 0 || cursor.event_count > encoded_lines.len() {
         return HistoryPushPlan::Full;
     }
@@ -225,7 +237,8 @@ pub(super) fn plan_history_push(
 }
 
 fn history_sync_state_path(root: &Path, project_id: &str) -> std::path::PathBuf {
-    crate::store::history_path(root, project_id).with_file_name(format!("{project_id}.history-sync.json"))
+    crate::store::history_path(root, project_id)
+        .with_file_name(format!("{project_id}.history-sync.json"))
 }
 
 pub(super) fn load_history_sync_state(root: &Path, project_id: &str) -> Result<HistorySyncState> {
@@ -259,7 +272,8 @@ fn record_history_sync(
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create {}", parent.display()))?;
     }
-    let body = serde_json::to_string_pretty(&state).context("failed to encode history sync state")?;
+    let body =
+        serde_json::to_string_pretty(&state).context("failed to encode history sync state")?;
     std::fs::write(&path, format!("{body}\n"))
         .with_context(|| format!("failed to write {}", path.display()))
 }
@@ -328,7 +342,9 @@ mod push_plan_tests {
     use super::*;
 
     fn lines(count: usize) -> Vec<String> {
-        (0..count).map(|index| format!("{{\"eventId\":\"e{index}\"}}")).collect()
+        (0..count)
+            .map(|index| format!("{{\"eventId\":\"e{index}\"}}"))
+            .collect()
     }
 
     #[test]
@@ -339,18 +355,36 @@ mod push_plan_tests {
     #[test]
     fn an_unchanged_ledger_sends_nothing_and_an_appended_one_sends_the_tail() {
         let pushed = lines(3);
-        let cursor = HistorySyncCursor { event_count: 3, fingerprint: history_fingerprint(&pushed) };
-        assert_eq!(plan_history_push(&pushed, Some(&cursor)), HistoryPushPlan::UpToDate);
-        assert_eq!(plan_history_push(&lines(5), Some(&cursor)), HistoryPushPlan::Tail(3));
+        let cursor = HistorySyncCursor {
+            event_count: 3,
+            fingerprint: history_fingerprint(&pushed),
+        };
+        assert_eq!(
+            plan_history_push(&pushed, Some(&cursor)),
+            HistoryPushPlan::UpToDate
+        );
+        assert_eq!(
+            plan_history_push(&lines(5), Some(&cursor)),
+            HistoryPushPlan::Tail(3)
+        );
     }
 
     #[test]
     fn a_rewritten_prefix_or_a_shrunken_ledger_sends_everything() {
         let pushed = lines(3);
-        let cursor = HistorySyncCursor { event_count: 3, fingerprint: history_fingerprint(&pushed) };
+        let cursor = HistorySyncCursor {
+            event_count: 3,
+            fingerprint: history_fingerprint(&pushed),
+        };
         let mut rewritten = lines(4);
         rewritten[1] = "{\"eventId\":\"e1\",\"message\":\"enriched\"}".to_string();
-        assert_eq!(plan_history_push(&rewritten, Some(&cursor)), HistoryPushPlan::Full);
-        assert_eq!(plan_history_push(&lines(2), Some(&cursor)), HistoryPushPlan::Full);
+        assert_eq!(
+            plan_history_push(&rewritten, Some(&cursor)),
+            HistoryPushPlan::Full
+        );
+        assert_eq!(
+            plan_history_push(&lines(2), Some(&cursor)),
+            HistoryPushPlan::Full
+        );
     }
 }
