@@ -508,7 +508,21 @@ fn resolve_bundle_id(
         return Ok((bundle_id.clone(), BundleResolutionSource::Config));
     }
 
-    bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first.")
+    // No fallback is set. Whether that is "make a bundle" or "say which one"
+    // depends on what exists: telling a person with four open bundles to
+    // create one is wrong advice.
+    let open_bundles = open_bundle_ids(root)?;
+    match open_bundles.as_slice() {
+        [] => bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first."),
+        [only] => bail!(
+            "No active Knit bundle is selected. Bundle `{only}` is open: run the same command with `--bundle {only}`, run it from `.knit/worktrees/{only}/<repo>/`, or select it with `knit switch {only} --workspace`."
+        ),
+        many => bail!(
+            "No active Knit bundle is selected and {} bundles are open: {}. Run the same command with `--bundle <bundle>`, or run it from `.knit/worktrees/<bundle>/<repo>/`.",
+            many.len(),
+            many.join(", ")
+        ),
+    }
 }
 
 pub fn ensure_workspace_fallback_status_is_unambiguous(active: &ActiveBundle) -> Result<()> {

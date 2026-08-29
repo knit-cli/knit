@@ -2367,3 +2367,70 @@ fn pull_reconcile_reports_forge_missing_repos_honestly() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "owner-token")];
+
+    knit(&workspace, ["bundle", "ledger work", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/ledger-work/backend");
+    append_line(&feature.join("app.txt"), "first");
+    knit(&workspace, ["commit", "--all", "-m", "First"]);
+
+    // The first push sends the whole ledger.
+    let first = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    assert!(first.contains("pushed history"), "{first}");
+    let pushes = common::recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 1, "{pushes:?}");
+    let initial: Vec<String> = pushes[0].clone();
+    assert!(!initial.is_empty());
+
+    // Nothing changed: the second push makes no history request at all, and
+    // still reports what the remote holds.
+    let second = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    assert!(second.contains(&format!("{} event(s)", initial.len())), "{second}");
+    assert_eq!(common::recorded_history_pushes(&fake_dir).len(), 1, "an unchanged ledger was pushed again");
+
+    // One more commit: only the events it added ride in the third push.
+    append_line(&feature.join("app.txt"), "second");
+    knit(&workspace, ["commit", "--all", "-m", "Second"]);
+    let third = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    let pushes = common::recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 2, "{pushes:?}");
+    assert!(!pushes[1].is_empty(), "the new commit produced no event");
+    assert!(
+        pushes[1].iter().all(|id| !initial.contains(id)),
+        "already-synced events rode again: {:?}",
+        pushes[1]
+    );
+    assert!(
+        third.contains(&format!("{} event(s)", initial.len() + pushes[1].len())),
+        "{third}"
+    );
+
+    // A second remote starts from nothing: it gets the whole ledger, and the
+    // first remote's cursor is untouched.
+    let other_dir = root.join("other-remote");
+    let other_url = spawn_fake_remote_push_api(&other_dir);
+    knit(&workspace, ["remote", "add", "mirror", &other_url]);
+    knit_with_env(&workspace, ["sync", "push", "--history", "--remote", "mirror"], &env);
+    let mirror = common::recorded_history_pushes(&other_dir);
+    assert_eq!(mirror.len(), 1, "{mirror:?}");
+    assert_eq!(mirror[0].len(), initial.len() + pushes[1].len());
+    assert_eq!(common::recorded_history_pushes(&fake_dir).len(), 2);
+
+    fs::remove_dir_all(root).unwrap();
+}
