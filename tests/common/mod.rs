@@ -199,13 +199,19 @@ pub fn install_parallel_push_hook(repo: &Path, gate: &Path, id: &str, peer: &str
     install_parallel_gate_hook(repo, "pre-push", gate, id, peer);
 }
 
-pub fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str, peer: &str) {
-    fs::create_dir_all(gate).unwrap();
-    // Resolve the repository's own hooks directory explicitly. Agent and IDE
-    // sessions may inject a process-wide core.hooksPath; honoring it here
-    // would install this temporary synchronization hook outside the fixture
-    // repository and contaminate unrelated tests or real Git operations.
-    let git_dir = PathBuf::from(git(repo, ["rev-parse", "--git-dir"]).trim());
+/// Install a git hook in this fixture repository only.
+///
+/// Resolve the repository's own hooks directory explicitly. Agent and IDE
+/// sessions may inject a process-wide core.hooksPath; honoring it here would
+/// install a temporary test hook outside the fixture repository and
+/// contaminate unrelated tests or real Git operations.
+///
+/// The *common* git dir, not the per-worktree one: git runs hooks from the
+/// shared directory, so a hook written into `.git/worktrees/<name>/hooks`
+/// silently never runs — which is exactly the kind of quietly dead test
+/// scaffolding these hooks exist to avoid.
+pub fn write_hook(repo: &Path, hook: &str, script: &str) {
+    let git_dir = PathBuf::from(git(repo, ["rev-parse", "--git-common-dir"]).trim());
     let git_dir = if git_dir.is_absolute() {
         git_dir
     } else {
@@ -213,9 +219,122 @@ pub fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str
     };
     let hook_path = git_dir.join("hooks").join(hook);
     fs::create_dir_all(hook_path.parent().unwrap()).unwrap();
+    fs::write(&hook_path, script).unwrap();
+    make_executable(&hook_path);
+}
+
+/// A pre-push hook that fails its first `failures` invocations with `message`
+/// and counts every attempt in `state/count`.
+pub fn install_flaky_push_hook(repo: &Path, state: &Path, message: &str, failures: u32) {
+    fs::create_dir_all(state).unwrap();
+    write_hook(
+        repo,
+        "pre-push",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+state={state}
+count=$(cat "$state/count" 2>/dev/null || echo 0)
+count=$((count + 1))
+printf '%s\n' "$count" > "$state/count"
+if [ "$count" -le {failures} ]; then
+  printf '%s\n' {message} >&2
+  exit 1
+fi
+"#,
+            state = shell_quote(&state.to_string_lossy()),
+            message = shell_quote(message),
+            failures = failures
+        ),
+    );
+}
+
+/// A pre-push hook that hangs, so a small `KNIT_GIT_PUSH_TIMEOUT` can prove
+/// the push is bounded rather than left to stall forever.
+pub fn install_slow_push_hook(repo: &Path, seconds: u32) {
+    write_hook(
+        repo,
+        "pre-push",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+sleep {seconds}
+"#
+        ),
+    );
+}
+
+/// A pre-push hook that records how many pushes were in flight at once, so a
+/// test can assert the pool never exceeded its limit.
+pub fn install_concurrency_probe_hook(repo: &Path, state: &Path) {
+    fs::create_dir_all(state).unwrap();
+    write_hook(
+        repo,
+        "pre-push",
+        &format!(
+            r#"#!/bin/sh
+set -eu
+state={state}
+lock="$state/lock"
+enter() {{
+  while ! mkdir "$lock" 2>/dev/null; do sleep 0.01; done
+  live=$(cat "$state/live" 2>/dev/null || echo 0)
+  live=$((live + $1))
+  printf '%s\n' "$live" > "$state/live"
+  peak=$(cat "$state/peak" 2>/dev/null || echo 0)
+  if [ "$live" -gt "$peak" ]; then printf '%s\n' "$live" > "$state/peak"; fi
+  rmdir "$lock"
+}}
+enter 1
+sleep 0.3
+enter -1
+"#,
+            state = shell_quote(&state.to_string_lossy())
+        ),
+    );
+}
+
+pub fn read_counter(state: &Path, name: &str) -> u32 {
+    fs::read_to_string(state.join(name))
+        .map(|value| value.trim().parse().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// Make the fake `gh` fail `pr create` for `repo` with `stderr`. When `once`
+/// is set the failure is spent after one attempt, so the retry can succeed.
+pub fn fake_gh_fail_create(fake_gh_dir: &Path, repo: &str, stderr: &str, once: bool) {
     fs::write(
-        &hook_path,
-        format!(
+        fake_gh_dir.join(format!("create-fail-{repo}")),
+        format!("{stderr}\n"),
+    )
+    .unwrap();
+    if once {
+        fs::write(fake_gh_dir.join(format!("create-fail-once-{repo}")), "").unwrap();
+    }
+}
+
+/// Make the fake `gh` report an existing PR once a create attempt has reached
+/// it: the shape of a create whose reply was lost after the host stored it.
+pub fn fake_gh_existing_after_create(fake_gh_dir: &Path, repo: &str) {
+    fs::write(
+        fake_gh_dir.join(format!("existing-after-create-{repo}")),
+        "",
+    )
+    .unwrap();
+}
+
+pub fn fake_gh_create_attempts(fake_gh_dir: &Path, repo: &str) -> usize {
+    fs::read_to_string(fake_gh_dir.join(format!("create-attempts-{repo}")))
+        .map(|value| value.lines().count())
+        .unwrap_or(0)
+}
+
+pub fn install_parallel_gate_hook(repo: &Path, hook: &str, gate: &Path, id: &str, peer: &str) {
+    fs::create_dir_all(gate).unwrap();
+    write_hook(
+        repo,
+        hook,
+        &format!(
             r#"#!/bin/sh
 set -eu
 gate={gate}
@@ -236,9 +355,7 @@ done
             id = shell_quote(id),
             peer = shell_quote(peer)
         ),
-    )
-    .unwrap();
-    make_executable(&hook_path);
+    );
 }
 
 pub fn shell_quote(value: &str) -> String {
@@ -777,7 +894,16 @@ repo="$(basename "$PWD")"
 
 case "$sub" in
   list)
-    printf '[]\n'
+    if [ -f "$GH_FAKE_DIR/existing-after-create-$repo" ] && [ -f "$GH_FAKE_DIR/create-attempted-$repo" ]; then
+      case "$repo" in
+        backend) number=101 ;;
+        frontend) number=202 ;;
+        *) number=303 ;;
+      esac
+      printf '[{"number":%s,"url":"https://github.com/acme/%s/pull/%s","state":"OPEN","title":"%s PR","baseRefName":"main","headRefName":"knit/venue-capacity","body":"Existing body","isDraft":false,"headRefOid":"%s-head","mergeable":"MERGEABLE","mergeStateStatus":"CLEAN","reviewDecision":""}]\n' "$number" "$repo" "$number" "$repo" "$repo"
+    else
+      printf '[]\n'
+    fi
     ;;
   create)
     base="main"
@@ -796,6 +922,18 @@ case "$sub" in
     printf '%s\n' "$base" > "$GH_FAKE_DIR/create-$repo.base"
     printf '%s\n' "$args" > "$GH_FAKE_DIR/create-$repo.args"
     cat > "$GH_FAKE_DIR/create-$repo.md"
+    printf 'x\n' >> "$GH_FAKE_DIR/create-attempts-$repo"
+    touch "$GH_FAKE_DIR/create-attempted-$repo"
+    if [ -f "$GH_FAKE_DIR/create-gate-$repo" ]; then
+      sh "$GH_FAKE_DIR/create-gate-$repo"
+    fi
+    if [ -f "$GH_FAKE_DIR/create-fail-$repo" ]; then
+      cat "$GH_FAKE_DIR/create-fail-$repo" >&2
+      if [ -f "$GH_FAKE_DIR/create-fail-once-$repo" ]; then
+        rm -f "$GH_FAKE_DIR/create-fail-once-$repo" "$GH_FAKE_DIR/create-fail-$repo"
+      fi
+      exit 1
+    fi
     case "$repo" in
       backend) number=101 ;;
       frontend) number=202 ;;

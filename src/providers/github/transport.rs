@@ -15,7 +15,16 @@ pub(super) fn github_api_output(
     body: Option<&str>,
 ) -> Result<String> {
     if use_native_github_api(target) {
-        return native_github_api_output(method, endpoint, body);
+        // Same retry contract as the `gh` path below (which retries inside
+        // `cli_output`): a host that was briefly unavailable gets another
+        // chance, a host that answered does not.
+        let action = format!("GitHub {method} /{}", endpoint.trim_start_matches('/'));
+        return crate::retry::retry_transient(
+            &action,
+            crate::retry::FORGE_ATTEMPTS,
+            crate::retry::classify_forge,
+            || native_github_api_output(method, endpoint, body),
+        );
     }
 
     let mut args = vec![OsString::from("api")];
@@ -105,6 +114,13 @@ pub(super) fn native_github_api_output(
             Ok(text.trim_end().to_string())
         }
         Err(ureq::Error::Status(status, response)) => {
+            // Read `Retry-After` before the body consumes the response: when
+            // GitHub says how long to wait, Knit waits exactly that long
+            // instead of guessing with its own backoff ladder.
+            let retry_after = response
+                .header("retry-after")
+                .and_then(|value| value.trim().parse::<u64>().ok())
+                .map(std::time::Duration::from_secs);
             let detail = response.into_string().unwrap_or_default();
             let detail = detail.trim();
             if status == 401 || looks_like_github_auth_failure(detail) {
@@ -112,7 +128,14 @@ pub(super) fn native_github_api_output(
                     "GitHub API request failed during {operation}: HTTP {status}: {detail}\nHint: GitHub rejected GH_TOKEN/GITHUB_TOKEN. Replace the saved GitHub credential with an active token that can access this repository, then retry."
                 );
             }
-            bail!("GitHub API request failed during {operation}: HTTP {status}: {detail}");
+            Err(anyhow::Error::new(crate::retry::HttpFailure {
+                status,
+                retry_after,
+                detail: detail.to_string(),
+                message: format!(
+                    "GitHub API request failed during {operation}: HTTP {status}: {detail}"
+                ),
+            }))
         }
         Err(ureq::Error::Transport(transport)) => {
             bail!("GitHub API request failed during {operation}: {transport}")

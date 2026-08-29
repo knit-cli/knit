@@ -2450,3 +2450,249 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// One bundle, one repo, committed and ready to push. The shared setup for
+/// the push-resilience tests below.
+#[cfg(unix)]
+fn one_repo_ready_to_push(root: &Path) -> (PathBuf, PathBuf, PathBuf, String) {
+    let (remote, backend, _collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "push resilience");
+    knit(&workspace, ["commit", "--all", "-m", "Push resilience"]);
+    let sha = git(&feature, ["rev-parse", "HEAD"]);
+    (workspace, feature, remote, sha)
+}
+
+#[test]
+#[cfg(unix)]
+fn push_bounds_how_many_repos_are_pushed_at_once() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let names = ["one", "two", "three", "four", "five"];
+    let mut remotes = Vec::new();
+    let mut paths = Vec::new();
+    for name in names {
+        let (remote, repo, _collaborator) = init_remote_repo(&root, name);
+        remotes.push(remote);
+        paths.push(repo);
+    }
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    let mut add: Vec<String> = vec!["bundle".to_string(), "add".to_string()];
+    add.extend(paths.iter().map(|path| path.to_str().unwrap().to_string()));
+    knit(&workspace, &add);
+    for name in names {
+        let feature = workspace.join(format!(".knit/worktrees/venue-capacity/{name}"));
+        append_line(&feature.join("app.txt"), "bounded push");
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Bounded push"]);
+
+    // Every repo's pre-push hook reports into one shared counter, so the
+    // probe measures how many pushes the pool really ran side by side.
+    let probe = root.join("push-probe");
+    for name in names {
+        install_concurrency_probe_hook(
+            &workspace.join(format!(".knit/worktrees/venue-capacity/{name}")),
+            &probe,
+        );
+    }
+
+    let push = knit_with_env(&workspace, ["push", "--all"], &[("KNIT_GIT_JOBS", "2")]);
+    assert!(push.contains("pushing 5 repo(s), 2 at a time"), "{push}");
+    assert_eq!(push.matches(": pushed ").count(), 5, "{push}");
+    assert!(push.contains("(5/5)"), "{push}");
+    let peak = read_counter(&probe, "peak");
+    assert!((1..=2).contains(&peak), "peak concurrency was {peak}");
+    for (name, remote) in names.iter().zip(remotes) {
+        let feature = workspace.join(format!(".knit/worktrees/venue-capacity/{name}"));
+        assert_eq!(
+            git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+            git(&feature, ["rev-parse", "HEAD"]),
+            "{name}"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn push_rejects_a_job_limit_that_is_not_a_positive_number() {
+    let root = unique_temp_dir();
+    let (workspace, _feature, _remote, _sha) = one_repo_ready_to_push(&root);
+
+    let zero = knit_fails_with_env(&workspace, ["push", "backend"], &[("KNIT_GIT_JOBS", "0")]);
+    assert!(
+        zero.contains("KNIT_GIT_JOBS must be a positive whole number"),
+        "{zero}"
+    );
+    let words = knit_fails_with_env(
+        &workspace,
+        ["push", "backend"],
+        &[("KNIT_GIT_JOBS", "lots")],
+    );
+    assert!(
+        words.contains("KNIT_GIT_JOBS must be a positive whole number"),
+        "{words}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn a_stalled_push_is_killed_and_names_the_repo_branch_and_limit() {
+    let root = unique_temp_dir();
+    let (workspace, feature, _remote, _sha) = one_repo_ready_to_push(&root);
+    install_slow_push_hook(&feature, 10);
+
+    let push = knit_fails_with_env(
+        &workspace,
+        ["push", "backend"],
+        &[("KNIT_GIT_PUSH_TIMEOUT", "1"), ("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert!(push.contains("timed out after 1s"), "{push}");
+    assert!(push.contains("backend"), "{push}");
+    assert!(push.contains("knit/venue-capacity"), "{push}");
+    // A timeout is a bad moment, not an answer: it is retried, and the
+    // failure still names what to do next.
+    assert!(
+        push.contains("retrying push (2/3) after a timeout"),
+        "{push}"
+    );
+    assert!(push.contains("re-run the same `knit push`"), "{push}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn a_dropped_push_is_retried_until_it_lands() {
+    let root = unique_temp_dir();
+    let (workspace, feature, remote, sha) = one_repo_ready_to_push(&root);
+    let state = root.join("push-state");
+    install_flaky_push_hook(
+        &feature,
+        &state,
+        "fatal: the remote end hung up unexpectedly",
+        1,
+    );
+
+    let push = knit_with_env(
+        &workspace,
+        ["push", "backend"],
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert!(
+        push.contains("backend: retrying push (2/3) after the remote end hanging up"),
+        "{push}"
+    );
+    assert!(push.contains("pushed"), "{push}");
+    assert_eq!(read_counter(&state, "count"), 2);
+    assert_eq!(
+        git(&remote, ["rev-parse", "refs/heads/knit/venue-capacity"]),
+        sha
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn a_rejected_push_is_reported_without_retrying() {
+    let root = unique_temp_dir();
+    let (workspace, feature, _remote, _sha) = one_repo_ready_to_push(&root);
+    let state = root.join("push-state");
+    install_flaky_push_hook(
+        &feature,
+        &state,
+        "! [rejected] knit/venue-capacity -> knit/venue-capacity (non-fast-forward)",
+        99,
+    );
+
+    let push = knit_fails_with_env(
+        &workspace,
+        ["push", "backend"],
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    // The remote answered. Asking again would only be told the same thing.
+    assert_eq!(read_counter(&state, "count"), 1, "{push}");
+    assert!(push.contains("push failed"), "{push}");
+    assert!(!push.contains("retrying"), "{push}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+#[cfg(unix)]
+fn one_failing_repo_does_not_stop_the_others_and_a_rerun_finishes_the_job() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    let backend_feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+    append_line(&backend_feature.join("app.txt"), "partial backend");
+    append_line(&frontend_feature.join("app.txt"), "partial frontend");
+    knit(&workspace, ["commit", "--all", "-m", "Partial push"]);
+
+    let state = root.join("frontend-state");
+    install_flaky_push_hook(
+        &frontend_feature,
+        &state,
+        "! [rejected] knit/venue-capacity -> knit/venue-capacity (non-fast-forward)",
+        99,
+    );
+
+    let push = knit_fails_with_env(
+        &workspace,
+        ["push", "--all"],
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert!(push.contains("backend"), "{push}");
+    assert!(push.contains("push failed"), "{push}");
+    assert!(push.contains("re-run the same `knit push`"), "{push}");
+    // The healthy repo still reached origin.
+    assert_eq!(
+        git(
+            &backend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"]
+        ),
+        git(&backend_feature, ["rev-parse", "HEAD"])
+    );
+
+    // Re-running after the cause is fixed only does the work that is missing:
+    // the already-pushed repo is a no-op, the failed one lands.
+    install_flaky_push_hook(&frontend_feature, &state, "unused", 0);
+    let again = knit_with_env(
+        &workspace,
+        ["push", "--all"],
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert_eq!(again.matches(": pushed ").count(), 2, "{again}");
+    assert_eq!(
+        git(
+            &frontend_remote,
+            ["rev-parse", "refs/heads/knit/venue-capacity"]
+        ),
+        git(&frontend_feature, ["rev-parse", "HEAD"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

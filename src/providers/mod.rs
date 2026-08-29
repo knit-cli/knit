@@ -397,6 +397,9 @@ fn checks_state(runs: &[CheckRun]) -> ChecksState {
 /// For `gh`, an invalid `GITHUB_TOKEN` or `GH_TOKEN` in the environment overrides
 /// `gh auth login`. When a host-token call fails with an auth error, Knit retries
 /// once without those variables so interactive credentials can succeed.
+///
+/// Calls that fail because the host was momentarily unavailable are retried
+/// with backoff; see [`crate::retry`] for what counts as transient.
 pub(crate) fn cli_output<I, S>(
     bin: &str,
     cwd: &Path,
@@ -412,10 +415,45 @@ where
         .map(|arg| arg.as_ref().to_os_string())
         .collect::<Vec<_>>();
 
-    match run_cli_output(bin, cwd, &args, stdin, false) {
+    // Forge CLIs are the single door to every code host Knit talks to, so
+    // this is where a host that is briefly unavailable (5xx, a rate limit, a
+    // dropped connection) is given another chance. Anything the host actually
+    // decided — bad credentials, a missing repo, a rejected payload — is
+    // returned on the first attempt.
+    crate::retry::retry_transient(
+        &cli_action_label(bin, &args),
+        crate::retry::FORGE_ATTEMPTS,
+        crate::retry::classify_forge,
+        || cli_output_once(bin, cwd, &args, stdin),
+    )
+}
+
+/// How a retried forge call names itself in the streamed retry line:
+/// `gh pr create`, `glab mr list`, `gh api`.
+fn cli_action_label(bin: &str, args: &[OsString]) -> String {
+    let words = args
+        .iter()
+        .map(|arg| arg.to_string_lossy().to_string())
+        .take_while(|arg| !arg.starts_with('-'))
+        .take(2)
+        .collect::<Vec<_>>();
+    if words.is_empty() {
+        bin.to_string()
+    } else {
+        format!("{bin} {}", words.join(" "))
+    }
+}
+
+fn cli_output_once(
+    bin: &str,
+    cwd: &Path,
+    args: &[OsString],
+    stdin: Option<&str>,
+) -> Result<String> {
+    match run_cli_output(bin, cwd, args, stdin, false) {
         Ok(output) => Ok(output),
         Err(first) if should_retry_gh_without_env_token(bin, &first) => {
-            match run_cli_output(bin, cwd, &args, stdin, true) {
+            match run_cli_output(bin, cwd, args, stdin, true) {
                 Ok(output) => {
                     warn_gh_env_token_override();
                     Ok(output)
@@ -550,6 +588,17 @@ fn gh_env_token_vars() -> Vec<&'static str> {
 
 fn should_retry_gh_without_env_token(bin: &str, err: &anyhow::Error) -> bool {
     bin == "gh" && !gh_env_token_vars().is_empty() && looks_like_gh_auth_failure(&err.to_string())
+}
+
+/// Whether a failed review creation means "this review already exists".
+///
+/// A create that is retried after a lost reply hits this: the first attempt
+/// did reach the host. Publishing then adopts the existing review instead of
+/// reporting a failure for work that succeeded.
+pub(crate) fn is_existing_review_error(error: &anyhow::Error) -> bool {
+    let message = format!("{error:#}").to_ascii_lowercase();
+    message.contains("already exists")
+        || message.contains("a pull request for these commits already exists")
 }
 
 pub(crate) fn is_gh_checks_access_error(err: &anyhow::Error) -> bool {

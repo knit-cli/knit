@@ -4,14 +4,16 @@
 
 use super::pr_body::initial_pr_body;
 use crate::checkout::checkout_dir;
-use crate::git::{current_branch, git_output, git_output_optional, rev_parse};
+use crate::commands::push::{run_push, PushForce};
+use crate::git::{current_branch, git_output_optional, rev_parse};
 use crate::ids::short_sha;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
-use crate::providers::{self, pr_number_from_url, publication_for_repo, PrTarget, PullRequest};
+use crate::providers::{
+    self, pr_number_from_url, publication_for_repo, Forge, PrTarget, PullRequest,
+};
 use crate::store::ActiveBundle;
 use anyhow::{bail, Context, Result};
-use std::ffi::OsString;
 use std::path::Path;
 
 #[derive(Clone)]
@@ -31,6 +33,8 @@ pub(super) struct PushedInfo {
 /// branch is on origin, before the review object is looked up or created, so
 /// the caller can print progress per step instead of per joined worker.
 pub(super) enum PublishEvent {
+    /// A mid-publish line (a retry, say) to print in the main thread's stream.
+    Note(String),
     Pushed {
         repo_id: String,
         pushed: PushedInfo,
@@ -86,7 +90,7 @@ pub(super) fn publish_repo_remote(
 
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream)
+    run_push(&cwd, branch, set_upstream, PushForce::No)
         .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
     let pushed = PushedInfo {
         sha,
@@ -130,27 +134,19 @@ pub(super) fn publish_repo_remote(
         }
     }
 
-    let title = format!("{} ({})", bundle.title, repo.id);
-    let initial_body = initial_pr_body(bundle, &repo.id);
-    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
-    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
-        number: pr_number_from_url(&url).unwrap_or(0),
-        url: url.clone(),
-        state: Some("OPEN".to_string()),
-        title: Some(title),
-        base_ref_name: Some(base_branch.to_string()),
-        head_ref_name: Some(branch.to_string()),
-        body: None,
-        is_draft: None,
-        head_ref_oid: None,
-        mergeable: None,
-        merge_state_status: None,
-        review_decision: None,
-    });
+    let status = create_or_adopt(
+        forge.as_ref(),
+        &target,
+        bundle,
+        repo,
+        base_branch,
+        branch,
+        draft,
+    )?;
     Ok(PublishRemoteResult {
         repo_index: job.repo_index,
         repo_id: repo.id.clone(),
-        status: PublishStatus::Created(summary),
+        status,
     })
 }
 
@@ -217,10 +213,52 @@ pub(super) fn publish_repo_remote_from_artifact(
         }
     }
 
+    let status = create_or_adopt(
+        forge.as_ref(),
+        &target,
+        bundle,
+        repo,
+        base_branch,
+        branch,
+        draft,
+    )?;
+    Ok(ArtifactPublishResult {
+        repo_index: job.repo_index,
+        repo_id: repo.id.clone(),
+        status,
+    })
+}
+
+/// Create the review object, or adopt one a previous attempt already created.
+///
+/// A create can fail *after* the host stored the review: a POST whose reply
+/// was lost is retried, and the retry is told the pull request already exists.
+/// The review is real, so Knit looks it up and records it instead of failing
+/// a run that in fact succeeded. Any other failure is the host's answer and
+/// is returned unchanged.
+fn create_or_adopt(
+    forge: &dyn Forge,
+    target: &PrTarget,
+    bundle: &ChangeGroup,
+    repo: &RepoEntry,
+    base_branch: &str,
+    branch: &str,
+    draft: bool,
+) -> Result<PublishStatus> {
     let title = format!("{} ({})", bundle.title, repo.id);
     let initial_body = initial_pr_body(bundle, &repo.id);
-    let url = forge.create(&target, base_branch, branch, &title, &initial_body, draft)?;
-    let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
+    let url = match forge.create(target, base_branch, branch, &title, &initial_body, draft) {
+        Ok(url) => url,
+        Err(error) => {
+            if providers::is_existing_review_error(&error) {
+                if let Ok(Some(existing)) = forge.find_existing(target, branch, base_branch) {
+                    return Ok(PublishStatus::FoundExisting(existing));
+                }
+            }
+            return Err(error);
+        }
+    };
+    let summary = forge.view(target, &url).unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),
@@ -234,11 +272,7 @@ pub(super) fn publish_repo_remote_from_artifact(
         merge_state_status: None,
         review_decision: None,
     });
-    Ok(ArtifactPublishResult {
-        repo_index: job.repo_index,
-        repo_id: repo.id.clone(),
-        status: PublishStatus::Created(summary),
-    })
+    Ok(PublishStatus::Created(summary))
 }
 
 /// Print the `pushed` line for a repo whose branch just reached origin.
@@ -387,17 +421,5 @@ fn ensure_origin(repo: &RepoEntry, cwd: &Path) -> Result<()> {
             cwd.display()
         )
     })?;
-    Ok(())
-}
-
-fn run_push(cwd: &Path, branch: &str, set_upstream: bool) -> Result<()> {
-    let mut args = vec![OsString::from("push")];
-    if set_upstream {
-        args.push(OsString::from("--set-upstream"));
-    }
-    args.push(OsString::from("origin"));
-    args.push(OsString::from(branch));
-
-    git_output(cwd, args)?;
     Ok(())
 }

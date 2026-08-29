@@ -1547,7 +1547,10 @@ fn bundle_agents_are_written_at_bundle_root_not_in_repo_checkouts() {
     assert!(bundle_agents.contains("## Agent Teamwork"));
     assert!(bundle_agents.contains("minimum capable subagent/model"));
     assert!(bundle_agents.contains("knit commit --all"));
-    assert!(bundle_agents.contains("knit push --set-upstream"));
+    // The review path is commit then publish: `knit publish create` pushes the
+    // branches itself, so the worktree guide must not teach a separate push.
+    assert!(bundle_agents.contains("knit publish create"));
+    assert!(bundle_agents.contains("`knit push --set-upstream` only when"));
     assert!(!bundle_agents.contains("knit --bundle"));
     assert_eq!(
         fs::read_to_string(&backend_agents_path).unwrap(),
