@@ -1691,10 +1691,21 @@ fn handle_fake_remote_push_request(
             fs::write(&record, existing).unwrap();
             (200, format!("{{\"data\":{{\"id\":\"{repo_id}\"}}}}"))
         }
-        ("POST", ["api", "v1", "projects", _, "history-events"]) => (
-            201,
-            "{\"data\":{\"insertedCount\":0,\"skippedCount\":0}}".to_string(),
-        ),
+        ("POST", ["api", "v1", "projects", _, "history-events"]) => {
+            // Every history push is recorded, one line per request, so a
+            // test can see how many requests a sync made and which events
+            // rode in each.
+            let record = dir.join("history-pushes.jsonl");
+            let mut existing = fs::read_to_string(&record).unwrap_or_default();
+            existing.push_str(&body.to_string());
+            existing.push('\n');
+            fs::write(&record, existing).unwrap();
+            let count = body["events"].as_array().map(Vec::len).unwrap_or(0);
+            (
+                201,
+                format!("{{\"data\":{{\"insertedCount\":{count},\"skippedCount\":0}}}}"),
+            )
+        }
         ("POST", ["api", "v1", "projects", _, "bundles"]) => {
             let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
             (
@@ -1944,4 +1955,26 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
         response.len()
     )?;
     stream.flush()
+}
+
+/// The history pushes the fake push remote received: one entry per request,
+/// each the list of event ids that request carried.
+pub fn recorded_history_pushes(dir: &Path) -> Vec<Vec<String>> {
+    fs::read_to_string(dir.join("history-pushes.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| {
+            let body: serde_json::Value = serde_json::from_str(line).unwrap();
+            body["events"]
+                .as_array()
+                .map(|events| {
+                    events
+                        .iter()
+                        .filter_map(|event| event["eventId"].as_str().map(str::to_string))
+                        .collect()
+                })
+                .unwrap_or_default()
+        })
+        .collect()
 }
