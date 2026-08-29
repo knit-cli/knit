@@ -1,11 +1,11 @@
 {
-    "version": "0.1.0-alpha.12",
+    "version": "0.1.0-alpha.13",
     "description": "Local-first CLI for coordinating cross-repo feature bundles",
     "homepage": "https://github.com/knit-cli/knit",
     "license": "Apache-2.0",
     "architecture": {
         "64bit": {
-            "url": "https://github.com/knit-cli/knit/releases/download/v0.1.0-alpha.12/knit-v0.1.0-alpha.12-x86_64-pc-windows-msvc.zip",
+            "url": "https://github.com/knit-cli/knit/releases/download/v0.1.0-alpha.13/knit-v0.1.0-alpha.13-x86_64-pc-windows-msvc.zip",
             "hash": "REPLACE_WITH_SHA256"
         }
     },
