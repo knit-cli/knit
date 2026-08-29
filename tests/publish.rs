@@ -490,3 +490,170 @@ fn pr_create_can_override_base_branch() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// One bundle with one committed repo and a fake `gh` on PATH: the shared
+/// setup for the publish-resilience tests below.
+fn one_repo_ready_to_publish(root: &std::path::Path) -> (std::path::PathBuf, std::path::PathBuf) {
+    let (_remote, backend, _collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "publish resilience");
+    knit(&workspace, ["commit", "--all", "-m", "Publish resilience"]);
+    (workspace, feature)
+}
+
+#[test]
+fn pr_create_retries_a_host_that_was_briefly_unavailable() {
+    let root = unique_temp_dir();
+    let (workspace, _feature) = one_repo_ready_to_publish(&root);
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    fake_gh_fail_create(&fake_gh_dir, "backend", "gh: Bad gateway (HTTP 502)", true);
+
+    let create = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert!(
+        create.contains("backend: retrying gh pr create (2/4) after HTTP 502"),
+        "{create}"
+    );
+    assert!(create.contains("created"), "{create}");
+    assert_eq!(fake_gh_create_attempts(&fake_gh_dir, "backend"), 2);
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["publications"].as_array().unwrap().len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_does_not_retry_a_refused_credential() {
+    let root = unique_temp_dir();
+    let (workspace, _feature) = one_repo_ready_to_publish(&root);
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    fake_gh_fail_create(
+        &fake_gh_dir,
+        "backend",
+        "gh: Bad credentials (HTTP 401)",
+        false,
+    );
+
+    let create = knit_fails_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    // GitHub answered. Repeating the call would only repeat the answer.
+    assert_eq!(
+        fake_gh_create_attempts(&fake_gh_dir, "backend"),
+        1,
+        "{create}"
+    );
+    assert!(!create.contains("retrying"), "{create}");
+    assert!(create.contains("PR create failed"), "{create}");
+    assert!(create.contains("re-run `knit publish create`"), "{create}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_adopts_the_review_a_lost_create_already_made() {
+    let root = unique_temp_dir();
+    let (workspace, _feature) = one_repo_ready_to_publish(&root);
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    // The shape of a create whose reply was lost: the PR exists on the host,
+    // and the next create is told so.
+    fake_gh_existing_after_create(&fake_gh_dir, "backend");
+    fake_gh_fail_create(
+        &fake_gh_dir,
+        "backend",
+        "gh: A pull request already exists for acme:knit/venue-capacity. (HTTP 422)",
+        false,
+    );
+
+    let create = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_RETRY_BASE_MS", "0")],
+    );
+    assert!(create.contains("exists"), "{create}");
+    assert!(!create.contains("PR create failed"), "{create}");
+    // A 422 is an answer, so the create itself is never repeated: the
+    // existing review is looked up instead.
+    assert_eq!(fake_gh_create_attempts(&fake_gh_dir, "backend"), 1);
+
+    let bundle = read_bundle(&workspace);
+    let publications = bundle["publications"].as_array().unwrap();
+    assert_eq!(publications.len(), 1);
+    assert_eq!(
+        publications[0]["url"].as_str(),
+        Some("https://github.com/acme/backend/pull/101")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_bounds_forge_writes_and_still_publishes_every_repo() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    let names = ["one", "two", "three", "four", "five"];
+    let mut paths = Vec::new();
+    for name in names {
+        let (_remote, repo, _collaborator) = init_remote_repo(&root, name);
+        paths.push(repo);
+    }
+    knit(&workspace, ["bundle", "venue capacity"]);
+    let mut add: Vec<String> = vec!["bundle".to_string(), "add".to_string()];
+    add.extend(paths.iter().map(|path| path.to_str().unwrap().to_string()));
+    knit(&workspace, &add);
+    for name in names {
+        let feature = workspace.join(format!(".knit/worktrees/venue-capacity/{name}"));
+        append_line(&feature.join("app.txt"), "bounded publish");
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Bounded publish"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let create = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_FORGE_JOBS", "2")],
+    );
+    assert!(
+        create.contains("publishing 5 repo(s), 2 at a time"),
+        "{create}"
+    );
+    assert_eq!(create.matches(": pushed ").count(), 5, "{create}");
+    assert_eq!(create.matches(": created ").count(), 5, "{create}");
+    assert!(create.contains("(5/5)"), "{create}");
+    for name in names {
+        assert_eq!(fake_gh_create_attempts(&fake_gh_dir, name), 1, "{name}");
+    }
+
+    let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["publications"].as_array().unwrap().len(), 5);
+
+    fs::remove_dir_all(root).unwrap();
+}

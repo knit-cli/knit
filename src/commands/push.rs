@@ -1,6 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::git::{
-    current_branch, git_output, git_output_optional, ref_commit_sha, remote_ref_sha, rev_parse,
+    current_branch, git_output, git_output_optional, git_output_with_timeout, ref_commit_sha,
+    remote_ref_sha, rev_parse,
 };
 use crate::ids::short_sha;
 use crate::model::{BundleState, ChangeGroup, RepoEntry};
@@ -15,6 +16,17 @@ use std::path::{Path, PathBuf};
 struct PushSuccess {
     upstream: String,
     sha: String,
+}
+
+/// What a push worker reports. `Note` carries mid-push lines (a retry, say)
+/// so they are printed in the main thread's stream rather than raced onto
+/// stdout from a worker.
+enum PushEvent {
+    Note(String),
+    Done {
+        repo_id: String,
+        result: Result<PushSuccess>,
+    },
 }
 
 /// How `git push` may move the remote branch. Mirrors git's own flags:
@@ -73,48 +85,70 @@ pub fn push_repos(
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
     let total = indexes.len();
+    let limit = crate::parallel::git_jobs()?;
     if total > 1 {
-        println!("{}", out::muted(format!("pushing {total} repo(s)…")));
+        let bound = if total > limit {
+            format!(", {limit} at a time")
+        } else {
+            String::new()
+        };
+        println!("{}", out::muted(format!("pushing {total} repo(s){bound}…")));
     }
 
     // Report each repo the moment its push finishes rather than after the
     // slowest one: with many repos and a slow origin, a report batched after
-    // the last join reads as a hang.
+    // the last join reads as a hang. The pool is bounded so a hundred-repo
+    // bundle does not open a hundred connections at once.
     let (tx, rx) = std::sync::mpsc::channel();
     let failures: Vec<String> = std::thread::scope(|scope| {
-        for &index in &indexes {
-            let active = &active;
-            let repo = &active.bundle.repos[index];
+        let active_ref = &active;
+        let sender = tx.clone();
+        crate::parallel::spawn_bounded(scope, &indexes, limit, move |&index| {
+            let repo = &active_ref.bundle.repos[index];
             let repo_id = repo.id.clone();
-            let tx = tx.clone();
-            scope.spawn(move || {
-                let result = push_repo(active, repo, set_upstream, force);
-                // The receiver outlives every worker; a send cannot fail.
-                let _ = tx.send((repo_id, result));
+            // Retry notes travel the same channel as the result, so the main
+            // thread stays the only writer and lines never interleave.
+            let notes = sender.clone();
+            let note_repo = repo_id.clone();
+            let _notes = crate::retry::stream_notes_to(move |line| {
+                let _ = notes.send(PushEvent::Note(format!(
+                    "{}: {line}",
+                    out::repo(&note_repo)
+                )));
             });
-        }
+            let result = push_repo(active_ref, repo, set_upstream, force);
+            // The receiver outlives every worker; a send cannot fail.
+            let _ = sender.send(PushEvent::Done { repo_id, result });
+        });
         drop(tx);
 
         let mut failures = Vec::new();
-        for (done, (repo_id, result)) in rx.into_iter().enumerate() {
-            let progress = out::progress(done + 1, total);
-            match result {
-                Ok(success) => {
-                    println!(
-                        "{}: {} {} {}{progress}",
-                        out::repo(&repo_id),
-                        out::movement("pushed"),
-                        out::branch(success.upstream),
-                        out::sha(short_sha(&success.sha))
-                    );
-                }
-                Err(error) => {
-                    println!(
-                        "{}: {}{progress}",
-                        out::repo(&repo_id),
-                        out::danger("push failed")
-                    );
-                    failures.push(format!("{repo_id}: {error:#}"));
+        let mut done = 0;
+        for event in rx {
+            match event {
+                PushEvent::Note(line) => println!("{line}"),
+                PushEvent::Done { repo_id, result } => {
+                    done += 1;
+                    let progress = out::progress(done, total);
+                    match result {
+                        Ok(success) => {
+                            println!(
+                                "{}: {} {} {}{progress}",
+                                out::repo(&repo_id),
+                                out::movement("pushed"),
+                                out::branch(success.upstream),
+                                out::sha(short_sha(&success.sha))
+                            );
+                        }
+                        Err(error) => {
+                            println!(
+                                "{}: {}{progress}",
+                                out::repo(&repo_id),
+                                out::danger("push failed")
+                            );
+                            failures.push(format!("{repo_id}: {error:#}"));
+                        }
+                    }
                 }
             }
         }
@@ -122,7 +156,10 @@ pub fn push_repos(
     });
 
     if !failures.is_empty() {
-        bail!("push failed:\n{}", failures.join("\n"));
+        bail!(
+            "push failed:\n{}\n\nre-run the same `knit push` to retry only these repos; branches already on origin are up to date.",
+            failures.join("\n")
+        );
     }
 
     // After git branches are pushed, also sync the bundle artifact to the
@@ -189,19 +226,41 @@ fn ensure_origin(repo: &RepoEntry, cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn run_push(cwd: &Path, branch: &str, set_upstream: bool, force: PushForce) -> Result<()> {
-    let mut args = vec![OsString::from("push")];
-    if set_upstream {
-        args.push(OsString::from("--set-upstream"));
-    }
-    if let Some(force_arg) = force.git_arg() {
-        args.push(OsString::from(force_arg));
-    }
-    args.push(OsString::from("origin"));
-    args.push(OsString::from(branch));
+/// The one `git push` door for Knit's fan-out commands (`knit push`,
+/// `knit publish create`, the branch/artifact coupling below).
+///
+/// Every push is bounded by `KNIT_GIT_PUSH_TIMEOUT` (default 300s) so a
+/// stalled connection cannot hold the command open, and a push that failed on
+/// the way to the remote — a reset connection, a hung-up remote, a timeout —
+/// is retried up to [`crate::retry::GIT_PUSH_ATTEMPTS`] times. A push the
+/// remote *answered* (rejected, stale lease, refused credentials) is returned
+/// immediately: that is an answer, and repeating it only delays it.
+pub(crate) fn run_push(
+    cwd: &Path,
+    branch: &str,
+    set_upstream: bool,
+    force: PushForce,
+) -> Result<()> {
+    let timeout = crate::retry::git_push_timeout()?;
+    crate::retry::retry_transient(
+        "push",
+        crate::retry::GIT_PUSH_ATTEMPTS,
+        crate::retry::classify_git_push,
+        || {
+            let mut args = vec![OsString::from("push")];
+            if set_upstream {
+                args.push(OsString::from("--set-upstream"));
+            }
+            if let Some(force_arg) = force.git_arg() {
+                args.push(OsString::from(force_arg));
+            }
+            args.push(OsString::from("origin"));
+            args.push(OsString::from(branch));
 
-    git_output(cwd, args)?;
-    Ok(())
+            git_output_with_timeout(cwd, args, timeout)?;
+            Ok(())
+        },
+    )
 }
 
 fn read_upstream(cwd: &Path) -> Option<String> {

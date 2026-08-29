@@ -387,6 +387,101 @@ where
     );
 }
 
+/// Like `git_output`, but bounded in time: the child is killed when `timeout`
+/// expires and the failure names the command, the directory and the limit.
+///
+/// `Command::output()` waits forever. That is fine for local plumbing and
+/// wrong for anything that talks to a remote: one stalled TCP connection to a
+/// code host would hold a whole fan-out command open with nothing to show for
+/// it. Output is drained by reader threads so a chatty child cannot deadlock
+/// on a full pipe, and stdin is closed so git can never sit waiting for a
+/// credential prompt.
+pub fn git_output_with_timeout<I, S>(
+    cwd: &Path,
+    args: I,
+    timeout: std::time::Duration,
+) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    use std::io::Read;
+
+    let args = collect_args(args);
+    let mut child = Command::new("git")
+        .args(&args)
+        .current_dir(cwd)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+
+    let mut stdout_pipe = child.stdout.take();
+    let mut stderr_pipe = child.stderr.take();
+    let stdout_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stdout_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+    let stderr_reader = std::thread::spawn(move || {
+        let mut buffer = Vec::new();
+        if let Some(pipe) = stderr_pipe.as_mut() {
+            let _ = pipe.read_to_end(&mut buffer);
+        }
+        buffer
+    });
+
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child
+            .try_wait()
+            .with_context(|| format!("failed to wait for git in {}", cwd.display()))?
+        {
+            Some(status) => break Some(status),
+            None => {
+                if std::time::Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+        }
+    };
+
+    let stdout = stdout_reader.join().unwrap_or_default();
+    let stderr = stderr_reader.join().unwrap_or_default();
+    let Some(status) = status else {
+        bail!(
+            "git {} in {} timed out after {}s",
+            display_args(&args),
+            cwd.display(),
+            timeout.as_secs()
+        );
+    };
+
+    if status.success() {
+        return Ok(String::from_utf8_lossy(&stdout).trim_end().to_string());
+    }
+
+    let stderr = String::from_utf8_lossy(&stderr);
+    let stdout = String::from_utf8_lossy(&stdout);
+    let detail = if stderr.trim().is_empty() {
+        stdout.trim()
+    } else {
+        stderr.trim()
+    };
+    bail!(
+        "git {} failed in {}: {}",
+        display_args(&args),
+        cwd.display(),
+        detail
+    );
+}
+
 /// Like `git_output`, but with extra environment variables set for the child
 /// git process only (e.g. `GIT_TERMINAL_PROMPT=0` for non-interactive remote
 /// queries). Never used to pass credentials.

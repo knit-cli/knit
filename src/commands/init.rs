@@ -633,7 +633,8 @@ For a one-step stage and commit:
 knit --bundle feature-a commit --all -m "Describe the feature change"
 ```
 
-Push the bundle's feature branches after committing:
+Push the bundle's feature branches without opening review objects (the PR path
+below pushes them itself, so this is only for branch-only work):
 
 ```sh
 knit --bundle feature-a push --set-upstream
@@ -649,8 +650,10 @@ knit --bundle feature-a sync pull --history
 ```
 
 Publish review objects (PRs/MRs) against their intended base branch. `create`
-auto-detects each repo's host; pass `--github` (or `--provider <id>`) to limit
-to one host. `knit request` is an alias for `knit publish`:
+pushes each feature branch itself, so the review path is commit then publish —
+no separate `knit push` step. It auto-detects each repo's host; pass `--github`
+(or `--provider <id>`) to limit to one host. `knit request` is an alias for
+`knit publish`:
 
 ```sh
 knit publish create
@@ -770,7 +773,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit sync push [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...` is the one verb family for moving artifacts to the sync remotes; with no target flag it pushes bundle, history, views, and architecture. The often-large knowledge-graph slice moves only with explicit `--kg`. Bundle push is project-wide: every local bundle artifact — open, landed, archived — is swept so remote lifecycle state converges on the local ledger. Pushing an open bundle always means branches + artifact: missing or stale feature branches are pushed to git `origin` first, and a bundle whose branches cannot be pushed or verified is skipped with a warning.
 - `knit sync pull [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...` pulls those same artifacts from the sync remotes. Bundle pull is project-wide: open bundles created on other machines (and their recorded PRs) are localized into `.knit/bundles/`, and stale local artifacts fast-forward whatever their state; materialize checkouts for a discovered bundle with `knit --bundle <slug> bundle worktree`.
 - `knit pull --merge` union-merges the bundle ledger when the local and remote artifacts have diverged (two users recorded work concurrently); diverged feature branches still need a git merge in the worktree afterwards.
-- `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking.
+- `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking; it opens no review objects, so use `knit publish create` (which pushes too) for the PR path.
 - `knit push --remote hosted` pushes the resolved bundle's branches and artifact to the configured sync remote so it is visible in hosted dashboards.
 - `knit git --all status --short` runs Git across tracked checkouts.
 - `knit clean --archived --worktrees` removes generated worktrees left behind by archived or landed bundles whose normal cleanup did not remove them.

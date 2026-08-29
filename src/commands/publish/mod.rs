@@ -72,51 +72,55 @@ pub fn create_publications(
         .collect();
 
     let total = jobs.len();
+    let limit = crate::parallel::forge_jobs()?;
     if total > 1 {
-        println!("{}", out::muted(format!("publishing {total} repo(s)…")));
+        println!("{}", out::muted(publishing_header(total, limit)));
     }
 
     // Workers stream their steps over a channel so every repo's push and
     // review object are printed the moment they exist, not after the slowest
-    // worker joined. The bundle is updated afterwards, once the workers have
-    // released their borrow of it.
+    // worker joined. The pool is bounded by the forge limit: a hundred-repo
+    // bundle must not open a hundred simultaneous writes against a host that
+    // rate-limits them. The bundle is updated afterwards, once the workers
+    // have released their borrow of it.
     let (tx, rx) = std::sync::mpsc::channel();
     let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
         let active = &active;
         let bundle = &bundle_snapshot;
-        for job in &jobs {
-            let job = job.clone();
-            let tx = tx.clone();
-            scope.spawn(move || {
-                let repo_id = job.repo.id.clone();
-                let on_pushed = |pushed| {
-                    let _ = tx.send(PublishEvent::Pushed {
-                        repo_id: repo_id.clone(),
-                        pushed,
-                    });
-                };
-                let result = publish_repo_remote(
-                    active,
-                    bundle,
-                    &job,
-                    draft,
-                    renew,
-                    set_upstream,
-                    &on_pushed,
-                );
-                // The receiver outlives every worker; a send cannot fail.
-                let _ = tx.send(PublishEvent::Done {
-                    repo_id,
-                    result: Box::new(result),
-                });
+        let sender = tx.clone();
+        crate::parallel::spawn_bounded(scope, &jobs, limit, move |job| {
+            let repo_id = job.repo.id.clone();
+            let notes = sender.clone();
+            let note_repo = repo_id.clone();
+            let _notes = crate::retry::stream_notes_to(move |line| {
+                let _ = notes.send(PublishEvent::Note(format!(
+                    "{}: {line}",
+                    out::repo(&note_repo)
+                )));
             });
-        }
+            let pushed_id = repo_id.clone();
+            let pushed_tx = sender.clone();
+            let on_pushed = move |pushed| {
+                let _ = pushed_tx.send(PublishEvent::Pushed {
+                    repo_id: pushed_id.clone(),
+                    pushed,
+                });
+            };
+            let result =
+                publish_repo_remote(active, bundle, job, draft, renew, set_upstream, &on_pushed);
+            // The receiver outlives every worker; a send cannot fail.
+            let _ = sender.send(PublishEvent::Done {
+                repo_id,
+                result: Box::new(result),
+            });
+        });
         drop(tx);
 
         let mut outcomes = Vec::new();
         let mut done = 0;
         for event in rx {
             match event {
+                PublishEvent::Note(line) => println!("{line}"),
                 PublishEvent::Pushed { repo_id, pushed } => report_pushed(&repo_id, &pushed),
                 PublishEvent::Done { repo_id, result } => {
                     done += 1;
@@ -179,7 +183,7 @@ pub fn create_publications(
 
     if !failures.is_empty() {
         bail!(
-            "PR publishing completed with failures:\n{}",
+            "PR publishing completed with failures:\n{}\n\nre-run `knit publish create` to retry only these repos; repos that already have a review object are left alone.",
             failures.join("\n")
         );
     }
@@ -233,39 +237,58 @@ pub fn create_publications_from_artifact(
         .collect();
 
     let total = jobs.len();
+    let limit = crate::parallel::forge_jobs()?;
     if total > 1 {
-        println!("{}", out::muted(format!("publishing {total} repo(s)…")));
+        println!("{}", out::muted(publishing_header(total, limit)));
     }
 
-    // Same streaming shape as the worktree path: workers publish against the
-    // snapshot while the live artifact is updated as each result arrives.
+    // Same streaming shape and same bounded pool as the worktree path:
+    // workers publish against the snapshot while the live artifact is updated
+    // as each result arrives.
     let (tx, rx) = std::sync::mpsc::channel();
     std::thread::scope(|scope| {
         let cwd = cwd.as_ref();
         let snapshot = &bundle_snapshot;
-        for job in &jobs {
-            let job = job.clone();
-            let tx = tx.clone();
-            scope.spawn(move || {
-                let repo_id = job.repo.id.clone();
-                let result = publish_repo_remote_from_artifact(cwd, snapshot, &job, draft, renew);
-                // The receiver outlives every worker; a send cannot fail.
-                let _ = tx.send((repo_id, result));
+        let sender = tx.clone();
+        crate::parallel::spawn_bounded(scope, &jobs, limit, move |job| {
+            let repo_id = job.repo.id.clone();
+            let notes = sender.clone();
+            let note_repo = repo_id.clone();
+            let _notes = crate::retry::stream_notes_to(move |line| {
+                let _ = notes.send(ArtifactPublishEvent::Note(format!(
+                    "{}: {line}",
+                    out::repo(&note_repo)
+                )));
             });
-        }
+            let result = publish_repo_remote_from_artifact(cwd, snapshot, job, draft, renew);
+            // The receiver outlives every worker; a send cannot fail.
+            let _ = sender.send(ArtifactPublishEvent::Done {
+                repo_id,
+                result: Box::new(result),
+            });
+        });
         drop(tx);
 
-        for (done, (repo_id, result)) in rx.into_iter().enumerate() {
-            let progress = out::progress(done + 1, total);
-            match result {
-                Ok(outcome) => apply_artifact_publish_result(&mut bundle, &outcome, &progress),
-                Err(error) => {
-                    println!(
-                        "{}: {}{progress}",
-                        out::repo(&repo_id),
-                        out::danger("PR create failed")
-                    );
-                    failures.push(format!("{repo_id}: {error:#}"));
+        let mut done = 0;
+        for event in rx {
+            match event {
+                ArtifactPublishEvent::Note(line) => println!("{line}"),
+                ArtifactPublishEvent::Done { repo_id, result } => {
+                    done += 1;
+                    let progress = out::progress(done, total);
+                    match *result {
+                        Ok(outcome) => {
+                            apply_artifact_publish_result(&mut bundle, &outcome, &progress)
+                        }
+                        Err(error) => {
+                            println!(
+                                "{}: {}{progress}",
+                                out::repo(&repo_id),
+                                out::danger("PR create failed")
+                            );
+                            failures.push(format!("{repo_id}: {error:#}"));
+                        }
+                    }
                 }
             }
         }
@@ -286,7 +309,7 @@ pub fn create_publications_from_artifact(
 
     if !failures.is_empty() {
         bail!(
-            "PR publishing completed with failures:\n{}",
+            "PR publishing completed with failures:\n{}\n\nre-run `knit publish create` to retry only these repos; repos that already have a review object are left alone.",
             failures.join("\n")
         );
     }
@@ -332,6 +355,26 @@ pub fn sync_publications_from_artifact(
     }
     write_bundle_artifact_output(&bundle, out_path)?;
     Ok(())
+}
+
+/// Header for a multi-repo publish. The concurrency limit is named only when
+/// it actually bounds the run, so the everyday three-repo bundle stays quiet.
+fn publishing_header(total: usize, limit: usize) -> String {
+    if total > limit {
+        format!("publishing {total} repo(s), {limit} at a time…")
+    } else {
+        format!("publishing {total} repo(s)…")
+    }
+}
+
+/// What an artifact-mode publish worker reports. The worktree path has richer
+/// steps (see `remote::PublishEvent`); this one only pushes review objects.
+enum ArtifactPublishEvent {
+    Note(String),
+    Done {
+        repo_id: String,
+        result: Box<Result<remote::ArtifactPublishResult>>,
+    },
 }
 
 fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -> Result<()> {

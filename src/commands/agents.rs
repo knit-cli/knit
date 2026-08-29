@@ -104,8 +104,13 @@ Bundle-scoped Knit commands resolve this bundle automatically from this cwd:
 knit status
 knit add
 knit commit --all -m "Describe the feature change"
-knit push --set-upstream
+knit publish create
 ```
+
+`knit publish create` pushes every tracked feature branch itself and then opens
+one review object (PR/MR) per repo, so committing and publishing is the whole
+path to review. Use `knit push --set-upstream` only when you want the branches
+on `origin` without review objects.
 
 {teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
