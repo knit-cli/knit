@@ -629,11 +629,28 @@ pub(crate) fn is_gh_checks_access_error(err: &anyhow::Error) -> bool {
 
 fn looks_like_gh_auth_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
-    lower.contains("401")
+    mentions_http_status(&lower, "401")
         || lower.contains("bad credentials")
         || lower.contains("authentication failed")
         || lower.contains("not authenticated")
-        || (lower.contains("403") && lower.contains("denied"))
+        || (mentions_http_status(&lower, "403") && lower.contains("denied"))
+}
+
+/// Whether `detail` mentions `status` as a standalone number — `HTTP 401:` —
+/// rather than as part of something else. Forge CLI errors echo the failing
+/// command, so a review URL ending in `/pull/401`, a commit sha, or a larger
+/// number must not read as an authentication failure.
+fn mentions_http_status(lower: &str, status: &str) -> bool {
+    lower.match_indices(status).any(|(start, _)| {
+        let before = lower[..start].chars().next_back();
+        let after = lower[start + status.len()..].chars().next();
+        let is_boundary = |c: Option<char>| {
+            c.is_none_or(|c| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '/' | '#' | '.' | '-' | '_'))
+            })
+        };
+        is_boundary(before) && is_boundary(after)
+    })
 }
 
 /// Whether `err` looks like a host rejecting our credentials — or Knit having
@@ -761,6 +778,22 @@ mod tests {
         assert!(looks_like_gh_auth_failure("authentication failed"));
         assert!(!looks_like_gh_auth_failure(
             "graphQL: Could not resolve to a PullRequest"
+        ));
+        // gh echoes the failing command: a review numbered 401, a sha or a
+        // path containing the digits is not a credential problem.
+        assert!(!looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/401 failed in /work/backend: GraphQL: Could not resolve to a PullRequest"
+        ));
+        assert!(!looks_like_gh_auth_failure(
+            "commit 7ab401c is not on the base branch"
+        ));
+        assert!(!looks_like_gh_auth_failure("HTTP 4010 is not a status"));
+        assert!(looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/7 failed: HTTP 401: Requires authentication"
+        ));
+        assert!(looks_like_gh_auth_failure("HTTP 403: Resource denied"));
+        assert!(!looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/403 failed: access denied to draft"
         ));
     }
 }
