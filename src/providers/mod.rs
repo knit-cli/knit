@@ -319,13 +319,16 @@ pub fn publication_for_repo<'a>(
         .find(|publication| publication.repo_id == repo_id && is_review_kind(&publication.kind))
 }
 
-/// Insert or update the recorded review publication for a repo.
+/// Insert or update the recorded review publication for a repo. Returns
+/// whether the bundle actually changed: a refresh that reports exactly the
+/// recorded review leaves the artifact untouched (including its timestamps),
+/// so callers can skip rewriting it.
 pub fn upsert_publication(
     bundle: &mut ChangeGroup,
     repo: &RepoEntry,
     forge: &dyn Forge,
     pr: &PullRequest,
-) {
+) -> bool {
     let entry = PublicationEntry {
         repo_id: repo.id.clone(),
         provider: forge.id().to_string(),
@@ -351,11 +354,23 @@ pub fn upsert_publication(
         .iter_mut()
         .find(|publication| publication.repo_id == repo.id && is_review_kind(&publication.kind))
     {
+        let unchanged = existing.provider == entry.provider
+            && existing.kind == entry.kind
+            && existing.number == entry.number
+            && existing.url == entry.url
+            && existing.base_branch == entry.base_branch
+            && existing.head_branch == entry.head_branch
+            && existing.state == entry.state
+            && existing.title == entry.title;
+        if unchanged {
+            return false;
+        }
         *existing = entry;
     } else {
         bundle.publications.push(entry);
     }
     bundle.updated_at = now_iso();
+    true
 }
 
 pub fn pr_number_from_url(url: &str) -> Option<u64> {
@@ -614,15 +629,41 @@ pub(crate) fn is_gh_checks_access_error(err: &anyhow::Error) -> bool {
 
 fn looks_like_gh_auth_failure(detail: &str) -> bool {
     let lower = detail.to_ascii_lowercase();
-    lower.contains("401")
+    mentions_http_status(&lower, "401")
         || lower.contains("bad credentials")
         || lower.contains("authentication failed")
         || lower.contains("not authenticated")
-        || (lower.contains("403") && lower.contains("denied"))
+        || (mentions_http_status(&lower, "403") && lower.contains("denied"))
 }
 
+/// Whether `detail` mentions `status` as a standalone number — `HTTP 401:` —
+/// rather than as part of something else. Forge CLI errors echo the failing
+/// command, so a review URL ending in `/pull/401`, a commit sha, or a larger
+/// number must not read as an authentication failure.
+fn mentions_http_status(lower: &str, status: &str) -> bool {
+    lower.match_indices(status).any(|(start, _)| {
+        let before = lower[..start].chars().next_back();
+        let after = lower[start + status.len()..].chars().next();
+        let is_boundary = |c: Option<char>| {
+            c.is_none_or(|c| {
+                !(c.is_ascii_alphanumeric() || matches!(c, '/' | '#' | '.' | '-' | '_'))
+            })
+        };
+        is_boundary(before) && is_boundary(after)
+    })
+}
+
+/// Whether `err` looks like a host rejecting our credentials — or Knit having
+/// none to offer — regardless of which forge produced it: gh-style failures,
+/// raw HTTP 401/403 responses, each adapter's missing-token message, and
+/// `tea` with no logged-in Forgejo host.
 pub(crate) fn is_likely_host_auth_failure(err: &anyhow::Error) -> bool {
-    looks_like_gh_auth_failure(&err.to_string())
+    let detail = format!("{err:#}").to_ascii_lowercase();
+    looks_like_gh_auth_failure(&detail)
+        || detail.contains("authentication requires")
+        || detail.contains("api access requires")
+        || detail.contains("no available login")
+        || detail.contains("unauthorized")
 }
 
 fn enhance_gh_auth_error(err: anyhow::Error) -> anyhow::Error {
@@ -737,6 +778,22 @@ mod tests {
         assert!(looks_like_gh_auth_failure("authentication failed"));
         assert!(!looks_like_gh_auth_failure(
             "graphQL: Could not resolve to a PullRequest"
+        ));
+        // gh echoes the failing command: a review numbered 401, a sha or a
+        // path containing the digits is not a credential problem.
+        assert!(!looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/401 failed in /work/backend: GraphQL: Could not resolve to a PullRequest"
+        ));
+        assert!(!looks_like_gh_auth_failure(
+            "commit 7ab401c is not on the base branch"
+        ));
+        assert!(!looks_like_gh_auth_failure("HTTP 4010 is not a status"));
+        assert!(looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/7 failed: HTTP 401: Requires authentication"
+        ));
+        assert!(looks_like_gh_auth_failure("HTTP 403: Resource denied"));
+        assert!(!looks_like_gh_auth_failure(
+            "gh pr view https://github.com/acme/backend/pull/403 failed: access denied to draft"
         ));
     }
 }

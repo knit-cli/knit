@@ -738,7 +738,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle delete <bundle> --force` moves the bundle artifact to `.knit/deleted/bundles/`, preserves git state, and archives the bundle's record on the sync remotes (best-effort; offline deletes warn and continue).
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches` discards generated worktrees and local feature branches for that bundle.
 - `knit bundle delete <bundle> --force --worktrees --branches --force-branches --remote-branches` also deletes the matching feature branches from `origin`.
-- `knit bundle prune` refreshes GitHub PR states and lists clean dead-work bundles with no recorded open PRs. Landed and archived bundle artifacts are kept as history unless `--archived` (which requires `--delete`) is passed.
+- `knit bundle prune` refreshes recorded PR states and lists clean dead-work bundles with no recorded open PRs. Landed and archived bundle artifacts are kept as history — never scanned or refreshed — unless `--archived` (which requires `--delete`) is passed.
 - `knit bundle prune --no-refresh` performs the same scan using cached recorded PR states only.
 - `knit bundle prune --apply` archives dead bundles as finished history (recording why, removing worktrees, preserving branches) and pushes the terminal state to the sync remotes; add `--delete` to discard the artifacts to `.knit/deleted/bundles/` instead.
 - `knit bundle prune --apply --all` archives dead bundles, removes generated and orphaned worktrees, cleans local feature branches and matching `origin` branches, and archives matching remote bundle records.

@@ -1063,3 +1063,191 @@ fn prune_archives_quarantined_remote_records_without_recorded_prs() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn bundle_prune_keeps_finished_bundles_unscanned() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications(&workspace, "venue-capacity", "OPEN");
+    knit(&workspace, ["bundle", "archive", "venue-capacity"]);
+
+    // The fake host would report both PRs merged — but an archived bundle is
+    // finished history, so a default prune must not contact the host for it
+    // (or rewrite its artifact) at all.
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("merged-frontend"), "").unwrap();
+
+    let artifact_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let before = fs::read_to_string(&artifact_path).unwrap();
+
+    let listing = knit_with_fake_gh(&workspace, ["bundle", "prune"], &fake_bin, &fake_gh_dir);
+    assert!(listing.contains("Kept 1 finished"));
+    assert!(!listing.contains("venue-capacity"));
+
+    assert_eq!(fs::read_to_string(&artifact_path).unwrap(), before);
+    let bundle = read_bundle(&workspace);
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|publication| publication["state"].as_str() == Some("OPEN")));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_prune_refresh_rewrites_artifacts_only_when_reviews_changed() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    write_bundle_publications(&workspace, "venue-capacity", "OPEN");
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("merged-frontend"), "").unwrap();
+
+    // The first refresh observes OPEN -> MERGED and must persist it.
+    let first = knit_with_fake_gh(&workspace, ["bundle", "prune"], &fake_bin, &fake_gh_dir);
+    assert!(first.contains("venue-capacity"));
+    let bundle = read_bundle(&workspace);
+    assert!(bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|publication| publication["state"].as_str() == Some("MERGED")));
+
+    // The second refresh observes exactly the recorded reviews; the artifact
+    // (including its timestamps) must stay byte-identical.
+    let artifact_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let before = fs::read_to_string(&artifact_path).unwrap();
+    knit_with_fake_gh(&workspace, ["bundle", "prune"], &fake_bin, &fake_gh_dir);
+    assert_eq!(fs::read_to_string(&artifact_path).unwrap(), before);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_prune_refresh_warns_once_per_forge_on_auth_failure() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+
+    // Point both repos at Bitbucket with recorded OPEN reviews. With no
+    // Bitbucket credentials the refresh fails identically for every PR on the
+    // host, so prune must warn once for the forge, not once per repo.
+    let artifact_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    let mut publications = Vec::new();
+    for repo in bundle["repos"].as_array_mut().unwrap() {
+        let repo_id = repo["id"].as_str().unwrap().to_string();
+        repo["remote"] = serde_json::json!(format!("https://bitbucket.org/acme/{repo_id}.git"));
+        publications.push(serde_json::json!({
+            "repoId": repo_id,
+            "provider": "bitbucket",
+            "kind": "pull_request",
+            "number": 1,
+            "url": format!("https://bitbucket.org/acme/{repo_id}/pull-requests/1"),
+            "baseBranch": repo["baseBranch"],
+            "headBranch": repo["featureBranch"],
+            "state": "OPEN",
+            "updatedAt": "2026-05-22T00:00:00.000Z"
+        }));
+    }
+    bundle["publications"] = serde_json::json!(publications);
+    fs::write(
+        &artifact_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+    git(
+        &backend,
+        [
+            "remote",
+            "add",
+            "origin",
+            "https://bitbucket.org/acme/backend.git",
+        ],
+    );
+    git(
+        &frontend,
+        [
+            "remote",
+            "add",
+            "origin",
+            "https://bitbucket.org/acme/frontend.git",
+        ],
+    );
+
+    let (_, warnings, success) = knit_split_output(
+        &workspace,
+        &["bundle", "prune"],
+        &[
+            ("KNIT_BITBUCKET_ACCESS_TOKEN", ""),
+            ("KNIT_BITBUCKET_EMAIL", ""),
+            ("KNIT_BITBUCKET_API_TOKEN", ""),
+        ],
+    );
+    assert!(success, "{warnings}");
+    assert_eq!(
+        warnings
+            .matches("bitbucket: authentication failed during prune refresh")
+            .count(),
+        1,
+        "{warnings}"
+    );
+    assert!(warnings.contains("Skipping further bitbucket refreshes"));
+
+    fs::remove_dir_all(root).unwrap();
+}
