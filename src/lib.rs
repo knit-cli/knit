@@ -255,7 +255,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 all,
                 archived,
                 deleted,
-            }) => commands::list_bundles(all, archived, deleted),
+                json,
+            }) => commands::list_bundles(all, archived, deleted, json),
             Some(BundleCommand::Prune {
                 apply,
                 delete,
@@ -331,7 +332,7 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             force,
         } => commands::clean_generated(plans, worktrees, archived, merge_worktrees, all, force),
-        Commands::Status => commands::show_status(),
+        Commands::Status { json } => commands::show_status(json),
         Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
         Commands::Fetch {
             repos,
