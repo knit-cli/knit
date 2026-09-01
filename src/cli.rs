@@ -192,7 +192,11 @@ pub enum Commands {
         force: bool,
     },
     /// Show status for all repos in the resolved bundle.
-    Status,
+    Status {
+        /// Print a machine-readable status document to stdout instead of the table.
+        #[arg(long)]
+        json: bool,
+    },
     /// Show cross-repo diffs against each repo base.
     Diff {
         /// Show a compact diffstat instead of full patches.
@@ -686,6 +690,9 @@ pub enum BundleCommand {
         /// Include deleted bundles.
         #[arg(long)]
         deleted: bool,
+        /// Print a machine-readable bundle list to stdout instead of the table.
+        #[arg(long)]
+        json: bool,
     },
     /// Archive dead bundles whose PRs are merged, closed, missing, or absent (--delete discards them instead).
     Prune {

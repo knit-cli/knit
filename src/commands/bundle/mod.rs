@@ -91,12 +91,42 @@ pub fn validate_bundle() -> Result<()> {
     bail!("bundle validation failed with {} error(s)", errors.len());
 }
 
-pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
+/// Machine-readable `knit bundle list --json` document. A host reads this to
+/// learn which bundles exist and where their artifacts are; the shape is a
+/// contract, so change it only deliberately.
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleListDocument {
+    active_bundle: Option<String>,
+    bundles: Vec<BundleListEntry>,
+}
+
+#[derive(Debug, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct BundleListEntry {
+    id: String,
+    title: String,
+    state: String,
+    active: bool,
+    repos: Vec<String>,
+    /// The bundle artifact, so a host can read the full record itself.
+    path: String,
+}
+
+pub fn list_bundles(all: bool, archived: bool, deleted: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let dir = root.join(".knit/bundles");
     let deleted_dir = root.join(".knit/deleted/bundles");
     if !dir.exists() && !deleted_dir.exists() {
+        if json {
+            let document = BundleListDocument {
+                active_bundle: None,
+                bundles: Vec::new(),
+            };
+            println!("{}", serde_json::to_string_pretty(&document)?);
+            return Ok(());
+        }
         println!("{}", out::muted("No bundles."));
         return Ok(());
     }
@@ -112,6 +142,7 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
     entries.sort();
 
     let mut shown = 0usize;
+    let mut listed = Vec::new();
     for path in entries {
         let bundle: ChangeGroup = read_json(&path)?;
         let state = bundle_state(&bundle);
@@ -123,11 +154,20 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
                 continue;
             }
         }
-        let marker = if active_id.as_deref() == Some(bundle.id.as_str()) {
-            "*"
-        } else {
-            " "
-        };
+        let active = active_id.as_deref() == Some(bundle.id.as_str());
+        if json {
+            listed.push(BundleListEntry {
+                id: bundle.id.clone(),
+                title: bundle.title.clone(),
+                state: state.to_string(),
+                active,
+                repos: bundle.repos.iter().map(|repo| repo.id.clone()).collect(),
+                path: path.display().to_string(),
+            });
+            shown += 1;
+            continue;
+        }
+        let marker = if active { "*" } else { " " };
         println!(
             "{} {} {:<8} {} repo(s)",
             marker,
@@ -136,6 +176,14 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
             bundle.repos.len()
         );
         shown += 1;
+    }
+    if json {
+        let document = BundleListDocument {
+            active_bundle: active_id,
+            bundles: listed,
+        };
+        println!("{}", serde_json::to_string_pretty(&document)?);
+        return Ok(());
     }
     if shown == 0 {
         let message = if archived || deleted || all {
