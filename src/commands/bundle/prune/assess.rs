@@ -48,9 +48,29 @@ pub(super) struct PruneAssessment {
     /// flight towards a terminal destination.
     pub(super) landed_intermediate: bool,
     pub(super) pending: Pending,
+    /// False for finished (landed/archived) bundles kept as history without
+    /// scanning: their signal fields are defaults, not observations.
+    pub(super) assessed: bool,
 }
 
 impl PruneAssessment {
+    /// A finished (landed/archived) bundle kept as history without scanning
+    /// its checkouts or refreshing its recorded reviews.
+    fn finished(bundle: &ChangeGroup, status: crate::commands::bundle::BundleStatus) -> Self {
+        Self {
+            id: bundle.id.clone(),
+            status,
+            repo_count: bundle.repos.len(),
+            saw_publication: false,
+            saw_open_publication: false,
+            saw_merged_publication: false,
+            saw_unpublished_commits: false,
+            landed_intermediate: landed_intermediate(bundle),
+            pending: Pending::default(),
+            assessed: false,
+        }
+    }
+
     /// Reason this bundle is dead work, or `None` if it should be kept.
     /// With `untracked` set, checkouts whose only uncommitted work is
     /// untracked files no longer hold the bundle back.
@@ -110,7 +130,10 @@ pub(super) struct PruneCache {
     pr_by_url: Arc<Mutex<HashMap<String, PullRequest>>>,
     pr_by_branch: Arc<Mutex<HashMap<BranchKey, Option<PullRequest>>>>,
     pending_changes: Arc<Mutex<HashMap<String, Pending>>>,
-    gh_auth_failure: Arc<Mutex<bool>>,
+    /// Forges whose credentials already failed this run. Auth failures repeat
+    /// identically for every PR on that host, so each forge warns once and
+    /// its remaining refreshes are skipped instead of re-failing per repo.
+    auth_failed_forges: Arc<Mutex<BTreeSet<String>>>,
 }
 
 #[derive(Clone, Debug, Hash, PartialEq, Eq)]
@@ -126,30 +149,34 @@ impl PruneCache {
             pr_by_url: Arc::new(Mutex::new(HashMap::new())),
             pr_by_branch: Arc::new(Mutex::new(HashMap::new())),
             pending_changes: Arc::new(Mutex::new(HashMap::new())),
-            gh_auth_failure: Arc::new(Mutex::new(false)),
+            auth_failed_forges: Arc::new(Mutex::new(BTreeSet::new())),
         }
     }
 
     pub(super) fn note_refresh_failure(
         &self,
+        forge_id: &str,
         bundle_id: &str,
         repo_id: &str,
         context: &str,
         err: &anyhow::Error,
     ) {
         if providers::is_likely_host_auth_failure(err) {
-            let mut seen = self.gh_auth_failure.lock().unwrap();
-            if !*seen {
+            let mut failed = self.auth_failed_forges.lock().unwrap();
+            if failed.insert(forge_id.to_string()) {
                 print_prune_warning(format!(
-                    "Forge authentication failed during prune refresh ({err:#}). Further refresh warnings are suppressed; using last recorded review state."
+                    "{forge_id}: authentication failed during prune refresh ({err:#}). Skipping further {forge_id} refreshes; using last recorded review state."
                 ));
-                *seen = true;
             }
             return;
         }
         print_prune_warning(format!(
             "{bundle_id}/{repo_id}: {context} ({err:#}); using last recorded state"
         ));
+    }
+
+    pub(super) fn forge_auth_failed(&self, forge_id: &str) -> bool {
+        self.auth_failed_forges.lock().unwrap().contains(forge_id)
     }
 
     pub(super) fn view_pr(&self, forge: &dyn Forge, cwd: &Path, url: &str) -> Result<PullRequest> {
@@ -217,19 +244,38 @@ impl PruneCache {
 /// Assess every bundle, returning the assessments plus the set of ids that exist
 /// locally. Best-effort: an unreadable bundle file is skipped with a warning, and
 /// a bundle that fails its scan is skipped rather than aborting the whole prune.
+///
+/// Finished (landed/archived) bundles are kept as history without scanning
+/// unless `include_finished` opts them into pruning: they can never become
+/// candidates otherwise, so inspecting their checkouts and refreshing their
+/// recorded reviews — often on hosts this machine has no credentials for —
+/// would be wasted work that only produces warnings.
 pub(super) fn assess_bundles(
     root: &Path,
     entries: Vec<PathBuf>,
     refresh: bool,
+    include_finished: bool,
     cache: &PruneCache,
-) -> (Vec<PruneAssessment>, BTreeSet<String>) {
+) -> Result<(Vec<PruneAssessment>, BTreeSet<String>)> {
     let mut local_ids = BTreeSet::new();
-    let mut bundles = Vec::new();
+    let mut assessments = Vec::new();
+    let mut jobs = Vec::new();
     for path in entries {
         match read_json::<ChangeGroup>(&path) {
             Ok(bundle) => {
                 local_ids.insert(bundle.id.clone());
-                bundles.push((path, bundle));
+                let status = crate::commands::bundle::bundle_state(&bundle);
+                if !include_finished
+                    && matches!(
+                        status,
+                        crate::commands::bundle::BundleStatus::Landed
+                            | crate::commands::bundle::BundleStatus::Archived
+                    )
+                {
+                    assessments.push(PruneAssessment::finished(&bundle, status));
+                    continue;
+                }
+                jobs.push((path, Mutex::new(bundle)));
             }
             Err(err) => print_prune_warning(format!(
                 "skipped unreadable bundle {}: {err:#}",
@@ -238,28 +284,35 @@ pub(super) fn assess_bundles(
         }
     }
 
-    let results: Vec<(String, Result<PruneAssessment>)> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for (path, mut bundle) in bundles {
-            handles.push(scope.spawn(move || {
-                let id = bundle.id.clone();
-                (id, assess_bundle(root, &path, &mut bundle, refresh, cache))
-            }));
-        }
-        handles
-            .into_iter()
-            .map(|handle| handle.join().unwrap())
-            .collect()
+    // Refresh scans are bound by forge API reads, plain scans by local git
+    // work; either way the pool is a deliberate size, not one thread per
+    // bundle — hundreds of simultaneous `gh` processes can fail spuriously
+    // (and read like an auth outage) long before the host rate limit does.
+    let limit = if refresh {
+        crate::parallel::forge_jobs()?
+    } else {
+        crate::parallel::git_jobs()?
+    };
+    let results: Mutex<Vec<(String, Result<PruneAssessment>)>> = Mutex::new(Vec::new());
+    std::thread::scope(|scope| {
+        crate::parallel::spawn_bounded(scope, &jobs, limit, |(path, bundle)| {
+            let mut bundle = bundle.lock().unwrap();
+            let id = bundle.id.clone();
+            let result = assess_bundle(root, path, &mut bundle, refresh, cache);
+            results.lock().unwrap().push((id, result));
+        });
     });
 
-    let mut assessments = Vec::new();
-    for (id, result) in results {
+    for (id, result) in results.into_inner().unwrap() {
         match result {
             Ok(assessment) => assessments.push(assessment),
             Err(err) => print_prune_warning(format!("{id}: skipped during prune scan: {err:#}")),
         }
     }
-    (assessments, local_ids)
+    // Workers finish in whatever order the hosts answer; the listing should
+    // not change shape between runs because of that.
+    assessments.sort_by(|a, b| a.id.cmp(&b.id));
+    Ok((assessments, local_ids))
 }
 
 fn assess_bundle(
@@ -270,62 +323,31 @@ fn assess_bundle(
     cache: &PruneCache,
 ) -> Result<PruneAssessment> {
     let bundle_id = bundle.id.clone();
-    let jobs: Vec<(usize, RepoEntry, Option<crate::model::PublicationEntry>)> = bundle
+    let jobs: Vec<(RepoEntry, Option<crate::model::PublicationEntry>)> = bundle
         .repos
         .iter()
-        .enumerate()
-        .map(|(index, repo)| {
+        .map(|repo| {
             (
-                index,
                 repo.clone(),
                 providers::publication_for_repo(bundle, &repo.id).cloned(),
             )
         })
         .collect();
 
-    let repo_results: Vec<(usize, Result<RepoPruneSignals>)> = std::thread::scope(|scope| {
-        let handles: Vec<_> = jobs
-            .iter()
-            .map(|(index, repo, recorded)| {
-                let index = *index;
-                let repo = repo.clone();
-                let recorded = recorded.clone();
-                let bundle_id = bundle_id.clone();
-                scope.spawn(move || {
-                    (
-                        index,
-                        assess_repo_signals(
-                            root,
-                            &bundle_id,
-                            &repo,
-                            recorded.as_ref(),
-                            refresh,
-                            cache,
-                        ),
-                    )
-                })
-            })
-            .collect();
-
-        handles
-            .into_iter()
-            .map(|handle| handle.join().expect("prune repo worker thread panicked"))
-            .collect()
-    });
-
     let mut saw_publication = false;
     let mut saw_merged_publication = false;
     let mut saw_open_publication = false;
     let mut saw_unpublished_commits = false;
     let mut pending = Pending::default();
+    let mut changed = false;
 
-    for (index, result) in repo_results {
-        let repo_id = bundle.repos[index].id.clone();
-        let signals = result.with_context(|| format!("{bundle_id}/{repo_id}"))?;
+    for (repo, recorded) in jobs {
+        let signals =
+            assess_repo_signals(root, &bundle_id, &repo, recorded.as_ref(), refresh, cache)
+                .with_context(|| format!("{bundle_id}/{}", repo.id))?;
         if let Some(pr) = signals.publication_update {
-            let repo = bundle.repos[index].clone();
             if let Ok(forge) = providers::for_repo(&repo) {
-                providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
+                changed |= providers::upsert_publication(bundle, &repo, forge.as_ref(), &pr);
             }
         }
         pending.merge(signals.pending);
@@ -338,7 +360,7 @@ fn assess_bundle(
         saw_unpublished_commits |= signals.unpublished_commits;
     }
 
-    if refresh {
+    if changed {
         write_json(path, bundle)?;
     }
 
@@ -352,6 +374,7 @@ fn assess_bundle(
         saw_unpublished_commits,
         landed_intermediate: landed_intermediate(bundle),
         pending,
+        assessed: true,
     })
 }
 
@@ -389,10 +412,14 @@ fn assess_repo_signals(
 
     if refresh {
         if let Ok(forge) = providers::for_repo(repo) {
-            if let Some(existing) = recorded {
+            if cache.forge_auth_failed(forge.id()) {
+                // This forge already rejected our credentials; every further
+                // call would fail the same way, so stay on recorded state.
+            } else if let Some(existing) = recorded {
                 match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
                     Ok(pr) => publication_update = Some(pr),
                     Err(err) => cache.note_refresh_failure(
+                        forge.id(),
                         bundle_id,
                         &repo.id,
                         &format!("could not refresh {}", existing.url),
@@ -409,6 +436,7 @@ fn assess_repo_signals(
                     Ok(Some(pr)) => publication_update = Some(pr),
                     Ok(None) => {}
                     Err(err) => cache.note_refresh_failure(
+                        forge.id(),
                         bundle_id,
                         &repo.id,
                         &format!("could not check for an open review object on {branch}"),

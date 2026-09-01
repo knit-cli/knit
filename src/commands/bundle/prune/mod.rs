@@ -8,6 +8,9 @@
 //! no commits on the feature branch (local or `origin/`) that base lacks.
 //! The same per-bundle signals drive the prune decision, the `--untracked`
 //! relaxation, and the `--report` view.
+//!
+//! Finished (landed/archived) bundles are kept as history without being
+//! scanned or refreshed at all unless `--archived` opts them into pruning.
 
 mod assess;
 mod orphans;
@@ -25,7 +28,14 @@ struct PruneCandidate {
 }
 
 /// Surface a non-fatal prune problem on stderr without aborting the whole run.
+/// Child-process errors (gh, glab, tea) can span multiple lines; a warning must
+/// stay one line so parallel scans do not shred each other's output.
 pub(super) fn print_prune_warning(message: impl std::fmt::Display) {
+    let message = message
+        .to_string()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
     eprintln!("{}", out::warn(message));
 }
 
@@ -77,7 +87,8 @@ pub fn prune_merged_bundles(
     let mut entries = bundle_json_paths(&dir)?;
     entries.sort();
     let cache = PruneCache::new();
-    let (assessments, local_ids) = assess_bundles(&root, entries, refresh, &cache);
+    let (assessments, local_ids) =
+        assess_bundles(&root, entries, refresh, include_finished, &cache)?;
 
     let mut candidates = Vec::new();
     let mut blocked_untracked = Vec::new();
@@ -326,6 +337,18 @@ pub fn prune_merged_bundles(
 fn print_prune_report(assessments: &[PruneAssessment], untracked: bool) {
     println!("{}", out::heading("Bundle report:"));
     for assessment in assessments {
+        if !assessment.assessed {
+            println!(
+                "  {} {}",
+                out::node(&assessment.id),
+                out::muted("kept — finished (landed/archived) history, not scanned")
+            );
+            println!(
+                "      {}",
+                out::muted(format!("{} repo(s)", assessment.repo_count))
+            );
+            continue;
+        }
         let status = if let Some(reason) = assessment.candidate_reason(untracked) {
             format!("prunable — {reason}")
         } else if assessment.blocked_by_untracked_only() {

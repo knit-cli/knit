@@ -319,13 +319,16 @@ pub fn publication_for_repo<'a>(
         .find(|publication| publication.repo_id == repo_id && is_review_kind(&publication.kind))
 }
 
-/// Insert or update the recorded review publication for a repo.
+/// Insert or update the recorded review publication for a repo. Returns
+/// whether the bundle actually changed: a refresh that reports exactly the
+/// recorded review leaves the artifact untouched (including its timestamps),
+/// so callers can skip rewriting it.
 pub fn upsert_publication(
     bundle: &mut ChangeGroup,
     repo: &RepoEntry,
     forge: &dyn Forge,
     pr: &PullRequest,
-) {
+) -> bool {
     let entry = PublicationEntry {
         repo_id: repo.id.clone(),
         provider: forge.id().to_string(),
@@ -351,11 +354,23 @@ pub fn upsert_publication(
         .iter_mut()
         .find(|publication| publication.repo_id == repo.id && is_review_kind(&publication.kind))
     {
+        let unchanged = existing.provider == entry.provider
+            && existing.kind == entry.kind
+            && existing.number == entry.number
+            && existing.url == entry.url
+            && existing.base_branch == entry.base_branch
+            && existing.head_branch == entry.head_branch
+            && existing.state == entry.state
+            && existing.title == entry.title;
+        if unchanged {
+            return false;
+        }
         *existing = entry;
     } else {
         bundle.publications.push(entry);
     }
     bundle.updated_at = now_iso();
+    true
 }
 
 pub fn pr_number_from_url(url: &str) -> Option<u64> {
@@ -621,8 +636,17 @@ fn looks_like_gh_auth_failure(detail: &str) -> bool {
         || (lower.contains("403") && lower.contains("denied"))
 }
 
+/// Whether `err` looks like a host rejecting our credentials — or Knit having
+/// none to offer — regardless of which forge produced it: gh-style failures,
+/// raw HTTP 401/403 responses, each adapter's missing-token message, and
+/// `tea` with no logged-in Forgejo host.
 pub(crate) fn is_likely_host_auth_failure(err: &anyhow::Error) -> bool {
-    looks_like_gh_auth_failure(&err.to_string())
+    let detail = format!("{err:#}").to_ascii_lowercase();
+    looks_like_gh_auth_failure(&detail)
+        || detail.contains("authentication requires")
+        || detail.contains("api access requires")
+        || detail.contains("no available login")
+        || detail.contains("unauthorized")
 }
 
 fn enhance_gh_auth_error(err: anyhow::Error) -> anyhow::Error {
