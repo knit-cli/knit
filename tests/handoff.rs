@@ -1,3 +1,7 @@
+// Target readiness currently uses Unix statvfs and du. Exercise the supported
+// Linux/macOS flow here; platform-independent model/schema tests still run everywhere.
+#![cfg(unix)]
+
 mod common;
 use common::*;
 use serde_json::{json, Value};

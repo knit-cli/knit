@@ -38,13 +38,13 @@ pub(crate) fn commit_active(
     }
 
     if stage_first {
-        stage_all_tracked(&active)?;
+        stage_all_tracked(active)?;
     }
-    let repos_to_commit = repos_with_staged_changes(&active)?;
+    let repos_to_commit = repos_with_staged_changes(active)?;
 
     if repos_to_commit.is_empty() {
         if !observed.is_empty() {
-            save_active_bundle(&active)?;
+            save_active_bundle(active)?;
         }
         bail!("No staged changes found in tracked checkouts.");
     }
@@ -137,7 +137,7 @@ pub(crate) fn commit_active(
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
-    save_active_bundle(&active)?;
+    save_active_bundle(active)?;
 
     crate::human!(
         "{} {}",

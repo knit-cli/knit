@@ -310,7 +310,9 @@ fn disk_available_mib(path: &Path) -> Result<u64> {
         return Err(std::io::Error::last_os_error().into());
     }
     let stat = unsafe { stat.assume_init() };
-    Ok((stat.f_bavail as u64).saturating_mul(stat.f_frsize as u64) / 1_048_576)
+    // statvfs field widths vary across Unix platforms. Widen before multiplying.
+    let mib = u128::from(stat.f_bavail) * u128::from(stat.f_frsize) / 1_048_576;
+    Ok(mib.try_into().unwrap_or(u64::MAX))
 }
 #[cfg(not(unix))]
 fn disk_available_mib(_path: &Path) -> Result<u64> {

@@ -131,6 +131,7 @@ pub fn clone_project_from_remote(
 
 /// Run the clone, tagging every failure with its machine-readable error kind so
 /// the `--json` wrapper can emit the contract error envelope.
+#[allow(clippy::too_many_arguments)] // Mirrors the public clone command's CLI options.
 fn clone_project_classified(
     project_identifier: &str,
     target: Option<&Path>,

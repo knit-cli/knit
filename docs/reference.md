@@ -919,6 +919,9 @@ publishes a typed `handoff.out` node. Git hooks and signing still apply. A parti
 commit failure records successful repositories before returning an error. Retry
 `out` to finish an interrupted publication without duplicating its checkpoint.
 Once publication succeeds, a second `out` refuses unless `--force` is supplied.
+This first handoff implementation targets Linux and macOS. Disk readiness uses
+Unix `statvfs` and source size measurement requires `du`; Windows target disk
+readiness currently reports unsupported.
 `status --json` includes the current acknowledged outgoing report under `out`,
 allowing clients to recover a lost response.
 

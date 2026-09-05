@@ -251,11 +251,7 @@ pub(super) fn ensure_bundle_repositories(
 }
 
 pub(crate) fn prefer_https_url(remote: &str, hosts: &BTreeSet<String>) -> Option<String> {
-    let (host, path) = if let Some(rest) = remote.strip_prefix("git@") {
-        rest.split_once(':')?
-    } else {
-        return None;
-    };
+    let (host, path) = remote.strip_prefix("git@")?.split_once(':')?;
     if !hosts.contains(host)
         || path.is_empty()
         || path.starts_with('/')
@@ -287,22 +283,6 @@ pub(super) fn reachable(
     crate::commands::handoff::probe::command_output("git", &args, cwd).map(|_| ())
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    #[test]
-    fn https_rewrite_is_exact_host_and_path_scoped() {
-        let hosts = BTreeSet::from(["github.com".into()]);
-        assert_eq!(
-            prefer_https_url("git@github.com:o/r.git", &hosts).as_deref(),
-            Some("https://github.com/o/r.git")
-        );
-        assert!(prefer_https_url("git@evil.github.com:o/r", &hosts).is_none());
-        assert!(prefer_https_url("git@github.com:../r", &hosts).is_none());
-        assert!(prefer_https_url("https://github.com/o/r", &hosts).is_none());
-    }
-}
-
 /// Compare equivalent SSH/HTTPS forge forms without relaxing the repository path.
 pub(crate) fn same_repository_url(left: &str, right: &str) -> bool {
     fn identity(value: &str) -> String {
@@ -325,4 +305,20 @@ pub(crate) fn same_repository_url(left: &str, right: &str) -> bool {
         value.to_string()
     }
     identity(left) == identity(right)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn https_rewrite_is_exact_host_and_path_scoped() {
+        let hosts = BTreeSet::from(["github.com".into()]);
+        assert_eq!(
+            prefer_https_url("git@github.com:o/r.git", &hosts).as_deref(),
+            Some("https://github.com/o/r.git")
+        );
+        assert!(prefer_https_url("git@evil.github.com:o/r", &hosts).is_none());
+        assert!(prefer_https_url("git@github.com:../r", &hosts).is_none());
+        assert!(prefer_https_url("https://github.com/o/r", &hosts).is_none());
+    }
 }
