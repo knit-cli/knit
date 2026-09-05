@@ -33,6 +33,11 @@ pub enum GitCredentialOperation {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Continue a bundle on another machine.
+    Handoff {
+        #[command(subcommand)]
+        command: HandoffCommand,
+    },
     /// Initialize a reusable project repo template (like `git init`, for a project).
     Init {
         /// Project name.
@@ -96,6 +101,9 @@ pub enum Commands {
         /// Only write project and bundle JSON; do not create feature worktrees.
         #[arg(long)]
         no_worktree: bool,
+        /// Use a connected forge's HTTPS transport when SSH authentication fails.
+        #[arg(long)]
+        prefer_https: bool,
         /// Print a machine-readable clone result document to stdout. Progress
         /// lines move to stderr.
         #[arg(long)]
@@ -1359,5 +1367,45 @@ pub enum LandCommand {
         /// Record already-resolved local branch movements as a land update without running git merge.
         #[arg(long)]
         continue_merge: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum HandoffCommand {
+    /// Checkpoint and publish this bundle for continuation elsewhere.
+    Out {
+        #[arg(long)]
+        to: Option<String>,
+        #[arg(short = 'm', long)]
+        message: Option<String>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check whether this machine can continue a remote bundle.
+    Probe {
+        project: Option<String>,
+        slug: Option<String>,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Accept a published handoff and print its worktree root.
+    In {
+        project: String,
+        slug: String,
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        #[arg(long)]
+        force: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the bundle's advisory handoff location.
+    Status {
+        #[arg(long)]
+        json: bool,
     },
 }

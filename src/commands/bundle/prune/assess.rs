@@ -5,33 +5,15 @@
 
 use super::print_prune_warning;
 use crate::checkout::is_in_place;
-use crate::git::{git_output, is_git_worktree, ref_exists, resolve_base_ref};
 use crate::model::{ChangeGroup, RepoEntry};
+use crate::pending::feature_branch_unmerged_commits;
+pub(super) use crate::pending::{path_pending_changes, Pending};
 use crate::providers::{self, Forge, PrTarget, PullRequest};
 use crate::store::{read_json, write_json};
 use anyhow::{Context, Result};
 use std::collections::{BTreeSet, HashMap};
-use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-
-/// Uncommitted work found in a checkout, split by whether Git tracks it.
-#[derive(Clone, Copy, Default)]
-pub(super) struct Pending {
-    pub(super) tracked: bool,
-    pub(super) untracked: bool,
-}
-
-impl Pending {
-    pub(super) fn any(self) -> bool {
-        self.tracked || self.untracked
-    }
-
-    pub(super) fn merge(&mut self, other: Pending) {
-        self.tracked |= other.tracked;
-        self.untracked |= other.untracked;
-    }
-}
 
 /// Everything prune learned about one bundle, so the same signals drive the
 /// prune decision, the `--untracked` relaxation, and the `--report` view.
@@ -502,31 +484,6 @@ fn assess_repo_signals(
     })
 }
 
-/// True when the bundle's feature branch (the local branch or its `origin/`
-/// counterpart in the source repo) carries commits the base branch does not.
-fn feature_branch_unmerged_commits(repo: &RepoEntry) -> Result<bool> {
-    let Some(branch) = repo.feature_branch.as_deref() else {
-        return Ok(false);
-    };
-    let repo_root = Path::new(&repo.path);
-    if !repo_root.exists() {
-        return Ok(false);
-    }
-    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
-    for candidate in [branch.to_string(), format!("origin/{branch}")] {
-        if !ref_exists(repo_root, &candidate) {
-            continue;
-        }
-        let range = format!("{base_ref}..{candidate}");
-        let count = git_output(repo_root, ["rev-list", "--count", &range])
-            .with_context(|| format!("failed to count commits in {range}"))?;
-        if count.trim() != "0" {
-            return Ok(true);
-        }
-    }
-    Ok(false)
-}
-
 fn publication_flags_from_publication(
     branch: Option<&str>,
     publication: &crate::model::PublicationEntry,
@@ -582,41 +539,4 @@ fn resolve_path(root: &Path, path: &str) -> PathBuf {
     } else {
         root.join(path)
     }
-}
-
-pub(super) fn path_pending_changes(path: &Path) -> Result<Pending> {
-    if !path.exists() {
-        return Ok(Pending::default());
-    }
-    if is_git_worktree(path) {
-        let status = git_output(path, ["status", "--porcelain"])?;
-        let mut pending = Pending::default();
-        for line in status.lines() {
-            if line.trim().is_empty() {
-                continue;
-            }
-            if line.starts_with("??") {
-                pending.untracked = true;
-            } else {
-                pending.tracked = true;
-            }
-        }
-        return Ok(pending);
-    }
-    // Stray files outside a Git worktree can't be classified, so treat them
-    // as tracked changes: they block pruning even with --untracked.
-    if path.is_file() {
-        return Ok(Pending {
-            tracked: true,
-            untracked: false,
-        });
-    }
-    let mut pending = Pending::default();
-    for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
-        pending.merge(path_pending_changes(&entry?.path())?);
-        if pending.tracked && pending.untracked {
-            break;
-        }
-    }
-    Ok(pending)
 }

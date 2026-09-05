@@ -26,7 +26,7 @@ fn is_knit_helper_for(value: &str, remote_name: &str) -> bool {
         && value.ends_with(&format!("{HELPER_MARKER}{}", shell_quote(remote_name)))
 }
 
-fn helper_command(remote_name: &str) -> Result<String> {
+pub(super) fn helper_command(remote_name: &str) -> Result<String> {
     let executable = std::env::current_exe().context("failed to resolve the knit executable")?;
     let executable = executable
         .to_str()
@@ -218,7 +218,7 @@ fn git_config(args: &[&str]) -> Result<()> {
 
 /// The remote's connected forge hosts, exact-HTTPS-host validated on our side
 /// regardless of what the server sent.
-fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<String>> {
+pub(super) fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<String>> {
     #[derive(Deserialize)]
     struct Descriptor {
         connected: bool,

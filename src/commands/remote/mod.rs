@@ -11,6 +11,7 @@ mod client;
 mod clone;
 mod credentials;
 mod facade;
+pub(crate) mod handoff;
 mod helpers;
 mod history;
 mod projects;
@@ -38,6 +39,7 @@ pub use push::{
     remove_remote, set_remote_token, show_remote, sync_active_bundle_to_remote_if_enabled,
     sync_bundle_to_remote_if_enabled,
 };
+pub(crate) use push::{push_active_bundle_to_remote, push_handoff_bundle_to_remote};
 
 use crate::model::{HistoryEvent, KnitProject, ProjectView};
 use serde::Deserialize;

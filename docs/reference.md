@@ -899,3 +899,53 @@ See [architecture.md](architecture.md) for the module boundaries and test layout
 - Additional self-hosted forge variants and pagination hardening
 - Better detection of existing registered worktrees
 - Optional bundle export/import flows for handoff to Gloss
+
+## Continue a bundle on another machine
+
+`knit handoff` keeps the same feature branches and ledger while moving editing to
+another workspace. Each agent continuation starts a new thread; provider session
+files, credentials, ignored build outputs, and running stacks remain on their host.
+
+```sh
+knit --bundle feature-a handoff out --to vps -m "Continue the parser work"
+knit handoff probe owner/project feature-a --workspace ./workspace
+knit handoff in owner/project feature-a --workspace ./workspace
+knit handoff status --json
+```
+
+Return with the same `out` and `in` verbs. `out` stages all nonignored files and
+commits dirty repositories, records a checkpoint, pushes feature branches, then
+publishes a typed `handoff.out` node. Git hooks and signing still apply. A partial
+commit failure records successful repositories before returning an error. Retry
+`out` to finish an interrupted publication without duplicating its checkpoint.
+Once publication succeeds, a second `out` refuses unless `--force` is supplied.
+This first handoff implementation targets Linux and macOS. Disk readiness uses
+Unix `statvfs` and source size measurement requires `du`; Windows target disk
+readiness currently reports unsupported.
+`status --json` includes the current acknowledged outgoing report under `out`,
+allowing clients to recover a lost response.
+
+`in` checks readiness again, clones missing repositories, materializes the bundle,
+and publishes `handoff.in`. An interrupted clone or acceptance can be retried;
+existing dirty checkouts, wrong repository origins, unfinished Git operations,
+and divergent ledgers block acceptance. Ledger divergence uses the existing
+`knit --bundle <slug> pull --merge` recovery. Branch divergence is resolved with
+Git before retrying. Location is advisory, derived from causal handoff links;
+competing acceptances are shown as a conflict rather than choosing a host by clock.
+
+Project requirements are declared in `knit.project.json` under `requirements`:
+`platforms`, `tools` (`name`, `minVersion`, `optional`, `for: "runtime"`), `diskMib`,
+`memoryMib`, `agents`, and `env`. Probe emits `ok`, `warn`, or `fail` per check and
+returns exit 2 for a failed verdict. Optional/runtime tools and low available
+memory warn. Required editing tools, unsupported platforms, missing named env
+variables, disk shortage, authentication, and Git access fail. Environment values
+are never printed. Agent availability is reported as unverifiable by the CLI.
+Before the first publication, probe can check the exported project's requirements
+and repositories and warns that the bundle-specific checkpoint is not available.
+
+`in --force` can bypass declared tool, platform, disk, and environment readiness
+failures; it cannot bypass credentials, schema compatibility, local changes, or
+handoff conflicts. A valid sync remote must exist in user-global config. Tokens
+remain in that config; handoff does not copy them into the new workspace. SSH
+origins may use HTTPS when SSH fails and the exact forge host has a Knit credential
+helper; `knit clone --prefer-https` exposes the same transport fallback.

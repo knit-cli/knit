@@ -30,7 +30,83 @@
         }
       }
     },
-    "nodes": { "type": "array" },
+    "nodes": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "origin": {
+            "type": "object",
+            "required": [
+              "hostname",
+              "platform"
+            ],
+            "properties": {
+              "environmentId": {
+                "type": "string"
+              },
+              "hostname": {
+                "type": "string",
+                "minLength": 1
+              },
+              "platform": {
+                "type": "string",
+                "minLength": 1
+              }
+            }
+          },
+          "handoff": {
+            "type": "object",
+            "required": [
+              "id",
+              "source"
+            ],
+            "properties": {
+              "id": {
+                "type": "string",
+                "minLength": 1
+              },
+              "source": {
+                "type": "object",
+                "required": [
+                  "hostname",
+                  "platform"
+                ],
+                "properties": {
+                  "environmentId": {
+                    "type": "string"
+                  },
+                  "hostname": {
+                    "type": "string",
+                    "minLength": 1
+                  },
+                  "platform": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "destination": {
+                "type": "string"
+              },
+              "checkpointCommitGroupIds": {
+                "type": "array",
+                "items": {
+                  "type": "string"
+                }
+              },
+              "sizeMib": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "outNodeId": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      }
+    },
     "publications": { "type": "array" }
   }
 }

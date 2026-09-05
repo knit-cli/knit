@@ -135,6 +135,7 @@ pub fn list_bundles(all: bool, archived: bool, deleted: bool) -> Result<()> {
             state,
             bundle.repos.len()
         );
+        crate::commands::handoff::print_location(&bundle);
         shown += 1;
     }
     if shown == 0 {

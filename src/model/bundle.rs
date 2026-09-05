@@ -496,6 +496,114 @@ pub fn is_terminal_landed_node(node: &BundleNode) -> bool {
         && node.landing.as_ref().is_none_or(|landing| landing.terminal)
 }
 
+/// Machine attribution is advisory; environment ids are stable host identities when available.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeOrigin {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment_id: Option<String>,
+    pub hostname: String,
+    pub platform: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeHandoff {
+    pub id: String,
+    pub source: NodeOrigin,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<String>,
+    #[serde(default)]
+    pub checkpoint_commit_group_ids: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub out_node_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HandoffLocationState {
+    Pending,
+    Active,
+    Conflict,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct HandoffLocation {
+    pub state: HandoffLocationState,
+    pub label: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<NodeOrigin>,
+    pub updated_at: String,
+    pub handoff_id: String,
+}
+
+impl ChangeGroup {
+    /// Derive location from causal handoff edges, never array order or clocks.
+    /// Outgoing nodes link the previous handoff through targetNodeId; incoming
+    /// nodes link their publication through outNodeId. Competing tips are a
+    /// visible conflict until explicitly reconciled, not a fabricated owner.
+    pub fn handoff_location(&self) -> Option<HandoffLocation> {
+        let nodes: Vec<_> = self
+            .nodes
+            .iter()
+            .filter(|node| {
+                matches!(node.node_type.as_str(), "handoff.out" | "handoff.in")
+                    && node.handoff.is_some()
+            })
+            .collect();
+        let superseded: std::collections::BTreeSet<&str> = nodes
+            .iter()
+            .flat_map(|node| {
+                node.target_node_id
+                    .as_deref()
+                    .into_iter()
+                    .chain(node.handoff.as_ref().and_then(|h| h.out_node_id.as_deref()))
+            })
+            .collect();
+        let mut tips: Vec<_> = nodes
+            .into_iter()
+            .filter(|n| !superseded.contains(n.id.as_str()))
+            .collect();
+        tips.sort_by(|a, b| (&a.created_at, &a.id).cmp(&(&b.created_at, &b.id)));
+        let node = *tips.last()?;
+        let handoff = node.handoff.as_ref()?;
+        let conflict = tips.len() > 1;
+        let pending = node.node_type == "handoff.out";
+        Some(HandoffLocation {
+            state: if conflict {
+                HandoffLocationState::Conflict
+            } else if pending {
+                HandoffLocationState::Pending
+            } else {
+                HandoffLocationState::Active
+            },
+            label: if conflict {
+                "competing handoffs".into()
+            } else if pending {
+                handoff
+                    .destination
+                    .clone()
+                    .unwrap_or_else(|| "another machine".into())
+            } else {
+                node.origin
+                    .as_ref()
+                    .map(|o| o.hostname.clone())
+                    .unwrap_or_else(|| "unknown machine".into())
+            },
+            origin: if conflict || pending {
+                None
+            } else {
+                node.origin.clone()
+            },
+            updated_at: node.created_at.clone(),
+            handoff_id: handoff.id.clone(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleNode {
@@ -512,6 +620,10 @@ pub struct BundleNode {
     /// T3_ACTOR_*; absent for plain CLI use and single-user setups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NodeActor>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<NodeOrigin>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff: Option<NodeHandoff>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -564,6 +676,36 @@ fn ambient_actor() -> Option<NodeActor> {
     })
 }
 
+/// Attribution for newly written nodes. Never backfill old nodes while reading.
+pub fn ambient_origin() -> NodeOrigin {
+    let hostname = non_empty_env("HOSTNAME")
+        .or_else(|| non_empty_env("COMPUTERNAME"))
+        .or_else(|| {
+            std::process::Command::new("hostname")
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .and_then(|o| String::from_utf8(o.stdout).ok())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+        })
+        .unwrap_or_else(|| "unknown".into());
+    let os = match std::env::consts::OS {
+        "macos" => "darwin",
+        other => other,
+    };
+    let arch = match std::env::consts::ARCH {
+        "x86_64" => "amd64",
+        "aarch64" => "arm64",
+        other => other,
+    };
+    NodeOrigin {
+        environment_id: non_empty_env("KNIT_ENVIRONMENT_ID"),
+        hostname,
+        platform: format!("{os}/{arch}"),
+    }
+}
+
 impl BundleNode {
     /// Every node starts here so cross-cutting attribution (session id)
     /// is recorded uniformly regardless of which command created it.
@@ -574,6 +716,8 @@ impl BundleNode {
             created_at,
             session_id: ambient_session_id(),
             actor: ambient_actor(),
+            origin: Some(ambient_origin()),
+            handoff: None,
             title: None,
             repo_ids: None,
             commit_group_id: None,
@@ -593,6 +737,56 @@ impl BundleNode {
         Self {
             title: Some(title),
             ..Self::base(feature_id, "feature.created", created_at)
+        }
+    }
+
+    pub fn checkpoint(
+        id: String,
+        created_at: String,
+        message: String,
+        repo_ids: Vec<String>,
+        commit_group_id: String,
+    ) -> Self {
+        Self {
+            message: Some(message),
+            repo_ids: Some(repo_ids),
+            commit_group_id: Some(commit_group_id),
+            ..Self::base(id, "checkpoint", created_at)
+        }
+    }
+
+    pub fn handoff_out(
+        id: String,
+        created_at: String,
+        title: Option<String>,
+        message: Option<String>,
+        repo_ids: Vec<String>,
+        handoff: NodeHandoff,
+    ) -> Self {
+        Self {
+            title,
+            message,
+            repo_ids: Some(repo_ids),
+            handoff: Some(handoff),
+            ..Self::base(id, "handoff.out", created_at)
+        }
+    }
+
+    pub fn handoff_in(
+        id: String,
+        created_at: String,
+        title: Option<String>,
+        message: Option<String>,
+        repo_ids: Vec<String>,
+        handoff: NodeHandoff,
+    ) -> Self {
+        Self {
+            title,
+            message,
+            repo_ids: Some(repo_ids),
+            target_node_id: handoff.out_node_id.clone(),
+            handoff: Some(handoff),
+            ..Self::base(id, "handoff.in", created_at)
         }
     }
 
@@ -766,5 +960,128 @@ impl BundleNode {
             publication_urls,
             ..Self::base(id, "pr.revert", created_at)
         }
+    }
+}
+
+#[cfg(test)]
+mod handoff_tests {
+    use super::*;
+
+    fn origin(host: &str) -> NodeOrigin {
+        NodeOrigin {
+            environment_id: Some(host.into()),
+            hostname: host.into(),
+            platform: "linux/amd64".into(),
+        }
+    }
+    fn outgoing(id: &str, predecessor: Option<&str>) -> BundleNode {
+        let mut node = BundleNode::handoff_out(
+            id.into(),
+            "2026-09-05T00:00:00Z".into(),
+            None,
+            None,
+            vec![],
+            NodeHandoff {
+                id: format!("handoff-{id}"),
+                source: origin("laptop"),
+                destination: Some("vps".into()),
+                checkpoint_commit_group_ids: vec![],
+                size_mib: Some(128),
+                out_node_id: None,
+            },
+        );
+        node.target_node_id = predecessor.map(str::to_string);
+        node
+    }
+    fn incoming(id: &str, out: &BundleNode, host: &str) -> BundleNode {
+        let mut payload = out.handoff.clone().unwrap();
+        payload.out_node_id = Some(out.id.clone());
+        let mut node = BundleNode::handoff_in(
+            id.into(),
+            "2026-09-04T00:00:00Z".into(),
+            None,
+            None,
+            vec![],
+            payload,
+        );
+        node.origin = Some(origin(host));
+        node
+    }
+    #[test]
+    fn handoff_location_follows_causality_despite_order_and_clock_skew() {
+        let mut bundle = ChangeGroup::new("bundle".into(), "test".into(), "now".into());
+        assert!(bundle.handoff_location().is_none());
+        let out = outgoing("out", None);
+        bundle.nodes.push(out.clone());
+        assert_eq!(
+            bundle.handoff_location().unwrap().state,
+            HandoffLocationState::Pending
+        );
+        let accepted = incoming("in", &out, "vps");
+        bundle.nodes.insert(0, accepted);
+        let location = bundle.handoff_location().unwrap();
+        assert_eq!(location.state, HandoffLocationState::Active);
+        assert_eq!(location.label, "vps");
+        let returning = outgoing("return-out", Some("in"));
+        let returned = incoming("return-in", &returning, "laptop");
+        bundle.nodes.insert(0, returned);
+        bundle.nodes.insert(0, returning);
+        assert_eq!(bundle.handoff_location().unwrap().label, "laptop");
+    }
+    #[test]
+    fn competing_acceptances_are_a_conflict_even_after_one_moves_again() {
+        let out = outgoing("out", None);
+        let mut bundle = ChangeGroup::new("bundle".into(), "test".into(), "now".into());
+        bundle.nodes.extend([
+            out.clone(),
+            incoming("in-a", &out, "vps-a"),
+            incoming("in-b", &out, "vps-b"),
+        ]);
+        assert_eq!(
+            bundle.handoff_location().unwrap().state,
+            HandoffLocationState::Conflict
+        );
+        bundle.nodes.push(outgoing("return", Some("in-a")));
+        assert_eq!(
+            bundle.handoff_location().unwrap().state,
+            HandoffLocationState::Conflict
+        );
+    }
+    #[test]
+    fn origin_is_additive_and_checkpoint_references_normal_commit_group() {
+        let node: BundleNode = serde_json::from_value(
+            serde_json::json!({"id":"old","type":"checkpoint","createdAt":"then","message":"old"}),
+        )
+        .unwrap();
+        assert!(node.origin.is_none());
+        assert!(node.handoff.is_none());
+        let checkpoint = BundleNode::checkpoint(
+            "cp".into(),
+            "now".into(),
+            "saved".into(),
+            vec!["repo".into()],
+            "kg".into(),
+        );
+        assert_eq!(checkpoint.commit_group_id.as_deref(), Some("kg"));
+        assert!(!checkpoint.origin.unwrap().platform.is_empty());
+        let encoded = serde_json::to_value(outgoing("out", None)).unwrap();
+        assert_eq!(encoded["handoff"]["sizeMib"], 128);
+        assert_eq!(encoded["handoff"]["source"]["environmentId"], "laptop");
+    }
+    #[test]
+    fn handoff_payload_matches_published_schema() {
+        let mut bundle = ChangeGroup::new("bundle".into(), "test".into(), "now".into());
+        let out = outgoing("out", None);
+        bundle
+            .nodes
+            .extend([out.clone(), incoming("in", &out, "vps")]);
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/bundle.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let value = serde_json::to_value(bundle).unwrap();
+        assert!(validator.is_valid(&value));
+        let mut invalid = value;
+        invalid["nodes"][1]["handoff"]["sizeMib"] = serde_json::json!(-1);
+        assert!(!validator.is_valid(&invalid));
     }
 }

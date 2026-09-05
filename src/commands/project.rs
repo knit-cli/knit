@@ -536,7 +536,23 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
         .iter()
         .find(|repo| repo.id == repo_id)
         .with_context(|| format!("repo `{repo_id}` is not listed in project `{}`", project.id))?;
-    let repo_root = Path::new(&repo_entry.path);
+    let bundle_checkout = crate::store::load_active_bundle()
+        .ok()
+        .filter(|active| {
+            active.bundle.project_id.as_deref() == Some(project_id.as_str())
+                && active.resolution_source != crate::store::BundleResolutionSource::Config
+        })
+        .and_then(|active| {
+            active
+                .bundle
+                .repos
+                .iter()
+                .find(|repo| repo.id == repo_id)
+                .and_then(|repo| crate::checkout::checkout_dir(&active, repo))
+        });
+    let repo_root = bundle_checkout
+        .as_deref()
+        .unwrap_or_else(|| Path::new(&repo_entry.path));
     let config_path = repo_root.join(PROJECT_CONFIG_FILE);
     if !config_path.exists() {
         bail!(
@@ -556,6 +572,9 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
         );
     }
 
+    if incoming.requirements.is_some() {
+        project.requirements = incoming.requirements;
+    }
     if incoming.runtime.is_some() {
         project.runtime = incoming.runtime;
     }

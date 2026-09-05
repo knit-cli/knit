@@ -11,6 +11,7 @@ pub mod doctor;
 pub mod fetch;
 pub mod git_credential;
 pub mod git_passthrough;
+pub mod handoff;
 pub mod history;
 pub mod init;
 pub mod land;
