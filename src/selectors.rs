@@ -6,6 +6,8 @@ pub fn is_loggable_node(node: &BundleNode) -> bool {
         node.node_type.as_str(),
         "check.recorded"
             | "checkpoint"
+            | "handoff.out"
+            | "handoff.in"
             | "commit.group"
             | "feature.closed"
             | "feature.landed"

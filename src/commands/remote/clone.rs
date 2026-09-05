@@ -94,6 +94,7 @@ pub fn clone_project_from_remote(
     token: Option<&str>,
     active_bundle: Option<&str>,
     materialize: bool,
+    prefer_https: bool,
     json: bool,
 ) -> Result<()> {
     if json {
@@ -107,6 +108,7 @@ pub fn clone_project_from_remote(
         token,
         active_bundle,
         materialize,
+        prefer_https,
     ) {
         Ok(document) => {
             if json {
@@ -137,13 +139,31 @@ fn clone_project_classified(
     token: Option<&str>,
     active_bundle: Option<&str>,
     materialize: bool,
+    prefer_https: bool,
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
     let reference = parse_clone_reference(project_identifier, url)
         .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
     let (remote_name, remote, stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, reference.remote_url.as_deref(), token)?;
-    let export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
+    let mut export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
         .map_err(|error| (RemoteErrorKind::Http, error))?;
+    if prefer_https {
+        if let Some(token) = token.as_deref() {
+            let hosts = super::helpers::connected_forge_hosts(&remote, token).unwrap_or_default();
+            let cwd = std::env::current_dir().map_err(|e| (RemoteErrorKind::Other, e.into()))?;
+            for repository in &mut export.repositories {
+                if let Some(url) = repository.remote_url.clone() {
+                    if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
+                        if super::handoff::reachable(&cwd, &url, &remote_name, &hosts).is_err()
+                            && super::handoff::reachable(&cwd, &https, &remote_name, &hosts).is_ok()
+                        {
+                            repository.remote_url = Some(https);
+                        }
+                    }
+                }
+            }
+        }
+    }
     clone_fetched_export(
         &reference.project_identifier,
         target,
@@ -159,7 +179,7 @@ fn clone_project_classified(
 }
 
 #[allow(clippy::too_many_arguments)]
-fn clone_fetched_export(
+pub(super) fn clone_fetched_export(
     project_identifier: &str,
     target: Option<&Path>,
     remote_name: String,
@@ -603,7 +623,7 @@ pub(super) fn clone_export_repositories(
 /// Clone (or adopt) one exported repository. Authentication comes from the
 /// installed Git credential helpers; a failed non-public clone carries the
 /// access hint.
-fn clone_one_export_repository(
+pub(super) fn clone_one_export_repository(
     target_root: &Path,
     repository: &RemoteExportRepository,
 ) -> Result<(String, PathBuf)> {
@@ -619,13 +639,19 @@ fn clone_one_export_repository(
         if !is_git_worktree(&repo_path) {
             bail!("{} exists but is not a git checkout.", repo_path.display());
         }
+        let origin = git_output(&repo_path, ["remote", "get-url", "origin"])?;
+        if !super::handoff::same_repository_url(origin.trim(), remote_url) {
+            bail!(
+                "{} belongs to a different Git origin; refusing to adopt it",
+                repo_path.display()
+            );
+        }
         crate::human!(
             "{}: {} {}",
             out::repo(&local_id),
             out::muted("using existing checkout"),
             out::path(repo_path.display())
         );
-        checkout_export_base_branch(&repo_path, repository)?;
         return Ok((local_id, repo_path));
     }
 

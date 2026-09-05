@@ -1234,7 +1234,7 @@ fn pull_bundle_by_slug_classified(
         &export.decoded_history_events(&project_id),
     )
     .map_err(other)?;
-    let local_project = load_project_if_present(&root, &project_id)
+    let mut local_project = load_project_if_present(&root, &project_id)
         .map_err(other)?
         .with_context(|| format!("No local Knit project named `{project_id}`."))
         .map_err(other)?;
@@ -1260,6 +1260,9 @@ fn pull_bundle_by_slug_classified(
     let (mut bundle, artifact_hash) =
         resolve_export_bundle_payload(&remote, Some(&token), remote_bundle)
             .map_err(|error| (RemoteErrorKind::Http, error))?;
+    super::helpers::ensure_helpers_for_git(&remote_name);
+    super::handoff::ensure_bundle_repositories(&root, &mut local_project, &export, &bundle)
+        .map_err(other)?;
     let bundle_id = bundle.id.clone();
     if root
         .join(".knit/deleted/bundles")

@@ -11,6 +11,65 @@
     "repos"
   ],
   "properties": {
+    "requirements": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "platforms": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "tools": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": [
+              "name"
+            ],
+            "additionalProperties": false,
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1
+              },
+              "minVersion": {
+                "type": "string"
+              },
+              "optional": {
+                "type": "boolean"
+              },
+              "for": {
+                "enum": [
+                  "runtime"
+                ]
+              }
+            }
+          }
+        },
+        "diskMib": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "memoryMib": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "agents": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        },
+        "env": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          }
+        }
+      }
+    },
     "schemaVersion": {
       "const": "0.1"
     },

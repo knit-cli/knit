@@ -251,3 +251,35 @@ Project files can carry a reusable `landing` template with merge priority, merge
 A land plan step is `merge_pr` (merge a recorded review object), `merge_branch` (merge the bundle's feature branch into that step's `targetBranch` and push it, which is how a bundle reaches an environment it only passes through), `wait_checks`, `run`, or `deploy`. `knit land apply` and `knit land resume` write run logs under `.knit/land-runs/`. Run files are operational logs, not the source of truth for code state. The bundle records a `feature.landed` summary node after every step succeeds. That node carries an optional `landing` object — `terminal`, plus the `lane` or `targetBranch` it went to — which says whether the landing finished the bundle; nodes written before this field existed always landed on the configured bases and read as terminal. A successful `knit land apply` into a terminal destination then archives the bundle with a `feature.archived` node while preserving the landed node for log selectors and provider reverts. A landing into an intermediate destination records only the landed node and leaves the bundle open. A later `knit revert <feature.landed> --apply` can create provider-native revert PRs across the landed repos and records that follow-up review group as `pr.revert`.
 
 Gloss should treat the bundle as read-only input. Gloss can analyze the current `headNodeId`, a specific `commit.group` node, or the full current bundle.
+
+## Handoff attribution and requirements
+
+New ledger nodes carry optional `origin` (`environmentId`, `hostname`,
+`platform`). `KNIT_ENVIRONMENT_ID` supplies the stable environment identity;
+plain CLI usage records hostname and normalized OS/architecture. Old nodes
+remain unchanged.
+
+`checkpoint` references its normal commit group via `commitGroupId`.
+`handoff.out` and `handoff.in` carry a structured `handoff` payload:
+
+```json
+{
+  "id": "handoff-unique-id",
+  "source": { "hostname": "laptop", "platform": "darwin/arm64" },
+  "destination": "vps",
+  "checkpointCommitGroupIds": ["kg_checkpoint"],
+  "sizeMib": 2048
+}
+```
+
+The acceptance copies the same payload and adds `outNodeId`, referencing its
+outgoing node. Incoming nodes also set `targetNodeId` to that outgoing node;
+an outgoing node sets `targetNodeId` to the preceding handoff node, if any.
+These causal links make the advisory location independent of array order or
+clock skew. A single outgoing tip means `pending`; an incoming tip means
+`active`. Competing tips mean `conflict`, never an arbitrarily chosen owner.
+This is an advisory record, not a distributed lock.
+
+Projects may declare `requirements` with `platforms`, `tools` (name,
+minVersion, optional, and `for: "runtime"`), `diskMib`, `memoryMib`, `agents`,
+and `env` variable names. Requirement declarations contain no secret values.

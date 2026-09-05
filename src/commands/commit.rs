@@ -18,10 +18,19 @@ use std::path::{Path, PathBuf};
 
 pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
-    ensure_mutable_checkouts(&active)?;
-    let observed = sync_observed_changes(&mut active)?;
+    crate::commands::handoff::warn_elsewhere(&active.bundle);
+    commit_active(&mut active, message, stage_first).map(|_| ())
+}
+
+pub(crate) fn commit_active(
+    active: &mut ActiveBundle,
+    message: &str,
+    stage_first: bool,
+) -> Result<String> {
+    ensure_mutable_checkouts(active)?;
+    let observed = sync_observed_changes(active)?;
     for change in &observed {
-        println!(
+        crate::human!(
             "{}: {}",
             out::repo(&change.repo_id),
             out::warn(sync_note(change))
@@ -76,7 +85,7 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     for (repo_id, result) in results {
         match result {
             Ok(outcome) => {
-                println!(
+                crate::human!(
                     "{}: {} {}",
                     out::repo(&repo_id),
                     out::movement("committed"),
@@ -102,13 +111,13 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
                 active.bundle.repos[outcome.repo_index].head_sha = Some(outcome.sha);
             }
             Err(error) => {
-                println!("{}: {}", out::repo(&repo_id), out::danger("commit failed"));
+                crate::human!("{}: {}", out::repo(&repo_id), out::danger("commit failed"));
                 failures.push(format!("{repo_id}: {error:#}"));
             }
         }
     }
 
-    if !failures.is_empty() {
+    if commits.is_empty() {
         bail!("commit failed:\n{}", failures.join("\n"));
     }
 
@@ -130,12 +139,18 @@ pub fn commit_staged(message: &str, stage_first: bool) -> Result<()> {
     active.bundle.updated_at = now_iso();
     save_active_bundle(&active)?;
 
-    println!(
+    crate::human!(
         "{} {}",
         out::heading("Recorded commit group"),
-        out::node(group_id)
+        out::node(&group_id)
     );
-    Ok(())
+    if !failures.is_empty() {
+        bail!(
+            "Recorded successful commits in {group_id}; retry remaining repositories:\n{}",
+            failures.join("\n")
+        );
+    }
+    Ok(group_id)
 }
 
 struct CommitOutcome {

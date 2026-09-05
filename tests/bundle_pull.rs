@@ -150,3 +150,62 @@ fn bundle_pull_unknown_slug_is_not_found() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn bundle_pull_clones_a_repository_added_to_the_remote_bundle() {
+    let root = unique_temp_dir();
+    let fake_dir = root.join("fake");
+    let (mut export, _) = export_with_feature_bundle(&root);
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let workspace = cloned_workspace(&root, &base_url);
+    assert!(!workspace.join("frontend").exists());
+
+    let frontend = root.join("frontend-source");
+    init_repo(&frontend, "frontend");
+    git(&frontend, ["branch", "knit/feature-a"]);
+    export["data"]["repositories"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id":"r-2", "localId":"frontend", "name":"frontend", "defaultBranch":"main",
+            "remoteUrl":frontend.to_string_lossy(), "visibility":"public", "metadata":{}
+        }));
+    let bundle = &mut export["data"]["bundles"][0]["currentArtifact"]["payload"];
+    bundle["repos"].as_array_mut().unwrap().push(serde_json::json!({
+        "id":"frontend", "path":"/elsewhere/frontend", "baseBranch":"main", "featureBranch":"knit/feature-a"
+    }));
+    bundle["nodes"] = serde_json::json!([{
+        "id":"frontend-added", "type":"repo.added", "createdAt":"2026-09-05T12:00:00Z", "repoIds":["frontend"]
+    }]);
+    bundle["headNodeId"] = serde_json::json!("frontend-added");
+    export["data"]["bundles"][0]["currentArtifact"]["artifactHash"] =
+        serde_json::json!("hash-with-frontend");
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+
+    let (stdout, stderr, success) =
+        knit_split_output(&workspace, &["bundle", "pull", "feature-a", "--json"], &[]);
+    assert!(success, "bundle pull failed: {stderr}\n{stdout}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["repos"].as_array().unwrap().len(), 2);
+    assert!(workspace.join("frontend/.git").exists());
+    let tree = workspace.join(".knit/worktrees/feature-a/frontend");
+    assert!(tree.join(".git").exists());
+    assert_eq!(
+        git(&tree, ["rev-parse", "HEAD"]).trim(),
+        git(&frontend, ["rev-parse", "main"]).trim()
+    );
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        project["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|repo| repo["id"] == "frontend")
+            .count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}

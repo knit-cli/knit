@@ -12,6 +12,7 @@ use std::path::PathBuf;
 pub fn show_log(limit: Option<usize>, shorthand_limit: Option<&str>) -> Result<()> {
     let limit = resolve_limit(limit, shorthand_limit)?;
     let active = load_active_bundle()?;
+    crate::commands::handoff::print_location(&active.bundle);
     if active.bundle.nodes.is_empty() && active.bundle.commit_groups.is_empty() {
         println!("{}", out::muted("No bundle nodes recorded yet."));
         return Ok(());
