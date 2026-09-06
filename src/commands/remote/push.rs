@@ -656,11 +656,29 @@ pub fn push_bundle_to_remote(
     push_active_bundle_to_remote(remote_name, project, &mut active, force)
 }
 
-fn push_active_bundle_to_remote(
+pub(crate) fn push_active_bundle_to_remote(
     remote_name: &str,
     project: Option<&str>,
     active: &mut ActiveBundle,
     force: PushForce,
+) -> Result<()> {
+    push_active_bundle_to_remote_impl(remote_name, project, active, force, true)
+}
+
+/// Handoff moves one bundle; it must not reshape an existing hosted project.
+pub(crate) fn push_handoff_bundle_to_remote(
+    remote_name: &str,
+    active: &mut ActiveBundle,
+) -> Result<()> {
+    push_active_bundle_to_remote_impl(remote_name, None, active, PushForce::No, false)
+}
+
+fn push_active_bundle_to_remote_impl(
+    remote_name: &str,
+    project: Option<&str>,
+    active: &mut ActiveBundle,
+    force: PushForce,
+    publish_project_shape: bool,
 ) -> Result<()> {
     // An open bundle's artifact must never reach a sync remote unless its
     // feature branches are on git origin: pushing a bundle means branches +
@@ -669,7 +687,7 @@ fn push_active_bundle_to_remote(
         crate::commands::push::ensure_open_bundle_branches_on_origin(&active.root, &active.bundle)
             .context("feature branches not pushed; artifact not synced")?;
     for line in &branch_lines {
-        println!("{line}");
+        crate::human!("{line}");
     }
 
     let config = load_effective_config(&active.root)?;
@@ -680,15 +698,29 @@ fn push_active_bundle_to_remote(
         .context("No project selected. Pass --project or run `knit init <name>`.")?;
     // Say that the sync has started: the branch pushes above finish in
     // seconds, and a silent minute after them read as a hang.
-    println!(
+    crate::human!(
         "{}",
         out::muted(format!("syncing {} to {remote_name}…", active.bundle.id))
     );
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&active.root, &project_id)?;
-    let (pushed_project, shape_push) =
-        upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?;
+    let (pushed_project, shape_push) = if publish_project_shape {
+        upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?
+    } else {
+        let response = request(
+            remote,
+            &token,
+            "GET",
+            &format!("/projects/{project_id}"),
+            None,
+        )?;
+        if response.status == 404 {
+            upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?
+        } else {
+            (decode_response(response)?, ProjectShapePush::ReadOnly)
+        }
+    };
     if let (Some(project), ProjectShapePush::Pushed) = (local_project.as_ref(), &shape_push) {
         push_repositories(remote, &token, &pushed_project.slug, &project.repos)?;
     }
@@ -710,7 +742,7 @@ fn push_active_bundle_to_remote(
         remote_name,
     );
 
-    println!(
+    crate::human!(
         "{} {} -> {}",
         out::movement(if force.is_force() {
             "pushed (forced)"
@@ -720,7 +752,7 @@ fn push_active_bundle_to_remote(
         out::repo(&active.bundle.id),
         out::repo(&pushed_bundle.slug)
     );
-    println!(
+    crate::human!(
         "{} {} {}",
         out::heading("Artifact:"),
         artifact.id,
@@ -728,7 +760,7 @@ fn push_active_bundle_to_remote(
     );
     match history_result {
         Ok(history_count) if history_count > 0 => {
-            println!(
+            crate::human!(
                 "{} {}",
                 out::heading("History:"),
                 out::muted(format!("{history_count} event(s) synced"))
@@ -736,7 +768,7 @@ fn push_active_bundle_to_remote(
         }
         Ok(_) => {}
         Err(error) => {
-            println!("{} {error:#}", out::warn("History sync skipped:"));
+            crate::human!("{} {error:#}", out::warn("History sync skipped:"));
         }
     }
     Ok(())

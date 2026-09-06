@@ -1,5 +1,5 @@
 pub fn status_label(short_status: &str) -> &'static str {
-    if short_status.trim().is_empty() {
+    if !crate::pending::Pending::from_porcelain(short_status).any() {
         return "clean";
     }
 

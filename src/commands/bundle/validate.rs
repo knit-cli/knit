@@ -187,6 +187,40 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
         "checkpoint" if node.message.as_deref().unwrap_or("").trim().is_empty() => {
             errors.push(format!("node `{}` must record message", node.id));
         }
+        "handoff.out" | "handoff.in" => {
+            if node
+                .origin
+                .as_ref()
+                .is_none_or(|o| o.hostname.trim().is_empty() || o.platform.trim().is_empty())
+            {
+                errors.push(format!(
+                    "node `{}` must record origin hostname and platform",
+                    node.id
+                ));
+            }
+            match &node.handoff {
+                None => errors.push(format!("node `{}` must record handoff", node.id)),
+                Some(handoff) => {
+                    if handoff.id.trim().is_empty()
+                        || handoff.source.hostname.trim().is_empty()
+                        || handoff.source.platform.trim().is_empty()
+                    {
+                        errors.push(format!(
+                            "node `{}` must record handoff id and source",
+                            node.id
+                        ));
+                    }
+                    if node.node_type == "handoff.in"
+                        && handoff
+                            .out_node_id
+                            .as_deref()
+                            .is_none_or(|id| id.trim().is_empty())
+                    {
+                        errors.push(format!("node `{}` must record handoff outNodeId", node.id));
+                    }
+                }
+            }
+        }
         "check.recorded" | "tag.created" => {
             if node.title.as_deref().unwrap_or("").trim().is_empty() {
                 errors.push(format!("node `{}` must record title", node.id));

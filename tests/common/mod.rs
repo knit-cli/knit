@@ -1689,6 +1689,7 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
 ///   set both differently to simulate a concurrent push between GET and POST)
 /// - `enforce-fast-forward`: POSTs without `force: true` are refused with a
 ///   plain 409, like a remote whose ledger is ahead
+/// - `reject-node-type`: artifact POSTs containing this node type fail with 503
 pub fn spawn_fake_remote_push_api(dir: &Path) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1746,7 +1747,19 @@ fn handle_fake_remote_push_request(
         .trim_start_matches('/')
         .to_string();
     let segments: Vec<&str> = path.split('/').collect();
+    if method == "PATCH" && matches!(segments.as_slice(), ["api", "v1", "projects", _]) {
+        let record = dir.join("project-shape-writes.jsonl");
+        let mut existing = fs::read_to_string(&record).unwrap_or_default();
+        existing.push_str(&body.to_string());
+        existing.push('\n');
+        fs::write(record, existing)?;
+    }
     let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["api", "v1", "me", "access-token"]) => (
+            200,
+            r#"{"data":{"scopes":["bundle:push","bundle:read"]}}"#.to_string(),
+        ),
+        ("GET", ["api", "v1", "me", "forge-credentials"]) => (200, r#"{"data":[]}"#.to_string()),
         // Project export: served from `<dir>/export.json` when a test staged
         // one, so prune's remote-orphan scan sees a configurable bundle list.
         ("GET", ["api", "v1", "projects", _, "export"]) => {
@@ -1885,7 +1898,17 @@ fn handle_fake_remote_push_request(
                 .map(|hash| hash.trim().to_string());
             let accepted =
                 "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string();
-            if let Some(expected) = expected {
+            let rejected_node = fs::read_to_string(dir.join("reject-node-type")).ok();
+            let reject = rejected_node.as_deref().is_some_and(|kind| {
+                body["payload"]["nodes"].as_array().is_some_and(|nodes| {
+                    nodes
+                        .iter()
+                        .any(|node| node["type"].as_str() == Some(kind.trim()))
+                })
+            });
+            if reject {
+                (503, r#"{"error":{"kind":"unavailable","message":"injected artifact publication failure"}}"#.to_string())
+            } else if let Some(expected) = expected {
                 // Compare-and-swap: accept only when the lease matches the
                 // hash this server currently holds.
                 if force && server_hash.as_deref() == Some(expected) {

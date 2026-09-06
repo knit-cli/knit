@@ -27,6 +27,8 @@ pub struct KnitProject {
     pub runtime: Option<ProjectRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<ProjectLandingPlan>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requirements: Option<ProjectRequirements>,
 }
 
 impl KnitProject {
@@ -42,8 +44,38 @@ impl KnitProject {
             commands: BTreeMap::new(),
             runtime: None,
             landing: None,
+            requirements: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRequirements {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub platforms: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tools: Vec<ProjectToolRequirement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub disk_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub memory_mib: Option<u64>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectToolRequirement {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub min_version: Option<String>,
+    #[serde(default)]
+    pub optional: bool,
+    #[serde(default, rename = "for", skip_serializing_if = "Option::is_none")]
+    pub for_: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -207,4 +239,36 @@ pub struct ProjectLandingCheckout {
 
 fn default_include_by_default() -> bool {
     true
+}
+
+#[cfg(test)]
+mod requirements_tests {
+    use super::*;
+
+    #[test]
+    fn project_requirements_roundtrip_and_match_schema() {
+        let mut project = KnitProject::new("tools".into(), "2026-09-05T00:00:00Z".into());
+        assert!(serde_json::to_value(&project)
+            .unwrap()
+            .get("requirements")
+            .is_none());
+        project.requirements = Some(serde_json::from_value(serde_json::json!({
+            "platforms": ["linux/amd64", "darwin/arm64"],
+            "tools": [{"name":"cargo", "minVersion":"1.85"}, {"name":"docker", "optional":true, "for":"runtime"}],
+            "diskMib":20480, "memoryMib":4096, "agents":["codex"], "env":["FLY_ACCESS_TOKEN"]
+        })).unwrap());
+        let value = serde_json::to_value(&project).unwrap();
+        let schema: serde_json::Value =
+            serde_json::from_str(include_str!("../../schemas/project.schema.json")).unwrap();
+        let validator = jsonschema::validator_for(&schema).unwrap();
+        let errors: Vec<_> = validator
+            .iter_errors(&value)
+            .map(|e| e.to_string())
+            .collect();
+        assert!(errors.is_empty(), "{errors:?}");
+        let decoded: KnitProject = serde_json::from_value(value).unwrap();
+        let requirements = decoded.requirements.unwrap();
+        assert_eq!(requirements.tools[1].for_.as_deref(), Some("runtime"));
+        assert!(!requirements.tools[0].optional);
+    }
 }

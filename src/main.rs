@@ -8,11 +8,18 @@ fn main() -> Result<()> {
     // descents (serde_json parsing, directory walks) can exceed that, so the
     // entire CLI — including argument parsing — runs on a worker thread with
     // an explicit stack size to make behavior uniform across platforms.
-    std::thread::Builder::new()
+    let result = std::thread::Builder::new()
         .name("knit".to_string())
         .stack_size(16 * 1024 * 1024)
         .spawn(|| run(Cli::parse()))
         .context("failed to spawn knit worker thread")?
         .join()
-        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    if result
+        .as_ref()
+        .is_err_and(|e| e.is::<knit::commands::handoff::report::ProbeFailed>())
+    {
+        std::process::exit(2);
+    }
+    result
 }

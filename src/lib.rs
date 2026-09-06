@@ -9,6 +9,7 @@ pub mod model;
 pub mod output;
 pub mod parallel;
 pub mod paths;
+pub mod pending;
 pub mod providers;
 pub mod repo_selectors;
 pub mod retry;
@@ -31,6 +32,33 @@ pub fn run(cli: Cli) -> Result<()> {
     let bundle_context = cli.bundle.clone();
     store::set_bundle_override(cli.bundle);
     match cli.command {
+        Commands::Handoff { command } => match command {
+            cli::HandoffCommand::Out {
+                to,
+                message,
+                force,
+                json,
+            } => commands::handoff::handoff_out(to.as_deref(), message.as_deref(), force, json),
+            cli::HandoffCommand::Probe {
+                project,
+                slug,
+                workspace,
+                json,
+            } => commands::handoff::handoff_probe(
+                project.as_deref(),
+                slug.as_deref(),
+                workspace.as_deref(),
+                json,
+            ),
+            cli::HandoffCommand::In {
+                project,
+                slug,
+                workspace,
+                force,
+                json,
+            } => commands::handoff::handoff_in(&project, &slug, workspace.as_deref(), force, json),
+            cli::HandoffCommand::Status { json } => commands::handoff::handoff_status(json),
+        },
         Commands::Init { name, agents } => commands::init_project(&name, agents),
         Commands::Agents { project } => commands::refresh_agents(project.as_deref()),
         Commands::Project { command } => match command {
@@ -171,6 +199,7 @@ pub fn run(cli: Cli) -> Result<()> {
             token,
             active_bundle,
             no_worktree,
+            prefer_https,
             json,
         } => commands::clone_project_from_remote(
             &project,
@@ -180,6 +209,7 @@ pub fn run(cli: Cli) -> Result<()> {
             token.as_deref(),
             active_bundle.as_deref(),
             !no_worktree,
+            prefer_https,
             json,
         ),
         Commands::Add {

@@ -13,6 +13,7 @@ use anyhow::Result;
 
 pub fn show_status() -> Result<()> {
     let active = load_active_bundle()?;
+    crate::commands::handoff::print_location(&active.bundle);
     ensure_workspace_fallback_status_is_unambiguous(&active)?;
     let unrecorded = detect_unrecorded_changes(&active)?;
     let state = bundle_state(&active.bundle);

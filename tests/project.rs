@@ -1634,3 +1634,34 @@ fn project_schema_accepts_a_null_lane_branch() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn project_pull_imports_requirements_from_the_resolved_bundle_checkout() {
+    let root = unique_temp_dir();
+    let repo = root.join("stack");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&repo, "stack");
+    let source = serde_json::json!({"schemaVersion":"0.1","kind":"KnitProject","id":"demo","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","repos":[],"requirements":{"tools":[{"name":"node","minVersion":"20"}]}});
+    fs::write(repo.join("knit.project.json"), source.to_string()).unwrap();
+    git(&repo, ["add", "knit.project.json"]);
+    git(&repo, ["commit", "-m", "Project configuration"]);
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "stack", repo.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "requirements"]);
+    let checkout = workspace.join(".knit/worktrees/requirements/stack");
+    let mut changed = source;
+    changed["requirements"]["tools"][0]["minVersion"] = serde_json::json!("24");
+    fs::write(checkout.join("knit.project.json"), changed.to_string()).unwrap();
+    knit(&checkout, ["project", "pull", "--repo", "stack"]);
+    let saved: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(saved["requirements"]["tools"][0]["minVersion"], "24");
+    assert_eq!(saved["repos"][0]["path"], repo.to_string_lossy().as_ref());
+    fs::remove_dir_all(root).unwrap();
+}

@@ -19,6 +19,7 @@ pub fn stage_paths(
         bail!("Use either --intent-to-add or --update, not both.");
     }
     let active = load_active_bundle_for_update()?;
+    crate::commands::handoff::warn_elsewhere(&active.bundle);
     let (repos, pathspecs) = resolve_stage_targets(&active, explicit_repos, args)?;
 
     if intent_to_add && pathspecs.is_empty() {
