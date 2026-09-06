@@ -84,7 +84,7 @@ knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
 knit bundle pull <slug> [--json]
 knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
-knit bundle list [--all] [--archived] [--deleted]
+knit bundle list [--all] [--archived] [--deleted] [--json]
 knit bundle archive <bundle> [--reason <reason>] [--keep-worktrees] [--force]
 knit bundle restore <bundle>
 knit bundle delete <bundle> --force [--worktrees] [--branches] [--force-branches] [--remote-branches]
@@ -95,7 +95,7 @@ knit bundle validate
 knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
-knit status
+knit status [--json]
 knit workspace status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--mode all|git|knit] [--remote <name>] [repo-id-or-path...]
@@ -560,7 +560,7 @@ knit add --intent-to-add frontend new-file.ts
 
 `knit add` is the staging command (the standalone `knit stage` alias was removed in the CLI cleanup).
 
-`knit status` shows the resolved bundle source, ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit.
+`knit status` shows the resolved bundle source, ordinary git status, checkout mode, wrong-branch warnings for in-place repos, and unrecorded commits when a tracked branch moved outside Knit. `knit status --json` prints the same facts as one document — bundle, resolution source, state, one entry per repo, and the recorded review count — for a program that drives Knit. `knit bundle list --json` does the same for the bundle list, and gives each bundle's artifact path so a host can read the full record itself. Both are contracts: they change only deliberately. See [docs/harness.md](harness.md).
 
 `knit diff` prints the resolved bundle and source, then shows cross-repo diffs against each repo's recorded `baseSha`. It follows `git diff`: committed, staged, and unstaged tracked-file changes are shown, while untracked files are not shown until they are added to the index. Use `knit status` or `knit git status --short` to see untracked files. Use `--stat` for a compact summary, or pass repo ids/paths to limit the output:
 
