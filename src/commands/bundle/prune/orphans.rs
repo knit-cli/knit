@@ -7,14 +7,14 @@ use super::assess::{
     path_pending_changes, publication_state_is_closed, publication_state_is_merged, PruneCache,
 };
 use super::print_prune_warning;
-use crate::git::{git_output, is_git_worktree};
+use crate::commands::clean::remove_git_worktree_from_self;
+use crate::git::is_git_worktree;
 use crate::model::{ChangeGroup, KnitConfig};
 use crate::output as out;
 use crate::providers;
 use crate::store::bundle_exists;
 use anyhow::{Context, Result};
 use std::collections::BTreeSet;
-use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -331,16 +331,6 @@ fn collect_git_worktrees(path: &Path, worktrees: &mut Vec<PathBuf>) -> Result<()
     for entry in fs::read_dir(path).with_context(|| format!("failed to read {}", path.display()))? {
         collect_git_worktrees(&entry?.path(), worktrees)?;
     }
-    Ok(())
-}
-
-fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
-    let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
-    if force {
-        args.push(OsString::from("--force"));
-    }
-    args.push(worktree.as_os_str().to_os_string());
-    git_output(worktree, args)?;
     Ok(())
 }
 

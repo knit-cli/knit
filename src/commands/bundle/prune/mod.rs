@@ -93,6 +93,11 @@ pub fn prune_merged_bundles(
     let mut candidates = Vec::new();
     let mut blocked_untracked = Vec::new();
     let mut kept_finished = 0usize;
+    // Finished bundles whose generated checkouts are still on disk: archived
+    // with `--keep-worktrees`, a landing whose cleanup was interrupted, or a
+    // removal that failed. Their artifacts are history and stay, but the
+    // checkouts are residue that nothing else reports.
+    let mut finished_with_worktrees: Vec<&PruneAssessment> = Vec::new();
     for assessment in &assessments {
         // Landed and archived bundles are finished work, not dead work: their
         // artifacts are the audit record of what shipped. Only `--archived`
@@ -105,6 +110,9 @@ pub fn prune_merged_bundles(
             )
         {
             kept_finished += 1;
+            if root.join(".knit/worktrees").join(&assessment.id).is_dir() {
+                finished_with_worktrees.push(assessment);
+            }
             continue;
         }
         if let Some(reason) = assessment.candidate_reason(untracked) {
@@ -145,6 +153,7 @@ pub fn prune_merged_bundles(
         && blocked_untracked.is_empty()
         && blocked_orphan_worktrees.is_empty()
         && remote_orphans.is_empty()
+        && finished_with_worktrees.is_empty()
     {
         println!(
             "{}",
@@ -176,6 +185,22 @@ pub fn prune_merged_bundles(
                 out::node(&assessment.id),
                 assessment.repo_count,
                 out::muted(format!("{}, only untracked files", assessment.pr_basis()))
+            );
+        }
+    }
+    if !finished_with_worktrees.is_empty() {
+        println!(
+            "{}",
+            out::heading(
+                "Finished bundles with worktrees still on disk (use --worktrees to clean):"
+            )
+        );
+        for assessment in &finished_with_worktrees {
+            println!(
+                "  {} {} repo(s), {}",
+                out::node(&assessment.id),
+                assessment.repo_count,
+                out::path(root.join(".knit/worktrees").join(&assessment.id).display())
             );
         }
     }
@@ -240,7 +265,8 @@ pub fn prune_merged_bundles(
                     untracked,
                     worktrees
                         || !orphan_worktrees.is_empty()
-                        || !blocked_orphan_worktrees.is_empty(),
+                        || !blocked_orphan_worktrees.is_empty()
+                        || !finished_with_worktrees.is_empty(),
                     force || !blocked_orphan_worktrees.is_empty(),
                     branches,
                     force_branches,
@@ -277,10 +303,24 @@ pub fn prune_merged_bundles(
         pruned += 1;
     }
     let mut removed_orphans = 0usize;
+    let mut cleaned_finished = 0usize;
     if worktrees {
         for orphan in orphan_worktrees {
             remove_orphan_worktree(&orphan, force)?;
             removed_orphans += 1;
+        }
+        for assessment in &finished_with_worktrees {
+            match crate::commands::clean::clean_finished_bundle_worktrees(
+                &root,
+                &assessment.id,
+                force,
+            ) {
+                Ok(_) => cleaned_finished += 1,
+                Err(err) => print_prune_warning(format!(
+                    "{}: could not clean finished bundle worktrees: {err:#}",
+                    assessment.id
+                )),
+            }
         }
     }
     // Remote orphan records are archived, never deleted: a record whose local
@@ -322,6 +362,13 @@ pub fn prune_merged_bundles(
             "{} {} orphan worktree dir(s)",
             out::heading("Removed:"),
             removed_orphans
+        );
+    }
+    if cleaned_finished > 0 {
+        println!(
+            "{} worktrees of {} finished bundle(s)",
+            out::heading("Cleaned:"),
+            cleaned_finished
         );
     }
     if removed_remote > 0 {

@@ -1251,3 +1251,135 @@ fn bundle_prune_refresh_warns_once_per_forge_on_auth_failure() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn clean_archived_prunes_stale_registrations_and_sweeps_container_leftovers() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "residue sweep"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let container = workspace.join(".knit/worktrees/residue-sweep");
+    let feature = container.join("backend");
+    assert!(feature.exists());
+    knit(
+        &workspace,
+        ["bundle", "archive", "residue-sweep", "--keep-worktrees"],
+    );
+
+    // The checkout is deleted by hand, leaving git with a stale worktree
+    // registration, and an agent left notes next to it.
+    fs::remove_dir_all(&feature).unwrap();
+    assert!(git(&backend, ["worktree", "list", "--porcelain"]).contains("prunable"));
+    let notes = container.join("notes");
+    fs::create_dir_all(&notes).unwrap();
+    fs::write(notes.join("PORT-REPORT.md"), "findings\n").unwrap();
+
+    // Without --force the stale registration is pruned but the stray files
+    // are preserved and named.
+    let cleaned = knit(&workspace, ["clean", "--archived", "--worktrees"]);
+    assert!(cleaned.contains("worktree already missing"));
+    assert!(cleaned.contains("stray files preserved"));
+    assert!(cleaned.contains("notes"));
+    assert!(!git(&backend, ["worktree", "list", "--porcelain"]).contains("prunable"));
+    assert!(notes.join("PORT-REPORT.md").exists());
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/residue-sweep.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert!(bundle["repos"][0]["worktreePath"].is_null());
+
+    // --force discards the stray files and the container with them.
+    let forced = knit(
+        &workspace,
+        ["clean", "--archived", "--worktrees", "--force"],
+    );
+    assert!(forced.contains("removed stray files"));
+    assert!(!container.exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clean_sweeps_leftover_checkout_of_a_repo_the_bundle_no_longer_tracks() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "untracked leftover"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let container = workspace.join(".knit/worktrees/untracked-leftover");
+    let feature = container.join("backend");
+    assert!(feature.exists());
+
+    // Drop the repo from the artifact while its checkout survives on disk,
+    // the shape an interrupted `bundle remove` or a hand-edited artifact
+    // leaves behind.
+    let artifact = workspace.join(".knit/bundles/untracked-leftover.bundle.json");
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    bundle["repos"] = serde_json::json!([]);
+    fs::write(&artifact, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+
+    let cleaned = knit(&workspace, ["clean", "--worktrees"]);
+    assert!(cleaned.contains("removed leftover worktree"));
+    assert!(!feature.exists());
+    assert!(!container.exists());
+    assert!(!git(&backend, ["worktree", "list", "--porcelain"]).contains("prunable"));
+    assert!(
+        git(&backend, ["branch", "--list", "knit/untracked-leftover"])
+            .contains("knit/untracked-leftover")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn prune_lists_and_cleans_finished_bundles_with_worktrees_on_disk() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "kept checkout"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let container = workspace.join(".knit/worktrees/kept-checkout");
+    assert!(container.join("backend").exists());
+    knit(
+        &workspace,
+        ["bundle", "archive", "kept-checkout", "--keep-worktrees"],
+    );
+
+    // The scan names the residue and points at --worktrees, without
+    // touching the finished artifact.
+    let scan = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(scan.contains("Finished bundles with worktrees still on disk"));
+    assert!(scan.contains("kept-checkout"));
+    assert!(scan.contains("--worktrees"));
+    assert!(container.join("backend").exists());
+
+    let applied = knit(
+        &workspace,
+        ["bundle", "prune", "--no-refresh", "--apply", "--worktrees"],
+    );
+    assert!(applied.contains("Cleaned: worktrees of 1 finished bundle(s)"));
+    assert!(!container.exists());
+    assert!(workspace
+        .join(".knit/bundles/kept-checkout.bundle.json")
+        .exists());
+    assert!(knit(&workspace, ["bundle", "list", "--archived"]).contains("kept-checkout"));
+    assert!(
+        git(&backend, ["branch", "--list", "knit/kept-checkout"]).contains("knit/kept-checkout")
+    );
+
+    // A second scan has nothing left to report.
+    let rescan = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(!rescan.contains("Finished bundles with worktrees still on disk"));
+
+    fs::remove_dir_all(root).unwrap();
+}
