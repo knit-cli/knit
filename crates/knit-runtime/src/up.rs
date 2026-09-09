@@ -4,6 +4,7 @@
 //! environment contract, and database resolution.
 
 use crate::config::{DatabaseMode, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::engine::build_engine_override;
 use crate::envfile;
 use crate::plan::StackPlan;
 use crate::state::{
@@ -12,7 +13,7 @@ use crate::state::{
 };
 use crate::support::{env_var_suffix, out, read_json, rev_parse, write_json};
 use crate::transform::{self, ServicePort};
-use crate::RuntimeContext;
+use crate::{EngineView, RuntimeContext};
 use anyhow::{bail, Context, Result};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
@@ -373,6 +374,7 @@ pub(crate) fn run_up_stacks(
         for note in &env_notes {
             println!("{note}");
         }
+        let override_file = write_engine_override(ctx, plan, &entry.prepared, &run_dir, multi)?;
         for port in &entry.ports {
             match port.source_host.filter(|source| *source != port.host) {
                 Some(source) => {
@@ -403,11 +405,10 @@ pub(crate) fn run_up_stacks(
             repo: plan.repo.id.clone(),
             project_name: plan.project_name.clone(),
             mode: plan.mode,
-            compose_file: compose_file
-                .strip_prefix(&ctx.root)
-                .unwrap_or(&compose_file)
-                .display()
-                .to_string(),
+            compose_file: workspace_relative(&ctx.root, &compose_file),
+            override_file: override_file
+                .as_deref()
+                .map(|path| workspace_relative(&ctx.root, path)),
             ports: entry.ports.clone(),
             profiles,
             env,
@@ -441,6 +442,12 @@ pub(crate) fn run_up_stacks(
         let mut command = Command::new("docker");
         command.args(["compose", "-f"]);
         command.arg(ctx.root.join(&stack.compose_file));
+        // Second `-f`: compose merges it over the stack's file, replacing
+        // service volumes by target.
+        if let Some(override_file) = &stack.override_file {
+            command.arg("-f");
+            command.arg(ctx.root.join(override_file));
+        }
         command.args(["-p", &plan.project_name]);
         for profile in &stack.profiles {
             command.args(["--profile", profile]);
@@ -514,6 +521,85 @@ pub(crate) fn run_up_stacks(
     };
     write_json(&run_dir.join("state.json"), &state)?;
     Ok(())
+}
+
+fn workspace_relative(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .display()
+        .to_string()
+}
+
+/// Where a stack's engine override compose file goes, or `None` when there is
+/// no engine view — the single decision that keeps a plain `up` byte-identical.
+pub(crate) fn engine_override_path(
+    engine: Option<&EngineView>,
+    run_dir: &Path,
+    multi: bool,
+    repo_id: &str,
+) -> Option<PathBuf> {
+    engine?;
+    Some(if multi {
+        run_dir.join(format!("docker-compose.{repo_id}.engine.yml"))
+    } else {
+        run_dir.join("docker-compose.engine.yml")
+    })
+}
+
+/// Write the stack's engine override (see [`crate::engine`]) and report it.
+/// Transform stacks override the config that was just generated; contract
+/// stacks resolve their compose file with the run's environment, since
+/// `${KNIT_*}` references have to interpolate before services can be
+/// enumerated. Without an engine view nothing is written and nothing prints.
+fn write_engine_override(
+    ctx: &RuntimeContext,
+    plan: &StackPlan,
+    prepared: &Prepared,
+    run_dir: &Path,
+    multi: bool,
+) -> Result<Option<PathBuf>> {
+    let Some(engine) = ctx.engine.as_ref() else {
+        return Ok(None);
+    };
+    let Some(path) = engine_override_path(Some(engine), run_dir, multi, &plan.repo.id) else {
+        return Ok(None);
+    };
+
+    let resolved = match prepared {
+        Prepared::Transform { config, .. } => config.clone(),
+        Prepared::Contract { env, .. } => {
+            transform::resolve_compose_config_with_env(&plan.compose, &plan.checkout, env)?
+        }
+    };
+    let (document, left_alone) = build_engine_override(&resolved, engine, &ctx.bundle_id)?;
+
+    // JSON is valid YAML, so the override stays a compose file.
+    fs::write(&path, serde_json::to_string_pretty(&document)?)
+        .context("failed to write engine override compose file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+    }
+
+    println!(
+        "{}",
+        out::muted(format!(
+            "Engine: {} at {} (override {})",
+            engine.volume,
+            engine.mount.display(),
+            path.display()
+        ))
+    );
+    if !left_alone.is_empty() {
+        println!(
+            "{} bind mounts outside {} are left as-is and will not resolve on the engine: {}",
+            out::warn("Warning:"),
+            engine.mount.display(),
+            left_alone.join(", ")
+        );
+    }
+    Ok(Some(path))
 }
 
 /// Build the `KNIT_*` environment contract for a runtime: bundle identity,
@@ -993,6 +1079,7 @@ mod tests {
                 checkout: Some(root.join("knithub")),
             }],
             extra_checkouts: vec![("gloss-web-ui".to_string(), root.join("gloss-web-ui"))],
+            engine: None,
         };
 
         let database = ResolvedDatabase {
@@ -1030,6 +1117,29 @@ mod tests {
         assert_eq!(env.get("KNIT_REV_KNITHUB").unwrap(), "unknown");
 
         std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn engine_override_path_is_none_without_an_engine_view() {
+        let run_dir = Path::new("/tmp/knit-run");
+
+        // No engine view: `up` writes no override and passes no second `-f`.
+        assert_eq!(engine_override_path(None, run_dir, false, "knithub"), None);
+        assert_eq!(engine_override_path(None, run_dir, true, "knithub"), None);
+
+        let engine = EngineView {
+            volume: "svartal-ws-1".to_string(),
+            mount: PathBuf::from("/var/lib/svartal"),
+            owner: None,
+        };
+        assert_eq!(
+            engine_override_path(Some(&engine), run_dir, false, "knithub"),
+            Some(run_dir.join("docker-compose.engine.yml"))
+        );
+        assert_eq!(
+            engine_override_path(Some(&engine), run_dir, true, "knithub"),
+            Some(run_dir.join("docker-compose.knithub.engine.yml"))
+        );
     }
 
     #[test]

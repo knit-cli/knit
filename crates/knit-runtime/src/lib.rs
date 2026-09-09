@@ -12,6 +12,7 @@
 
 pub mod config;
 mod eject;
+mod engine;
 mod envfile;
 mod plan;
 mod state;
@@ -37,6 +38,24 @@ pub struct RuntimeContext {
     /// Additional repo checkouts exposed through the `KNIT_CHECKOUT_*` env
     /// contract (project repos that are not in the bundle).
     pub extra_checkouts: Vec<(String, PathBuf)>,
+    /// How the docker engine sees this process's filesystem, when the engine
+    /// is not the one this process runs on ("docker outside of docker"). Set,
+    /// `up` writes a compose override per stack that turns bind mounts under
+    /// [`EngineView::mount`] into subpaths of [`EngineView::volume`], adds a
+    /// `host.docker.internal` host entry, and labels containers with the
+    /// bundle and owner. Unset, nothing about a run changes.
+    pub engine: Option<EngineView>,
+}
+
+/// The docker engine's view of this workspace: the named volume it knows the
+/// workspace as, where this process sees that volume, and an opaque owner id
+/// recorded as a container label so an external supervisor can find (and
+/// clean up) everything a workspace started.
+#[derive(Clone, Debug)]
+pub struct EngineView {
+    pub volume: String,
+    pub mount: PathBuf,
+    pub owner: Option<String>,
 }
 
 #[derive(Clone)]
@@ -95,6 +114,12 @@ pub fn purge(ctx: &RuntimeContext) -> Result<()> {
 /// Report live service states, ports, and URLs for the bundle's stacks.
 pub fn status(ctx: &RuntimeContext) -> Result<()> {
     state::run_status(ctx)
+}
+
+/// The same report as [`status`], as one JSON object on stdout and nothing
+/// else — the machine-readable surface remote callers parse.
+pub fn status_json(ctx: &RuntimeContext) -> Result<()> {
+    state::run_status_json(ctx)
 }
 
 /// Whether this bundle has recorded runtime run state.

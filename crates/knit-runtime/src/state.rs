@@ -233,6 +233,181 @@ pub(crate) fn run_status(ctx: &RuntimeContext) -> Result<()> {
     Ok(())
 }
 
+/// `knit run status --json`: the same facts as the human report, as one JSON
+/// object on stdout and nothing else.
+pub(crate) fn run_status_json(ctx: &RuntimeContext) -> Result<()> {
+    let state = load_runtime_state(ctx).ok();
+    let projects: Vec<String> = match &state {
+        Some(state) => recorded_stacks(&ctx.bundle_id, state)
+            .into_iter()
+            .map(|stack| stack.project_name)
+            .collect(),
+        // No state (an `up` that failed before recording, or a run started by
+        // an older knit): report whatever the derived project names still own.
+        None => derived_project_names(ctx),
+    };
+    let collected: Vec<(String, Vec<(String, String)>)> = projects
+        .into_iter()
+        .map(|project_name| {
+            let services = compose_service_states(&project_name);
+            (project_name, services)
+        })
+        .collect();
+
+    let report = build_status_json(&ctx.bundle_id, state.as_ref(), &collected);
+    println!("{}", serde_json::to_string_pretty(&report)?);
+    Ok(())
+}
+
+/// The compose projects a bundle's run could be using without recorded state:
+/// the legacy single-stack name plus the per-repo names multi-stack runs
+/// derive. Mirrors what `run_down` sweeps.
+fn derived_project_names(ctx: &RuntimeContext) -> Vec<String> {
+    let legacy = compose_project_name(&ctx.bundle_id);
+    let mut names = vec![legacy.clone()];
+    names.extend(
+        ctx.repos
+            .iter()
+            .map(|repo| format!("{legacy}--{}", repo.id)),
+    );
+    names
+}
+
+/// The stacks a run state describes. State written before multi-stack runs
+/// existed only has the top-level fields, which describe one stack under the
+/// legacy project name.
+fn recorded_stacks(bundle_id: &str, state: &RuntimeRunState) -> Vec<RuntimeStackState> {
+    if !state.stacks.is_empty() {
+        return state.stacks.clone();
+    }
+    vec![RuntimeStackState {
+        repo: state.stack_repo.clone(),
+        project_name: compose_project_name(bundle_id),
+        mode: state.mode,
+        compose_file: state.compose_file.clone(),
+        override_file: None,
+        ports: state.ports.clone(),
+        profiles: state.profiles.clone(),
+        env: state.env.clone(),
+        database: state.database.clone(),
+    }]
+}
+
+/// Assemble the JSON report from the run state and the `(project name,
+/// services)` pairs already collected from docker, so the serialization is
+/// testable on its own.
+fn build_status_json(
+    bundle_id: &str,
+    state: Option<&RuntimeRunState>,
+    collected: &[(String, Vec<(String, String)>)],
+) -> StatusReport {
+    let services_of = |project_name: &str| -> Vec<StatusService> {
+        collected
+            .iter()
+            .find(|(name, _)| name == project_name)
+            .map(|(_, services)| {
+                services
+                    .iter()
+                    .map(|(name, state)| StatusService {
+                        name: name.clone(),
+                        state: state.clone(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+
+    let stacks: Vec<StatusStack> = match state {
+        Some(state) => recorded_stacks(bundle_id, state)
+            .into_iter()
+            .map(|stack| StatusStack {
+                services: services_of(&stack.project_name),
+                repo: Some(stack.repo),
+                project_name: stack.project_name,
+                mode: Some(stack.mode),
+                compose_file: Some(stack.compose_file),
+                override_file: stack.override_file,
+                ports: stack.ports,
+                database: stack.database,
+            })
+            .collect(),
+        // Without state a project is only worth reporting when it still owns
+        // containers; the derived names are guesses.
+        None => collected
+            .iter()
+            .filter(|(_, services)| !services.is_empty())
+            .map(|(project_name, _)| StatusStack {
+                repo: None,
+                project_name: project_name.clone(),
+                mode: None,
+                compose_file: None,
+                override_file: None,
+                services: services_of(project_name),
+                ports: Vec::new(),
+                database: None,
+            })
+            .collect(),
+    };
+
+    StatusReport {
+        bundle_id: bundle_id.to_string(),
+        recorded: state.is_some(),
+        running: stacks.iter().any(|stack| {
+            stack
+                .services
+                .iter()
+                .any(|service| service.state == "running")
+        }),
+        profile_path: state.and_then(|state| state.profile_path.clone()),
+        frontend_port: state.and_then(|state| frontend_port(&state.ports)),
+        started_at: state.map(|state| state.started_at.clone()),
+        stacks,
+    }
+}
+
+/// `knit run status --json` output. Keys are camelCase and match
+/// `state.json`; optional facts are omitted rather than emitted as null, so a
+/// consumer can tell "absent" from "recorded as empty". `repo` is the one
+/// exception: it is explicitly null for a stack resolved by project name
+/// alone.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct StatusReport {
+    bundle_id: String,
+    recorded: bool,
+    running: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    profile_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    frontend_port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    started_at: Option<String>,
+    stacks: Vec<StatusStack>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StatusStack {
+    repo: Option<String>,
+    project_name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<RuntimeMode>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    compose_file: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    override_file: Option<String>,
+    services: Vec<StatusService>,
+    ports: Vec<ServicePort>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    database: Option<StateDatabase>,
+}
+
+#[derive(Debug, Serialize)]
+struct StatusService {
+    name: String,
+    state: String,
+}
+
 /// The isolated Compose project name a bundle's runtime runs under, so two
 /// bundles can bring the same stack up side by side.
 pub(crate) fn compose_project_name(bundle_id: &str) -> String {
@@ -358,6 +533,10 @@ pub(crate) struct RuntimeStackState {
     #[serde(default)]
     pub(crate) mode: RuntimeMode,
     pub(crate) compose_file: String,
+    /// Workspace-relative path of the engine override compose file this stack
+    /// ran with, when the runtime had an [`crate::EngineView`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) override_file: Option<String>,
     #[serde(default)]
     pub(crate) ports: Vec<ServicePort>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -399,6 +578,112 @@ mod tests {
                 ("frontend".to_string(), "running".to_string()),
                 ("backend".to_string(), "running".to_string())
             ]
+        );
+    }
+
+    fn recorded_state() -> RuntimeRunState {
+        let ports = vec![ServicePort {
+            service: "backend".into(),
+            host: 4011,
+            container: Some(4000),
+            source_host: Some(4001),
+        }];
+        RuntimeRunState {
+            bundle_id: "my-bundle".into(),
+            stack_repo: "knithub".into(),
+            mode: RuntimeMode::Contract,
+            ports: ports.clone(),
+            database: None,
+            compose_file: ".knit/runtime-runs/my-bundle/docker-compose.yml".into(),
+            profiles: Vec::new(),
+            env: BTreeMap::new(),
+            profile_path: Some("/app/profile".into()),
+            started_at: "2026-09-09T10:00:00Z".into(),
+            stacks: vec![RuntimeStackState {
+                repo: "knithub".into(),
+                project_name: "knit-run-my-bundle".into(),
+                mode: RuntimeMode::Contract,
+                compose_file: ".knit/runtime-runs/my-bundle/docker-compose.yml".into(),
+                override_file: Some(
+                    ".knit/runtime-runs/my-bundle/docker-compose.engine.yml".into(),
+                ),
+                ports,
+                profiles: Vec::new(),
+                env: BTreeMap::new(),
+                database: Some(StateDatabase {
+                    mode: DatabaseMode::Shared,
+                    port: 5436,
+                    name: "knithub_dev".into(),
+                }),
+            }],
+        }
+    }
+
+    #[test]
+    fn status_json_reports_the_documented_shape_for_a_recorded_run() {
+        let state = recorded_state();
+        let collected = vec![(
+            "knit-run-my-bundle".to_string(),
+            vec![("backend".to_string(), "running".to_string())],
+        )];
+
+        let report = build_status_json("my-bundle", Some(&state), &collected);
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "bundleId": "my-bundle",
+                "recorded": true,
+                "running": true,
+                "profilePath": "/app/profile",
+                "frontendPort": 4011,
+                "startedAt": "2026-09-09T10:00:00Z",
+                "stacks": [{
+                    "repo": "knithub",
+                    "projectName": "knit-run-my-bundle",
+                    "mode": "contract",
+                    "composeFile": ".knit/runtime-runs/my-bundle/docker-compose.yml",
+                    "overrideFile": ".knit/runtime-runs/my-bundle/docker-compose.engine.yml",
+                    "services": [{ "name": "backend", "state": "running" }],
+                    "ports": [{
+                        "service": "backend",
+                        "host": 4011,
+                        "container": 4000,
+                        "sourceHost": 4001
+                    }],
+                    "database": { "mode": "shared", "port": 5436, "name": "knithub_dev" }
+                }]
+            })
+        );
+    }
+
+    #[test]
+    fn status_json_lists_only_projects_with_containers_when_no_state_was_recorded() {
+        let collected = vec![
+            ("knit-run-my-bundle".to_string(), Vec::new()),
+            (
+                "knit-run-my-bundle--knithub".to_string(),
+                vec![("backend".to_string(), "exited".to_string())],
+            ),
+        ];
+
+        let report = build_status_json("my-bundle", None, &collected);
+        let value = serde_json::to_value(&report).unwrap();
+
+        assert_eq!(
+            value,
+            serde_json::json!({
+                "bundleId": "my-bundle",
+                "recorded": false,
+                "running": false,
+                "stacks": [{
+                    "repo": null,
+                    "projectName": "knit-run-my-bundle--knithub",
+                    "services": [{ "name": "backend", "state": "exited" }],
+                    "ports": []
+                }]
+            })
         );
     }
 

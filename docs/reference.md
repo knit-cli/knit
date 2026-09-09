@@ -104,7 +104,7 @@ knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--featu
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
-knit run up|status                             # bundle runtime stack
+knit run up|status [--json]                    # bundle runtime stack
 knit run down [--purge]
 knit run eject [--force]
 knit run --list
@@ -226,6 +226,18 @@ Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss
 In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts.
 
 In transform mode the lifted shape brings its own database service by default, with a fresh project-scoped volume per bundle — isolated and empty. To test bundles against real dev data instead, set `database.mode: "shared"` and name the compose service that IS the database in `database.service`: the service is stripped from every lifted stack that has it, and references to it in environments and build args are rewired to `host`/`port` — connection URLs (`@db:5432` → `@host:port`), values exactly equal to the service name (split HOST vars), and values equal to `containerPort` (default 5432) whose key mentions PORT. Reachability is checked before anything starts. Note the tradeoff: bundle code, including its migrations, then runs against the shared dev database.
+
+**Docker outside of docker.** When knit runs in a container whose docker CLI talks to an engine outside it — a Svartal workspace, where the workspace filesystem is a named volume the engine knows under a different name — three environment variables tell the runtime how that engine sees it:
+
+| Variable | Meaning |
+| --- | --- |
+| `KNIT_RUNTIME_ENGINE_VOLUME` | The named volume the engine knows this workspace as. Setting it turns the feature on. |
+| `KNIT_RUNTIME_ENGINE_VOLUME_MOUNT` | Where this process sees that volume. Absolute; defaults to `/var/lib/svartal`. |
+| `KNIT_RUNTIME_OWNER` | Opaque owner id, recorded as a container label. Optional. |
+
+With the volume set, `knit run up` writes one override compose file per stack into the run directory (`docker-compose.engine.yml`, or `docker-compose.<repo>.engine.yml` for multi-stack runs) and passes it as a second `-f` after the stack's compose file. For every service of the resolved config the override adds `extra_hosts: ["host.docker.internal:host-gateway"]`, the labels `io.knit.runtime.bundle` (and `io.knit.runtime.owner` when set), and replaces every bind mount whose source lies under the mount path with a subpath mount of the volume at the same target — Compose merges service volumes by target, so the bind is replaced rather than added to. Binds outside the mount are left alone and named in a warning; build contexts are untouched, since the compose client sends them itself. The override path is recorded on the stack state as `overrideFile`. With `KNIT_RUNTIME_ENGINE_VOLUME` unset nothing changes: no override file, no labels, identical generated files and docker commands.
+
+`knit run status --json` prints one JSON object on stdout and nothing else — `bundleId`, `recorded`, `running`, `profilePath`, `frontendPort`, `startedAt`, and a `stacks` array of `{repo, projectName, mode, composeFile, overrideFile, services, ports, database}` — the same facts as the human report, with the camelCase field names of `state.json` and optional fields omitted when absent. Without recorded run state, `recorded` is false and `stacks` lists the compose projects that still own containers, with `repo: null`. It is the surface a remote caller parses; `--json` is rejected for the other `knit run` verbs.
 
 ### Checks
 

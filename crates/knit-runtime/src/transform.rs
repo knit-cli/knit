@@ -27,6 +27,7 @@
 
 use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// One published port of the transformed stack.
@@ -549,7 +550,19 @@ fn relative_between(base: &Path, target: &Path) -> Option<String> {
 /// Resolve the compose file via `docker compose config --format json`,
 /// anchored at the source repo so relative paths resolve in source-space.
 pub fn resolve_compose_config(compose_file: &Path, project_directory: &Path) -> Result<Value> {
-    run_compose_config(compose_file, project_directory, false)
+    run_compose_config(compose_file, project_directory, false, None)
+}
+
+/// Like [`resolve_compose_config`], but with an environment injected — the
+/// only way to resolve a contract-mode compose file, whose `${KNIT_*}`
+/// references would otherwise interpolate to nothing. The project name comes
+/// from the same environment so resolved names match the run.
+pub fn resolve_compose_config_with_env(
+    compose_file: &Path,
+    project_directory: &Path,
+    env: &BTreeMap<String, String>,
+) -> Result<Value> {
+    run_compose_config(compose_file, project_directory, false, Some(env))
 }
 
 /// Like [`resolve_compose_config`], but with `--no-env-resolution`, so
@@ -560,21 +573,28 @@ pub fn resolve_compose_config_no_env(
     compose_file: &Path,
     project_directory: &Path,
 ) -> Result<Value> {
-    run_compose_config(compose_file, project_directory, true)
+    run_compose_config(compose_file, project_directory, true, None)
 }
 
 fn run_compose_config(
     compose_file: &Path,
     project_directory: &Path,
     no_env_resolution: bool,
+    env: Option<&BTreeMap<String, String>>,
 ) -> Result<Value> {
     let mut command = std::process::Command::new("docker");
     command
         .args(["compose", "-f"])
         .arg(compose_file)
         .arg("--project-directory")
-        .arg(project_directory)
-        .args(["config", "--format", "json"]);
+        .arg(project_directory);
+    if let Some(env) = env {
+        if let Some(project_name) = env.get("COMPOSE_PROJECT_NAME") {
+            command.args(["--project-name", project_name]);
+        }
+        command.envs(env);
+    }
+    command.args(["config", "--format", "json"]);
     if no_env_resolution {
         command.arg("--no-env-resolution");
     }

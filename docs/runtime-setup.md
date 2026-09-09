@@ -17,7 +17,7 @@ you're done:
 ```sh
 knit bundle "my feature" --repo api --cd
 knit run up        # lift the stack: worktree code, stable ports, isolated volumes
-knit run status    # live service states, ports, URLs
+knit run status    # live service states, ports, URLs (--json for one JSON object)
 knit run down      # stop containers; keep restart data
 knit run down --purge  # also remove bundle-owned volumes and local images
 ```
