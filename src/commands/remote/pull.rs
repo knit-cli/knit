@@ -278,7 +278,7 @@ fn reconcile_project_repositories(
     // A scoped workspace (`knit clone --view`) only takes membership repos its
     // scope view resolves to; the rest stay on the remote until the view is
     // extended. Out-of-scope repos are neither added nor treated as removals.
-    let scope = workspace_scope(root, membership)?;
+    let scope = workspace_scope(root, &project.id, membership)?;
     let mut skipped_by_scope = Vec::new();
     let planned_adds: Vec<RemoteExportRepository> = membership
         .repos
@@ -480,13 +480,16 @@ pub(super) struct WorkspaceScope {
 /// what a scoped workspace exists to avoid.
 pub(super) fn workspace_scope(
     root: &Path,
+    local_project_id: &str,
     membership: &KnitProject,
 ) -> Result<Option<WorkspaceScope>> {
     let config = crate::store::load_config(root)?;
     let Some(view_name) = config.scope_view else {
         return Ok(None);
     };
-    let views = crate::store::load_views(root, &membership.id)?;
+    // Views are keyed by the local (slugified) project id, which is not
+    // always the id the remote membership carries.
+    let views = crate::store::load_views(root, local_project_id)?;
     let Some(view) = views.views.get(&view_name) else {
         println!(
             "{} scope view {} is not saved locally; no project repos will be added until it is restored (`knit sync pull --views`) or recreated (`knit view save {} --base none --include <repo>...`).",
@@ -514,6 +517,37 @@ pub(super) fn workspace_scope(
         view_name,
         repo_ids,
     }))
+}
+
+/// Remote artifacts a sweep skipped because their bundle touches repos not
+/// cloned here, keyed by bundle slug. The slim export does not name a
+/// bundle's repos, so without this the same artifact would be downloaded on
+/// every sync just to be skipped again — and a scoped workspace is exactly
+/// where several such bundles live.
+type SkippedArtifacts = BTreeMap<String, String>;
+
+fn skipped_artifacts_path(root: &Path) -> std::path::PathBuf {
+    root.join(".knit/sync-skipped.json")
+}
+
+fn load_skipped_artifacts(root: &Path) -> SkippedArtifacts {
+    let path = skipped_artifacts_path(root);
+    if !path.exists() {
+        return SkippedArtifacts::new();
+    }
+    read_json(&path).unwrap_or_default()
+}
+
+fn save_skipped_artifacts(root: &Path, skipped: &SkippedArtifacts) -> Result<()> {
+    let path = skipped_artifacts_path(root);
+    if skipped.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    write_json(&path, skipped)
 }
 
 /// Repo ids `bundle` references that the local project does not carry.
@@ -1069,6 +1103,7 @@ pub fn fetch_bundles_from_remote(
 
     let mut fetched_count = 0;
     let mut quarantined_count = 0;
+    let mut skipped_artifacts = load_skipped_artifacts(root);
     for remote_bundle in export.bundles {
         if remote_bundle.lifecycle_state == "deleted" {
             continue;
@@ -1134,6 +1169,18 @@ pub fn fetch_bundles_from_remote(
             }
         }
 
+        // Skipped last time for touching repos not cloned here, and unchanged
+        // since: nothing to download, the answer would be the same.
+        if skipped_artifacts.get(&remote_bundle.slug) == Some(&artifact.artifact_hash) {
+            println!(
+                "  {} {} [{}]",
+                out::node(&remote_bundle.slug),
+                out::muted(&remote_bundle.lifecycle_state),
+                out::muted("skipped: touches repos not cloned here (unchanged)")
+            );
+            continue;
+        }
+
         let (mut bundle, artifact_hash) =
             resolve_export_bundle_payload(&remote, Some(&token), &remote_bundle)
                 .with_context(|| format!("failed to fetch bundle `{}`", remote_bundle.slug))?;
@@ -1155,8 +1202,10 @@ pub fn fetch_bundles_from_remote(
                     missing.join(", ")
                 ))
             );
+            skipped_artifacts.insert(remote_bundle.slug.clone(), artifact_hash);
             continue;
         }
+        skipped_artifacts.remove(&remote_bundle.slug);
 
         let status;
         if let Some(mut local) = local {
@@ -1255,6 +1304,7 @@ pub fn fetch_bundles_from_remote(
             ))
         );
     }
+    save_skipped_artifacts(root, &skipped_artifacts)?;
     if fetched_count > 0 {
         println!(
             "{} {} bundle(s) from {}",

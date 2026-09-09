@@ -43,7 +43,8 @@ pub(super) fn build_default_plan(
         .into_iter()
         .filter(|repo| changed_repo_ids.contains(&repo.id))
         .collect::<Vec<_>>();
-    let lane = resolve_lane(project.as_ref(), landing, lane_name)?;
+    let scoped = workspace_is_scoped(active);
+    let lane = resolve_lane(project.as_ref(), landing, lane_name, scoped)?;
     let (destinations, lane_absent) =
         resolve_destinations(&scope, lane_name, lane, target_branch, active)?;
     if let Some(lane_name) = lane_name {
@@ -519,10 +520,21 @@ fn destinations_are_configured_bases(
 }
 
 /// Look up and validate the project lane a landing was asked for.
+/// Whether this workspace is a scoped clone (`knit clone --view`), carrying
+/// only part of the project. Shared landing config still names every repo,
+/// so validation must not read an absent repo as a typo there.
+fn workspace_is_scoped(active: &ActiveBundle) -> bool {
+    load_config(&active.root)
+        .ok()
+        .and_then(|config| config.scope_view)
+        .is_some()
+}
+
 fn resolve_lane<'a>(
     project: Option<&'a KnitProject>,
     landing: Option<&'a ProjectLandingPlan>,
     lane_name: Option<&str>,
+    scoped: bool,
 ) -> Result<Option<&'a ProjectLandingLane>> {
     let Some(lane_name) = lane_name else {
         return Ok(None);
@@ -545,11 +557,16 @@ fn resolve_lane<'a>(
             )
         }
     })?;
-    validate_lane(project, lane_name, lane)?;
+    validate_lane(project, lane_name, lane, scoped)?;
     Ok(Some(lane))
 }
 
-fn validate_lane(project: &KnitProject, lane_name: &str, lane: &ProjectLandingLane) -> Result<()> {
+fn validate_lane(
+    project: &KnitProject,
+    lane_name: &str,
+    lane: &ProjectLandingLane,
+    scoped: bool,
+) -> Result<()> {
     if lane
         .default_branch
         .as_deref()
@@ -579,7 +596,7 @@ fn validate_lane(project: &KnitProject, lane_name: &str, lane: &ProjectLandingLa
         {
             bail!("landing.lanes.{lane_name}.branches.{repo_id} must not be empty. Use null to declare `{repo_id}` absent from this lane.");
         }
-        if repo_id != "*" && !project.repos.iter().any(|repo| repo.id == *repo_id) {
+        if repo_id != "*" && !scoped && !project.repos.iter().any(|repo| repo.id == *repo_id) {
             bail!("landing lane `{lane_name}` maps unknown project repository `{repo_id}`");
         }
     }
@@ -866,11 +883,13 @@ fn append_project_deployments(
             // triggered by another repository's change has no merge of its own
             // to match against, and discarding it here would drop it silently.
             let fires_on_own_repo =
-                deployment_watches(project, deployment)?.is_some_and(|watched| {
-                    watched
-                        .iter()
-                        .all(|id| Some(id) == deployment.repo_id.as_ref())
-                });
+                deployment_watches(project, deployment, workspace_is_scoped(active))?.is_some_and(
+                    |watched| {
+                        watched
+                            .iter()
+                            .all(|id| Some(id) == deployment.repo_id.as_ref())
+                    },
+                );
             if fires_on_own_repo
                 && deployment
                     .repo_id
@@ -931,7 +950,7 @@ fn push_pending_deployment<'a>(
             deployment.id
         );
     }
-    let watched = deployment_watches(project, deployment)?;
+    let watched = deployment_watches(project, deployment, workspace_is_scoped(active))?;
     ensure_push_deployment_is_not_cross_repo(deployment, watched.as_deref())?;
     // A bundle that recorded no work at all is a deploy-only plan: there is no
     // change set to scope against, so scoping has nothing to say and the
@@ -1104,6 +1123,7 @@ fn deployment_step(
 fn deployment_watches(
     project: Option<&KnitProject>,
     deployment: &crate::model::ProjectLandingDeployment,
+    scoped: bool,
 ) -> Result<Option<Vec<String>>> {
     let Some(declared) = &deployment.when_changed else {
         return Ok(deployment.repo_id.clone().map(|repo_id| vec![repo_id]));
@@ -1131,7 +1151,7 @@ fn deployment_watches(
             deployment.id
         );
     }
-    if let Some(project) = project {
+    if let (Some(project), false) = (project, scoped) {
         for repo_id in declared.iter().filter(|repo_id| *repo_id != "*") {
             if !project.repos.iter().any(|repo| repo.id == *repo_id) {
                 bail!(

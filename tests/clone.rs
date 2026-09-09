@@ -971,3 +971,136 @@ fn remote_views_json_lists_the_users_views_outside_any_workspace() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn clone_with_repo_scope_pushes_the_scope_view_only_after_reading_remote_views() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    // The user already keeps two views on the remote; a `--repo` clone must
+    // add `scope` next to them, never replace the document.
+    fs::write(
+        fake_dir.join("views.json"),
+        serde_json::json!({
+            "data": {
+                "defaultView": "backend",
+                "views": {
+                    "backend": {"exclude": ["frontend"]},
+                    "everything": {"include": ["frontend"]},
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let target = root.join("workspace");
+
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "backend",
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(success, "scoped clone failed: {stderr}");
+    let puts = recorded_views_puts(&fake_dir);
+    assert_eq!(puts.len(), 1, "exactly one views upload: {puts:?}");
+    let pushed = &puts[0];
+    assert_eq!(pushed["defaultView"], "backend");
+    assert_eq!(
+        pushed["views"]["backend"]["exclude"],
+        serde_json::json!(["frontend"])
+    );
+    assert_eq!(
+        pushed["views"]["everything"]["include"],
+        serde_json::json!(["frontend"])
+    );
+    assert_eq!(pushed["views"]["scope"]["base"], "none");
+    assert_eq!(
+        pushed["views"]["scope"]["include"],
+        serde_json::json!(["backend"])
+    );
+
+    // A second workspace with a *different* `--repo` set must not silently
+    // rescope the first one through the shared view.
+    let other = root.join("other");
+    fs::write(
+        fake_dir.join("views.json"),
+        serde_json::json!({"data": {"views": pushed["views"]}}).to_string(),
+    )
+    .unwrap();
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            other.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "frontend",
+            "--no-worktree",
+        ],
+        &[],
+    );
+    assert!(!success);
+    assert!(
+        stderr.contains("already have a remote view named `scope`"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(recorded_views_puts(&fake_dir).len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_repo_scope_without_a_token_keeps_the_view_local_and_says_so() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--repo",
+            "backend",
+            "--no-worktree",
+        ],
+        &[],
+    );
+    assert!(success, "scoped clone failed: {stderr}");
+    // Without --json, human lines stay on stdout.
+    assert!(
+        stdout.contains("scope view not pushed"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(recorded_views_puts(&fake_dir).is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}

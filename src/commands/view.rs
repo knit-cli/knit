@@ -429,6 +429,53 @@ fn derive_from_bundle(
     })
 }
 
+/// Record repos that a scoped workspace just cloned on purpose (a named
+/// `knit bundle pull`, a handoff) in its scope view, so reconcile keeps
+/// treating them as in scope. A missing scope view is left alone: recreating
+/// it here would silently pick a seed set the user never chose.
+pub(crate) fn extend_scope_view(root: &Path, project_id: &str, repos: &[String]) -> Result<()> {
+    if repos.is_empty() {
+        return Ok(());
+    }
+    let Some(scope) = crate::store::load_config(root)
+        .ok()
+        .and_then(|config| config.scope_view)
+    else {
+        return Ok(());
+    };
+    let _lock = acquire_named_lock(root, &format!("views-{project_id}"))?;
+    let mut views = load_views(root, project_id)?;
+    let Some(view) = views.views.get_mut(&scope) else {
+        println!(
+            "{} scope view {} is not saved locally, so {} was cloned without recording it in the scope.",
+            out::warn("warning:"),
+            out::repo(&scope),
+            repos.join(", ")
+        );
+        return Ok(());
+    };
+    let mut added = Vec::new();
+    for id in repos {
+        view.exclude.retain(|existing| existing != id);
+        if !view.include.contains(id) {
+            view.include.push(id.clone());
+            added.push(id.clone());
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    views.updated_at = now_iso();
+    save_views(root, &views)?;
+    println!(
+        "{} scope view {} extended with {}",
+        out::heading("Views:"),
+        out::repo(&scope),
+        added.join(", ")
+    );
+    Ok(())
+}
+
 /// Slugify, validate against the project, and de-duplicate a list of repo ids.
 ///
 /// A scoped workspace (`knit clone --view`) carries only part of the project,

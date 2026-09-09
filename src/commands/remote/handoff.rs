@@ -216,13 +216,16 @@ impl HandoffExport {
     }
 }
 
-/// Clone only missing bundle repositories. Existing checkouts retain their branches.
+/// Clone only missing bundle repositories. Existing checkouts retain their
+/// branches. Returns the ids it cloned; in a scoped workspace those are
+/// recorded in the scope view, since the user asked for this bundle by name.
 pub(super) fn ensure_bundle_repositories(
     root: &Path,
     project: &mut KnitProject,
     export: &RemoteProjectExport,
     bundle: &ChangeGroup,
-) -> Result<()> {
+) -> Result<Vec<String>> {
+    let mut cloned = Vec::new();
     for repo in &bundle.repos {
         if project
             .repos
@@ -246,8 +249,10 @@ pub(super) fn ensure_bundle_repositories(
         project.repos.retain(|r| r.id != repo.id);
         project.repos.push(entry);
         store::write_json(&store::project_path(root, &project.id), project)?;
+        cloned.push(repo.id.clone());
     }
-    Ok(())
+    crate::commands::view::extend_scope_view(root, &project.id, &cloned)?;
+    Ok(cloned)
 }
 
 pub(crate) fn prefer_https_url(remote: &str, hosts: &BTreeSet<String>) -> Option<String> {
