@@ -67,7 +67,11 @@ fn clean_revert_plans(active: &ActiveBundle) -> Result<()> {
 pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool) -> Result<usize> {
     if active.bundle.repos.is_empty() {
         println!("{}", out::muted("No repos are tracked in this bundle."));
-        return Ok(0);
+        // Still sweep the container: a checkout for a repo that was since
+        // removed from the bundle is exactly the leftover this catches.
+        let removed = clean_bundle_container_leftovers(&active.root, &active.bundle.id, force)?;
+        remove_bundle_worktree_container(&active.root, &active.bundle.id);
+        return Ok(removed);
     }
 
     // A bundle whose worktrees are being discarded cannot resume its runtime.
@@ -111,6 +115,13 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
                 out::path(path.display())
             );
             repo.worktree_path = None;
+            // The checkout was deleted by hand, so git still lists it as a
+            // worktree until pruned; a stale entry keeps the branch "checked
+            // out" and blocks later `git worktree add`/branch deletion.
+            let repo_root = PathBuf::from(&repo.path);
+            if repo_root.exists() {
+                prune_git_worktrees(&repo_root);
+            }
             continue;
         }
 
@@ -142,8 +153,92 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         bail!("failed to clean worktrees:\n{}", failures.join("\n"));
     }
 
+    removed += clean_bundle_container_leftovers(&active.root, &active.bundle.id, force)?;
     remove_bundle_worktree_container(&active.root, &active.bundle.id);
     remove_runtime_run_dir(&active.root, &active.bundle.id);
+    Ok(removed)
+}
+
+/// Sweep what the per-repo pass cannot see inside `.knit/worktrees/<bundle>/`:
+/// checkouts for repos the bundle no longer tracks, and stray files an agent
+/// or a bundle created without a recorded worktree left behind. Without
+/// these the container directory survives archive/prune forever, and the
+/// finished bundle keeps showing up as on-disk residue. Leftover git
+/// worktrees are removed like any generated checkout (dirty ones need
+/// `force`); stray files are only discarded with `force`, since nothing
+/// else records them.
+fn clean_bundle_container_leftovers(root: &Path, bundle_id: &str, force: bool) -> Result<usize> {
+    let dir = root.join(".knit/worktrees").join(bundle_id);
+    if !dir.is_dir() {
+        return Ok(0);
+    }
+    let mut removed = 0usize;
+    let mut failures = Vec::new();
+    let mut entries: Vec<PathBuf> = fs::read_dir(&dir)
+        .with_context(|| format!("failed to read {}", dir.display()))?
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.is_dir())
+        .collect();
+    entries.sort();
+    for path in entries {
+        // A `.git` entry distinguishes a real checkout from stray files that
+        // merely sit inside a workspace that is itself a git repo.
+        if path.join(".git").exists() && crate::git::is_git_worktree(&path) {
+            match remove_git_worktree_from_self(&path, force) {
+                Ok(()) => {
+                    println!(
+                        "{} {}",
+                        out::movement("removed leftover worktree"),
+                        out::path(path.display())
+                    );
+                    removed += 1;
+                }
+                Err(error) => failures.push(format!(
+                    "{}: failed to remove leftover worktree (pass --force to discard uncommitted work): {error:#}",
+                    path.display()
+                )),
+            }
+            continue;
+        }
+        if !force {
+            println!(
+                "{} {} {}",
+                out::warn("stray files preserved:"),
+                out::path(path.display()),
+                out::muted("(pass --force to discard)")
+            );
+            continue;
+        }
+        fs::remove_dir_all(&path)
+            .with_context(|| format!("failed to remove {}", path.display()))?;
+        println!(
+            "{} {}",
+            out::movement("removed stray files"),
+            out::path(path.display())
+        );
+        removed += 1;
+    }
+    if !failures.is_empty() {
+        bail!("failed to clean worktrees:\n{}", failures.join("\n"));
+    }
+    Ok(removed)
+}
+
+/// Clean one finished bundle's generated worktrees by artifact path,
+/// persisting the cleared `worktreePath`s. Shared by the `clean --archived`
+/// sweep and `bundle prune --apply --worktrees`.
+pub(crate) fn clean_finished_bundle_worktrees(
+    root: &Path,
+    bundle_id: &str,
+    force: bool,
+) -> Result<usize> {
+    let path = crate::store::bundle_path(root, bundle_id);
+    let bundle: ChangeGroup = read_json(&path)?;
+    let mut active = ActiveBundle::unlocked(root.to_path_buf(), path.clone(), bundle);
+    let removed = clean_worktrees_for_bundle(&mut active, force)?;
+    active.bundle.updated_at = now_iso();
+    write_json(&path, &active.bundle)?;
     Ok(removed)
 }
 
@@ -254,7 +349,38 @@ fn remove_git_worktree(repo_root: &Path, worktree: &Path, force: bool) -> Result
     }
     args.push(worktree.as_os_str().to_os_string());
     git_output(repo_root, args)?;
+    prune_git_worktrees(repo_root);
     Ok(())
+}
+
+/// Remove a linked worktree by running git inside it, for checkouts whose
+/// source repo is only known through the worktree itself (orphan dirs,
+/// leftovers for repos a bundle no longer tracks). The source repo is
+/// resolved first so its worktree list can be pruned once the directory is
+/// gone.
+pub(crate) fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
+    let common_dir = git_output(
+        worktree,
+        ["rev-parse", "--path-format=absolute", "--git-common-dir"],
+    )
+    .ok()
+    .map(|dir| PathBuf::from(dir.trim()));
+    let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
+    if force {
+        args.push(OsString::from("--force"));
+    }
+    args.push(worktree.as_os_str().to_os_string());
+    git_output(worktree, args)?;
+    if let Some(common_dir) = common_dir.filter(|dir| dir.is_dir()) {
+        prune_git_worktrees(&common_dir);
+    }
+    Ok(())
+}
+
+/// Drop git's bookkeeping for worktrees whose directories are gone. Best
+/// effort: a failed prune leaves a cosmetic stale entry, never lost work.
+pub(crate) fn prune_git_worktrees(repo_root: &Path) {
+    let _ = git_output(repo_root, ["worktree", "prune"]);
 }
 
 fn remove_empty_dirs(path: PathBuf) {
