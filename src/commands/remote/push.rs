@@ -410,6 +410,13 @@ pub fn push_project_to_remote(
 ) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
+    if prune {
+        if let Some(scope_view) = config.scope_view.as_deref() {
+            bail!(
+                "This workspace is scoped to view `{scope_view}`, so its project lists only the repos cloned here; `--prune` would delete the other repos' records on the remote. Run `knit project push --prune` from a whole-project clone."
+            );
+        }
+    }
     let remote_names = match remote_name {
         Some(remote_name) => vec![slugify(remote_name)],
         None => configured_sync_remote_names(&config),
@@ -489,7 +496,12 @@ fn push_project_to_one_remote(
 }
 
 /// Upload the local saved views for a project to the remote, if any exist.
-fn upload_views(remote: &KnitRemote, token: &str, root: &Path, project_slug: &str) -> Result<()> {
+pub(super) fn upload_views(
+    remote: &KnitRemote,
+    token: &str,
+    root: &Path,
+    project_slug: &str,
+) -> Result<()> {
     let views = crate::store::load_views(root, project_slug)?;
     if views.views.is_empty() && views.default_view.is_none() {
         return Ok(());

@@ -28,6 +28,13 @@ pub struct KnitConfig {
     /// the configured sync remote. Set false to never sync on push.
     #[serde(default = "default_push_sync")]
     pub push_sync: bool,
+    /// Saved view this workspace is scoped to: only the repos that view
+    /// resolves to are cloned here (`knit clone --view`/`--repo`). Remote
+    /// pulls add membership repos only inside the scope, and bundles that
+    /// touch other repos are skipped instead of failing. Absent means the
+    /// workspace carries the whole project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope_view: Option<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub remotes: BTreeMap<String, KnitRemote>,
 }
@@ -44,6 +51,7 @@ impl KnitConfig {
             stealth: None,
             auto_tag: None,
             push_sync: true,
+            scope_view: None,
             remotes: BTreeMap::new(),
         }
     }
@@ -59,6 +67,7 @@ impl KnitConfig {
             stealth: None,
             auto_tag: None,
             push_sync: true,
+            scope_view: None,
             remotes: BTreeMap::new(),
         }
     }
@@ -74,6 +83,7 @@ impl KnitConfig {
             stealth: None,
             auto_tag: None,
             push_sync: true,
+            scope_view: None,
             remotes: BTreeMap::new(),
         }
     }

@@ -104,6 +104,15 @@ pub enum Commands {
         /// Use a connected forge's HTTPS transport when SSH authentication fails.
         #[arg(long)]
         prefer_https: bool,
+        /// Clone only the repos one of your saved views resolves to, and scope
+        /// the workspace to that view. Extend it later with `knit view include
+        /// <view> <repo>` followed by `knit pull`.
+        #[arg(long, conflicts_with = "repos")]
+        view: Option<String>,
+        /// Clone only these repo ids (repeatable), saved as the absolute view
+        /// `scope` that the workspace is then scoped to.
+        #[arg(long = "repo", value_name = "REPO", value_delimiter = ',')]
+        repos: Vec<String>,
         /// Print a machine-readable clone result document to stdout. Progress
         /// lines move to stderr.
         #[arg(long)]
@@ -1071,6 +1080,20 @@ pub enum RemoteCommand {
         /// Named sync remote. Defaults to the configured sync remote.
         #[arg(long)]
         remote: Option<String>,
+        /// Print a machine-readable JSON document to stdout.
+        #[arg(long)]
+        json: bool,
+    },
+    /// List your saved views for a remote project, before cloning it.
+    Views {
+        /// Project reference: `owner/slug`, a project slug, or an absolute project URL.
+        project: String,
+        /// Named sync remote. Defaults to the configured sync remote.
+        #[arg(long)]
+        remote: Option<String>,
+        /// Remote base URL for legacy selectors. Do not combine with an absolute project URL.
+        #[arg(long)]
+        url: Option<String>,
         /// Print a machine-readable JSON document to stdout.
         #[arg(long)]
         json: bool,

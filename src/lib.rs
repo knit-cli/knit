@@ -173,6 +173,12 @@ pub fn run(cli: Cli) -> Result<()> {
             RemoteCommand::Projects { remote, json } => {
                 commands::list_remote_projects(remote.as_deref(), json)
             }
+            RemoteCommand::Views {
+                project,
+                remote,
+                url,
+                json,
+            } => commands::list_remote_views(&project, remote.as_deref(), url.as_deref(), json),
             RemoteCommand::AuthStatus { name, json } => commands::remote_auth_status(&name, json),
             RemoteCommand::SyncHelpers { name } => commands::sync_remote_helpers_command(&name),
             RemoteCommand::Show { name, global } => commands::show_remote(&name, global),
@@ -200,6 +206,8 @@ pub fn run(cli: Cli) -> Result<()> {
             active_bundle,
             no_worktree,
             prefer_https,
+            view,
+            repos,
             json,
         } => commands::clone_project_from_remote(
             &project,
@@ -210,6 +218,10 @@ pub fn run(cli: Cli) -> Result<()> {
             active_bundle.as_deref(),
             !no_worktree,
             prefer_https,
+            commands::CloneScopeRequest {
+                view: view.as_deref(),
+                repos: &repos,
+            },
             json,
         ),
         Commands::Add {

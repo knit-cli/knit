@@ -50,9 +50,10 @@ git says right now). Those have machine-readable output:
 ```sh
 knit status --json              # resolved bundle, state, per-repo git state
 knit bundle list --json         # every bundle, with its artifact path
-knit clone <project> --json     # what a clone produced
+knit clone <project> --json     # what a clone produced (--view/--repo scope it)
 knit bundle pull <slug> --json  # what a pull produced
 knit remote projects --json     # projects visible to a remote token
+knit remote views <project> --json  # the user's saved views for one, before cloning
 knit remote auth-status <name> --json
 ```
 
