@@ -10,6 +10,7 @@ use super::client::{
 use super::credentials::NO_ACCESS_HINT;
 use super::{
     print_json_error_envelope, RemoteErrorKind, RemoteExportRepository, RemoteProjectExport,
+    RemoteViews,
 };
 use crate::commands::agents::{
     print_bundle_worktree_agents_summary, write_bundle_worktree_agents_md,
@@ -18,8 +19,8 @@ use crate::commands::worktree::materialize_repos;
 use crate::git::{current_branch, git_output, is_git_worktree, ref_exists};
 use crate::ids::slugify;
 use crate::model::{
-    ChangeGroup, CheckoutMode, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry,
-    SCHEMA_VERSION,
+    ChangeGroup, CheckoutMode, KnitConfig, KnitProject, KnitProjectViews, KnitRemote,
+    ProjectRepoEntry, ProjectView, ViewBase, SCHEMA_VERSION,
 };
 use crate::output as out;
 use crate::store::{
@@ -45,6 +46,13 @@ pub(super) struct CloneDocument {
     cloned_repo_count: usize,
     failed_repo_count: usize,
     omitted_repository_count: u64,
+    /// The saved view this workspace is scoped to (`--view`/`--repo`); absent
+    /// for a whole-project clone.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    scope_view: Option<String>,
+    /// Repos the export offered that the scope left out on purpose. They are
+    /// not failures: `knit view include <scope> <repo>` + `knit pull` adds one.
+    repos_out_of_scope: Vec<String>,
     bundles: CloneDocumentBundles,
     active_bundle: Option<String>,
     worktrees_materialized: bool,
@@ -74,6 +82,10 @@ struct CloneDocumentRepo {
 struct CloneDocumentBundles {
     restored: Vec<String>,
     dropped: Vec<DroppedBundle>,
+    /// Bundles left out only because they touch repos outside the scope.
+    /// Distinct from `dropped`, which records clone failures and withheld
+    /// repos; these are expected for a scoped workspace.
+    out_of_scope: Vec<DroppedBundle>,
 }
 
 /// A bundle the export carried but the clone could not restore because one or
@@ -83,6 +95,34 @@ struct CloneDocumentBundles {
 pub(super) struct DroppedBundle {
     pub(super) id: String,
     pub(super) missing_repos: Vec<String>,
+}
+
+/// Name of the absolute view `knit clone --repo` saves so a hand-picked
+/// scope can be extended like any other view (`knit view include scope <repo>`).
+pub const CLONE_SCOPE_VIEW: &str = "scope";
+
+/// What the caller asked `knit clone` to limit the workspace to: a saved view
+/// (`--view`), an explicit repo list (`--repo`), or nothing.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct CloneScopeRequest<'a> {
+    pub view: Option<&'a str>,
+    pub repos: &'a [String],
+}
+
+impl CloneScopeRequest<'_> {
+    fn is_scoped(&self) -> bool {
+        self.view.is_some() || !self.repos.is_empty()
+    }
+}
+
+/// A clone scope resolved against the export: the view the workspace records
+/// plus the repo ids it resolves to. `save_view` marks a `--repo` scope whose
+/// view exists nowhere yet and must be written (and pushed) by the clone.
+struct ResolvedCloneScope {
+    view_name: String,
+    view: ProjectView,
+    repo_ids: BTreeSet<String>,
+    save_view: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -95,6 +135,7 @@ pub fn clone_project_from_remote(
     active_bundle: Option<&str>,
     materialize: bool,
     prefer_https: bool,
+    scope: CloneScopeRequest<'_>,
     json: bool,
 ) -> Result<()> {
     if json {
@@ -109,6 +150,7 @@ pub fn clone_project_from_remote(
         active_bundle,
         materialize,
         prefer_https,
+        scope,
     ) {
         Ok(document) => {
             if json {
@@ -141,6 +183,7 @@ fn clone_project_classified(
     active_bundle: Option<&str>,
     materialize: bool,
     prefer_https: bool,
+    scope: CloneScopeRequest<'_>,
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
     let reference = parse_clone_reference(project_identifier, url)
         .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
@@ -165,6 +208,14 @@ fn clone_project_classified(
             }
         }
     }
+    if scope.view.is_some() && token.is_none() {
+        return Err((
+            RemoteErrorKind::NoToken,
+            anyhow::anyhow!(
+                "`--view` needs a remote token: saved views are your own configuration on the remote. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, or run `knit remote token <name> <token>`."
+            ),
+        ));
+    }
     clone_fetched_export(
         &reference.project_identifier,
         target,
@@ -175,6 +226,7 @@ fn clone_project_classified(
         export,
         active_bundle,
         materialize,
+        scope,
     )
     .map_err(|error| (RemoteErrorKind::Other, error))
 }
@@ -190,7 +242,33 @@ pub(super) fn clone_fetched_export(
     export: RemoteProjectExport,
     active_bundle: Option<&str>,
     materialize: bool,
+    scope: CloneScopeRequest<'_>,
 ) -> Result<CloneDocument> {
+    // Views are fetched before any repo is cloned: `--view` resolves against
+    // them, and a whole-project clone restores them as before. A failure is
+    // fatal only when the scope depends on the answer.
+    let project_id = export_project_id(&export);
+    let mut views_unavailable: Option<String> = None;
+    let remote_views = match token.as_deref() {
+        Some(token) => match super::pull::fetch_remote_views(&remote, token, &project_id) {
+            Ok(views) => Some(views),
+            Err(error) if scope.view.is_some() => {
+                return Err(error.context("failed to fetch your saved views for `--view`"))
+            }
+            Err(error) => {
+                views_unavailable = Some(format!("{error:#}"));
+                None
+            }
+        },
+        None => {
+            views_unavailable = Some("no remote token configured".to_string());
+            None
+        }
+    };
+    let resolved_scope = resolve_clone_scope(&export, scope, remote_views.as_ref())?;
+    let (scoped_repositories, repos_out_of_scope, repos_unavailable) =
+        partition_export_repositories(&export, resolved_scope.as_ref());
+
     let target_root = resolve_clone_target(target, project_identifier)?;
     prepare_clone_target(&target_root)?;
 
@@ -214,8 +292,17 @@ pub(super) fn clone_fetched_export(
     })?;
 
     super::helpers::ensure_helpers_for_git(&remote_name);
-    let (repo_paths, failed_repos) =
-        clone_export_repositories_collecting(&target_root, &export.repositories);
+    let (repo_paths, mut failed_repos) =
+        clone_export_repositories_collecting(&target_root, &scoped_repositories);
+    // A scope repo the export carries no record for (withheld by the server,
+    // or never registered) cannot be cloned; say so instead of dropping it.
+    for repo_id in repos_unavailable {
+        failed_repos.push((
+            repo_id,
+            "not in the remote export (withheld from your token, or not registered on the remote)"
+                .to_string(),
+        ));
+    }
     if repo_paths.is_empty() {
         bail!(
             "Failed to clone any repository for project `{}`:\n{}",
@@ -228,6 +315,14 @@ pub(super) fn clone_fetched_export(
 
     let (bundles, dropped_bundles) =
         localized_export_bundles(&export, &project, &remote, &remote_name, token.as_deref())?;
+    let out_of_scope: BTreeSet<&str> = repos_out_of_scope.iter().map(String::as_str).collect();
+    let (out_of_scope_bundles, dropped_bundles): (Vec<DroppedBundle>, Vec<DroppedBundle>) =
+        dropped_bundles.into_iter().partition(|dropped| {
+            dropped
+                .missing_repos
+                .iter()
+                .all(|repo| out_of_scope.contains(repo.as_str()))
+        });
     for bundle in &bundles {
         write_json(&bundle_path(&target_root, &bundle.id), bundle)?;
     }
@@ -237,7 +332,7 @@ pub(super) fn clone_fetched_export(
         &export.decoded_history_events(&project.id),
     )?;
 
-    let selected_bundle_id = select_active_bundle(&bundles, active_bundle)?;
+    let selected_bundle_id = select_active_bundle(&bundles, &out_of_scope_bundles, active_bundle)?;
     let mut remotes = BTreeMap::new();
     remotes.insert(
         remote_name.clone(),
@@ -256,17 +351,51 @@ pub(super) fn clone_fetched_export(
         stealth: None,
         auto_tag: None,
         push_sync: true,
+        scope_view: resolved_scope.as_ref().map(|scope| scope.view_name.clone()),
         remotes,
     };
     crate::store::save_config(&target_root, &config)?;
 
-    // Best-effort: restore the cloning user's saved views for the project.
-    if let Some(token) = token.as_deref() {
-        match super::pull::pull_views_into(&target_root, &remote, token, &project.id) {
-            Ok(count) if count > 0 => {
-                crate::human!("{} {count} view(s)", out::heading("Views:"))
+    // Restore the cloning user's saved views, adding the `--repo` scope view
+    // when the clone made one so the scope can be extended like any view.
+    let mut views = match remote_views {
+        Some(remote_views) => super::pull::views_from_remote(&project.id, remote_views),
+        None => KnitProjectViews::new(project.id.clone(), now_iso()),
+    };
+    let mut push_views = false;
+    if let Some(scope) = resolved_scope.as_ref().filter(|scope| scope.save_view) {
+        views
+            .views
+            .insert(scope.view_name.clone(), scope.view.clone());
+        views.updated_at = now_iso();
+        push_views = true;
+    }
+    if !views.views.is_empty() || views.default_view.is_some() {
+        crate::store::save_views(&target_root, &views)?;
+        crate::human!("{} {} view(s)", out::heading("Views:"), views.views.len());
+    }
+    // The scope view has to outlive the next `knit sync pull --views`, which
+    // replaces local views with the remote's, so push it right away — but
+    // only when the remote's document was actually read: uploading otherwise
+    // would replace every view the user has on the remote with this one.
+    if push_views {
+        match (token.as_deref(), views_unavailable.as_deref()) {
+            (Some(token), None) => {
+                if let Err(error) =
+                    super::push::upload_views(&remote, token, &target_root, &project.id)
+                {
+                    crate::human!(
+                        "{} {error:#} (run `knit sync push --views` later)",
+                        out::warn("scope view not pushed:")
+                    );
+                }
             }
-            _ => {}
+            (_, reason) => crate::human!(
+                "{} {}; the view `{}` exists only in this workspace until `knit sync push --views` succeeds, and a `knit sync pull --views` before that drops it.",
+                out::warn("scope view not pushed:"),
+                reason.unwrap_or("remote views unavailable"),
+                CLONE_SCOPE_VIEW
+            ),
         }
     }
 
@@ -317,6 +446,34 @@ pub(super) fn clone_fetched_export(
             dropped.missing_repos.join(", ")
         );
     }
+    if let Some(scope) = resolved_scope.as_ref() {
+        crate::human!(
+            "{} view {} — {} repo(s) left out: {}",
+            out::heading("Scope:"),
+            out::repo(&scope.view_name),
+            repos_out_of_scope.len(),
+            if repos_out_of_scope.is_empty() {
+                "none".to_string()
+            } else {
+                repos_out_of_scope.join(", ")
+            }
+        );
+        for bundle in &out_of_scope_bundles {
+            crate::human!(
+                "{} bundle {} touches {}",
+                out::muted("Outside scope:"),
+                out::repo(&bundle.id),
+                bundle.missing_repos.join(", ")
+            );
+        }
+        crate::human!(
+            "{}",
+            out::muted(format!(
+                "Extend the scope with `knit view include {} <repo>` followed by `knit pull`.",
+                scope.view_name
+            ))
+        );
+    }
 
     Ok(clone_document(
         project_identifier,
@@ -327,9 +484,191 @@ pub(super) fn clone_fetched_export(
         &failed_repos,
         &bundles,
         dropped_bundles,
+        CloneScopeOutcome {
+            view: resolved_scope.map(|scope| scope.view_name),
+            repos_out_of_scope,
+            bundles: out_of_scope_bundles,
+        },
         selected_bundle_id,
         worktrees_materialized,
     ))
+}
+
+/// What a scope left out of the clone, for the result document.
+struct CloneScopeOutcome {
+    view: Option<String>,
+    repos_out_of_scope: Vec<String>,
+    bundles: Vec<DroppedBundle>,
+}
+
+/// The local project id a clone of this export will use, before the project
+/// artifact exists: the exported knit project's id, else the remote slug.
+fn export_project_id(export: &RemoteProjectExport) -> String {
+    slugify(
+        export
+            .knit_project
+            .as_ref()
+            .map(|project| project.id.as_str())
+            .unwrap_or(export.project.slug.as_str()),
+    )
+}
+
+/// The project membership a scope resolves against: the exported knit
+/// project when it carries repos, else a project built from the export's
+/// repository records (paths are unknown before cloning and irrelevant here).
+fn membership_project_from_export(export: &RemoteProjectExport) -> KnitProject {
+    if let Some(project) = export
+        .knit_project
+        .as_ref()
+        .filter(|project| !project.repos.is_empty())
+    {
+        return project.clone();
+    }
+    let mut project = KnitProject::new(export_project_id(export), now_iso());
+    project.repos = export
+        .repositories
+        .iter()
+        .map(|repository| project_repo_entry_from_export(repository, Path::new("")))
+        .collect();
+    project
+}
+
+/// Resolve `--view`/`--repo` into the view the workspace will record and the
+/// repo ids to clone. `--view` must name one of the user's remote views;
+/// `--repo` ids must be project repos and become the absolute view `scope`.
+fn resolve_clone_scope(
+    export: &RemoteProjectExport,
+    scope: CloneScopeRequest<'_>,
+    remote_views: Option<&RemoteViews>,
+) -> Result<Option<ResolvedCloneScope>> {
+    if !scope.is_scoped() {
+        return Ok(None);
+    }
+    let membership = membership_project_from_export(export);
+    let known: Vec<&str> = membership
+        .repos
+        .iter()
+        .map(|repo| repo.id.as_str())
+        .collect();
+
+    if let Some(view_name) = scope.view {
+        let view_name = slugify(view_name);
+        let views = remote_views.context("no saved views were returned by the remote")?;
+        let Some(view) = views.views.get(&view_name).cloned() else {
+            let available: Vec<&str> = views.views.keys().map(String::as_str).collect();
+            bail!(
+                "You have no saved view named `{view_name}` for project `{}` on the remote. {}",
+                export.project.slug,
+                if available.is_empty() {
+                    "Clone the whole project, or pass `--repo <id>` to pick repos directly."
+                        .to_string()
+                } else {
+                    format!("Available views: {}.", available.join(", "))
+                }
+            );
+        };
+        let repo_ids: BTreeSet<String> = crate::commands::init::resolve_view_repos(
+            &membership,
+            &[],
+            false,
+            Some((view_name.as_str(), &view)),
+            &[],
+            &[],
+        )?
+        .into_iter()
+        .map(|repo| repo.id)
+        .collect();
+        if repo_ids.is_empty() {
+            bail!(
+                "View `{view_name}` resolves to no repos of project `{}`; nothing to clone.",
+                export.project.slug
+            );
+        }
+        return Ok(Some(ResolvedCloneScope {
+            view_name,
+            view,
+            repo_ids,
+            save_view: false,
+        }));
+    }
+
+    let mut repo_ids = BTreeSet::new();
+    for repo in scope.repos {
+        let repo_id = slugify(repo);
+        if !known.contains(&repo_id.as_str()) {
+            bail!(
+                "Project `{}` has no repo named `{repo_id}`. Available: {}.",
+                export.project.slug,
+                known.join(", ")
+            );
+        }
+        repo_ids.insert(repo_id);
+    }
+    let view = ProjectView {
+        base: ViewBase::None,
+        include: repo_ids.iter().cloned().collect(),
+        exclude: Vec::new(),
+    };
+    // The user may already keep a remote view named `scope` (from an earlier
+    // `--repo` clone). Reuse it when it is the same shape; refuse to overwrite
+    // a different one, since that would silently rescope the other workspace.
+    let mut save_view = true;
+    if let Some(existing) = remote_views.and_then(|views| views.views.get(CLONE_SCOPE_VIEW)) {
+        let same_shape = existing.base == ViewBase::None
+            && existing.exclude.is_empty()
+            && existing.include.iter().cloned().collect::<BTreeSet<_>>() == repo_ids;
+        if same_shape {
+            save_view = false;
+        } else {
+            bail!(
+                "You already have a remote view named `{CLONE_SCOPE_VIEW}` for project `{}` with a different shape ({}). Clone it with `--view {CLONE_SCOPE_VIEW}`, or rename it first (`knit view save <new> --from {CLONE_SCOPE_VIEW}` then `knit view rm {CLONE_SCOPE_VIEW}` in a workspace that has it).",
+                export.project.slug,
+                if existing.include.is_empty() {
+                    "empty".to_string()
+                } else {
+                    existing.include.join(", ")
+                }
+            );
+        }
+    }
+    Ok(Some(ResolvedCloneScope {
+        view_name: CLONE_SCOPE_VIEW.to_string(),
+        view,
+        repo_ids,
+        save_view,
+    }))
+}
+
+/// Split the export's repositories into the ones to clone and the ids the
+/// scope leaves out (export order). Unscoped clones keep everything.
+fn partition_export_repositories(
+    export: &RemoteProjectExport,
+    scope: Option<&ResolvedCloneScope>,
+) -> (Vec<RemoteExportRepository>, Vec<String>, Vec<String>) {
+    let Some(scope) = scope else {
+        return (export.repositories.clone(), Vec::new(), Vec::new());
+    };
+    let mut selected = Vec::new();
+    let mut left_out = Vec::new();
+    let mut seen = BTreeSet::new();
+    for repository in &export.repositories {
+        let local_id = export_repo_local_id(repository);
+        if scope.repo_ids.contains(&local_id) {
+            seen.insert(local_id);
+            selected.push(repository.clone());
+        } else {
+            left_out.push(local_id);
+        }
+    }
+    // Scope ids the membership knows but the export carries no record for:
+    // the caller reports them as failures rather than losing them.
+    let unavailable = scope
+        .repo_ids
+        .iter()
+        .filter(|id| !seen.contains(*id))
+        .cloned()
+        .collect();
+    (selected, left_out, unavailable)
 }
 
 /// Assemble the `--json` result document from the clone's outcomes. Repos keep
@@ -345,9 +684,15 @@ fn clone_document(
     failed_repos: &[(String, String)],
     bundles: &[ChangeGroup],
     dropped_bundles: Vec<DroppedBundle>,
+    scope: CloneScopeOutcome,
     active_bundle: Option<String>,
     worktrees_materialized: bool,
 ) -> CloneDocument {
+    let out_of_scope: BTreeSet<&str> = scope
+        .repos_out_of_scope
+        .iter()
+        .map(String::as_str)
+        .collect();
     let (identifier_owner, _slug) = super::client::split_project_identifier(project_identifier);
     let owner = identifier_owner.or_else(|| {
         export
@@ -359,6 +704,7 @@ fn clone_document(
     let repos = export
         .repositories
         .iter()
+        .filter(|repository| !out_of_scope.contains(export_repo_local_id(repository).as_str()))
         .map(|repository| {
             let local_id = export_repo_local_id(repository);
             if repo_paths.contains_key(&local_id) {
@@ -380,6 +726,16 @@ fn clone_document(
             }
         })
         .collect::<Vec<_>>();
+    let mut repos = repos;
+    for (failed_id, error) in failed_repos {
+        if !repos.iter().any(|repo| &repo.id == failed_id) {
+            repos.push(CloneDocumentRepo {
+                id: failed_id.clone(),
+                status: "failed",
+                error: Some(error.clone()),
+            });
+        }
+    }
     let cloned_repo_count = repos.iter().filter(|repo| repo.status == "cloned").count();
     let failed_repo_count = repos.len() - cloned_repo_count;
 
@@ -394,9 +750,12 @@ fn clone_document(
         cloned_repo_count,
         failed_repo_count,
         omitted_repository_count: export.omitted_repository_count.unwrap_or(0),
+        scope_view: scope.view,
+        repos_out_of_scope: scope.repos_out_of_scope,
         bundles: CloneDocumentBundles {
             restored: bundles.iter().map(|bundle| bundle.id.clone()).collect(),
             dropped: dropped_bundles,
+            out_of_scope: scope.bundles,
         },
         active_bundle,
         worktrees_materialized,
@@ -410,16 +769,16 @@ fn clone_document(
 type ResolvedCloneRemote = (String, KnitRemote, Option<String>, Option<String>);
 
 #[derive(Debug, PartialEq, Eq)]
-struct CloneReference {
-    project_identifier: String,
-    remote_url: Option<String>,
+pub(super) struct CloneReference {
+    pub(super) project_identifier: String,
+    pub(super) remote_url: Option<String>,
 }
 
 /// Accept the traditional `owner/slug` selector and the absolute, GitHub-like
 /// form `https://host/owner/slug`. In the absolute form the authority is the
 /// remote endpoint and the two path segments are the unambiguous project
 /// namespace; there is no second URL argument that can disagree with it.
-fn parse_clone_reference(reference: &str, url: Option<&str>) -> Result<CloneReference> {
+pub(super) fn parse_clone_reference(reference: &str, url: Option<&str>) -> Result<CloneReference> {
     let parsed = match url::Url::parse(reference) {
         Ok(parsed) => parsed,
         Err(_) if reference.contains("://") => {
@@ -856,7 +1215,10 @@ fn localized_export_bundles(
 
 /// Repo ids a bundle payload references that are absent from the cloned
 /// project, in payload order.
-fn missing_bundle_repos(payload: &ChangeGroup, available: &BTreeSet<&str>) -> Vec<String> {
+pub(super) fn missing_bundle_repos(
+    payload: &ChangeGroup,
+    available: &BTreeSet<&str>,
+) -> Vec<String> {
     payload
         .repos
         .iter()
@@ -867,12 +1229,19 @@ fn missing_bundle_repos(payload: &ChangeGroup, available: &BTreeSet<&str>) -> Ve
 
 fn select_active_bundle(
     bundles: &[ChangeGroup],
+    out_of_scope: &[DroppedBundle],
     requested: Option<&str>,
 ) -> Result<Option<String>> {
     if let Some(requested) = requested {
         let requested = slugify(requested);
         if bundles.iter().any(|bundle| bundle.id == requested) {
             return Ok(Some(requested));
+        }
+        if let Some(skipped) = out_of_scope.iter().find(|bundle| bundle.id == requested) {
+            bail!(
+                "Bundle `{requested}` touches repos outside this clone's scope ({}). Include them in the view and clone again, or clone the whole project.",
+                skipped.missing_repos.join(", ")
+            );
         }
         bail!("Remote export has no bundle named `{requested}`.");
     }
@@ -1152,11 +1521,17 @@ mod tests {
             cloned_repo_count: 1,
             failed_repo_count: 1,
             omitted_repository_count: 1,
+            scope_view: Some("backend".to_string()),
+            repos_out_of_scope: vec!["docs".to_string()],
             bundles: CloneDocumentBundles {
                 restored: vec!["feature-a".to_string()],
                 dropped: vec![DroppedBundle {
                     id: "feature-c".to_string(),
                     missing_repos: vec!["frontend".to_string()],
+                }],
+                out_of_scope: vec![DroppedBundle {
+                    id: "feature-d".to_string(),
+                    missing_repos: vec!["docs".to_string()],
                 }],
             },
             active_bundle: Some("feature-a".to_string()),
@@ -1176,9 +1551,12 @@ mod tests {
                 "clonedRepoCount": 1,
                 "failedRepoCount": 1,
                 "omittedRepositoryCount": 1,
+                "scopeView": "backend",
+                "reposOutOfScope": ["docs"],
                 "bundles": {
                     "restored": ["feature-a"],
                     "dropped": [{"id": "feature-c", "missingRepos": ["frontend"]}],
+                    "outOfScope": [{"id": "feature-d", "missingRepos": ["docs"]}],
                 },
                 "activeBundle": "feature-a",
                 "worktreesMaterialized": true,

@@ -124,13 +124,13 @@ pub fn save_view(
         view.base = base;
     }
     // A repo belongs to exactly one list; a flag flips the membership.
-    for id in normalize_ids(&project_artifact, include)? {
+    for id in normalize_ids(&root, &project_artifact, include)? {
         view.exclude.retain(|existing| existing != &id);
         if !view.include.contains(&id) {
             view.include.push(id);
         }
     }
-    for id in normalize_ids(&project_artifact, exclude)? {
+    for id in normalize_ids(&root, &project_artifact, exclude)? {
         view.include.retain(|existing| existing != &id);
         if !view.exclude.contains(&id) {
             view.exclude.push(id);
@@ -353,7 +353,7 @@ fn mutate_view_list(
     let (root, project_id) = resolve_project(project)?;
     let project_artifact = load_project_by_id(&root, &project_id)?;
     let name = slugify(name);
-    let ids = normalize_ids(&project_artifact, repos)?;
+    let ids = normalize_ids(&root, &project_artifact, repos)?;
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
@@ -429,17 +429,86 @@ fn derive_from_bundle(
     })
 }
 
+/// Record repos that a scoped workspace just cloned on purpose (a named
+/// `knit bundle pull`, a handoff) in its scope view, so reconcile keeps
+/// treating them as in scope. A missing scope view is left alone: recreating
+/// it here would silently pick a seed set the user never chose.
+pub(crate) fn extend_scope_view(root: &Path, project_id: &str, repos: &[String]) -> Result<()> {
+    if repos.is_empty() {
+        return Ok(());
+    }
+    let Some(scope) = crate::store::load_config(root)
+        .ok()
+        .and_then(|config| config.scope_view)
+    else {
+        return Ok(());
+    };
+    let _lock = acquire_named_lock(root, &format!("views-{project_id}"))?;
+    let mut views = load_views(root, project_id)?;
+    let Some(view) = views.views.get_mut(&scope) else {
+        println!(
+            "{} scope view {} is not saved locally, so {} was cloned without recording it in the scope.",
+            out::warn("warning:"),
+            out::repo(&scope),
+            repos.join(", ")
+        );
+        return Ok(());
+    };
+    let mut added = Vec::new();
+    for id in repos {
+        view.exclude.retain(|existing| existing != id);
+        if !view.include.contains(id) {
+            view.include.push(id.clone());
+            added.push(id.clone());
+        }
+    }
+    if added.is_empty() {
+        return Ok(());
+    }
+    views.updated_at = now_iso();
+    save_views(root, &views)?;
+    println!(
+        "{} scope view {} extended with {}",
+        out::heading("Views:"),
+        out::repo(&scope),
+        added.join(", ")
+    );
+    Ok(())
+}
+
 /// Slugify, validate against the project, and de-duplicate a list of repo ids.
-fn normalize_ids(project: &crate::model::KnitProject, repos: &[String]) -> Result<Vec<String>> {
+///
+/// A scoped workspace (`knit clone --view`) carries only part of the project,
+/// so a repo it does not know may still be one the remote project has —
+/// naming it in a view is exactly how the scope gets extended. Such ids are
+/// accepted with a note; `knit pull` clones them when membership confirms
+/// them, and bundle resolution already skips ids that never materialize.
+fn normalize_ids(
+    root: &Path,
+    project: &crate::model::KnitProject,
+    repos: &[String],
+) -> Result<Vec<String>> {
+    let scope_view = crate::store::load_config(root)
+        .ok()
+        .and_then(|config| config.scope_view);
     let mut ids = Vec::new();
     for repo in expand_repo_selectors(repos) {
         let id = slugify(&repo);
         if !project.repos.iter().any(|repo| repo.id == id) {
-            bail!(
-                "Project {} has no repo named {}.",
-                out::repo(&project.id),
-                out::repo(&id)
-            );
+            match &scope_view {
+                Some(scope) => println!(
+                    "{} {} is not cloned in this workspace (scoped to view {}); `knit pull` adds it if project {} has it.",
+                    out::warn("note:"),
+                    out::repo(&id),
+                    out::repo(scope),
+                    out::repo(&project.id)
+                ),
+                None => bail!(
+                    "Project {} has no repo named {}.",
+                    out::repo(&project.id),
+                    out::repo(&id)
+                ),
+            }
         }
         if !ids.contains(&id) {
             ids.push(id);

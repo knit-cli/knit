@@ -669,3 +669,438 @@ fn clone_fetches_each_bundle_artifact_individually() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Scoped clones: `--repo` / `--view` clone part of a project on purpose
+// ---------------------------------------------------------------------------
+
+/// An export with two cloneable repos, one bundle inside `backend` alone and
+/// one spanning both. The body doubles as the user's remote views document
+/// (the fake remote serves one body for every path): a `backend` view that
+/// excludes `frontend`.
+fn two_repo_export_with_views(root: &Path) -> serde_json::Value {
+    let backend = root.join("backend-source");
+    let frontend = root.join("frontend-source");
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {
+                    "localId": "backend",
+                    "name": "backend",
+                    "defaultBranch": null,
+                    "remoteUrl": backend.to_string_lossy(),
+                    "metadata": {},
+                },
+                {
+                    "localId": "frontend",
+                    "name": "frontend",
+                    "defaultBranch": null,
+                    "remoteUrl": frontend.to_string_lossy(),
+                    "metadata": {},
+                },
+            ],
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "feature-a",
+                    "lifecycleState": "open",
+                    "currentArtifact": {
+                        "artifactHash": "hash-a",
+                        "payload": bundle_payload("feature-a", &["backend"]),
+                    },
+                },
+                {
+                    "id": "rb-2",
+                    "slug": "feature-both",
+                    "lifecycleState": "open",
+                    "currentArtifact": {
+                        "artifactHash": "hash-b",
+                        "payload": bundle_payload("feature-both", &["backend", "frontend"]),
+                    },
+                },
+            ],
+            "historyEvents": [],
+            "defaultView": "backend",
+            "views": {
+                "backend": {"exclude": ["frontend"]},
+            },
+        }
+    })
+}
+
+#[test]
+fn clone_with_repo_scope_clones_only_the_selected_repos() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--repo",
+            "backend",
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(success, "scoped clone failed: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+
+    // Out-of-scope repos are neither cloned nor counted as failures.
+    assert_eq!(
+        document["repos"],
+        serde_json::json!([{"id": "backend", "status": "cloned"}])
+    );
+    assert_eq!(document["clonedRepoCount"], 1);
+    assert_eq!(document["failedRepoCount"], 0);
+    assert_eq!(document["scopeView"], "scope");
+    assert_eq!(document["reposOutOfScope"], serde_json::json!(["frontend"]));
+    assert_eq!(
+        document["bundles"]["restored"],
+        serde_json::json!(["feature-a"])
+    );
+    assert_eq!(document["bundles"]["dropped"], serde_json::json!([]));
+    assert_eq!(
+        document["bundles"]["outOfScope"],
+        serde_json::json!([{"id": "feature-both", "missingRepos": ["frontend"]}])
+    );
+    assert!(target.join("backend").exists());
+    assert!(!target.join("frontend").exists());
+    assert!(stderr.contains("Scope:"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("knit view include scope"),
+        "stderr: {stderr}"
+    );
+
+    // The workspace records its scope, and the hand-picked set is a saved
+    // absolute view so it can be extended like any other.
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["scopeView"], "scope");
+    let views: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(target.join(".knit/views/demo.views.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(views["views"]["scope"]["base"], "none");
+    assert_eq!(
+        views["views"]["scope"]["include"],
+        serde_json::json!(["backend"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_view_scope_resolves_the_remote_view() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--view",
+            "backend",
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(success, "view clone failed: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["scopeView"], "backend");
+    assert_eq!(document["reposOutOfScope"], serde_json::json!(["frontend"]));
+    assert_eq!(
+        document["repos"],
+        serde_json::json!([{"id": "backend", "status": "cloned"}])
+    );
+    assert!(!target.join("frontend").exists());
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(target.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["scopeView"], "backend");
+    // The remote views were restored as usual.
+    let views: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(target.join(".knit/views/demo.views.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(views["defaultView"], "backend");
+    assert_eq!(
+        views["views"]["backend"]["exclude"],
+        serde_json::json!(["frontend"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_unknown_view_fails_before_cloning_anything() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--view",
+            "nope",
+            "--no-worktree",
+        ],
+        &[],
+    );
+    assert!(!success);
+    assert!(
+        stderr.contains("no saved view named `nope`"),
+        "stderr: {stderr}"
+    );
+    assert!(
+        stderr.contains("Available views: backend"),
+        "stderr: {stderr}"
+    );
+    assert!(!target.join("backend").exists());
+
+    // `--view` is meaningless without a token: views are per-user config.
+    let (stdout, _stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--view",
+            "backend",
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(!success);
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["error"]["kind"], "noToken");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn remote_views_json_lists_the_users_views_outside_any_workspace() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "remote",
+            "views",
+            "acme/demo",
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--json",
+        ],
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(success, "remote views failed: {stderr}");
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["remote"], "hosted");
+    assert_eq!(document["project"], "demo");
+    assert_eq!(document["defaultView"], "backend");
+    assert_eq!(
+        document["views"],
+        serde_json::json!([
+            {"name": "backend", "base": "default", "include": [], "exclude": ["frontend"]}
+        ])
+    );
+
+    // No token: the same generic envelope `remote projects` emits.
+    let (stdout, _stderr, success) = knit_split_output(
+        &root,
+        &[
+            "remote",
+            "views",
+            "acme/demo",
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--json",
+        ],
+        &[],
+    );
+    assert!(!success);
+    let document: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+    assert_eq!(document["error"]["kind"], "noToken");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_repo_scope_pushes_the_scope_view_only_after_reading_remote_views() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    // The user already keeps two views on the remote; a `--repo` clone must
+    // add `scope` next to them, never replace the document.
+    fs::write(
+        fake_dir.join("views.json"),
+        serde_json::json!({
+            "data": {
+                "defaultView": "backend",
+                "views": {
+                    "backend": {"exclude": ["frontend"]},
+                    "everything": {"include": ["frontend"]},
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let target = root.join("workspace");
+
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "backend",
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+    assert!(success, "scoped clone failed: {stderr}");
+    let puts = recorded_views_puts(&fake_dir);
+    assert_eq!(puts.len(), 1, "exactly one views upload: {puts:?}");
+    let pushed = &puts[0];
+    assert_eq!(pushed["defaultView"], "backend");
+    assert_eq!(
+        pushed["views"]["backend"]["exclude"],
+        serde_json::json!(["frontend"])
+    );
+    assert_eq!(
+        pushed["views"]["everything"]["include"],
+        serde_json::json!(["frontend"])
+    );
+    assert_eq!(pushed["views"]["scope"]["base"], "none");
+    assert_eq!(
+        pushed["views"]["scope"]["include"],
+        serde_json::json!(["backend"])
+    );
+
+    // A second workspace with a *different* `--repo` set must not silently
+    // rescope the first one through the shared view.
+    let other = root.join("other");
+    fs::write(
+        fake_dir.join("views.json"),
+        serde_json::json!({"data": {"views": pushed["views"]}}).to_string(),
+    )
+    .unwrap();
+    let (_stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            other.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "frontend",
+            "--no-worktree",
+        ],
+        &[],
+    );
+    assert!(!success);
+    assert!(
+        stderr.contains("already have a remote view named `scope`"),
+        "stderr: {stderr}"
+    );
+    assert_eq!(recorded_views_puts(&fake_dir).len(), 1);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_repo_scope_without_a_token_keeps_the_view_local_and_says_so() {
+    let root = unique_temp_dir();
+    let export = two_repo_export_with_views(&root);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--repo",
+            "backend",
+            "--no-worktree",
+        ],
+        &[],
+    );
+    assert!(success, "scoped clone failed: {stderr}");
+    // Without --json, human lines stay on stdout.
+    assert!(
+        stdout.contains("scope view not pushed"),
+        "stdout: {stdout}\nstderr: {stderr}"
+    );
+    assert!(recorded_views_puts(&fake_dir).is_empty());
+
+    fs::remove_dir_all(root).unwrap();
+}

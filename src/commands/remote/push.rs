@@ -4,8 +4,9 @@
 
 use super::client::{
     configured_sync_remote_names, decode_response, effective_workspace_config,
-    load_project_if_present, normalize_base_url, request, request_json, resolve_project_id,
-    resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env, workspace_config,
+    fetch_project_export, load_project_if_present, normalize_base_url, request, request_json,
+    resolve_project_id, resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env,
+    workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::commands::push::PushForce;
@@ -410,6 +411,13 @@ pub fn push_project_to_remote(
 ) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let project_id = resolve_project_id(&root, &config, name)?;
+    if prune {
+        if let Some(scope_view) = config.scope_view.as_deref() {
+            bail!(
+                "This workspace is scoped to view `{scope_view}`, so its project lists only the repos cloned here; `--prune` would delete the other repos' records on the remote. Run `knit project push --prune` from a whole-project clone."
+            );
+        }
+    }
     let remote_names = match remote_name {
         Some(remote_name) => vec![slugify(remote_name)],
         None => configured_sync_remote_names(&config),
@@ -458,7 +466,7 @@ fn push_project_to_one_remote(
 ) -> Result<()> {
     let remote = resolve_remote(config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
-    let pushed = upsert_project(remote, &token, project_id, project)?;
+    let pushed = upsert_project(root, remote, &token, project_id, project)?;
     let repo_count = match project {
         Some(project) => push_repositories(remote, &token, &pushed.slug, &project.repos)?,
         None => 0,
@@ -489,7 +497,12 @@ fn push_project_to_one_remote(
 }
 
 /// Upload the local saved views for a project to the remote, if any exist.
-fn upload_views(remote: &KnitRemote, token: &str, root: &Path, project_slug: &str) -> Result<()> {
+pub(super) fn upload_views(
+    remote: &KnitRemote,
+    token: &str,
+    root: &Path,
+    project_slug: &str,
+) -> Result<()> {
     let views = crate::store::load_views(root, project_slug)?;
     if views.views.is_empty() && views.default_view.is_none() {
         return Ok(());
@@ -706,7 +719,13 @@ fn push_active_bundle_to_remote_impl(
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&active.root, &project_id)?;
     let (pushed_project, shape_push) = if publish_project_shape {
-        upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?
+        upsert_or_fetch_project(
+            &active.root,
+            remote,
+            &token,
+            &project_id,
+            local_project.as_ref(),
+        )?
     } else {
         let response = request(
             remote,
@@ -716,7 +735,13 @@ fn push_active_bundle_to_remote_impl(
             None,
         )?;
         if response.status == 404 {
-            upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?
+            upsert_or_fetch_project(
+                &active.root,
+                remote,
+                &token,
+                &project_id,
+                local_project.as_ref(),
+            )?
         } else {
             (decode_response(response)?, ProjectShapePush::ReadOnly)
         }
@@ -935,13 +960,71 @@ fn sync_active_bundle_to_remote_names(
     }
 }
 
+/// The project shape this workspace may publish. The remote treats the pushed
+/// `knitProject.repos` as the shared membership every collaborator reconciles
+/// against, and a scoped workspace's local project lists only the repos cloned
+/// here — pushing that short list would make every teammate's next pull drop
+/// the other repos from their project and their saved views. So a scoped
+/// workspace merges its entries over the remote's current membership, and
+/// publishes no shape at all when that membership cannot be read.
+pub(super) fn publishable_project(
+    root: &Path,
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<Option<KnitProject>> {
+    let Some(project) = project else {
+        return Ok(None);
+    };
+    let scope_view = crate::store::load_config(root)
+        .ok()
+        .and_then(|config| config.scope_view);
+    let Some(scope_view) = scope_view else {
+        return Ok(Some(project.clone()));
+    };
+    let membership = fetch_project_export(remote, Some(token), project_id)
+        .ok()
+        .and_then(|export| export.knit_project)
+        .filter(|membership| !membership.repos.is_empty());
+    let Some(membership) = membership else {
+        println!(
+            "{} this workspace is scoped to view {} and the remote's project membership could not be read; the local repo list is partial, so the project shape was not pushed.",
+            out::warn("project shape not pushed:"),
+            out::repo(&scope_view)
+        );
+        return Ok(None);
+    };
+    let mut merged = project.clone();
+    merged.repos = membership
+        .repos
+        .iter()
+        .map(|remote_repo| {
+            project
+                .repos
+                .iter()
+                .find(|repo| repo.id == remote_repo.id)
+                .cloned()
+                .unwrap_or_else(|| remote_repo.clone())
+        })
+        .collect();
+    for repo in &project.repos {
+        if !merged.repos.iter().any(|existing| existing.id == repo.id) {
+            merged.repos.push(repo.clone());
+        }
+    }
+    Ok(Some(merged))
+}
+
 fn upsert_project(
+    root: &Path,
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
-    let payload = project_payload(project_id, project);
+    let project = publishable_project(root, remote, token, project_id, project)?;
+    let payload = project_payload(project_id, project.as_ref());
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
     if response.status == 404 {
@@ -961,12 +1044,14 @@ enum ProjectShapePush {
 }
 
 fn upsert_or_fetch_project(
+    root: &Path,
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<(RemoteProject, ProjectShapePush)> {
-    let payload = project_payload(project_id, project);
+    let project = publishable_project(root, remote, token, project_id, project)?;
+    let payload = project_payload(project_id, project.as_ref());
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
     match response.status {
@@ -983,12 +1068,13 @@ fn upsert_or_fetch_project(
 }
 
 pub(super) fn upsert_project_for_history(
+    root: &Path,
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
-    let (pushed, _shape) = upsert_or_fetch_project(remote, token, project_id, project)?;
+    let (pushed, _shape) = upsert_or_fetch_project(root, remote, token, project_id, project)?;
     Ok(pushed)
 }
 
@@ -1356,8 +1442,13 @@ pub fn push_all_bundles_to_remote(
             Some(slug) => slug.clone(),
             None => {
                 let local_project = load_project_if_present(&root, &project_id)?;
-                let (upserted, shape_push) =
-                    upsert_or_fetch_project(remote, &token, &project_id, local_project.as_ref())?;
+                let (upserted, shape_push) = upsert_or_fetch_project(
+                    &root,
+                    remote,
+                    &token,
+                    &project_id,
+                    local_project.as_ref(),
+                )?;
                 if let (Some(local), ProjectShapePush::Pushed) =
                     (local_project.as_ref(), &shape_push)
                 {

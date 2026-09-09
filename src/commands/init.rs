@@ -321,14 +321,53 @@ fn select_project_repos(
 ) -> Result<Vec<ProjectRepoEntry>> {
     let project = crate::commands::project::load_project_by_id(root, project_id)?;
     let view = resolve_active_view(root, project_id, view_name)?;
-    resolve_view_repos(
+    let selected = resolve_view_repos(
         &project,
         repo_ids,
         all_repos,
         view.as_ref().map(|(name, view)| (name.as_str(), view)),
         include,
         exclude,
-    )
+    )?;
+    ensure_repos_cloned(root, &selected)?;
+    Ok(selected)
+}
+
+/// Refuse a bundle that would track a project repo with no checkout on this
+/// machine. In a scoped workspace the fix is to extend the scope view and
+/// pull; elsewhere the project entry points at a path that has gone missing.
+fn ensure_repos_cloned(root: &Path, selected: &[ProjectRepoEntry]) -> Result<()> {
+    let missing: Vec<&ProjectRepoEntry> = selected
+        .iter()
+        .filter(|repo| !Path::new(&repo.path).exists())
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let ids: Vec<&str> = missing.iter().map(|repo| repo.id.as_str()).collect();
+    let scope_view = root
+        .join(".knit/config.json")
+        .exists()
+        .then(|| load_config(root).ok())
+        .flatten()
+        .and_then(|config| config.scope_view);
+    match scope_view {
+        Some(view) => bail!(
+            "Repo {} is not cloned in this workspace (scoped to view {}). Run `knit view include {view} {}` and then `knit pull` to add it, or leave it out with `--exclude`.",
+            ids.join(", "),
+            out::repo(&view),
+            ids.join(" ")
+        ),
+        None => bail!(
+            "Repo {} has no checkout at its recorded path: {}. Clone it there or fix the project entry with `knit project add`.",
+            ids.join(", "),
+            missing
+                .iter()
+                .map(|repo| repo.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ),
+    }
 }
 
 /// Resolve which named view to apply: an explicit `--view` name (which must

@@ -42,8 +42,8 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 ## Commands
 
 ```sh
-knit clone https://<host>/<owner>/<project> [target] [--token <token>] [--active-bundle <bundle>] [--no-worktree] [--json]
-knit clone <owner>/<project> [target] [--remote <name>] [--url <url>] [--token <token>] [--active-bundle <bundle>] [--no-worktree] [--json]
+knit clone https://<host>/<owner>/<project> [target] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--json]
+knit clone <owner>/<project> [target] [--remote <name>] [--url <url>] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--json]
 knit init <name> [--agents]
 knit agents [project]                         # refresh workspace + project AGENTS.md sections
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
@@ -58,6 +58,7 @@ knit project list
 knit project show [name]
 knit project remove <name> [--repo <repo-id>]... [--force]
 knit remote add <name> <url> [--token <token>|--token-stdin] [--global]
+knit remote views <owner>/<project> [--remote <name>] [--url <url>] [--json]
 knit remote list [--global]
 knit remote show <name> [--global]
 knit remote remove <name> [--global]
@@ -311,6 +312,28 @@ knit bundle apply-view backend       # reshape the bundle to match a saved view
 ```
 
 `knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Views sync to the remote as the user's own config with `knit sync push --views` / `knit sync pull --views`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
+
+#### Scoped clones
+
+A view can also decide what a machine clones in the first place. `knit clone owner/project --view backend` fetches your saved views before touching git (so it needs a remote token), clones only the repos that view resolves to, and records the view as the workspace's **scope** (`scopeView` in `.knit/config.json`). `knit clone owner/project --repo api,worker` does the same from an explicit list, saving it as the absolute view `scope`. With a token, that view is pushed to the remote right away so a later `knit sync pull --views` keeps it — but only after your remote views were read, so the upload can never replace them; without a token the clone says the view exists only locally until `knit sync push --views`. A remote view already named `scope` is reused when it has the same repos and refused otherwise, so two `--repo` clones cannot silently rescope each other. `knit remote views owner/project` lists your views for a project before you clone it; a teammate without saved views uses `--repo`.
+
+A scoped workspace stays compatible with the whole project. Bundle artifacts, history and views are identical to a full clone's; only the local project's repo list is shorter, and the parts of Knit that would otherwise assume every repo is present respect the scope instead:
+
+- Pushes never shrink the shared project. The remote treats the pushed project's repo list as the membership every collaborator reconciles against, so a scoped workspace merges its entries over the remote's current membership before any push (`knit push`, `knit project push`, `knit sync push --history`), and publishes no project shape at all when that membership cannot be read. `knit project push --prune` is refused outright, because it would delete the other repos' records.
+- Remote pulls reconcile project membership only inside the scope: a repo added to the project on the remote is cloned here only when the scope view resolves to it. Repos outside the scope are named, never cloned, and never treated as removals.
+- `knit sync pull --bundles` skips a remote bundle that touches a repo not cloned here (printed as `skipped: repo <id> not cloned here`) and keeps syncing the rest, so a teammate working elsewhere in the project cannot break your sync. Skipped artifacts are remembered in `.knit/sync-skipped.json` and not downloaded again until they change. Such bundles still show up on the remote.
+- `knit bundle pull <slug>` and `knit handoff in` name a bundle explicitly, so they do clone its missing repos — and record them in the scope view, printing `scope view <name> extended with <repo>`.
+- `knit bundle` refuses a repo selection that includes a repo with no checkout here, naming the fix. `knit land plan` accepts landing lanes and deployments that name repos absent from a scoped workspace.
+
+Growing the scope is editing the view and pulling. In a scoped workspace `knit view include`/`save` accept a repo id that is not cloned here yet (with a note), because that is how the scope grows; the next `knit pull` clones it if the remote project has it:
+
+```sh
+knit view include scope docs        # or: knit view include backend docs
+knit pull                           # clones docs, adds it to the local project
+knit bundle "docs work" --view scope --include docs
+```
+
+The scope view is ordinary per-user view data: renaming or deleting it leaves the workspace scoped with nothing addable until it is restored (`knit sync pull --views`) or recreated with `knit view save`.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 

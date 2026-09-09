@@ -2696,3 +2696,386 @@ fn one_failing_repo_does_not_stop_the_others_and_a_rerun_finishes_the_job() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+// ---------------------------------------------------------------------------
+// Scoped workspaces (`knit clone --view`): reconcile, bundle sync, prune
+// ---------------------------------------------------------------------------
+
+/// Turn a reconcile scaffold into a scoped workspace: an absolute `scope`
+/// view over `repos`, recorded as the workspace's scope in config.json.
+fn scope_workspace(workspace: &Path, repos: &[&str]) {
+    let include = repos.join(",");
+    knit(
+        workspace,
+        [
+            "view",
+            "save",
+            "scope",
+            "--base",
+            "none",
+            "--include",
+            &include,
+        ],
+    );
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["scopeView"] = serde_json::json!("scope");
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+}
+
+#[test]
+fn pull_reconcile_adds_only_membership_repos_inside_the_scope_view() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    scope_workspace(&workspace, &["backend"]);
+    let newrepo = root.join("newrepo");
+    init_repo(&newrepo, "newrepo");
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    // Outside the scope: named, not cloned, not treated as a removal either.
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(
+        output.contains("outside scope view scope: newrepo"),
+        "{output}"
+    );
+    assert!(!workspace.join("newrepo").exists());
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
+
+    // Extending the scope is the documented two-step: include, then pull.
+    knit(&workspace, ["view", "include", "scope", "newrepo"]);
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(output.contains("added"), "{output}");
+    assert!(workspace.join("newrepo").exists());
+    assert_eq!(project_repo_ids(&workspace), vec!["backend", "newrepo"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_pull_skips_bundles_that_touch_repos_not_cloned_here() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    // No membership in the export, so reconcile has nothing to add; the
+    // remote bundle spans a repo this workspace simply does not carry.
+    let payload = |id: &str, repos: &[&str]| {
+        serde_json::json!({
+            "schemaVersion": "1",
+            "kind": "knit.bundle",
+            "id": id,
+            "title": id,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "repos": repos.iter().map(|repo| serde_json::json!({
+                "id": repo, "path": format!("/tmp/{repo}"), "baseBranch": "main",
+            })).collect::<Vec<_>>(),
+            "commitGroups": [],
+        })
+    };
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            ],
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "elsewhere",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "h1", "payload": payload("elsewhere", &["backend", "frontend"])},
+                },
+                {
+                    "id": "rb-2",
+                    "slug": "mine",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "h2", "payload": payload("mine", &["backend"])},
+                },
+            ],
+            "historyEvents": [],
+        }
+    })
+    .to_string();
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(
+        output.contains("skipped: repo frontend not cloned here"),
+        "{output}"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/elsewhere.bundle.json")
+        .exists());
+    // The other bundle still syncs: one foreign bundle must not stop the sweep.
+    assert!(workspace.join(".knit/bundles/mine.bundle.json").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn project_push_prune_is_refused_in_a_scoped_workspace() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    scope_workspace(&workspace, &["backend"]);
+    knit(
+        &workspace,
+        ["remote", "add", "hosted", "http://127.0.0.1:9"],
+    );
+
+    let output = knit_fails_with_env(
+        &workspace,
+        ["project", "push", "--prune"],
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(output.contains("scoped to view `scope`"), "{output}");
+    assert!(output.contains("--prune"), "{output}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_start_names_the_scope_when_a_selected_repo_is_not_cloned() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    // A membership entry whose checkout does not exist on this machine, the
+    // shape a scoped clone leaves behind for the repos it left out.
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let mut docs = project["repos"][0].clone();
+    docs["id"] = serde_json::json!("docs");
+    docs["path"] = serde_json::json!(root.join("docs").to_str().unwrap());
+    project["repos"].as_array_mut().unwrap().push(docs);
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap(),
+    )
+    .unwrap();
+
+    let output = knit_fails(&workspace, ["bundle", "needs docs", "--repo", "docs"]);
+    assert!(output.contains("has no checkout"), "{output}");
+
+    scope_workspace(&workspace, &["backend"]);
+    let output = knit_fails(&workspace, ["bundle", "needs docs too", "--repo", "docs"]);
+    assert!(output.contains("not cloned in this workspace"), "{output}");
+    assert!(output.contains("knit view include scope docs"), "{output}");
+
+    // The scope's own repos still bundle fine.
+    let output = knit(&workspace, ["bundle", "just backend", "--repo", "backend"]);
+    assert!(!output.contains("not cloned"), "{output}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Export served by `spawn_fake_remote_api` for scoped-push tests: the
+/// project's shared membership is backend + newrepo, and one open bundle
+/// spans both.
+fn scoped_push_export(root: &Path) -> String {
+    let newrepo = root.join("newrepo");
+    if !newrepo.exists() {
+        init_repo(&newrepo, "newrepo");
+    }
+    let payload = |id: &str, repos: &[&str]| {
+        serde_json::json!({
+            "schemaVersion": "1",
+            "kind": "knit.bundle",
+            "id": id,
+            "title": id,
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "repos": repos.iter().map(|repo| serde_json::json!({
+                "id": repo, "path": format!("/tmp/{repo}"), "baseBranch": "main",
+            })).collect::<Vec<_>>(),
+            "commitGroups": [],
+        })
+    };
+    serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+                    {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "main"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+                {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "metadata": {}},
+            ],
+            "omittedRepositoryCount": 0,
+            "bundles": [
+                {
+                    "id": "rb-1",
+                    "slug": "elsewhere",
+                    "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "h1", "payload": payload("elsewhere", &["backend", "newrepo"])},
+                },
+            ],
+            "historyEvents": [],
+        }
+    })
+    .to_string()
+}
+
+#[test]
+fn project_push_from_a_scoped_workspace_keeps_the_shared_membership_whole() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    scope_workspace(&workspace, &["backend"]);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, scoped_push_export(&root));
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["project", "push"], &env);
+    assert!(output.contains("pushed"), "{output}");
+
+    // The pushed `knitProject.repos` is what every collaborator reconciles
+    // against, so it must carry the remote's full membership, not just the
+    // repo cloned here.
+    let upserts = recorded_project_upserts(&fake_dir);
+    assert!(!upserts.is_empty(), "no project upsert recorded");
+    let pushed_repos: Vec<&str> = upserts.last().unwrap()["metadata"]["knitProject"]["repos"]
+        .as_array()
+        .expect("knitProject.repos in the pushed payload")
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(pushed_repos, vec!["backend", "newrepo"], "{upserts:?}");
+    // The local project itself stays scoped.
+    assert_eq!(project_repo_ids(&workspace), vec!["backend"]);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_pull_remembers_skipped_bundles_and_does_not_refetch_them() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    scope_workspace(&workspace, &["backend"]);
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+
+    // Slim export: the artifact has to be fetched to learn which repos the
+    // bundle touches — exactly once.
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            ],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "elsewhere",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "h1", "sizeBytes": 42},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "elsewhere",
+                "currentArtifact": {
+                    "artifactHash": "h1",
+                    "payload": {
+                        "schemaVersion": "1",
+                        "kind": "knit.bundle",
+                        "id": "elsewhere",
+                        "title": "elsewhere",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "repos": [
+                            {"id": "backend", "path": "/tmp/backend", "baseBranch": "main"},
+                            {"id": "frontend", "path": "/tmp/frontend", "baseBranch": "main"},
+                        ],
+                        "commitGroups": [],
+                    },
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let first = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(
+        first.contains("skipped: repo frontend not cloned here"),
+        "{first}"
+    );
+    assert_eq!(recorded_artifact_fetches(&fake_dir), vec!["rb-1"]);
+
+    let second = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(second.contains("unchanged"), "{second}");
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1"],
+        "the unchanged artifact must not be downloaded again"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/elsewhere.bundle.json")
+        .exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_pull_by_name_extends_the_scope_view_with_what_it_cloned() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    scope_workspace(&workspace, &["backend"]);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, scoped_push_export(&root));
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    // Asking for this bundle by name is an explicit opt-in to its repos.
+    let output = knit_with_env(&workspace, ["bundle", "pull", "elsewhere"], &env);
+    assert!(
+        output.contains("scope view scope extended with newrepo"),
+        "{output}"
+    );
+    assert!(workspace.join("newrepo").exists());
+    let views: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/views/demo.views.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        views["views"]["scope"]["include"],
+        serde_json::json!(["backend", "newrepo"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

@@ -61,19 +61,35 @@ pub(super) fn pull_views_into(
     token: &str,
     project_id: &str,
 ) -> Result<usize> {
-    let remote_views: RemoteViews = request_json(
+    let remote_views = fetch_remote_views(remote, token, project_id)?;
+    let views = views_from_remote(project_id, remote_views);
+    crate::store::save_views(root, &views)?;
+    Ok(views.views.len())
+}
+
+/// Fetch the current user's saved views for a project without touching the
+/// workspace. `knit clone --view` resolves against this before cloning.
+pub(super) fn fetch_remote_views(
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+) -> Result<RemoteViews> {
+    request_json(
         remote,
         token,
         "GET",
         &format!("/projects/{project_id}/view"),
         None,
-    )?;
+    )
+}
+
+/// The local views artifact a remote views response becomes.
+pub(super) fn views_from_remote(project_id: &str, remote_views: RemoteViews) -> KnitProjectViews {
     let mut views = KnitProjectViews::new(project_id.to_string(), now_iso());
     views.default_view = remote_views.default_view;
     views.views = remote_views.views;
     views.updated_at = now_iso();
-    crate::store::save_views(root, &views)?;
-    Ok(views.views.len())
+    views
 }
 
 /// The local project plus the remote project export, fetched once so many
@@ -259,10 +275,22 @@ fn reconcile_project_repositories(
         .map(|repository| (export_repo_local_id(repository), repository))
         .collect();
 
+    // A scoped workspace (`knit clone --view`) only takes membership repos its
+    // scope view resolves to; the rest stay on the remote until the view is
+    // extended. Out-of-scope repos are neither added nor treated as removals.
+    let scope = workspace_scope(root, &project.id, membership)?;
+    let mut skipped_by_scope = Vec::new();
     let planned_adds: Vec<RemoteExportRepository> = membership
         .repos
         .iter()
         .filter(|entry| !existing.contains(&entry.id))
+        .filter(|entry| match &scope {
+            Some(scope) if !scope.repo_ids.contains(&entry.id) => {
+                skipped_by_scope.push(entry.id.clone());
+                false
+            }
+            _ => true,
+        })
         .map(|entry| match records.get(entry.id.as_str()) {
             Some(record) => (*record).clone(),
             None => RemoteExportRepository {
@@ -279,6 +307,16 @@ fn reconcile_project_repositories(
         })
         .collect();
 
+    if let (Some(scope), false) = (&scope, skipped_by_scope.is_empty()) {
+        println!(
+            "{} {} outside scope view {}: {} (extend with `knit view include {} <repo>`)",
+            out::heading("Project repos:"),
+            out::muted("not cloned"),
+            out::repo(&scope.view_name),
+            skipped_by_scope.join(", "),
+            scope.view_name
+        );
+    }
     if planned_adds.is_empty() && planned_removals.is_empty() {
         return Ok(());
     }
@@ -427,6 +465,95 @@ fn reconcile_project_repositories(
     }
 
     Ok(())
+}
+
+/// The repo ids a scoped workspace is allowed to carry, resolved from its
+/// scope view against the remote membership.
+pub(super) struct WorkspaceScope {
+    pub(super) view_name: String,
+    pub(super) repo_ids: BTreeSet<String>,
+}
+
+/// Resolve the workspace's scope view (if any) against `membership`. A scope
+/// view that no longer exists locally resolves to an empty set — the safe
+/// answer, since cloning the whole project behind the user's back is exactly
+/// what a scoped workspace exists to avoid.
+pub(super) fn workspace_scope(
+    root: &Path,
+    local_project_id: &str,
+    membership: &KnitProject,
+) -> Result<Option<WorkspaceScope>> {
+    let config = crate::store::load_config(root)?;
+    let Some(view_name) = config.scope_view else {
+        return Ok(None);
+    };
+    // Views are keyed by the local (slugified) project id, which is not
+    // always the id the remote membership carries.
+    let views = crate::store::load_views(root, local_project_id)?;
+    let Some(view) = views.views.get(&view_name) else {
+        println!(
+            "{} scope view {} is not saved locally; no project repos will be added until it is restored (`knit sync pull --views`) or recreated (`knit view save {} --base none --include <repo>...`).",
+            out::warn("warning:"),
+            out::repo(&view_name),
+            view_name
+        );
+        return Ok(Some(WorkspaceScope {
+            view_name,
+            repo_ids: BTreeSet::new(),
+        }));
+    };
+    let repo_ids = crate::commands::init::resolve_view_repos(
+        membership,
+        &[],
+        false,
+        Some((view_name.as_str(), view)),
+        &[],
+        &[],
+    )?
+    .into_iter()
+    .map(|repo| repo.id)
+    .collect();
+    Ok(Some(WorkspaceScope {
+        view_name,
+        repo_ids,
+    }))
+}
+
+/// Remote artifacts a sweep skipped because their bundle touches repos not
+/// cloned here, keyed by bundle slug. The slim export does not name a
+/// bundle's repos, so without this the same artifact would be downloaded on
+/// every sync just to be skipped again — and a scoped workspace is exactly
+/// where several such bundles live.
+type SkippedArtifacts = BTreeMap<String, String>;
+
+fn skipped_artifacts_path(root: &Path) -> std::path::PathBuf {
+    root.join(".knit/sync-skipped.json")
+}
+
+fn load_skipped_artifacts(root: &Path) -> SkippedArtifacts {
+    let path = skipped_artifacts_path(root);
+    if !path.exists() {
+        return SkippedArtifacts::new();
+    }
+    read_json(&path).unwrap_or_default()
+}
+
+fn save_skipped_artifacts(root: &Path, skipped: &SkippedArtifacts) -> Result<()> {
+    let path = skipped_artifacts_path(root);
+    if skipped.is_empty() {
+        if path.exists() {
+            fs::remove_file(&path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    write_json(&path, skipped)
+}
+
+/// Repo ids `bundle` references that the local project does not carry.
+fn repos_missing_locally(bundle: &ChangeGroup, project: &KnitProject) -> Vec<String> {
+    let available: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
+    super::clone::missing_bundle_repos(bundle, &available)
 }
 
 /// Pull one named bundle's recorded state from a prepared remote context:
@@ -976,6 +1103,7 @@ pub fn fetch_bundles_from_remote(
 
     let mut fetched_count = 0;
     let mut quarantined_count = 0;
+    let mut skipped_artifacts = load_skipped_artifacts(root);
     for remote_bundle in export.bundles {
         if remote_bundle.lifecycle_state == "deleted" {
             continue;
@@ -1041,10 +1169,43 @@ pub fn fetch_bundles_from_remote(
             }
         }
 
+        // Skipped last time for touching repos not cloned here, and unchanged
+        // since: nothing to download, the answer would be the same.
+        if skipped_artifacts.get(&remote_bundle.slug) == Some(&artifact.artifact_hash) {
+            println!(
+                "  {} {} [{}]",
+                out::node(&remote_bundle.slug),
+                out::muted(&remote_bundle.lifecycle_state),
+                out::muted("skipped: touches repos not cloned here (unchanged)")
+            );
+            continue;
+        }
+
         let (mut bundle, artifact_hash) =
             resolve_export_bundle_payload(&remote, Some(&token), &remote_bundle)
                 .with_context(|| format!("failed to fetch bundle `{}`", remote_bundle.slug))?;
         let branch_mapping = bundle_branch_mapping(&bundle);
+
+        // A bundle touching repos this workspace does not carry (a scoped
+        // clone, or a repo that failed to clone) cannot be localized. That is
+        // expected for a scoped workspace, so skip it and keep going: the
+        // remaining bundles must still sync.
+        let missing = repos_missing_locally(&bundle, &local_project);
+        if !missing.is_empty() {
+            println!(
+                "  {} {} {} [{}]",
+                out::node(&remote_bundle.slug),
+                out::muted(&remote_bundle.lifecycle_state),
+                branch_mapping,
+                out::muted(format!(
+                    "skipped: repo {} not cloned here",
+                    missing.join(", ")
+                ))
+            );
+            skipped_artifacts.insert(remote_bundle.slug.clone(), artifact_hash);
+            continue;
+        }
+        skipped_artifacts.remove(&remote_bundle.slug);
 
         let status;
         if let Some(mut local) = local {
@@ -1143,6 +1304,7 @@ pub fn fetch_bundles_from_remote(
             ))
         );
     }
+    save_skipped_artifacts(root, &skipped_artifacts)?;
     if fetched_count > 0 {
         println!(
             "{} {} bundle(s) from {}",

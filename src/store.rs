@@ -242,6 +242,8 @@ pub fn merge_effective_config(global: KnitConfig, workspace: KnitConfig) -> Knit
         effective.auto_tag = workspace.auto_tag;
     }
     effective.push_sync = workspace.push_sync;
+    // The scope is a property of this checkout, never of the user.
+    effective.scope_view = workspace.scope_view;
     effective.remotes.extend(workspace.remotes);
 
     effective

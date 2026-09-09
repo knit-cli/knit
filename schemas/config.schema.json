@@ -17,6 +17,7 @@
     "stealth": { "type": "boolean" },
     "autoTag": { "type": "boolean" },
     "pushSync": { "type": "boolean" },
+    "scopeView": { "type": "string" },
     "remotes": {
       "type": "object",
       "additionalProperties": {

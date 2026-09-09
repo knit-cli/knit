@@ -31,6 +31,7 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&root, &project_id)?;
     let remote_project = super::push::upsert_project_for_history(
+        &root,
         remote,
         &token,
         &project_id,

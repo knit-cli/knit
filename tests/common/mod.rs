@@ -2103,7 +2103,38 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             (200, export)
         }
         ("GET", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/view") => {
-            (200, "{\"data\":{\"views\":{}}}".to_string())
+            // Tests stage `<dir>/views.json` to serve a user's saved views.
+            let views = fs::read_to_string(dir.join("views.json"))
+                .unwrap_or_else(|_| "{\"data\":{\"views\":{}}}".to_string());
+            (200, views)
+        }
+        ("PUT", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/view") => {
+            // Record every views upload so tests can assert what was pushed.
+            let mut log = fs::read_to_string(dir.join("views-puts.jsonl")).unwrap_or_default();
+            log.push_str(&body);
+            log.push('\n');
+            fs::write(dir.join("views-puts.jsonl"), log).unwrap();
+            (200, "{\"data\":{}}".to_string())
+        }
+        ("PATCH", path) | ("POST", path)
+            if path.starts_with("/api/v1/projects")
+                && !path.contains("/repositories")
+                && !path.ends_with("/view") =>
+        {
+            // Project upserts: record the payload (its `metadata.knitProject`
+            // is the shared membership every collaborator reconciles against).
+            let mut log =
+                fs::read_to_string(dir.join("project-upserts.jsonl")).unwrap_or_default();
+            log.push_str(&body);
+            log.push('\n');
+            fs::write(dir.join("project-upserts.jsonl"), log).unwrap();
+            (
+                200,
+                "{\"data\":{\"id\":\"p-1\",\"slug\":\"demo\",\"name\":\"demo\"}}".to_string(),
+            )
+        }
+        ("POST", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/repositories") => {
+            (200, "{\"data\":{\"id\":\"r-1\"}}".to_string())
         }
         _ => (
             404,
@@ -2116,6 +2147,26 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
         response.len()
     )?;
     stream.flush()
+}
+
+/// The project upserts `spawn_fake_remote_api` received, one payload per line.
+pub fn recorded_project_upserts(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("project-upserts.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The views uploads `spawn_fake_remote_api` received, one payload per line.
+pub fn recorded_views_puts(dir: &Path) -> Vec<serde_json::Value> {
+    fs::read_to_string(dir.join("views-puts.jsonl"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
 }
 
 /// The history pushes the fake push remote received: one entry per request,
