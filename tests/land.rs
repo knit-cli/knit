@@ -4234,6 +4234,148 @@ fn a_terminal_target_still_merges_the_reviews() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Publish one backend review against `main` and return the workspace with
+/// the fake forge wired up, ready for `knit land`.
+fn publish_main_review_bundle(
+    root: &Path,
+    title: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github" });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", title]);
+    let slug = title.replace(' ', "-");
+    let feature = workspace.join(format!(".knit/worktrees/{slug}/backend"));
+    append_line(&feature.join("app.txt"), "main change");
+    knit(&workspace, ["commit", "--all", "-m", "Main change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+/// A request names a destination, not a flag. A plan written bare lands every
+/// review into the base it records — `main` here — so `--target main` asks for
+/// exactly that plan. This is the resume path a one-click "land to main" takes
+/// after an earlier bare `knit land` left its plan behind: the plan step is
+/// refused as already existing, and the apply must then accept the plan
+/// rather than demand a `--force` regeneration of the same landing.
+#[test]
+fn a_target_request_accepts_a_bare_plan_that_already_lands_there() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "bare then target");
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan_json = read_land_plan(&workspace, "bare-then-target");
+    assert!(plan_json["targetBranch"].is_null(), "{plan_json}");
+
+    let existing = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main", "plan"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(existing.contains("Land plan already exists"), "{existing}");
+
+    // Showing the plan under the same destination is not a mismatch either.
+    let shown = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(shown.contains("backend -> main"), "{shown}");
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed bare-then-target"), "{apply}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+
+    let bundle = read_named_bundle(&workspace, "bare-then-target");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A different destination is still refused: the plan lands into `main`, and
+/// `--target release` asks for somewhere else.
+#[test]
+fn a_target_request_still_refuses_a_bare_plan_that_lands_elsewhere() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "bare then release");
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let mismatched = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--target", "release", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        mismatched.contains("Land plan targets recorded PR bases, not `release`"),
+        "{mismatched}"
+    );
+    assert!(!fake_gh_dir.join("merged-backend").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The mirror image: a `--target main` plan whose reviews already record
+/// `main` lands into the recorded review bases, so a bare apply may use it.
+#[test]
+fn a_bare_request_accepts_a_target_plan_for_the_recorded_bases() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "target then bare");
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plan_json = read_land_plan(&workspace, "target-then-bare");
+    assert_eq!(plan_json["targetBranch"].as_str(), Some("main"));
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed target-then-bare"), "{apply}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// The artifact path follows the same rule: an intermediate `--target` merges
 /// the feature branch on the host and leaves the review untouched.
 #[test]
