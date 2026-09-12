@@ -107,6 +107,7 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
         // destination of its own, so a finished lane or target run does not
         // answer it either.
         let same_destination = ensure_requested_selection_matches_plan(
+            &active,
             target_branch.as_deref(),
             lane_name.as_deref(),
             &plan,
@@ -154,6 +155,7 @@ pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Res
     if plan_path.exists() {
         let plan: LandPlan = read_json(&plan_path)?;
         ensure_requested_selection_matches_plan(
+            &active,
             target_branch.as_deref(),
             lane_name.as_deref(),
             &plan,
@@ -201,7 +203,12 @@ pub fn apply_land_plan(
         );
     }
     let plan: LandPlan = read_json(&path)?;
-    ensure_requested_selection_matches_plan(target_branch.as_deref(), lane_name.as_deref(), &plan)?;
+    ensure_requested_selection_matches_plan(
+        &active,
+        target_branch.as_deref(),
+        lane_name.as_deref(),
+        &plan,
+    )?;
     validate::validate_plan_for_bundle(&active, &plan)?;
     ensure_tag_matches_destination(&plan, tag.as_deref())?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
@@ -326,6 +333,7 @@ pub(super) fn normalize_lane_name(lane_name: Option<&str>) -> Result<Option<Stri
 }
 
 fn ensure_requested_selection_matches_plan(
+    active: &ActiveBundle,
     requested_target: Option<&str>,
     requested_lane: Option<&str>,
     plan: &LandPlan,
@@ -343,6 +351,17 @@ fn ensure_requested_selection_matches_plan(
         if plan.target_branch.as_deref() == Some(requested_target) {
             return Ok(());
         }
+        // A request names a destination, not a flag. A bare plan whose
+        // recorded review bases are all `main` already lands into `main`, so
+        // `--target main` asks for exactly the landing it describes; refusing
+        // it would strand the operator behind a plan that is already right.
+        if plan.lane.is_none()
+            && plan_lands_every_repo_into(active, plan, |_, destination| {
+                destination == requested_target
+            })
+        {
+            return Ok(());
+        }
         let planned = plan.target_branch.as_deref().unwrap_or("recorded PR bases");
         bail!(
             "Land plan targets {planned}, not `{requested_target}`. Regenerate it with `knit land --target {requested_target} plan --force`, inspect it, then apply again."
@@ -358,11 +377,54 @@ fn ensure_requested_selection_matches_plan(
         );
     }
     if let Some(planned_target) = plan.target_branch.as_deref() {
+        // The mirror image: a `--target main` plan whose reviews all already
+        // record `main` as their base lands into the recorded review bases.
+        if plan_lands_every_repo_into(active, plan, |repo_id, destination| {
+            publication_for_repo(&active.bundle, repo_id)
+                .is_some_and(|publication| publication.base_branch == destination)
+        }) {
+            return Ok(());
+        }
         bail!(
             "Land plan targets `{planned_target}`, not the recorded review bases. Pass `--target {planned_target}` to use it, or regenerate it with `knit land plan --force`."
         );
     }
     Ok(())
+}
+
+/// Whether every merge step in the plan lands its repository somewhere
+/// `accepts` agrees with. A step's destination is its own branch, the plan's
+/// per-repo projection, the plan's one raw target, or the base its recorded
+/// review points at. A plan with no merge step, or one whose destination
+/// cannot be resolved, lands nowhere knowable and never matches.
+fn plan_lands_every_repo_into(
+    active: &ActiveBundle,
+    plan: &LandPlan,
+    accepts: impl Fn(&str, &str) -> bool,
+) -> bool {
+    let mut saw_merge = false;
+    for step in plan.steps.iter().filter(|step| plan::is_merge_step(step)) {
+        let Some(repo_id) = step.repo_id.as_deref() else {
+            return false;
+        };
+        let destination = step
+            .target_branch
+            .as_deref()
+            .or_else(|| plan.target_branches.get(repo_id).map(String::as_str))
+            .or(plan.target_branch.as_deref())
+            .or_else(|| {
+                publication_for_repo(&active.bundle, repo_id)
+                    .map(|publication| publication.base_branch.as_str())
+            });
+        let Some(destination) = destination else {
+            return false;
+        };
+        if !accepts(repo_id, destination) {
+            return false;
+        }
+        saw_merge = true;
+    }
+    saw_merge
 }
 
 /// Apply the plan's native target contract to the recorded review objects
