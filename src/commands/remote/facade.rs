@@ -183,7 +183,11 @@ pub fn sync_push(
 /// as does `knit pull --remote`/`knit fetch --knit` (bundles only). Bundle pull
 /// for the active bundle is delegated to the existing localize/refresh path in
 /// `remote::pull`; this module does not reimplement that logic.
-pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()> {
+pub fn sync_pull(
+    targets: SyncTargets,
+    remote_overrides: &[String],
+    artifacts_only: bool,
+) -> Result<()> {
     let remotes = resolve_remotes(remote_overrides)?;
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
@@ -211,7 +215,7 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             // matters: the artifact-only sync would fast-forward the active
             // bundle's artifact first and turn this into a skip, leaving its
             // checkouts stale.
-            if crate::store::load_active_bundle().is_ok() {
+            if !artifacts_only && crate::store::load_active_bundle().is_ok() {
                 if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
                     failures.push(format!("{remote} bundle: {error:#}"));
                 }
@@ -222,7 +226,10 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             // their slugs. Diverged ledgers are reported, not merged;
             // `knit pull --merge` is the explicit door for that.
             match effective_workspace_config() {
-                Ok((root, config)) => {
+                Ok((root, mut config)) => {
+                    if let Some(project) = project {
+                        config.active_project = Some(project.to_string());
+                    }
                     if let Err(error) =
                         super::pull::fetch_bundles_from_remote(&root, &config, Some(remote))
                     {

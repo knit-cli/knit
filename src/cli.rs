@@ -565,6 +565,9 @@ pub enum SyncCommand {
     /// Pull artifacts from the sync remotes. With no target flags, pulls bundle, history,
     /// and views for the resolved project/bundle.
     Pull {
+        /// Only sync artifacts; do not fetch branches, create worktrees, or update checkouts.
+        #[arg(long)]
+        artifacts_only: bool,
         #[command(flatten)]
         targets: SyncTargetArgs,
         /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
