@@ -1117,6 +1117,9 @@ pub fn fetch_bundles_from_remote(
         // the slim export alone is decided here, before any payload is
         // downloaded: the sweep must not pull an artifact it has no use for.
         let bundle_path = bundles_dir.join(format!("{}.bundle.json", remote_bundle.slug));
+        // Background artifact convergence must serialize with commits and
+        // other pulls, just like the named bundle's checkout-refresh path.
+        let _lock = acquire_named_lock(root, &remote_bundle.slug)?;
         let local: Option<ChangeGroup> =
             if bundle_path.exists() {
                 Some(read_json(&bundle_path).with_context(|| {

@@ -1605,7 +1605,12 @@ fn handle_fake_remote_bundle_request(
         .to_string();
     let segments: Vec<&str> = path.split('/').collect();
     let (status, response) = match (method.as_str(), segments.as_slice()) {
-        ("GET", ["api", "v1", "projects", _, "export"]) => {
+        ("GET", ["api", "v1", "projects", project_id, "export"]) => {
+            let mut record = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("project-export-fetches.txt"))?;
+            writeln!(record, "{project_id}")?;
             match fs::read_to_string(dir.join("export.json")) {
                 Ok(body) => (200, body),
                 Err(_) => (

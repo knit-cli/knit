@@ -758,7 +758,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     PushForce::from_flags(force_with_lease, force),
                 )
             }
-            Some(SyncCommand::Pull { targets, remote }) => {
+            Some(SyncCommand::Pull {
+                targets,
+                remote,
+                artifacts_only,
+            }) => {
                 let targets = commands::remote::SyncTargets::resolve(
                     targets.bundles,
                     targets.history,
@@ -767,7 +771,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.kg,
                     targets.all,
                 );
-                commands::remote::sync_pull(targets, &remote)
+                commands::remote::sync_pull(targets, &remote, artifacts_only)
             }
         },
         Commands::History { command } => match command {

@@ -9,7 +9,7 @@ use super::{
     normalize_target_branch, state_is_merged,
 };
 use crate::ids::node_id;
-use crate::model::{BundleNode, MergeMethod};
+use crate::model::{BundleNode, BundleState, MergeMethod};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo};
 use crate::store::{read_json, write_json};
@@ -340,6 +340,18 @@ pub fn apply_land_from_artifact(
         }),
     );
     bundle.nodes.push(node);
+    // Artifact-mode runs have no checkout to clean, but must publish the same
+    // terminal lifecycle as a workspace landing so other machines converge.
+    if terminal {
+        let archived_at = now_iso();
+        bundle.state = Some(BundleState::Archived);
+        bundle.archived_at = Some(archived_at.clone());
+        bundle.nodes.push(BundleNode::feature_archived(
+            node_id("archive"),
+            archived_at,
+            Some("landed".to_string()),
+        ));
+    }
     bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());
     bundle.updated_at = now_iso();
 

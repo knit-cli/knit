@@ -1911,6 +1911,197 @@ fn sync_pull_fetches_each_bundle_artifact_from_the_slim_export() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn sync_pull_terminal_landing_archives_existing_bundle_and_preserves_dirty_worktree() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["bundle", "remote landing", "--repo", "backend"],
+    );
+    let feature = workspace.join(".knit/worktrees/remote-landing/backend");
+    append_line(&feature.join("app.txt"), "published feature");
+    knit(&workspace, ["commit", "--all", "-m", "Published feature"]);
+    let artifact_path = workspace.join(".knit/bundles/remote-landing.bundle.json");
+    let original: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    // The remote feature branch is absent, as when the host deletes it after merge.
+    let original_head = git(&feature, ["rev-parse", "HEAD"]);
+    append_line(&feature.join("app.txt"), "uncommitted local work");
+    fs::write(feature.join("notes.txt"), "untracked local notes").unwrap();
+    let dirty_contents = fs::read_to_string(feature.join("app.txt")).unwrap();
+
+    // Hosted landing extends the shared ledger and archives its artifact.
+    // It cannot clean another machine's checkout, including unfinished work.
+    let mut landed = original.clone();
+    let landed_at = "2099-01-01T00:00:00.000Z";
+    landed["nodes"].as_array_mut().unwrap().extend([
+        serde_json::json!({
+            "id": "land_remote", "type": "feature.landed", "createdAt": landed_at,
+            "planId": "land-remote-landing", "runId": "run-hosted", "provider": "github",
+            "repoIds": ["backend"], "landing": {"terminal": true},
+        }),
+        serde_json::json!({
+            "id": "archive_remote", "type": "feature.archived", "createdAt": landed_at,
+            "message": "landed",
+        }),
+    ]);
+    landed["headNodeId"] = serde_json::json!("archive_remote");
+    landed["state"] = serde_json::json!("archived");
+    landed["archivedAt"] = serde_json::json!(landed_at);
+    landed["updatedAt"] = serde_json::json!(landed_at);
+    // Foreign checkout paths must never replace this machine's paths.
+    landed["repos"][0]["worktreePath"] = serde_json::json!("/other-machine/backend");
+
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    fs::write(
+        fake_dir.join("export.json"),
+        serde_json::json!({"data": {
+            "project": {"slug": "demo"}, "knitProject": null, "repositories": [],
+            "bundles": [
+                {"id": "rb-1", "slug": "remote-landing", "lifecycleState": "archived",
+                 "currentArtifact": {"artifactHash": "hash-landed", "sizeBytes": 42}},
+                {"id": "rb-old", "slug": "old-landed", "lifecycleState": "archived",
+                 "currentArtifact": {"artifactHash": "hash-old", "sizeBytes": 42}},
+            ], "historyEvents": [],
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({"data": {
+            "id": "rb-1", "slug": "remote-landing",
+            "currentArtifact": {"artifactHash": "hash-landed", "payload": landed},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    knit(&workspace, ["init", "unrelated"]);
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["activeProject"], "unrelated");
+    assert_eq!(original["projectId"], "demo");
+    // An automatic sweep must yield to an authoring operation on this bundle.
+    let lock_path = workspace.join(".knit/locks/remote-landing.lock");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    fs::write(&lock_path, std::process::id().to_string()).unwrap();
+    let before_locked_pull = fs::read(&artifact_path).unwrap();
+    let blocked = knit_fails_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert!(blocked.contains("Another Knit process"), "{blocked}");
+    assert_eq!(fs::read(&artifact_path).unwrap(), before_locked_pull);
+    assert_eq!(
+        fs::read_to_string(feature.join("app.txt")).unwrap(),
+        dirty_contents
+    );
+    assert_eq!(
+        fs::read_to_string(feature.join("notes.txt")).unwrap(),
+        "untracked local notes"
+    );
+    assert!(lock_path.exists());
+    fs::remove_file(&lock_path).unwrap();
+
+    let output = knit_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert!(output.contains("remote-landing"), "{output}");
+    let local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(local["state"], "archived");
+    assert_eq!(local["archivedAt"], landed_at);
+    assert_eq!(local["headNodeId"], "archive_remote");
+    assert_eq!(local["nodes"], landed["nodes"]);
+    assert_eq!(local["commitGroups"], original["commitGroups"]);
+    assert_eq!(
+        local["repos"][0]["worktreePath"],
+        original["repos"][0]["worktreePath"]
+    );
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), original_head);
+    assert_eq!(
+        fs::read_to_string(feature.join("app.txt")).unwrap(),
+        dirty_contents
+    );
+    assert_eq!(
+        fs::read_to_string(feature.join("notes.txt")).unwrap(),
+        "untracked local notes"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/old-landed.bundle.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/deleted/bundles/remote-landing.bundle.json")
+        .exists());
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+
+    knit_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+    let repeated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(repeated, local);
+    let projects = fs::read_to_string(fake_dir.join("project-export-fetches.txt")).unwrap();
+    assert!(!projects.is_empty());
+    assert!(
+        projects.lines().all(|project| project == "demo"),
+        "{projects}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Once a bundle records the remote artifact hash it is in sync with, later
 /// pulls decide "nothing new" from the slim export alone: the payload is never
 /// downloaded again.

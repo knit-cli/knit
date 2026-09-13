@@ -126,6 +126,19 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
         .iter()
         .any(|node| node["type"].as_str() == Some("feature.landed")));
 
+    assert_eq!(landed_bundle["state"], "archived");
+    assert!(landed_bundle["archivedAt"].is_string());
+    let archive = latest_node_of_type(&landed_bundle, "feature.archived");
+    assert_eq!(archive["message"], "landed");
+    assert_eq!(landed_bundle["headNodeId"], archive["id"]);
+    let original_nodes = artifact_payload["nodes"].as_array().unwrap();
+    assert_eq!(
+        &landed_bundle["nodes"].as_array().unwrap()[..original_nodes.len()],
+        original_nodes.as_slice()
+    );
+    // Artifact landing must not dispose another machine's checkout.
+    assert!(backend_feature.join("app.txt").exists());
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -192,6 +205,11 @@ fn artifact_land_apply_accepts_a_server_resolved_lane_map() {
     );
     let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
     assert_eq!(landed_payload["publications"][0]["baseBranch"], "stable");
+    assert_eq!(landed_payload["state"], "archived");
+    assert_eq!(
+        latest_node_of_type(&landed_payload, "feature.archived")["message"],
+        "landed"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -2750,6 +2768,13 @@ fn artifact_intermediate_lane_merges_the_branch_and_spares_the_review() {
     let landing = &landed_payload["nodes"].as_array().unwrap().last().unwrap()["landing"];
     assert_eq!(landing["terminal"], json!(false));
     assert_eq!(landing["lane"], json!("staging"));
+    assert_ne!(landed_payload["state"], "archived");
+    assert!(landed_payload["archivedAt"].is_null());
+    assert!(!landed_payload["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"] == "feature.archived"));
 
     fs::remove_dir_all(root).unwrap();
 }
