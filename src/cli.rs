@@ -33,6 +33,11 @@ pub enum GitCredentialOperation {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Set up named forge credentials and personal project/repository assignments.
+    Auth {
+        #[command(subcommand)]
+        command: AuthCommand,
+    },
     /// Continue a bundle on another machine.
     Handoff {
         #[command(subcommand)]
@@ -815,6 +820,13 @@ pub enum WorkspaceCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
+    /// Set up forge access for this project (same as `knit auth setup`).
+    Auth {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
     /// Add or update a repo in the active project.
     Add {
         /// Stable repo id inside the project.
@@ -1440,5 +1452,77 @@ pub enum HandoffCommand {
     Status {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    /// Add or reuse credentials, then choose the project repositories each credential serves.
+    Setup {
+        #[arg(long)]
+        project: Option<String>,
+        /// Limit editable repositories; setup still displays full-project coverage.
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
+    /// Save a named credential. Prompts without echo unless --token-stdin or --token-env is used.
+    Add {
+        name: String,
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "forgejo"])]
+        provider: String,
+        /// Forge hostname; defaults to the provider's public host.
+        #[arg(long)]
+        host: Option<String>,
+        /// Bitbucket Atlassian account email for an API token; omit for a repository access token.
+        #[arg(long)]
+        username: Option<String>,
+        /// Store an environment variable reference instead of storing the token itself.
+        #[arg(long, conflicts_with = "token_stdin")]
+        token_env: Option<String>,
+        /// Read the token from stdin, never from a command-line argument.
+        #[arg(long)]
+        token_stdin: bool,
+        /// Explicitly rotate an existing named credential for all its assignments.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Assign a saved credential to selected repositories in a project.
+    Use {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(short = 'r', long = "repo", required = true)]
+        repos: Vec<String>,
+    },
+    /// Show per-repository assignments. --check probes Git read access without modifying repositories.
+    Status {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List named credentials and assignment counts, never token values.
+    List,
+    /// Remove an unused named credential from this machine.
+    Remove { name: String },
+    /// Remove personal assignments. With none left, the project resumes existing Git/forge login behavior.
+    Clear {
+        #[arg(long)]
+        project: Option<String>,
+        /// Omit to clear every assignment in the project.
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
+    #[command(hide = true)]
+    GitCredential {
+        #[arg(long)]
+        credential: String,
+        #[arg(long)]
+        host: String,
+        #[arg(long)]
+        path: String,
+        operation: GitCredentialOperation,
     },
 }

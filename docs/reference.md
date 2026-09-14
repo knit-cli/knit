@@ -974,3 +974,7 @@ handoff conflicts. A valid sync remote must exist in user-global config. Tokens
 remain in that config; handoff does not copy them into the new workspace. SSH
 origins may use HTTPS when SSH fails and the exact forge host has a Knit credential
 helper; `knit clone --prefer-https` exposes the same transport fallback.
+
+## Forge credentials
+
+Use `knit auth setup` (or `knit project auth`) to add or reuse personal credentials and explicitly link each to project repositories. One credential can serve multiple repositories across owners; several credentials can share a host or use different backends. Setup shows full-project mapping and coverage; `--repo` limits edits, and `done` reports missing links as incomplete. Links control where Knit uses credentials, not provider permissions. `knit auth add`, `use`, `status --check`, `list`, `clear`, and `remove` support scripted setup, repository overrides, inspection, and rotation. See [Project-aware forge credentials](forge-auth.md) for storage, selection, and permissions. No hosted service or desktop application is required.

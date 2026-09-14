@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod auth;
 pub mod base;
 pub mod bundle;
 pub mod check;

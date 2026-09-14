@@ -123,6 +123,7 @@ pub(super) fn create(
     let payload = create_pull_request_payload(base, head, title, body, draft)?;
     if use_native_github_api(target) {
         let output = native_github_api_output(
+            target,
             "POST",
             &pull_request_api_endpoint(repo_full_name),
             Some(&payload),
@@ -142,7 +143,7 @@ pub(super) fn create(
         OsString::from("--jq"),
         OsString::from(".html_url"),
     ];
-    let output = cli_output(CLI, &target.cwd, args, Some(&payload))?;
+    let output = cli_output(CLI, target, args, Some(&payload))?;
     parse_pr_url(&output)
         .or_else(|| {
             let trimmed = output.trim();

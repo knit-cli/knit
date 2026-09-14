@@ -100,6 +100,7 @@ pub fn start_bundle(
         KnitConfig::new(bundle_id.clone())
     };
     let project_id = resolve_start_project(&root, project, &config)?;
+    crate::auth::set_project_override(project_id.clone());
     let mut bundle = ChangeGroup::new(bundle_id.clone(), title.to_string(), now_iso());
     bundle.project_id = project_id.clone();
     write_json(&bundle_path, &bundle)?;
@@ -601,6 +602,16 @@ A bundle is the cross-repo analogue of a git branch: `knit bundle "feature title
 creates one (like `git branch <name>`), `knit bundle` alone shows the current one, and
 creation flags go straight on it, e.g. `knit bundle "feature title" --project x --repo backend`.
 Bundle creation fetches each selected repo's configured `origin/<baseBranch>` and records that exact commit before creating any feature branch. Source checkouts are not moved, and a dirty source checkout does not make the new bundle stale. Use `--offline` to prefer cached remote bases or `--from-local-base` only when deliberately starting from local base branches.
+
+Set up personal forge credentials for the project directly in Knit (no hosted service or desktop app required):
+
+```sh
+knit auth setup
+knit auth status --check
+knit auth use shared-token --repo backend --repo frontend
+```
+
+Choose a credential, then the repositories where Knit should use it. One credential can cover many repositories across owners; add more for separate access or different backends. Setup shows all links and missing coverage; `--repo` limits edits, and `done` finishes explicitly. Links do not grant provider permissions. Assignments stay in user-level config, outside shared project and bundle artifacts. Once a project has assignments, unassigned forge repositories require setup rather than falling back to ambient tokens.
 
 Inspect and update the workspace's distinct Git states explicitly:
 
