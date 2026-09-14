@@ -243,10 +243,17 @@ pub fn for_remote(remote: &str) -> Option<Box<dyn Forge>> {
 
 /// Resolve the forge adapter for a tracked repo, using its recorded remote.
 ///
-/// GitLab, Codeberg/Forgejo, and Bitbucket are detected from the remote host; every other
-/// remote (including unrecognized hosts and local paths) defaults to GitHub,
-/// preserving Knit's original `gh`-backed behavior.
+/// An explicit project credential selects the adapter using metadata only.
+/// Without assignments, detect known hosts and default to GitHub for other
+/// remotes, preserving Knit's original `gh`-backed behavior.
 pub fn for_repo(repo: &RepoEntry) -> Result<Box<dyn Forge>> {
+    if let Some(remote) = &repo.remote {
+        if let Some(provider) = crate::auth::provider_for_remote(&std::env::current_dir()?, remote)?
+        {
+            return by_id(&provider)
+                .with_context(|| format!("unsupported credential provider `{provider}`"));
+        }
+    }
     Ok(repo
         .remote
         .as_deref()
@@ -406,18 +413,115 @@ fn checks_state(runs: &[CheckRun]) -> ChecksState {
     }
 }
 
+/// Resolve the actual operation target, including artifact-mode repositories.
+/// An explicit repository must never inherit the checkout origin's binding.
+pub(crate) fn target_credential(
+    target: &PrTarget,
+    provider: &str,
+) -> Result<Option<crate::auth::ResolvedCredential>> {
+    let credential = match &target.repo_full_name {
+        Some(repo) => crate::auth::resolve_repository(&target.cwd, provider, repo)?,
+        None => crate::auth::resolve(&target.cwd, None)?,
+    };
+    if let Some(credential) = &credential {
+        if credential.provider != provider {
+            bail!(
+                "credential `{}` is for {}, but this operation uses {provider}",
+                credential.name,
+                credential.provider
+            );
+        }
+    }
+    Ok(credential)
+}
+
+/// Bound secrets only go to the expected HTTPS API origin. Environment API
+/// overrides remain supported for legacy authentication, but cannot redirect a
+/// project's saved token to another server.
+pub(crate) fn bound_api_base(credential: &crate::auth::ResolvedCredential) -> Result<String> {
+    let host = &credential.host;
+    let base = match credential.provider.as_str() {
+        "github" if host == "github.com" => "https://api.github.com".to_string(),
+        "github" => format!("https://{host}/api/v3"),
+        "gitlab" => format!("https://{host}/api/v4"),
+        "bitbucket" if host == "bitbucket.org" => "https://api.bitbucket.org/2.0".to_string(),
+        "bitbucket" => {
+            bail!("project credentials currently support Bitbucket Cloud (bitbucket.org)")
+        }
+        "forgejo" => format!("https://{host}/api/v1"),
+        provider => bail!("unsupported credential provider `{provider}`"),
+    };
+    let parsed = url::Url::parse(&base).context("invalid credential API host")?;
+    let expected_host = match (credential.provider.as_str(), host.as_str()) {
+        ("github", "github.com") => "api.github.com",
+        ("bitbucket", "bitbucket.org") => "api.bitbucket.org",
+        _ => host,
+    };
+    if parsed.host_str() != Some(expected_host)
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        bail!("invalid credential API host");
+    }
+    Ok(base)
+}
+
+fn configure_cli_credential(
+    command: &mut Command,
+    bin: &str,
+    credential: &crate::auth::ResolvedCredential,
+) -> Result<()> {
+    match bin {
+        "gh" => {
+            command
+                .env("GH_HOST", &credential.host)
+                .env_remove("GH_TOKEN")
+                .env_remove("GITHUB_TOKEN")
+                .env_remove("GH_ENTERPRISE_TOKEN")
+                .env_remove("GITHUB_ENTERPRISE_TOKEN")
+                .env_remove("GH_REPO");
+            if credential.host == "github.com" || credential.host.ends_with(".ghe.com") {
+                command
+                    .env("GH_TOKEN", &credential.token)
+                    .env("GITHUB_TOKEN", &credential.token);
+            } else {
+                command
+                    .env("GH_ENTERPRISE_TOKEN", &credential.token)
+                    .env("GITHUB_ENTERPRISE_TOKEN", &credential.token);
+            }
+        }
+        "glab" => {
+            command
+                .env("GITLAB_HOST", &credential.host)
+                .env("GL_HOST", &credential.host)
+                .env("GITLAB_TOKEN", &credential.token)
+                .env("GLAB_TOKEN", &credential.token)
+                .env("OAUTH_TOKEN", &credential.token)
+                .env("GITLAB_API_HOST", &credential.host)
+                .env("GLAB_API_PROTOCOL", "https")
+                .env("API_PROTOCOL", "https")
+                .env_remove("GITLAB_REPO")
+                .env_remove("GITLAB_GROUP")
+                .env_remove("GLAB_REPO");
+        }
+        _ => bail!("project credentials require the native API for `{bin}`"),
+    }
+    Ok(())
+}
+
 /// Run a forge CLI and capture stdout, returning a helpful error when the tool
 /// is missing or exits non-zero.
 ///
 /// For `gh`, an invalid `GITHUB_TOKEN` or `GH_TOKEN` in the environment overrides
 /// `gh auth login`. When a host-token call fails with an auth error, Knit retries
-/// once without those variables so interactive credentials can succeed.
+/// once without those variables so interactive credentials can succeed. Explicit
+/// project credentials never take this fallback path.
 ///
 /// Calls that fail because the host was momentarily unavailable are retried
 /// with backoff; see [`crate::retry`] for what counts as transient.
 pub(crate) fn cli_output<I, S>(
     bin: &str,
-    cwd: &Path,
+    target: &PrTarget,
     args: I,
     stdin: Option<&str>,
 ) -> Result<String>
@@ -425,10 +529,65 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = args
+    let mut args = args
         .into_iter()
         .map(|arg| arg.as_ref().to_os_string())
         .collect::<Vec<_>>();
+
+    let provider = match bin {
+        "gh" => "github",
+        "glab" => "gitlab",
+        "tea" => "forgejo",
+        _ => bail!("unsupported forge CLI `{bin}`"),
+    };
+    let credential = target_credential(target, provider)?;
+    if let Some(credential) = &credential {
+        // gh api otherwise derives its host from cwd in some invocation
+        // contexts, even when this operation explicitly targets another repo.
+        if bin == "gh" && args.first().is_some_and(|arg| arg == "api") {
+            args.push(OsString::from("--hostname"));
+            args.push(OsString::from(&credential.host));
+        }
+        if (bin == "gh" && args.first().is_some_and(|arg| arg == "pr"))
+            || (bin == "glab" && args.first().is_some_and(|arg| arg == "mr"))
+        {
+            let repository = if let Some(repository) = &target.repo_full_name {
+                repository.clone()
+            } else {
+                // Use origin, as credential resolution does. Forge CLIs may
+                // otherwise choose an upstream remote in a fork checkout.
+                let output = Command::new("git")
+                    .args(["remote", "get-url", "origin"])
+                    .current_dir(&target.cwd)
+                    .output()
+                    .context("Cannot inspect origin for the assigned forge target")?;
+                if !output.status.success() {
+                    bail!("Cannot resolve origin for the assigned forge target");
+                }
+                let remote = std::str::from_utf8(&output.stdout)
+                    .context("Repository origin is not UTF-8")?;
+                let (host, repository) = crate::auth::remote_target(remote.trim())?;
+                if host != credential.host {
+                    bail!("Repository origin changed after credential resolution");
+                }
+                repository
+            };
+            let repository = if bin == "gh" {
+                format!("{}/{repository}", credential.host)
+            } else {
+                format!("https://{}/{repository}", credential.host)
+            };
+            if let Some(index) = args.iter().position(|arg| arg == "--repo") {
+                let value = args
+                    .get_mut(index + 1)
+                    .context("Missing forge repository argument")?;
+                *value = OsString::from(repository);
+            } else {
+                args.push(OsString::from("--repo"));
+                args.push(OsString::from(repository));
+            }
+        }
+    }
 
     // Forge CLIs are the single door to every code host Knit talks to, so
     // this is where a host that is briefly unavailable (5xx, a rate limit, a
@@ -439,7 +598,7 @@ where
         &cli_action_label(bin, &args),
         crate::retry::FORGE_ATTEMPTS,
         crate::retry::classify_forge,
-        || cli_output_once(bin, cwd, &args, stdin),
+        || cli_output_once(bin, &target.cwd, &args, stdin, credential.as_ref()),
     )
 }
 
@@ -464,11 +623,12 @@ fn cli_output_once(
     cwd: &Path,
     args: &[OsString],
     stdin: Option<&str>,
+    credential: Option<&crate::auth::ResolvedCredential>,
 ) -> Result<String> {
-    match run_cli_output(bin, cwd, args, stdin, false) {
+    match run_cli_output(bin, cwd, args, stdin, false, credential) {
         Ok(output) => Ok(output),
-        Err(first) if should_retry_gh_without_env_token(bin, &first) => {
-            match run_cli_output(bin, cwd, args, stdin, true) {
+        Err(first) if credential.is_none() && should_retry_gh_without_env_token(bin, &first) => {
+            match run_cli_output(bin, cwd, args, stdin, true, None) {
                 Ok(output) => {
                     warn_gh_env_token_override();
                     Ok(output)
@@ -476,7 +636,9 @@ fn cli_output_once(
                 Err(retry) => Err(enhance_gh_auth_error(retry)),
             }
         }
-        Err(err) => Err(if bin == "gh" {
+        Err(err) => Err(if let Some(credential) = credential {
+            anyhow::anyhow!("{err:#}\nProject credential: `{}`. Update its token or project assignment with `knit project auth`.", credential.name)
+        } else if bin == "gh" {
             enhance_gh_auth_error(err)
         } else {
             err
@@ -524,6 +686,7 @@ fn run_cli_output(
     args: &[OsString],
     stdin: Option<&str>,
     strip_host_tokens: bool,
+    credential: Option<&crate::auth::ResolvedCredential>,
 ) -> Result<String> {
     let mut command = forge_cli_command(bin);
     command
@@ -543,6 +706,9 @@ fn run_cli_output(
         if strip_host_tokens {
             command.env_remove("GH_TOKEN").env_remove("GITHUB_TOKEN");
         }
+    }
+    if let Some(credential) = credential {
+        configure_cli_credential(&mut command, bin, credential)?;
     }
     let mut child = command
         .spawn()
@@ -586,7 +752,9 @@ fn run_cli_output(
         "{bin} {} failed in {}: {}",
         display_args(args),
         cwd.display(),
-        detail
+        credential
+            .map(|credential| credential.redact(detail))
+            .unwrap_or_else(|| detail.to_string())
     );
 }
 
@@ -724,6 +892,79 @@ fn display_args(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn credential(provider: &str, host: &str, token: &str) -> crate::auth::ResolvedCredential {
+        crate::auth::ResolvedCredential {
+            name: "test".into(),
+            provider: provider.into(),
+            host: host.into(),
+            username: String::new(),
+            token: token.into(),
+        }
+    }
+
+    #[test]
+    fn bound_api_destinations_follow_credential_hosts() {
+        for (provider, host, expected) in [
+            ("github", "github.com", "https://api.github.com"),
+            (
+                "github",
+                "github.example.test",
+                "https://github.example.test/api/v3",
+            ),
+            (
+                "gitlab",
+                "gitlab.example.test",
+                "https://gitlab.example.test/api/v4",
+            ),
+            (
+                "bitbucket",
+                "bitbucket.org",
+                "https://api.bitbucket.org/2.0",
+            ),
+            (
+                "forgejo",
+                "forgejo.example.test",
+                "https://forgejo.example.test/api/v1",
+            ),
+        ] {
+            assert_eq!(
+                bound_api_base(&credential(provider, host, "secret")).unwrap(),
+                expected
+            );
+        }
+        assert!(bound_api_base(&credential("github", "github.com@evil.test", "secret")).is_err());
+    }
+
+    #[test]
+    fn cli_credentials_are_scoped_to_each_child_and_host_class() {
+        let mut public = Command::new("gh");
+        configure_cli_credential(
+            &mut public,
+            "gh",
+            &credential("github", "github.com", "public-secret"),
+        )
+        .unwrap();
+        let mut enterprise = Command::new("gh");
+        configure_cli_credential(
+            &mut enterprise,
+            "gh",
+            &credential("github", "github.example.test", "enterprise-secret"),
+        )
+        .unwrap();
+        let public_env: std::collections::BTreeMap<_, _> = public.get_envs().collect();
+        let enterprise_env: std::collections::BTreeMap<_, _> = enterprise.get_envs().collect();
+        assert_eq!(
+            public_env[OsStr::new("GH_TOKEN")],
+            Some(OsStr::new("public-secret"))
+        );
+        assert_eq!(public_env[OsStr::new("GH_ENTERPRISE_TOKEN")], None);
+        assert_eq!(enterprise_env[OsStr::new("GH_TOKEN")], None);
+        assert_eq!(
+            enterprise_env[OsStr::new("GH_ENTERPRISE_TOKEN")],
+            Some(OsStr::new("enterprise-secret"))
+        );
+    }
 
     #[test]
     fn detects_host_from_remote_forms() {

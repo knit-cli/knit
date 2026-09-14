@@ -105,7 +105,7 @@ impl Forge for Forgejo {
         head: &str,
         base: &str,
     ) -> Result<Option<PullRequest>> {
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let output = api_output(
                 target,
@@ -142,7 +142,7 @@ impl Forge for Forgejo {
         } else {
             title.to_string()
         };
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let payload = serde_json::to_string(&json!({
                 "head": head,
@@ -177,7 +177,7 @@ impl Forge for Forgejo {
                 OsString::from(body),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         if let Some(url) = parse_pr_url(&output) {
             return Ok(url);
         }
@@ -188,7 +188,7 @@ impl Forge for Forgejo {
     }
 
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let output = api_output(
                 target,
@@ -209,7 +209,7 @@ impl Forge for Forgejo {
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
-        if use_api(target) {
+        if use_api(target)? {
             return edit_api_pr(target, selector, &json!({ "body": body }));
         }
         let args = repo_scoped_args(
@@ -223,7 +223,7 @@ impl Forge for Forgejo {
                 OsString::from(body),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -254,7 +254,7 @@ impl Forge for Forgejo {
             "rebase" => "rebase",
             other => bail!("unknown Forgejo merge method `{other}`"),
         };
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let payload = serde_json::to_string(&json!({
                 "Do": style,
@@ -280,7 +280,7 @@ impl Forge for Forgejo {
             args.push(OsString::from("--delete-branch"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -290,7 +290,7 @@ impl Forge for Forgejo {
         selector: &str,
         _required_only: bool,
     ) -> Result<Vec<CheckRun>> {
-        if !use_api(target) {
+        if !use_api(target)? {
             // Basic tea-only users can still publish and land; richer status
             // evidence requires an API token.
             return Ok(Vec::new());
@@ -321,7 +321,7 @@ impl Forgejo {
                 OsString::from("json"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         if output.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -329,8 +329,10 @@ impl Forgejo {
     }
 }
 
-fn use_api(target: &PrTarget) -> bool {
-    target.repo_full_name.is_some() || api_token().is_some()
+fn use_api(target: &PrTarget) -> Result<bool> {
+    Ok(super::target_credential(target, "forgejo")?.is_some()
+        || target.repo_full_name.is_some()
+        || api_token().is_some())
 }
 
 fn resolve_repo(target: &PrTarget) -> Result<String> {
@@ -462,13 +464,22 @@ fn api_output(
     endpoint: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    let token = api_token().context(
-        "Forgejo API access requires KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN",
-    )?;
-    let base = api_base(target)?;
+    let credential = super::target_credential(target, "forgejo")?;
+    let token = credential
+        .as_ref()
+        .map(|value| value.token.clone())
+        .or_else(api_token)
+        .context(
+            "Forgejo API access requires KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN",
+        )?;
+    let base = match &credential {
+        Some(value) => super::bound_api_base(value)?,
+        None => api_base(target)?,
+    };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -494,6 +505,10 @@ fn api_output(
             }
             Err(ureq::Error::Status(status, response)) => {
                 let detail = response.into_string().unwrap_or_default();
+                let detail = credential
+                    .as_ref()
+                    .map(|value| value.redact(&detail))
+                    .unwrap_or(detail);
                 if (500..=599).contains(&status) && attempt < 2 {
                     std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
                     continue;

@@ -23,7 +23,7 @@ pub(super) fn github_api_output(
             &action,
             crate::retry::FORGE_ATTEMPTS,
             crate::retry::classify_forge,
-            || native_github_api_output(method, endpoint, body),
+            || native_github_api_output(target, method, endpoint, body),
         );
     }
 
@@ -37,7 +37,7 @@ pub(super) fn github_api_output(
         args.push(OsString::from("--input"));
         args.push(OsString::from("-"));
     }
-    cli_output(CLI, &target.cwd, args, body)
+    cli_output(CLI, target, args, body)
 }
 
 pub(super) fn use_native_github_api(target: &PrTarget) -> bool {
@@ -78,16 +78,26 @@ fn ipv4_first_resolver(netloc: &str) -> std::io::Result<Vec<std::net::SocketAddr
 }
 
 pub(super) fn native_github_api_output(
+    target: &PrTarget,
     method: &str,
     endpoint: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    let token = github_api_token()
+    let credential = crate::providers::target_credential(target, "github")?;
+    let token = credential
+        .as_ref()
+        .map(|value| value.token.clone())
+        .or_else(github_api_token)
         .context("KNIT_GITHUB_API_TRANSPORT requires GH_TOKEN or GITHUB_TOKEN")?;
-    let url = format!("{}/{}", github_api_base(), endpoint.trim_start_matches('/'));
+    let base = match &credential {
+        Some(value) => crate::providers::bound_api_base(value)?,
+        None => github_api_base(),
+    };
+    let url = format!("{}/{}", base, endpoint.trim_start_matches('/'));
     let operation = format!("{method} /{}", endpoint.trim_start_matches('/'));
 
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(20))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -122,6 +132,10 @@ pub(super) fn native_github_api_output(
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
             let detail = response.into_string().unwrap_or_default();
+            let detail = credential
+                .as_ref()
+                .map(|value| value.redact(&detail))
+                .unwrap_or(detail);
             let detail = detail.trim();
             if status == 401 || looks_like_github_auth_failure(detail) {
                 bail!(

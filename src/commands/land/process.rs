@@ -376,10 +376,12 @@ mod tests {
         ));
         let started = Instant::now();
         let mut command = Command::new("sh");
+        // Waiting for this child preserves its termination status. A bare
+        // `wait` may return zero once all children have exited on Linux shells.
         command
             .args([
                 "-c",
-                "printf ready; sleep 20 & echo $! > \"$KNIT_TEST_PID_FILE\"; wait",
+                "printf ready; sleep 20 & child_pid=$!; echo \"$child_pid\" > \"$KNIT_TEST_PID_FILE\"; wait \"$child_pid\"",
             ])
             .env("KNIT_TEST_PID_FILE", &pid_file);
         let output = run_streamed(&mut command, Some(1)).unwrap();

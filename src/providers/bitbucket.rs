@@ -113,7 +113,7 @@ impl Forge for Bitbucket {
             encode_repo(&repo)?,
             encode_query_component(&query)
         );
-        let output = api_output("GET", &endpoint, None)?;
+        let output = api_output(target, "GET", &endpoint, None)?;
         let list: BitbucketList<BitbucketPullRequest> =
             serde_json::from_str(&output).context("failed to parse Bitbucket pull list JSON")?;
         Ok(list
@@ -142,6 +142,7 @@ impl Forge for Bitbucket {
         }))
         .context("failed to encode Bitbucket pull request payload")?;
         let output = api_output(
+            target,
             "POST",
             &format!("repositories/{}/pullrequests", encode_repo(&repo)?),
             Some(&payload),
@@ -156,6 +157,7 @@ impl Forge for Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         let output = api_output(
+            target,
             "GET",
             &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
             None,
@@ -210,6 +212,7 @@ impl Forge for Bitbucket {
         }))
         .context("failed to encode Bitbucket merge payload")?;
         api_output(
+            target,
             "POST",
             &format!(
                 "repositories/{}/pullrequests/{id}/merge",
@@ -230,6 +233,7 @@ impl Forge for Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         let output = api_output(
+            target,
             "GET",
             &format!(
                 "repositories/{}/pullrequests/{id}/statuses?pagelen=100",
@@ -249,6 +253,7 @@ impl Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         api_output(
+            target,
             "PUT",
             &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
             Some(payload),
@@ -298,8 +303,8 @@ impl From<BitbucketStatus> for CheckRun {
 }
 
 pub(crate) fn commit_check_runs(target: &PrTarget, repo: &str, sha: &str) -> Result<Vec<CheckRun>> {
-    let _ = target;
     let output = api_output(
+        target,
         "GET",
         &format!(
             "repositories/{}/commit/{}/statuses/build?pagelen=100",
@@ -466,14 +471,32 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
-    let auth = auth_header()?;
+fn api_output(
+    target: &PrTarget,
+    method: &str,
+    endpoint: &str,
+    body: Option<&str>,
+) -> Result<String> {
+    let credential = super::target_credential(target, "bitbucket")?;
+    let auth = match &credential {
+        Some(value) if !value.username.is_empty() => format!(
+            "Basic {}",
+            base64_encode(&format!("{}:{}", value.username, value.token))
+        ),
+        Some(value) => format!("Bearer {}", value.token),
+        None => auth_header()?,
+    };
+    let base = match &credential {
+        Some(value) => super::bound_api_base(value)?,
+        None => api_base(),
+    };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
-    let url = format!("{}/{endpoint}", api_base());
+    let url = format!("{base}/{endpoint}");
     // Keep this small transport local for now. It mirrors the proven GitHub
     // transport; extracting a shared authenticated client can happen separately.
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(20))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -496,6 +519,10 @@ fn api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String
             .with_context(|| format!("failed to read Bitbucket API response for {operation}")),
         Err(ureq::Error::Status(status, response)) => {
             let detail = response.into_string().unwrap_or_default();
+            let detail = credential
+                .as_ref()
+                .map(|value| value.redact(&detail).replace(&auth, "[REDACTED]"))
+                .unwrap_or(detail);
             if status == 401 || status == 403 {
                 bail!(
                     "Bitbucket API request failed during {operation}: HTTP {status}: {}\nHint: set KNIT_BITBUCKET_ACCESS_TOKEN, or KNIT_BITBUCKET_EMAIL with KNIT_BITBUCKET_API_TOKEN, to credentials that can access this repository.",

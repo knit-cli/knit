@@ -1,4 +1,6 @@
 pub mod advice;
+pub mod auth;
+pub mod auth_git;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
@@ -29,9 +31,11 @@ pub use cli::{
 };
 
 pub fn run(cli: Cli) -> Result<()> {
+    auth::set_project_override(None);
     let bundle_context = cli.bundle.clone();
     store::set_bundle_override(cli.bundle);
     match cli.command {
+        Commands::Auth { command } => commands::auth::run(command),
         Commands::Handoff { command } => match command {
             cli::HandoffCommand::Out {
                 to,
@@ -62,6 +66,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Init { name, agents } => commands::init_project(&name, agents),
         Commands::Agents { project } => commands::refresh_agents(project.as_deref()),
         Commands::Project { command } => match command {
+            ProjectCommand::Auth { project, repos } => {
+                commands::auth::setup(project.as_deref(), &repos)
+            }
             ProjectCommand::Add {
                 repo_id,
                 repo_path,

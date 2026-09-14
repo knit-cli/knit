@@ -77,7 +77,7 @@ impl Forge for GitHub {
                 OsString::from("1"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         let prs: Vec<PullRequest> =
             serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
         Ok(prs.into_iter().next())
@@ -112,7 +112,7 @@ impl Forge for GitHub {
             args.push(OsString::from("--draft"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        let output = cli_output(CLI, target, args, Some(body))?;
         parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
     }
 
@@ -132,7 +132,7 @@ impl Forge for GitHub {
                 OsString::from(PR_JSON_FIELDS),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
     }
 
@@ -152,7 +152,7 @@ impl Forge for GitHub {
                 OsString::from("-"),
             ],
         );
-        cli_output(CLI, &target.cwd, args, Some(body))?;
+        cli_output(CLI, target, args, Some(body))?;
         Ok(())
     }
 
@@ -172,7 +172,7 @@ impl Forge for GitHub {
                 OsString::from(base),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -226,7 +226,7 @@ impl Forge for GitHub {
             args.push(OsString::from(sha));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -250,7 +250,7 @@ impl Forge for GitHub {
                 OsString::from("-"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        let output = cli_output(CLI, target, args, Some(body))?;
         parse_pr_url(&output).context("`gh pr revert` did not print a PR URL")
     }
 
@@ -278,7 +278,7 @@ impl Forge for GitHub {
         }
         let args = repo_scoped_args(target, "--repo", args);
 
-        match cli_output(CLI, &target.cwd, args, None) {
+        match cli_output(CLI, target, args, None) {
             Ok(output) if output.trim().is_empty() => Ok(Vec::new()),
             Ok(output) => {
                 serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON")

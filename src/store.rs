@@ -478,7 +478,7 @@ pub fn find_knit_root(start: &Path) -> Option<PathBuf> {
     }
 }
 
-fn resolve_bundle_id(
+pub(crate) fn resolve_bundle_id(
     root: &Path,
     cwd: &Path,
     config: &KnitConfig,

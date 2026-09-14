@@ -71,6 +71,7 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 ## Docs
 
 - **[docs/quickstart.md](docs/quickstart.md)** — install to landed multi-repo change in ten minutes, plus the concepts in full.
+- **[docs/forge-auth.md](docs/forge-auth.md)** — native CLI setup for per-project and per-repository forge tokens.
 - **[docs/runtime-setup.md](docs/runtime-setup.md)** — configure any dockerized project for `knit run up`: zero-config to shared dev database, step by step.
 - **[docs/reference.md](docs/reference.md)** — the complete behavior reference: every command, projects and views, bundle lifecycle, publish/land/merge, checks, history and `related`, revert, storage layout, limitations, roadmap.
 - **[docs/harness.md](docs/harness.md)** — building a host on top of Knit: the artifacts to read, the commands that answer in JSON, bundle context, and session attribution.
