@@ -235,7 +235,7 @@ fn all_native_providers_reject_broken_bindings_before_transport() {
                 root.join("home/forge-auth.json"),
                 json!({"credentials":{
                 "selected":{"provider":provider,"host":if failure == "host-mismatch" { "wrong.test" } else {host},"tokenEnv":"ABSENT_SYNTHETIC_TOKEN"}},
-                "projects":{&key:bindings}}),
+                "scopedCredentials":["selected"], "projects":{&key:bindings}}),
             );
             let target = PrTarget::explicit(ws.join("app"), "org/app");
             let error = match provider {
@@ -388,7 +388,9 @@ fn fetch_remote_groups_must_receive_project_auth() {
     assert_eq!(selected.len(), 1);
     assert_eq!(selected[0].name, "selected");
 
-    // Missing assignments fail before the caller can launch any member.
+    // Project-only tokens require assignments; no host default covers the
+    // missing member. Fail before the caller can launch any member.
+    registry["scopedCredentials"] = json!(["selected", "second"]);
     registry["projects"][&key]
         .as_object_mut()
         .unwrap()

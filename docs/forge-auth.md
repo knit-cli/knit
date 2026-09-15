@@ -1,132 +1,118 @@
-# Project-aware forge credentials
+# Forge credentials
 
-Give a project credentials, then explicitly link each forge repository to the credential Knit should use. Usually one credential serves many repositories; a project can also use several credentials on the same host or across different backends. Setup is native to Knit: no KnitHub account, sync remote, or Ivaldi installation is required.
+Knit keeps your GitHub, Bitbucket, GitLab, and Forgejo tokens locally. Your sync remote token authorizes the ledger separately; it is never used as a forge token.
+
+## Default tokens: the normal setup
 
 ```sh
+knit auth                         # choose a forge, paste its token, repeat
+knit clone demo --remote hosted
+```
+
+Press Enter at the forge menu to finish. Your default token for each **exact host** serves every project, clone, pull, push, and forge API operation unless you choose an override. No repository selection or credential flags are needed. Bitbucket asks which token kind you have; an Atlassian API token also needs your account email.
+
+The first regular token saved for a host becomes its default. Adding another never displaces it. A legacy store with exactly one unscoped token inherits that token as its default; with several tokens, choose explicitly using `knit auth default NAME`. The bare wizard can also create a new default or deliberately replace the current default's secret. Replacing an environment-backed default with a pasted token clears its environment reference.
+
+## Optional project overrides
+
+```sh
+knit auth --project tools
+# Equivalent from that workspace:
 knit auth setup
-knit auth setup --project tools
+# Limit the repositories being edited:
+knit auth setup --repo api --repo web
 ```
 
-`knit project auth` opens the same wizard:
+`knit project auth` opens the same project wizard. For each declared group, or each host when no group is declared:
 
-1. Review the full project's repository → credential mapping and missing links.
-2. Choose a saved credential or `new` (use `use NAME` for a credential named `new` or `done`). For a new credential, choose a project host; Knit infers public providers and asks for the backend on custom hosts. Supply an environment variable reference or enter a hidden token.
-3. Select compatible repository IDs or numbers, separated by commas or spaces. `all` links every displayed repository on that host, across owners. Selected existing links are replaced; Enter cancels this selection.
-4. Repeat for further credentials or reassignments, then type `done`. Missing links are reported as incomplete; saved links remain. When all links exist, you can optionally check Git read access.
+- **Enter:** use the host default, clearing only the selected repositories' project overrides.
+- **t:** enter a project-only token. It never becomes a global default, even if it is the first token on that host.
+- **s:** keep the current configuration.
 
-`knit auth setup --repo api --repo web` limits editable repositories, including what `all` selects. The wizard still displays coverage and missing links for the entire project. Links specify where Knit uses credentials; they do not grant or change permissions on the provider. Choose tokens whose provider permissions cover the repositories and operations you intend to use.
+The wizard displays the group's token guidance and selects its repositories for you. Groups outside the local workspace or `--repo` selection are skipped. The final summary shows full-project coverage. Project setup never rotates a shared secret or changes another project's assignments.
 
-## Scriptable setup and repository overrides
+## Project-defined authentication requirements
 
-For the common case, use one credential for several repositories, even when their owners differ:
+Maintainers can declare token guidance in hosted project settings or `knit.project.json`. The `auth` field travels in project exports; it contains descriptions, never credentials or personal credential names.
+
+```json
+{
+  "auth": {
+    "groups": [{
+      "id": "github-work",
+      "name": "GitHub work token",
+      "provider": "github",
+      "host": "github.com",
+      "repos": ["api", "web"],
+      "tokenTypes": ["fine_grained_pat"],
+      "permissions": ["contents:read", "pull_requests:write"],
+      "instructions": "Create a token scoped to these repositories.",
+      "tokenUrl": "https://github.com/settings/personal-access-tokens/new"
+    }]
+  }
+}
+```
+
+Group IDs must be unique; a repository may belong to only one group. Groups reference portable repository IDs and must match their repositories' hosts and providers. Several groups may share a host. Unknown fields, unknown/ambiguous repository references, and mismatched hosts are rejected. `{"groups": []}` explicitly clears guidance; omitting `auth` during an update preserves hosted guidance.
+
+Supported token kinds:
+
+| Provider | Token kinds |
+| --- | --- |
+| GitHub | `fine_grained_pat`, `classic_pat` |
+| Bitbucket Cloud | `atlassian_api_token`, `access_token` |
+| GitLab | `personal_access_token`, `project_access_token`, `group_access_token` |
+| Forgejo | `access_token` |
+
+`permissions`, `instructions`, and `tokenUrl` are optional. Links must use HTTPS without embedded credentials. Knit displays guidance without executing instructions or opening links. Recommendations never replace a working default or prove that a token has the required permissions.
+
+## Clone and recovery
+
+An ordinary clone uses saved defaults automatically. With complete local credential coverage, Knit skips the hosted credential-helper lookup. An ordinary ledger-only remote token does not need access to hosted forge credentials.
+
+When access is missing, interactive clone guides you through declared groups or infers a host from a failed Git operation. New regular tokens become host defaults. Existing project-only tokens are not automatically reused for another project. Noninteractive clones never prompt and explain how to finish setup.
+
+If a credential is rejected, recovery saves a **new project-only credential for the affected repositories**, leaving the old secret, environment reference, and default untouched. Failed repositories are retried once. Use `knit pull --bundles` to reconcile missing repositories in an existing workspace.
+
+An interrupted clone that has checkouts but no configured workspace can resume with the same `knit clone` command and destination. Knit adopts only real checkout roots whose repository IDs and origins match, preserving branches and dirty work. Unrelated files, foreign checkouts, and symlinked scaffolding are refused. Finished bundles remain imported history; they are not automatically selected as active work.
+
+For an explicit automation override, `knit clone --credential NAME` remains available and repeatable, with at most one credential per host. Names and token availability are validated before export fetch or destination changes. The selection saves personal assignments for in-scope repositories before fetching, using the same resolver as later pull/push operations. Assignments survive failed clones so a token repair followed by `knit pull --bundles` recovers in place. An existing conflicting destination assignment is an error. No credential from the surrounding workspace is borrowed.
+
+## Scriptable setup and inspection
 
 ```sh
+# First token on each host becomes its default:
 knit auth add shared --provider github --token-env PROJECT_GITHUB_TOKEN
-knit auth use shared --project tools --repo api --repo web --repo docs
-```
-
-For a project with different access requirements and backends, retain `shared` for `web` and `docs`, reassign `api`, and link a Bitbucket repository:
-
-```sh
-knit auth add restricted --provider github --token-env API_GITHUB_TOKEN
-knit auth use restricted --project tools --repo api
 knit auth add cloud --provider bitbucket \
   --username you@example.com --token-env PROJECT_BITBUCKET_TOKEN
-knit auth use cloud --project tools --repo legacy
-```
 
-These are example repository IDs. Assign every forge repository in your project, including observed repositories you intend to use. `auth use` requires `--repo`, which can be repeated; every selected repository must match the credential's host. For convenient bulk selection, use `all` in the setup wizard. Named credentials can also be reused deliberately across projects.
+# Explicit repository override and host default selection:
+knit auth use restricted --project tools --repo api --repo web
+knit auth default shared
 
-Omit `--token-env` for an interactive hidden token prompt, or use `--token-stdin` to pipe a token from your secret manager. An environment reference must be available when Knit uses it; adding the reference does not require its value. For Bitbucket Atlassian API tokens, supply your account email with `--username`. For repository, project, or workspace access tokens, omit it. Other providers are `gitlab` and `forgejo`; use `--host git.example.com` for a self-hosted forge. Bitbucket support is Bitbucket Cloud.
-
-Inspect or check access:
-
-```sh
 knit auth list
-knit auth status --project tools
 knit auth status --project tools --check
 knit auth status --project tools --json
 ```
 
-`status` shows assignments without network requests. `--check` runs `git ls-remote` against each forge repository with a 30-second timeout per repository. A successful check confirms Git read access only; it does not prove API, push, pull-request, or merge permissions. Publishing and landing still validate access through the actual forge operations. The check exits nonzero if an assignment, credential, or Git access probe fails.
+Omit `--token-env` to paste a token at a hidden prompt, or use `--token-stdin` with a secret manager. Use `--host git.example.com` for a self-hosted forge and `--token-type` to record a known kind. An environment reference must be set when the credential is used. For Bitbucket repository/project/workspace access tokens, omit `--username`.
+
+`status` reports coverage without network access. `--check` probes Git read access with a 30-second timeout per repository and exits nonzero on missing credentials or failed access. It does not prove push, API, review, or merge permissions; those are checked by the actual operation.
+
+```sh
+knit auth add restricted --provider github --replace  # deliberate shared rotation
+knit auth clear --project tools --repo api             # restore default/allowed ambient access
+knit auth remove restricted                           # only when unused
+```
 
 ## Selection and storage
 
-- Explicit project selection wins. Otherwise Knit uses the selected bundle's project in a bundle worktree or with `--bundle`, then the workspace's active project. Creating a bundle with `--project` uses that project's assignments for its initial fetches.
-- Assignments are personal to the workspace's canonical project artifact path. They are not committed or synced in `knit.project.json`, project exports, or bundle artifacts. On another machine or after moving a workspace, run setup again; named credentials on the same machine can be reused.
-- A project with no assignments retains existing Git credentials, SSH, `gh auth login`, and provider environment behavior.
-- Once a project has assignments, every forge repository it accesses needs an explicit assignment. Unknown targets, missing credentials, and authentication failures stop the operation. Knit does not retry a selected credential with a broader ambient token. Local filesystem remotes continue working.
-- Knit applies credentials separately to Git and forge API operations. Parallel operations do not change the parent process's token environment. Git uses a temporary credential helper and a repository-scoped authorization header supplied through the child environment; SSH forge URLs are translated to HTTPS for that invocation when a token is assigned. Saved remotes and Git config are unchanged. This requires Git 2.31 or newer (`--config-env` support); older versions fail rather than using another credential.
-- Repository-location overrides (`-C`, `--git-dir`, `--work-tree`) on network commands are rejected when project credentials are configured. Run Knit from the intended checkout instead.
-- Bare Git commands outside Knit retain their existing authentication. Project assignments apply to Knit operations, including `knit git`.
+Selection order is **explicit operation/project assignment → exact-host default → permitted ambient Git access**. Missing or rejected explicit credentials fail rather than falling back to a broader token. Hostless API targets must match project membership or the actual checkout origin unambiguously.
 
-Credential metadata and assignments live in `forge-auth.json` next to your user-level Knit config. Pasted tokens live in `forge-secrets.json` in that same directory; this is a **private plaintext file, not an encrypted vault**. On Unix the directory is mode `0700` and files are `0600`; on Windows they inherit the user's directory access controls. The location follows `KNIT_HOME`, `XDG_CONFIG_HOME`, and the same platform fallbacks as Knit config. Prefer environment references when a secret manager already supplies your tokens. Tokens are not accepted as command-line arguments, printed by status/list, or written to portable artifacts.
+A project without assignments retains existing Git helpers, SSH, `gh auth login`, and provider environment behavior where no Knit default applies. Once assignments exist, other forge repositories need a default, an assignment, or a recorded ambient allowance for their exact remote. Declaring an auth group or changing a remote invalidates that ambient allowance. Local filesystem remotes require no credentials.
 
-An assignment limits where Knit uses a token. It does not reduce a classic token's underlying forge permissions. Organization repositories can often use fine-grained tokens; outside-collaborator arrangements and some operations may require classic tokens. See [GitHub's token documentation](https://docs.github.com/en/authentication/keeping-your-account-and-data-secure/managing-your-personal-access-tokens).
+Assignments are keyed by the workspace's canonical project artifact path. They stay local: a moved workspace needs its project overrides configured again; host defaults remain available. Project selection follows explicit selection, then bundle context, then the active workspace project.
 
-For read-only use, grant repository read permissions. For GitHub publish/land, grant Contents and Pull requests read/write plus Metadata read; collaborator management is a separate administrative permission. For Bitbucket, GitLab, and Forgejo, grant the corresponding repository and review permissions for the operations you use.
+Metadata, defaults, and assignments live in `forge-auth.json`; pasted tokens live in `forge-secrets.json`, a **private plaintext file, not an encrypted vault**. These follow `KNIT_HOME`, `XDG_CONFIG_HOME`, and the platform's user-config location. Unix directories use `0700` and files `0600`; Windows uses the user's inherited access controls. Tokens never appear in command arguments, status output, project exports, or bundles.
 
-## Cloning a private project before it exists locally
-
-`knit auth setup` and `knit auth use` need a local project to link repositories
-into, but `knit clone` creates the project only after Git has already fetched
-the repositories. When your sync remote token cannot export forge credentials
-(the remote answers its connected-forge lookup with 403), save a personal
-credential first and select it by name for that one clone:
-
-```sh
-knit auth add work-github --provider github
-knit clone team-project --remote hosted --credential work-github
-```
-
-`--credential` is repeatable and host-scoped: a project whose repositories
-live on several forges selects one credential per host.
-
-```sh
-knit auth add work-github --provider github
-knit auth add team-bitbucket --provider bitbucket
-knit clone team-project --remote hosted \
-  --credential work-github --credential team-bitbucket
-```
-
-What the selection does:
-
-- Credentials are validated before anything changes: unknown names, two
-  selected credentials for the same host, and credentials whose token is not
-  currently resolvable (unsaved token, unset environment reference) fail
-  before the export is fetched or the target directory is created.
-- The selection applies only to the repository URLs this clone actually
-  clones, matched by exact host and path, and only to Git: the sync remote's
-  API keeps using its own token. SSH remote URLs are rewritten to HTTPS for
-  that invocation, as with project assignments.
-- Hosts without a selected credential keep their existing behavior (SSH keys,
-  installed helpers, public access) and are reported as uncovered. A
-  `--repo`-scoped clone does not need credentials for repositories outside its
-  scope: cloning the GitHub set does not require a Bitbucket token.
-- When the selection covers every forge repository being cloned, the hosted
-  credential-helper lookup is skipped entirely.
-- If a selected credential's token is denied, the failed repository names the
-  credential and how to update it; there is no silent fallback to another
-  credential.
-- After a successful clone, each cloned repository is assigned to the selected
-  credential covering its host in your personal assignment store, exactly as
-  `knit auth use` would have written — the new workspace works with `knit
-  auth status` without a setup pass. Assignments and tokens are never synced.
-
-## Rotation and removal
-
-```sh
-# Rotates this named credential for every project using it:
-knit auth add restricted --provider github --replace
-
-# Reassign a repository:
-knit auth use shared --project tools --repo api
-
-# Remove assignments (omit --repo to clear the entire project):
-knit auth clear --project tools --repo legacy
-
-# Only unused credentials can be removed:
-knit auth remove restricted
-```
-
-Clearing the last assignment restores the project's existing ambient authentication behavior. Rotation and removal affect local Knit storage; revoke a token on its forge when it should no longer be valid.
+Knit applies credentials to child Git processes and forge API calls without changing the parent environment or saved Git remotes. Token-backed SSH URLs use HTTPS for that operation. Git 2.31 or newer is required. Network operations with repository-location overrides (`-C`, `--git-dir`, `--work-tree`) are rejected when project credentials are configured; run from the intended checkout. Bare Git commands outside Knit keep their existing authentication.

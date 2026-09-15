@@ -33,10 +33,13 @@ pub enum GitCredentialOperation {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Set up named forge credentials and personal project/repository assignments.
+    /// Set up forge tokens: bare `knit auth` manages the personal default tokens used for everything; `knit auth --project NAME` wires one project.
     Auth {
+        /// Scope the wizard to one project: use the default tokens or give the project its own.
+        #[arg(long)]
+        project: Option<String>,
         #[command(subcommand)]
-        command: AuthCommand,
+        command: Option<AuthCommand>,
     },
     /// Continue a bundle on another machine.
     Handoff {
@@ -1466,7 +1469,7 @@ pub enum HandoffCommand {
 
 #[derive(Subcommand)]
 pub enum AuthCommand {
-    /// Add or reuse credentials, then choose the project repositories each credential serves.
+    /// Choose host defaults or project-only tokens, with optional repository scope.
     Setup {
         #[arg(long)]
         project: Option<String>,
@@ -1485,6 +1488,9 @@ pub enum AuthCommand {
         /// Bitbucket Atlassian account email for an API token; omit for a repository access token.
         #[arg(long)]
         username: Option<String>,
+        /// Which of the provider's token kinds this is, e.g. fine_grained_pat or atlassian_api_token.
+        #[arg(long)]
+        token_type: Option<String>,
         /// Store an environment variable reference instead of storing the token itself.
         #[arg(long, conflicts_with = "token_stdin")]
         token_env: Option<String>,
@@ -1502,6 +1508,11 @@ pub enum AuthCommand {
         project: Option<String>,
         #[arg(short = 'r', long = "repo", required = true)]
         repos: Vec<String>,
+    },
+    /// Choose which saved credential is a host's default. The default serves every project on that forge unless overridden.
+    Default {
+        /// An existing credential name.
+        name: String,
     },
     /// Show per-repository assignments. --check probes Git read access without modifying repositories.
     Status {

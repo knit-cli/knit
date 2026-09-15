@@ -33,7 +33,8 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
-use std::path::Path;
+use std::io::IsTerminal;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 /// Pull the current user's saved views for a project from the sync remote,
@@ -189,7 +190,22 @@ pub fn prepare_remote_pull(
                     &project_id,
                     &export.decoded_history_events(&project_id),
                 )?;
+                // The pending known-repos map is written before any reconcile
+                // step that might fail: a pull that errors on invalid auth
+                // requirements or a half-failed repository reconcile must
+                // still leave the out-of-scope membership discoverable for
+                // local setup and credential resolution.
+                reconcile_known_pending(&root, &project, &export)?;
+                // Auth requirements land before the repository reconcile so a
+                // private repo whose fetch fails cannot block receiving its
+                // own new requirements: the next pull needs both the group
+                // and the failed repo's project entry to recover.
+                reconcile_project_auth(&root, &mut project, &export)?;
                 reconcile_project_repositories(&root, &mut project, &export)?;
+                // Refresh again after a successful reconcile: entries the
+                // reconcile added (or kept for failed adds) leave the pending
+                // map naming exactly the membership still absent locally.
+                reconcile_known_pending(&root, &project, &export)?;
                 return Ok(Some(RemotePullContext {
                     project,
                     export,
@@ -217,6 +233,14 @@ pub fn prepare_remote_pull(
     Ok(None)
 }
 
+/// Whether a reconcile failure should enter guided credential setup: a Git
+/// authentication-shaped error, or Knit's own strict-gate error for a
+/// repository a declared group covers without an assigned credential (the
+/// pending-map variant names `knit pull` in its hint).
+fn needs_guided_auth(reason: &str) -> bool {
+    super::clone::is_auth_shaped_failure(reason) || reason.contains("no assigned credential")
+}
+
 /// Reconcile the local project's tracked repositories with the remote
 /// project's *membership* — the deliberate repo list in the exported
 /// `knitProject` payload — so repos added or removed on the remote flow into
@@ -231,17 +255,38 @@ pub fn prepare_remote_pull(
 /// successful additions are always persisted, and removals are persisted only
 /// when every planned addition succeeded — a reconcile that failed half-way
 /// must not leave the local project matching neither side.
+fn repository_from_entry(entry: &crate::model::ProjectRepoEntry) -> RemoteExportRepository {
+    RemoteExportRepository {
+        local_id: Some(entry.id.clone()),
+        name: entry.id.clone(),
+        default_branch: Some(entry.base_branch.clone()),
+        remote_url: entry.remote.clone(),
+        visibility: None,
+        metadata: serde_json::json!({
+            "checkoutMode": entry.checkout_mode.as_str(),
+            "includeByDefault": entry.include_by_default,
+        }),
+    }
+}
+
 fn reconcile_project_repositories(
     root: &Path,
     project: &mut KnitProject,
     export: &RemoteProjectExport,
 ) -> Result<()> {
-    let Some(membership) = export
+    // Legacy exports have no portable membership. They cannot reshape this
+    // project, but its existing entries still need failed-checkout recovery.
+    let authoritative = export
         .knit_project
         .as_ref()
-        .filter(|knit_project| !knit_project.repos.is_empty())
-    else {
-        return Ok(());
+        .is_some_and(|p| !p.repos.is_empty());
+    let fallback;
+    let membership = match export.knit_project.as_ref().filter(|p| !p.repos.is_empty()) {
+        Some(membership) => membership,
+        None => {
+            fallback = project.clone();
+            &fallback
+        }
     };
 
     let membership_ids: BTreeSet<&str> = membership
@@ -269,8 +314,16 @@ fn reconcile_project_repositories(
     // records for clone detail (remote URL, visibility, forge state). A
     // membership entry without a record still reconciles from its own fields.
     let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
-    let records: BTreeMap<String, &RemoteExportRepository> = export
-        .repositories
+    // Without authoritative membership, recovery uses local identity and
+    // configuration, never possibly stale inventory with the same local id.
+    let local_records: Vec<_>;
+    let inventory = if authoritative {
+        &export.repositories
+    } else {
+        local_records = project.repos.iter().map(repository_from_entry).collect();
+        &local_records
+    };
+    let records: BTreeMap<String, &RemoteExportRepository> = inventory
         .iter()
         .map(|repository| (export_repo_local_id(repository), repository))
         .collect();
@@ -293,19 +346,60 @@ fn reconcile_project_repositories(
         })
         .map(|entry| match records.get(entry.id.as_str()) {
             Some(record) => (*record).clone(),
-            None => RemoteExportRepository {
-                local_id: Some(entry.id.clone()),
-                name: entry.id.clone(),
-                default_branch: Some(entry.base_branch.clone()),
-                remote_url: entry.remote.clone(),
-                visibility: None,
-                metadata: serde_json::json!({
-                    "checkoutMode": entry.checkout_mode.as_str(),
-                    "includeByDefault": entry.include_by_default,
-                }),
-            },
+            None => repository_from_entry(entry),
         })
         .collect();
+
+    // Existing project repos whose checkout is gone — a clone that failed for
+    // a missing credential kept the entry, or a checkout deleted since — are
+    // retried like additions. The entry is the recovery contract: setup maps
+    // credentials onto it, and this reconcile re-clones it. Only the standard
+    // layout (checkout at `<root>/<id>`, what clone and reconcile write) is
+    // retried automatically; an entry with a custom path is reported instead
+    // of silently moving the checkout.
+    let mut planned_retries: Vec<RemoteExportRepository> = Vec::new();
+    let mut retry_ids: BTreeSet<String> = BTreeSet::new();
+    for repo in &project.repos {
+        if !membership_ids.contains(repo.id.as_str()) {
+            continue;
+        }
+        let recorded = PathBuf::from(&repo.path);
+        let recorded = if recorded.is_absolute() {
+            recorded
+        } else {
+            root.join(recorded)
+        };
+        if recorded.exists() && crate::git::is_git_worktree(&recorded) {
+            continue;
+        }
+        if recorded != root.join(&repo.id) {
+            println!(
+                "{} {}: checkout missing at {} is outside the standard layout; not re-cloned automatically",
+                out::warn("Project repo:"),
+                out::repo(&repo.id),
+                recorded.display()
+            );
+            continue;
+        }
+        let record = records
+            .get(repo.id.as_str())
+            .map(|record| (*record).clone())
+            .unwrap_or_else(|| repository_from_entry(repo));
+        if record
+            .remote_url
+            .as_deref()
+            .is_none_or(|url| url.trim().is_empty())
+        {
+            println!(
+                "{} {}: checkout missing and no clone URL recorded; cannot retry",
+                out::warn("Project repo:"),
+                out::repo(&repo.id)
+            );
+            continue;
+        }
+        retry_ids.insert(repo.id.clone());
+        planned_retries.push(record);
+    }
 
     if let (Some(scope), false) = (&scope, skipped_by_scope.is_empty()) {
         println!(
@@ -317,26 +411,39 @@ fn reconcile_project_repositories(
             scope.view_name
         );
     }
-    if planned_adds.is_empty() && planned_removals.is_empty() {
+    if planned_adds.is_empty() && planned_removals.is_empty() && planned_retries.is_empty() {
         return Ok(());
+    }
+
+    let mut membership_summary = format!(
+        "syncing membership from remote (+{} / -{})",
+        planned_adds.len(),
+        planned_removals.len()
+    );
+    if !planned_retries.is_empty() {
+        membership_summary.push_str(&format!(
+            ", retrying {} missing checkout(s)",
+            planned_retries.len()
+        ));
     }
 
     println!(
         "{} {}",
         out::heading("Project repos:"),
-        out::muted(format!(
-            "syncing membership from remote (+{} / -{})",
-            planned_adds.len(),
-            planned_removals.len()
-        ))
+        out::muted(membership_summary)
     );
 
-    // Verify phase: fail additions before any clone touches the workspace,
-    // and blame the right thing while doing it.
+    // Verify phase: fail additions and retries before any clone touches the
+    // workspace, and blame the right thing while doing it.
     let mut verified = Vec::new();
     let mut failed = Vec::new();
-    for repository in planned_adds {
+    // Additions that failed for reasons a credential may fix keep their
+    // repository record: the entry written below is what setup maps a
+    // credential onto and what the next pull retries.
+    let mut unresolved = Vec::new();
+    for repository in planned_adds.into_iter().chain(planned_retries) {
         let local_id = export_repo_local_id(&repository);
+        let is_retry = retry_ids.contains(&local_id);
         if export_repo_forge_missing(&repository) {
             failed.push((
                 local_id,
@@ -365,24 +472,263 @@ fn reconcile_project_repositories(
                     format!("repository not found or no access: {error}; {NO_ACCESS_HINT}")
                 };
                 failed.push((local_id, reason));
+                // Only a failure credentials may fix keeps the entry; a
+                // public repo that was not found is genuinely gone, and old
+                // behavior (no local trace) stands.
+                if !is_retry && repository.visibility.as_deref() != Some("public") {
+                    unresolved.push(repository);
+                }
             }
         }
     }
 
-    // Apply phase: clone verified additions and record them.
+    // Guided auth for repositories the anonymous probe could not reach, in a
+    // terminal. Two failure shapes reach it: authentication-shaped Git errors
+    // (a private repository without working access — Knit disables raw Git
+    // prompts, so it surfaces as "terminal prompts disabled" or "could not
+    // read Username"), and Knit's own strict-gate error for a repository a
+    // declared group covers but no credential is assigned to yet (including
+    // old partial clones whose missing repositories live only in the pending
+    // map). Missing credentials enter setup right here — the project's
+    // declared groups projected onto the failing repositories first, then one
+    // inferred group per remaining host — and every linked repository is
+    // re-probed before the apply phase clones anything. A public repository
+    // that only hit the strict gate needs no token: its exact remote is
+    // recorded as ambient access and re-probed. Existing checkouts —
+    // successful or dirty — are never touched; only repositories that
+    // already failed are retried. Noninteractive pulls keep the reported
+    // failure and the `knit auth setup` + rerun path.
+    if std::io::stdin().is_terminal() {
+        let needs_auth: Vec<RemoteExportRepository> = failed
+            .iter()
+            .filter(|(_, reason)| needs_guided_auth(reason))
+            .filter_map(|(local_id, _)| {
+                records
+                    .get(local_id.as_str())
+                    .map(|record| (*record).clone())
+            })
+            .filter(|record| {
+                record
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+            })
+            .collect();
+        // A repository a declared group covers is never given ambient
+        // access, public or not: the group is the project's statement that a
+        // credential is required, so it takes the guided group path.
+        let group_members: BTreeSet<String> = project
+            .auth
+            .iter()
+            .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
+            .collect();
+        // Public repositories whose only problem is the missing assignment —
+        // and that no group covers — are recorded as ambient access instead
+        // of prompting.
+        let (public_gate, prompt): (Vec<RemoteExportRepository>, Vec<RemoteExportRepository>) =
+            needs_auth.into_iter().partition(|record| {
+                !group_members.contains(&export_repo_local_id(record))
+                    && record.visibility.as_deref() == Some("public")
+                    && failed.iter().any(|(id, reason)| {
+                        *id == export_repo_local_id(record)
+                            && reason.contains("no assigned credential")
+                    })
+            });
+        for record in &public_gate {
+            let local_id = export_repo_local_id(record);
+            // A host default serves this repository; ambient access is not
+            // what it will use.
+            if let (Ok((host, _)), Ok(store)) = (
+                crate::auth::remote_target(record.remote_url.as_deref().unwrap_or_default()),
+                crate::auth::load(),
+            ) {
+                if store.default_for_host(&host).is_some() {
+                    continue;
+                }
+            }
+            if let Err(error) = crate::auth::record_ambient_access(
+                root,
+                &project.id,
+                &local_id,
+                record.remote_url.as_deref().unwrap_or_default(),
+            ) {
+                println!(
+                    "{} {local_id}: {error:#}",
+                    out::warn("ambient access not recorded:")
+                );
+            }
+        }
+        if !prompt.is_empty() {
+            println!(
+                "{} {} repo(s) need a forge token (no working access); setting that up now:",
+                out::heading("Private repositories:"),
+                prompt.len()
+            );
+            let failing: Vec<(String, String)> = prompt
+                .iter()
+                .map(|record| {
+                    (
+                        export_repo_local_id(record),
+                        record.remote_url.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let mut setup_project = project.clone();
+            setup_project.repos.extend(prompt.iter().map(|record| {
+                project_repo_entry_from_export(record, &root.join(export_repo_local_id(record)))
+            }));
+            let guided = crate::commands::auth::repair_credentials(root, &setup_project, &failing);
+            if let Err(error) = guided {
+                println!(
+                    "{} {error:#}",
+                    out::warn("Guided setup failed; repositories keep their recovery entries:")
+                );
+            }
+        }
+        // Re-probe everything the gate or setup may have unblocked: public
+        // ambient recordings and newly linked repositories alike.
+        let reprobe = public_gate
+            .iter()
+            .chain(prompt.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        for repository in reprobe {
+            let local_id = export_repo_local_id(&repository);
+            let url = repository.remote_url.as_deref().unwrap_or_default();
+            match crate::git::remote_repo_reachable(root, url) {
+                Ok(()) => {
+                    failed.retain(|(id, _)| *id != local_id);
+                    verified.push(repository);
+                }
+                Err(error) => {
+                    failed.retain(|(id, _)| *id != local_id);
+                    failed.push((
+                        local_id.clone(),
+                        format!("repository not found or no access: {error}; {NO_ACCESS_HINT}"),
+                    ));
+                }
+            }
+        }
+    }
+
+    // Apply phase: clone verified additions and retries, and record them.
     let mut added = Vec::new();
+    let mut recovered = Vec::new();
     for repository in &verified {
         let local_id = export_repo_local_id(repository);
         match clone_export_repositories(root, std::slice::from_ref(repository)) {
             Ok(paths) => {
                 if let Some(repo_path) = paths.get(&local_id) {
-                    project
-                        .repos
-                        .push(project_repo_entry_from_export(repository, repo_path));
-                    added.push(local_id);
+                    if retry_ids.contains(&local_id) {
+                        // A retry refreshes the entry in place; the repo was
+                        // already a project member whose checkout had gone.
+                        if let Some(entry) =
+                            project.repos.iter_mut().find(|repo| repo.id == local_id)
+                        {
+                            if authoritative {
+                                *entry = project_repo_entry_from_export(repository, repo_path);
+                            }
+                        }
+                        recovered.push(local_id);
+                    } else {
+                        project
+                            .repos
+                            .push(project_repo_entry_from_export(repository, repo_path));
+                        added.push(local_id);
+                    }
                 }
             }
-            Err(error) => failed.push((local_id, format!("{error:#}"))),
+            Err(error) => {
+                failed.push((local_id.clone(), format!("{error:#}")));
+                if !retry_ids.contains(&local_id)
+                    && repository.visibility.as_deref() != Some("public")
+                {
+                    unresolved.push(repository.clone());
+                }
+            }
+        }
+    }
+
+    // An intended member whose add failed keeps a project entry at the
+    // projected path (absent on disk), exactly like a clone that failed for a
+    // missing credential: the entry is the recovery contract for
+    // `knit auth setup` + the next pull. Out-of-scope repos never get one —
+    // they stay in the pending map instead.
+    let mut unresolved_ids = Vec::new();
+    for repository in &unresolved {
+        let local_id = export_repo_local_id(repository);
+        if project.repos.iter().any(|repo| repo.id == local_id) {
+            continue;
+        }
+        project.repos.push(project_repo_entry_from_export(
+            repository,
+            &root.join(&local_id),
+        ));
+        unresolved_ids.push(local_id);
+    }
+
+    // Repositories with working ambient access (no credential involved) get
+    // their exact remote recorded, so the project's strict
+    // assigned-credentials gate keeps letting them through later: the ones
+    // this pull cloned, and — the recovery path for older partial clones —
+    // any member that already has a standard-layout checkout but no binding.
+    // A repository a declared group covers is never recorded ambient: the
+    // group is the project's statement that a credential is required. The
+    // strict gate only exists once the project has assignments; with none,
+    // ambient repositories resolve fine untouched and no personal state is
+    // written at all.
+    {
+        let bindings = crate::auth::load()
+            .ok()
+            .and_then(|store| {
+                crate::auth::project_key(root, &project.id)
+                    .ok()
+                    .and_then(|key| store.projects.get(&key).cloned())
+            })
+            .unwrap_or_default();
+        let group_members: BTreeSet<String> = project
+            .auth
+            .iter()
+            .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
+            .collect();
+        if !bindings.is_empty() {
+            let mut ambient_ids: Vec<String> =
+                added.iter().chain(recovered.iter()).cloned().collect();
+            for repo in &project.repos {
+                if !bindings.contains_key(&repo.id)
+                    && !group_members.contains(&repo.id)
+                    && crate::git::is_git_worktree(&root.join(&repo.id))
+                {
+                    ambient_ids.push(repo.id.clone());
+                }
+            }
+            for id in ambient_ids {
+                if group_members.contains(&id) {
+                    continue;
+                }
+                let Some(remote) = project
+                    .repos
+                    .iter()
+                    .find(|repo| repo.id == id)
+                    .and_then(|repo| repo.remote.clone())
+                else {
+                    continue;
+                };
+                if bindings.contains_key(&id) {
+                    continue;
+                }
+                if crate::auth::is_local_remote(&remote) {
+                    continue;
+                }
+                if let Err(error) =
+                    crate::auth::record_ambient_access(root, &project.id, &id, &remote)
+                {
+                    println!(
+                        "{} {id}: {error:#}",
+                        out::warn("ambient access not recorded:")
+                    );
+                }
+            }
         }
     }
 
@@ -400,11 +746,20 @@ fn reconcile_project_repositories(
         });
     }
 
-    if added.is_empty() && removed.is_empty() && failed.is_empty() {
+    if added.is_empty()
+        && removed.is_empty()
+        && failed.is_empty()
+        && recovered.is_empty()
+        && unresolved_ids.is_empty()
+    {
         return Ok(());
     }
 
-    if !added.is_empty() || !removed.is_empty() {
+    if !added.is_empty()
+        || !removed.is_empty()
+        || !recovered.is_empty()
+        || !unresolved_ids.is_empty()
+    {
         project.repos.sort_by(|a, b| a.id.cmp(&b.id));
         project.updated_at = now_iso();
         write_json(&project_path(root, &project.id), project)?;
@@ -427,6 +782,14 @@ fn reconcile_project_repositories(
             out::repo(id)
         );
     }
+    for id in &recovered {
+        println!(
+            "{} {} {}",
+            out::heading("Project repo:"),
+            out::movement("recovered"),
+            out::repo(id)
+        );
+    }
     for id in &removed {
         println!(
             "{} {} {}",
@@ -445,11 +808,22 @@ fn reconcile_project_repositories(
         );
     }
     for (id, reason) in &failed {
+        let (label, hint) = if retry_ids.contains(id) {
+            ("Project repo retry failed:", "")
+        } else if unresolved_ids.contains(id) {
+            (
+                "Project repo add failed:",
+                " (kept in the project without a checkout; link a credential with `knit auth setup`, then `knit pull --bundles` retries it)",
+            )
+        } else {
+            ("Project repo add failed:", "")
+        };
         println!(
-            "{} {}: {}",
-            out::warn("Project repo add failed:"),
+            "{} {}: {}{}",
+            out::warn(label),
             out::repo(id),
-            out::muted(reason)
+            out::muted(reason),
+            out::muted(hint)
         );
     }
     if !failed.is_empty() && !planned_removals.is_empty() {
@@ -464,6 +838,140 @@ fn reconcile_project_repositories(
         );
     }
 
+    Ok(())
+}
+
+/// Sync the project's auth requirements from the remote membership. The
+/// requirements are shared project metadata, so they converge the same way
+/// the repo membership does — but personal credential assignments are never
+/// touched: pulling new groups never expands what a local credential is
+/// assigned to. Validated against the remote's full membership before import
+/// so a scoped local project (fewer repos cloned) still accepts groups that
+/// reference repos outside its scope.
+///
+/// Partial exports (the server withheld private repos from this token) carry
+/// a *projection*: groups covering withheld repos are absent, and an empty
+/// `groups` there means "nothing visible", not an intentional clear. A
+/// partial export never erases local groups: a workspace with no local auth
+/// takes the valid projected groups, and a workspace that already has auth
+/// keeps its document (a safe merge cannot distinguish a withheld group from
+/// a deleted one) with a message pointing at a full-export token. Only a
+/// complete export is authoritative: its explicit `groups: []` clears.
+fn reconcile_project_auth(
+    root: &Path,
+    project: &mut KnitProject,
+    export: &RemoteProjectExport,
+) -> Result<()> {
+    let Some(incoming) = export
+        .knit_project
+        .as_ref()
+        .and_then(|membership| membership.auth.clone())
+    else {
+        return Ok(());
+    };
+    if project.auth.as_ref() == Some(&incoming) {
+        return Ok(());
+    }
+    let partial = export.omitted_repository_count.unwrap_or(0) > 0;
+    if partial && project.auth.is_some() {
+        let kept = project
+            .auth
+            .as_ref()
+            .map(|auth| auth.groups.len())
+            .unwrap_or(0);
+        println!(
+            "{} the export is partial (repos were withheld from this token), so its projected auth requirements were not applied; keeping {kept} local group(s). Pull with a token that can see the whole project to update them.",
+            out::warn("Auth requirements:")
+        );
+        return Ok(());
+    }
+    let mut membership = export.knit_project.clone().unwrap_or_else(|| {
+        let mut synthetic = KnitProject::new(project.id.clone(), now_iso());
+        synthetic.repos = project.repos.clone();
+        synthetic
+    });
+    membership.auth = Some(incoming.clone());
+    crate::auth::validate_project_auth(&membership)
+        .context("Refusing to import invalid project auth requirements from the remote")?;
+    let count = incoming.groups.len();
+    project.auth = Some(incoming);
+    project.updated_at = now_iso();
+    write_json(&project_path(root, &project.id), project)?;
+    println!(
+        "{} {} group(s); local credential assignments were not changed (run `knit auth setup` to review them)",
+        out::heading("Auth requirements:"),
+        count
+    );
+    Ok(())
+}
+
+/// Maintain the local-only known-pending map from the authoritative remote
+/// membership: every membership repo no local project entry covers (a scope
+/// this workspace deliberately left out) maps to its remote URL. Grouped setup
+/// validates group references against this map, and the credential resolver
+/// can serve a binding for a pending repo once the person who owns it made
+/// one. It never creates or widens an assignment by itself.
+///
+/// Only a complete export is authoritative over absent keys: it rebuilds the
+/// map from the membership, pruning entries the membership no longer lists.
+/// A partial export (repos withheld from this token) cannot tell a withheld
+/// repo from a deleted one, and the auth document is preserved on partial
+/// exports — so its retained hidden-group references would stop resolving if
+/// the pending map were rebuilt. A partial export therefore starts from the
+/// previous map, removes ids that are local now, and updates each explicitly
+/// visible membership entry from its current remote URL (removing it when
+/// that URL is empty); absent keys survive.
+fn reconcile_known_pending(
+    root: &Path,
+    project: &KnitProject,
+    export: &RemoteProjectExport,
+) -> Result<()> {
+    let Some(membership) = export
+        .knit_project
+        .as_ref()
+        .filter(|membership| !membership.repos.is_empty())
+    else {
+        // No authoritative membership to reconcile against: an absent or
+        // degenerate export must not wipe bookkeeping an earlier, complete
+        // export recorded.
+        return Ok(());
+    };
+    let previous = crate::auth::load_known_pending_repos(root, &project.id);
+    let mut pending = if export.omitted_repository_count.unwrap_or(0) > 0 {
+        previous.clone()
+    } else {
+        BTreeMap::new()
+    };
+    for repo in &project.repos {
+        pending.remove(&repo.id);
+    }
+    let local: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
+    let records: BTreeMap<String, &RemoteExportRepository> = export
+        .repositories
+        .iter()
+        .map(|repository| (export_repo_local_id(repository), repository))
+        .collect();
+    for entry in &membership.repos {
+        if local.contains(entry.id.as_str()) {
+            continue;
+        }
+        let url = records
+            .get(&entry.id)
+            .and_then(|record| record.remote_url.clone())
+            .or_else(|| entry.remote.clone())
+            .filter(|url| !url.trim().is_empty());
+        match url {
+            Some(url) => {
+                pending.insert(entry.id.clone(), url);
+            }
+            None => {
+                pending.remove(&entry.id);
+            }
+        }
+    }
+    if previous != pending {
+        crate::auth::save_known_pending_repos(root, &project.id, &pending)?;
+    }
     Ok(())
 }
 
@@ -614,7 +1122,10 @@ pub fn pull_bundle_remote_state(
         return refresh_bundle_checkouts(root, path, local, materialize, "up to date");
     }
     let (remote_payload, artifact_hash) = context.bundle_payload(remote_bundle)?;
-    match ledger_relation(&local.node_id_sequence(), &remote_payload.node_id_sequence()) {
+    match ledger_relation(
+        &local.node_id_sequence(),
+        &remote_payload.node_id_sequence(),
+    ) {
         LedgerRelation::Equal => {
             let local =
                 record_synced_artifact(&path, local, context, remote_bundle, &artifact_hash)?;
@@ -634,7 +1145,7 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
                 "bundle {bundle_id}: local and remote ledgers have diverged; run `knit pull --merge` to combine them"
-            )))
+            )));
         }
         LedgerRelation::Diverged => {
             let localized = localize_bundle(remote_payload, &context.project)?;
