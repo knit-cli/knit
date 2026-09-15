@@ -2097,8 +2097,10 @@ pub(super) fn is_auth_shaped_failure(failure: &str) -> bool {
         "could not read username",
         "terminal prompts disabled",
         "invalid username or password",
-        "401",
-        "403",
+        "http 401",
+        "http 403",
+        "returned error: 401",
+        "returned error: 403",
         "requires environment variable",
         "has no saved token",
     ]
@@ -2516,6 +2518,43 @@ mod tests {
             visibility: None,
             metadata: Value::Null,
         }
+    }
+
+    #[test]
+    fn missing_feature_branch_is_not_reported_as_an_authentication_failure() {
+        // Status-like digits in a checkout path or branch are not an HTTP
+        // authentication response.
+        assert!(!is_auth_shaped_failure(
+            "git fetch failed in /tmp/run-40393: couldn't find remote ref knit/task-401"
+        ));
+        assert!(is_auth_shaped_failure(
+            "fatal: unable to access remote: The requested URL returned error: 403"
+        ));
+        let root = temp_dir("missing-feature");
+        let source = root.join("source");
+        init_source_repo(&source);
+        let checkout = root.join("checkout");
+        assert!(Command::new("git")
+            .arg("clone")
+            .arg(&source)
+            .arg(&checkout)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let mut bundle = ChangeGroup::new(
+            "missing".into(),
+            "Missing".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        bundle.repos.push(serde_json::from_value(serde_json::json!({
+            "id": "app", "path": checkout, "baseBranch": "main", "featureBranch": "knit/deleted-feature"
+        })).unwrap());
+        let error = super::super::client::prepare_feature_branches(&bundle).unwrap_err();
+        let message = format!("{error:#}");
+        assert!(message.contains("couldn't find remote ref"), "{message}");
+        assert!(!message.contains(NO_ACCESS_HINT), "{message}");
+        fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

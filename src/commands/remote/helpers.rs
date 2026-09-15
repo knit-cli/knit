@@ -78,6 +78,12 @@ pub(crate) fn ensure_helpers_for_git(remote_name: &str) {
     let Ok(token) = super::client::resolve_token(&remote_name, remote) else {
         return;
     };
+    // Ordinary ledger tokens intentionally cannot export forge secrets.
+    // Check that capability before an optional helper request, so working
+    // local Git credentials do not produce a misleading permission warning.
+    if local_git_only(&introspect_token(remote, &token)) {
+        return;
+    }
     match sync_remote_helpers(&remote_name, remote, &token) {
         Ok(hosts) if !hosts.is_empty() => {
             crate::human!(
@@ -279,6 +285,14 @@ enum Introspection {
     Unclassified(String),
 }
 
+fn local_git_only(introspection: &Introspection) -> bool {
+    matches!(introspection,
+        Introspection::Token { scopes: Some(scopes), kind }
+            if kind.as_deref() != Some(ENVIRONMENT_TOKEN_KIND)
+                && !scopes.iter().any(|scope| scope == FORGE_CREDENTIAL_SCOPE)
+    )
+}
+
 fn introspect_token(remote: &KnitRemote, token: &str) -> Introspection {
     match request(remote, token, "GET", "/me/access-token", None) {
         Ok(response) => introspection_from_response(response.status, &response.body),
@@ -355,9 +369,8 @@ fn forge_forbidden_diagnosis(introspection: Introspection, server_body: &str) ->
                     "Sync remote returned HTTP 403: this sync token cannot export forge \
                      credentials — its scopes ({}) lack the reserved `{FORGE_CREDENTIAL_SCOPE}` \
                      scope, granted only to tokens minted for a registered personal \
-                     environment. Run `knit clone <project> --remote <name>` to collect local \
-                     forge credentials during the clone, or `knit pull --bundles` in an \
-                     existing workspace.",
+                     environment. Use your existing Git credentials or run `knit auth` to \
+                     configure local forge defaults; the sync token remains separate.",
                     scopes.join(", ")
                 )
             } else {
@@ -388,6 +401,34 @@ fn forge_forbidden_diagnosis(introspection: Introspection, server_body: &str) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn automatic_helpers_skip_only_known_ordinary_sync_tokens() {
+        for kind in [None, Some("legacy"), Some("personal")] {
+            assert!(local_git_only(&Introspection::Token {
+                scopes: Some(vec!["project:read".into(), "bundle:read".into()]),
+                kind: kind.map(str::to_owned),
+            }));
+        }
+        for (kind, scopes) in [
+            (Some(ENVIRONMENT_TOKEN_KIND), Some(vec![])),
+            (
+                Some(ENVIRONMENT_TOKEN_KIND),
+                Some(vec![FORGE_CREDENTIAL_SCOPE.into()]),
+            ),
+            (Some("legacy"), Some(vec![FORGE_CREDENTIAL_SCOPE.into()])),
+            (Some("legacy"), None),
+        ] {
+            assert!(!local_git_only(&Introspection::Token {
+                scopes,
+                kind: kind.map(str::to_owned),
+            }));
+        }
+        assert!(!local_git_only(&Introspection::Rejected));
+        assert!(!local_git_only(&Introspection::Unclassified(
+            "unavailable".into()
+        )));
+    }
 
     #[test]
     fn knit_helper_shape_is_recognized_across_names_and_paths() {
@@ -423,15 +464,15 @@ mod tests {
     }
 
     #[test]
-    fn ordinary_scope_metadata_points_at_clone_and_pull_collection() {
+    fn ordinary_scope_metadata_points_at_local_auth() {
         let diagnosis = diagnosis_for(
             200,
             r#"{"data":{"tokenKind":"legacy","scopes":["project:read","bundle:read","artifact:read","history:read"]}}"#,
         );
         assert!(diagnosis.contains("project:read, bundle:read, artifact:read, history:read"));
         assert!(diagnosis.contains("registered personal environment"));
-        assert!(diagnosis.contains("knit clone <project> --remote <name>"));
-        assert!(diagnosis.contains("knit pull --bundles"));
+        assert!(diagnosis.contains("knit auth"));
+        assert!(diagnosis.contains("sync token remains separate"));
         assert!(!diagnosis.contains("auth add"));
         assert!(!diagnosis.contains("--credential"));
     }
