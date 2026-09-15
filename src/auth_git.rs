@@ -18,23 +18,19 @@ pub fn configure(
     let Some((operation, targets)) = network_targets(cwd, args)? else {
         return Ok(Vec::new());
     };
-    // Knit owns authentication for every network operation it runs: raw Git
-    // username/password prompts are disabled for the child so a private
-    // HTTPS remote without a usable credential fails fast instead of hanging
-    // the command on a prompt nobody answers (the failure then feeds guided
-    // local token setup). Working ambient access is untouched — SSH agent
-    // keys and credential helpers, ambient or Knit-installed, never reach
-    // the terminal-prompt path.
-    command.env("GIT_TERMINAL_PROMPT", "0");
-    command.env("GIT_ASKPASS", "");
-    for (name, _) in std::env::vars_os() {
-        if name.to_string_lossy().starts_with("GIT_TRACE") {
-            command.env_remove(name);
-        }
+    // Operations that reach remotes Knit has no binding for — a clone, or a
+    // reachability probe — must never hang on a raw Git username/password
+    // prompt: with no credential selected there is nothing to answer it, so
+    // the prompts are disabled for the child and the fast failure feeds
+    // guided local token setup. Working ambient access is untouched — SSH
+    // agent keys and credential helpers, ambient or Knit-installed, never
+    // reach the terminal-prompt path. In-workspace fetch/push keeps its
+    // previous behavior (suppression only when a credential is selected).
+    if matches!(operation.as_str(), "clone" | "ls-remote") {
+        command.env("GIT_TERMINAL_PROMPT", "0");
+        command.env("GIT_ASKPASS", "");
+        command.arg("-c").arg("core.askPass=");
     }
-    command.env_remove("GIT_CURL_VERBOSE");
-    command.env("GIT_TRACE_REDACT", "1");
-    command.arg("-c").arg("core.askPass=");
     if changes_repository(args) {
         let registry = auth::load()?;
         if let Ok((root, project)) = auth::project_context(cwd, None) {
@@ -65,8 +61,24 @@ pub fn configure(
                     "-c",
                     "credential.useHttpPath=true",
                 ]);
+                command.env("GIT_TERMINAL_PROMPT", "0");
+                command.env("GIT_ASKPASS", "");
                 command.env("SSH_ASKPASS", "");
-                command.args(["-c", "http.followRedirects=false", "-c", "http.extraHeader="]);
+                for (name, _) in std::env::vars_os() {
+                    if name.to_string_lossy().starts_with("GIT_TRACE") {
+                        command.env_remove(name);
+                    }
+                }
+                command.env_remove("GIT_CURL_VERBOSE");
+                command.env("GIT_TRACE_REDACT", "1");
+                command.args([
+                    "-c",
+                    "core.askPass=",
+                    "-c",
+                    "http.followRedirects=false",
+                    "-c",
+                    "http.extraHeader=",
+                ]);
             }
             let executable = std::env::current_exe().context("locating Knit credential helper")?;
             let helper = format!(

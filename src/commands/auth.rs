@@ -417,7 +417,9 @@ fn describe_group(group: &ProjectAuthGroup, absent: &[String]) {
         "\nGroup {}: {} ({} @ {})",
         group.id, group.name, group.provider, group.host
     );
-    println!("  Token type(s): {}", group.token_types.join(", "));
+    if !group.token_types.is_empty() {
+        println!("  Token type(s): {}", group.token_types.join(", "));
+    }
     if !group.permissions.is_empty() {
         println!("  Permissions: {}", group.permissions.join(", "));
     }
@@ -478,6 +480,59 @@ fn bitbucket_username_for_token_type(
         }
     }
     Ok(None)
+}
+
+/// Ask which of Bitbucket's token kinds a new token is. The kind decides the
+/// Git username scheme, so an unclassified Bitbucket credential would
+/// authenticate as the wrong identity later; one question buys correctness.
+/// Other providers' opaque tokens all authenticate the same way and stay
+/// unclassified until their owner says otherwise.
+fn ask_bitbucket_token_type(ask: &mut impl FnMut(&str) -> Result<String>) -> Result<String> {
+    let kinds = crate::model::BITBUCKET_TOKEN_TYPES;
+    for (index, kind) in kinds.iter().enumerate() {
+        println!("  {}. {kind}", index + 1);
+    }
+    loop {
+        let choice = ask("Which kind of Bitbucket token is it? (name/number): ")?;
+        if let Some(found) = kinds.iter().find(|kind| **kind == choice.as_str()) {
+            return Ok(found.to_string());
+        }
+        if let Ok(number) = choice.parse::<usize>() {
+            if let Some(found) = number.checked_sub(1).and_then(|n| kinds.get(n)) {
+                return Ok(found.to_string());
+            }
+        }
+        println!("Choose one of the listed token kinds.");
+    }
+}
+
+/// Make sure a saved Bitbucket credential carries its token kind. A recorded
+/// account email implies the Atlassian API-token mode; otherwise the owner is
+/// asked once and the answer is persisted.
+fn ensure_bitbucket_token_type(
+    name: &str,
+    spec: &CredentialSpec,
+    ask: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<String> {
+    if let Some(kind) = spec.token_type.as_deref() {
+        return Ok(kind.to_string());
+    }
+    let kind = if spec
+        .username
+        .as_deref()
+        .is_some_and(|email| email.contains('@'))
+    {
+        println!(
+            "`{name}` has an account email recorded; treating it as an \
+             `atlassian_api_token` token."
+        );
+        "atlassian_api_token".to_string()
+    } else {
+        ask_bitbucket_token_type(ask)?
+    };
+    save_credential_token_type(name, &kind)?;
+    println!("Recorded `{name}` as a `{kind}` token.");
+    Ok(kind)
 }
 
 /// Record how an existing opaque token should be treated. The type is never
@@ -834,17 +889,31 @@ pub(crate) fn group_setup_with_prompt(
 
 /// Guided setup for `knit clone` and pull recovery — the tight path. For each
 /// group (already projected to the repositories this clone or recovery
-/// actually needs): reuse the unique compatible saved credential without
-/// asking; pick from several with one numbered answer (Enter takes the
-/// first); or prompt for the token itself — hidden, once per group, no
-/// credential-name choreography. New credentials get automatic names derived
-/// from host and group id, so distinct groups on the same host stay distinct.
-/// Repositories are linked as each group resolves; `knit auth setup` keeps
-/// the full wizard for later review and edits. An empty token answer skips
-/// that group, keeping whatever access already works.
+/// actually needs), in order:
+///
+/// * Repositories the group already links keep their links — assignment fills
+///   only the unlinked ones, never overwriting a deliberate per-repo override.
+/// * A group whose sibling repositories already share one credential is
+///   extended to its unlinked repositories without asking.
+/// * Otherwise the saved credentials are tiered: same provider and host with
+///   a token kind the group declares (or any, when the group declares none;
+///   unclassified ones are labeled honestly) are preferred over classified
+///   kinds the group does not declare. Exactly one preferred credential —
+///   and none created for a different group in this session — is reused with
+///   an announcement; anything less clean offers a numbered choice with a
+///   new-token option, so distinct groups on one host stay distinct.
+/// * A new token is prompted for directly — hidden, once per group, no
+///   credential-name choreography — and saved under an automatic name
+///   derived from host and group id.
+/// * `repair` names repositories whose authentication just failed despite a
+///   link; their group does not get skipped but offers one hidden token that
+///   rotates the rejected credential in place.
+///
+/// `knit auth setup` keeps the full wizard for review and edits.
 pub(crate) fn guided_group_setup(
     root: &Path,
     project: &KnitProject,
+    repair: &BTreeSet<String>,
     ask: &mut impl FnMut(&str) -> Result<String>,
     read_token: &mut impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
@@ -853,63 +922,198 @@ pub(crate) fn guided_group_setup(
         .as_ref()
         .context("Project has no auth requirements")?;
     let key = auth::project_key(root, &project.id)?;
+    // Credentials created during this setup, by group: a later group on the
+    // same host must not silently reuse another group's fresh credential.
+    let mut session_created: BTreeMap<String, String> = BTreeMap::new();
     let mut bound_any = false;
     for group in &auth_requirements.groups {
         if group.repos.is_empty() {
             continue;
         }
-        // A group whose repositories are all linked already (a recovery
-        // rerun) is left alone; guided setup never rewrites deliberate links.
-        if auth::load()?
-            .projects
-            .get(&key)
-            .is_some_and(|bindings| group.repos.iter().all(|repo| bindings.contains_key(repo)))
-        {
+        let store = auth::load()?;
+        let bindings = store.projects.get(&key);
+        let linked = |repo: &str| bindings.is_some_and(|b| b.contains_key(repo));
+        let unlinked: Vec<String> = group
+            .repos
+            .iter()
+            .filter(|repo| !linked(repo))
+            .cloned()
+            .collect();
+        let failing: Vec<String> = group
+            .repos
+            .iter()
+            .filter(|repo| repair.contains(*repo))
+            .cloned()
+            .collect();
+        if unlinked.is_empty() && failing.is_empty() {
+            // Fully linked and working: never re-prompt.
             continue;
         }
+        // Sibling extension: part of the group shares one credential —
+        // extend it to the rest without a prompt. Deliberate per-repo
+        // overrides to other credentials are respected, not overwritten.
+        if unlinked.len() < group.repos.len() && failing.is_empty() {
+            let bound_credentials: BTreeSet<&String> = group
+                .repos
+                .iter()
+                .filter_map(|repo| bindings.and_then(|b| b.get(repo)))
+                .collect();
+            if let Some(shared) = bound_credentials.iter().next() {
+                if bound_credentials.len() == 1 {
+                    let shared = (*shared).clone();
+                    assign_in(root, project, &unlinked, &shared)?;
+                    bound_any = true;
+                    continue;
+                }
+            }
+        }
         describe_group(group, &[]);
-        let store = auth::load()?;
+        // Repair: a linked group whose authentication was just rejected.
+        // One shared credential for the failing repositories offers one
+        // hidden fix; mixed credentials fall through to the choice. An
+        // environment-backed credential is never rotated in place (its token
+        // lives in the named variable, and pasting a replacement would leave
+        // two competing sources): the answer becomes a new local credential
+        // the failing repositories are rebound to.
+        if unlinked.is_empty() && !failing.is_empty() {
+            let bound_credentials: BTreeSet<&String> = failing
+                .iter()
+                .filter_map(|repo| bindings.and_then(|b| b.get(repo)))
+                .collect();
+            if bound_credentials.len() == 1 {
+                let name = (*bound_credentials.iter().next().unwrap()).clone();
+                let spec = store.credentials.get(&name).cloned();
+                if let Some(spec) = spec {
+                    println!(
+                        "Credential `{name}` ({}) was used and access was denied for {}.",
+                        spec.token_type
+                            .as_deref()
+                            .unwrap_or("token type unclassified"),
+                        failing.join(", ")
+                    );
+                    if spec.token_env.is_some() {
+                        let token = read_token(&format!(
+                            "Replacement token for {} (saved as a new local credential; `{name}` keeps reading its environment variable — hidden): ",
+                            spec.host
+                        ))?;
+                        let token = token.trim();
+                        if !token.is_empty() {
+                            let new_spec = CredentialSpec {
+                                provider: spec.provider.clone(),
+                                host: spec.host.to_ascii_lowercase(),
+                                username: spec.username.clone(),
+                                token_type: spec.token_type.clone(),
+                                // A pasted replacement never rides the old
+                                // environment reference.
+                                token_env: None,
+                            };
+                            let new_name = unique_credential_name(&format!(
+                                "{}-{}",
+                                sanitize_credential_name(&spec.host),
+                                sanitize_credential_name(&group.id)
+                            ))?;
+                            save_new_credential(&new_name, &new_spec, token)?;
+                            if spec.provider == "bitbucket" {
+                                let kind = ensure_bitbucket_token_type(&new_name, &new_spec, ask)?;
+                                reconcile_bitbucket_username(
+                                    &new_name,
+                                    &kind,
+                                    new_spec.username.is_some(),
+                                    ask,
+                                )?;
+                            }
+                            assign_in(root, project, &failing, &new_name)?;
+                            bound_any = true;
+                        }
+                        continue;
+                    }
+                    let token = read_token(&format!(
+                        "New token for `{name}` (Enter to keep the current one — hidden): "
+                    ))?;
+                    let token = token.trim();
+                    if !token.is_empty() {
+                        rotate_credential_token(&name, token)?;
+                    }
+                    if spec.provider == "bitbucket" {
+                        let kind = ensure_bitbucket_token_type(&name, &spec, ask)?;
+                        reconcile_bitbucket_username(&name, &kind, spec.username.is_some(), ask)?;
+                    }
+                    bound_any = true;
+                    continue;
+                }
+            }
+        }
         let compatible: Vec<(String, CredentialSpec)> = store
             .credentials
             .iter()
             .filter(|(_, spec)| credential_matches_group(spec, group))
             .map(|(name, spec)| (name.clone(), spec.clone()))
             .collect();
-        let name = match compatible.len() {
-            1 => {
-                let (name, spec) = &compatible[0];
+        // Tiered: a declared-kind (or unclassified) match outranks a
+        // classified kind the group does not declare.
+        let tier = |spec: &CredentialSpec| match (&spec.token_type, group.token_types.is_empty()) {
+            (None, _) => 1,
+            (Some(_), true) => 1,
+            (Some(kind), false) if group.token_types.contains(kind) => 0,
+            (Some(_), false) => 2,
+        };
+        let mut ordered = compatible;
+        ordered.sort_by_key(|(_, spec)| tier(spec));
+        let preferred: Vec<&(String, CredentialSpec)> =
+            ordered.iter().filter(|(_, spec)| tier(spec) < 2).collect();
+        let session_owner = session_created
+            .iter()
+            .find(|(host, _)| host.eq_ignore_ascii_case(&group.host))
+            .map(|(host, group_id)| (host.clone(), group_id.clone()));
+        let name = match preferred.len() {
+            1 if session_owner.is_none() => {
+                let (name, spec) = &preferred[0];
                 println!(
                     "Using saved credential `{name}` ({} @ {}) for this group.",
-                    spec.provider, spec.host
+                    spec.provider, spec.host,
                 );
                 name.clone()
             }
-            n if n > 1 => {
+            _ if !ordered.is_empty() => {
                 println!("Saved credentials for {} @ {}:", group.provider, group.host);
-                for (i, (name, spec)) in compatible.iter().enumerate() {
-                    println!(
-                        "  {}. {name} ({})",
-                        i + 1,
-                        spec.token_type
-                            .as_deref()
-                            .unwrap_or("token type unclassified")
-                    );
+                for (i, (name, spec)) in ordered.iter().enumerate() {
+                    let kind = match &spec.token_type {
+                        Some(kind) if group.token_types.contains(kind) => {
+                            format!("`{kind}`")
+                        }
+                        Some(kind) => format!("`{kind}`, outside this group's kinds"),
+                        None => "token type unclassified".to_owned(),
+                    };
+                    println!("  {}. {name} ({kind})", i + 1);
                 }
+                println!("  n. enter a new token for this group");
                 loop {
                     let choice = ask(&format!(
-                        "Credential for {} @ {} (1-{n}, Enter = 1): ",
-                        group.provider, group.host
+                        "Credential for {} @ {} (1-{}, n, Enter = 1): ",
+                        group.provider,
+                        group.host,
+                        ordered.len()
                     ))?;
+                    if choice.eq_ignore_ascii_case("n") {
+                        if let Some(name) =
+                            create_group_credential(group, ask, read_token, &mut |base| {
+                                unique_credential_name(base)
+                            })?
+                        {
+                            break name;
+                        }
+                        continue;
+                    }
                     let picked = if choice.is_empty() {
-                        Some(compatible[0].0.clone())
+                        Some(ordered[0].0.clone())
                     } else {
                         choice
                             .parse::<usize>()
                             .ok()
                             .and_then(|number| number.checked_sub(1))
-                            .and_then(|index| compatible.get(index).map(|(name, _)| name.clone()))
+                            .and_then(|index| ordered.get(index).map(|(name, _)| name.clone()))
                             .or_else(|| {
-                                compatible
+                                ordered
                                     .iter()
                                     .find(|(name, _)| *name == choice)
                                     .map(|(name, _)| name.clone())
@@ -917,56 +1121,52 @@ pub(crate) fn guided_group_setup(
                     };
                     match picked {
                         Some(name) => break name,
-                        None => println!("Choose a displayed credential, or press Enter."),
+                        None => println!("Choose a displayed credential, n, or press Enter."),
                     }
                 }
             }
-            _ => {
-                // No compatible saved credential: ask for the token itself.
-                let token_type = choose_group_token_type(group, ask)?;
-                println!("{}", permission_help(&group.provider));
-                let token =
-                    read_token(&format!("Token for {} ({} — hidden): ", group.host, group.id))?;
-                let token = token.trim();
-                if token.is_empty() {
+            _ => match create_group_credential(group, ask, read_token, &mut |base| {
+                unique_credential_name(base)
+            })? {
+                Some(name) => name,
+                None => {
                     println!(
                         "Skipped group `{}`; its repositories keep whatever access they have.",
                         group.id
                     );
                     continue;
                 }
-                let username = if group.provider == "bitbucket" {
-                    bitbucket_username_for_token_type(&token_type, ask)?
-                } else {
-                    None
-                };
-                let spec = CredentialSpec {
-                    provider: group.provider.clone(),
-                    // Group hosts are case-insensitive; store the canonical
-                    // lowercase form so later exact host comparisons hold.
-                    host: group.host.to_ascii_lowercase(),
-                    username,
-                    token_type: Some(token_type),
-                    token_env: None,
-                };
-                let name = unique_credential_name(&auto_credential_name(group))?;
-                save_new_credential(&name, &spec, token)?;
-                name
-            }
+            },
         };
-        // A reused Bitbucket credential may have drifted from its token kind
-        // (API token without its account email, or the reverse); one question
-        // fixes what would otherwise authenticate wrongly.
-        let store = auth::load()?;
-        if let Some(spec) = store.credentials.get(&name) {
-            if group.provider == "bitbucket" {
-                if let Some(token_type) = spec.token_type.clone() {
-                    reconcile_bitbucket_username(&name, &token_type, spec.username.is_some(), ask)?;
+        if !session_created.contains_key(&group.host.to_ascii_lowercase()) {
+            if let Some(spec) = auth::load()?.credentials.get(&name) {
+                if !spec.host.is_empty() {
+                    session_created.insert(spec.host.clone(), group.id.clone());
                 }
             }
         }
-        assign_in(root, project, &group.repos, &name)?;
-        bound_any = true;
+        // A reused Bitbucket credential may have drifted from its token kind
+        // (API token without its account email, an unclassified token, or
+        // the reverse); one question each fixes what would otherwise
+        // authenticate with the wrong Git username.
+        let store = auth::load()?;
+        if let Some(spec) = store.credentials.get(&name) {
+            if group.provider == "bitbucket" {
+                let kind = ensure_bitbucket_token_type(&name, spec, ask)?;
+                reconcile_bitbucket_username(&name, &kind, spec.username.is_some(), ask)?;
+            }
+        }
+        // Link the group's unlinked repositories; a failing (rejected)
+        // repository is rebound too — its previous link just failed, so the
+        // fresh choice replaces it.
+        let mut to_assign = unlinked;
+        to_assign.extend(failing.iter().cloned());
+        to_assign.sort();
+        to_assign.dedup();
+        if !to_assign.is_empty() {
+            assign_in(root, project, &to_assign, &name)?;
+            bound_any = true;
+        }
     }
     if !bound_any {
         println!("Every group is already linked; nothing to set up.");
@@ -974,27 +1174,106 @@ pub(crate) fn guided_group_setup(
     Ok(())
 }
 
+/// Create a brand-new credential for a guided group: one hidden token
+/// prompt, an automatic name, no choreography. `None` means the answer was
+/// empty and the group is declined for now.
+fn create_group_credential(
+    group: &ProjectAuthGroup,
+    ask: &mut impl FnMut(&str) -> Result<String>,
+    read_token: &mut impl FnMut(&str) -> Result<String>,
+    unique_name: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<Option<String>> {
+    let token_type = if group.token_types.is_empty() {
+        // No declared kinds: Bitbucket still needs its actual mode — the kind
+        // picks the Git username and the email question. Other providers'
+        // opaque tokens authenticate identically and stay unclassified.
+        if group.provider == "bitbucket" {
+            Some(ask_bitbucket_token_type(ask)?)
+        } else {
+            None
+        }
+    } else {
+        Some(choose_group_token_type(group, ask)?)
+    };
+    println!("{}", permission_help(&group.provider));
+    let token = read_token(&format!(
+        "Token for {} ({} — hidden): ",
+        group.host, group.id
+    ))?;
+    let token = token.trim();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    let username = if group.provider == "bitbucket" {
+        match &token_type {
+            Some(kind) => bitbucket_username_for_token_type(kind, ask)?,
+            None => None,
+        }
+    } else {
+        None
+    };
+    let spec = CredentialSpec {
+        provider: group.provider.clone(),
+        // Group hosts are case-insensitive; store the canonical lowercase
+        // form so later exact host comparisons hold.
+        host: group.host.to_ascii_lowercase(),
+        username,
+        token_type,
+        token_env: None,
+    };
+    let name = unique_name(&auto_credential_name(group))?;
+    save_new_credential(&name, &spec, token)?;
+    Ok(Some(name))
+}
+
+/// Replace a rejected credential's token in place, keeping its name, spec,
+/// and every project assignment that already points at it.
+fn rotate_credential_token(name: &str, token: &str) -> Result<()> {
+    if token.is_empty() || token.chars().any(char::is_control) {
+        bail!("Token must be nonempty and on one line.");
+    }
+    let _lock = auth::lock()?;
+    let store = auth::load()?;
+    let spec = store
+        .credentials
+        .get(name)
+        .cloned()
+        .with_context(|| format!("Credential `{name}` is not configured"))?;
+    auth::save_credential(&store, name, Some(token))?;
+    println!(
+        "Rotated the token on `{name}` ({} @ {}); every assigned repository now uses the new token.",
+        spec.provider, spec.host
+    );
+    Ok(())
+}
+
 /// Credential name for a guided group: the host, plus the group id when the
 /// group is not the host's own inferred stand-in, with characters outside the
 /// credential-name charset folded to hyphens.
 fn auto_credential_name(group: &ProjectAuthGroup) -> String {
-    let sanitize = |value: &str| -> String {
-        value
-            .chars()
-            .map(|c| {
-                if c.is_ascii_alphanumeric() || "-_.".contains(c) {
-                    c
-                } else {
-                    '-'
-                }
-            })
-            .collect()
-    };
     if group.id.eq_ignore_ascii_case(&group.host) {
-        sanitize(&group.host)
+        sanitize_credential_name(&group.host)
     } else {
-        format!("{}-{}", sanitize(&group.host), sanitize(&group.id))
+        format!(
+            "{}-{}",
+            sanitize_credential_name(&group.host),
+            sanitize_credential_name(&group.id)
+        )
     }
+}
+
+/// Fold a free-form label into the credential-name charset.
+fn sanitize_credential_name(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                c
+            } else {
+                '-'
+            }
+        })
+        .collect()
 }
 
 /// The base name, or its `-2`, `-3`, … successors until one is unused.
@@ -1023,7 +1302,7 @@ fn save_new_credential(name: &str, spec: &CredentialSpec, token: &str) -> Result
         bail!("Credential `{name}` exists. Use `knit auth add {name} --replace` to rotate it.");
     }
     store.credentials.insert(name.to_owned(), spec.clone());
-    auth::save_credential(&mut store, name, Some(token))?;
+    auth::save_credential(&store, name, Some(token))?;
     println!(
         "Saved `{name}` in your personal Knit credential store (private file, not encrypted). Repository access has not been checked."
     );
@@ -1033,10 +1312,11 @@ fn save_new_credential(name: &str, spec: &CredentialSpec, token: &str) -> Result
 /// Infer one group per distinct forge host from repositories that just failed
 /// authenticated access, and guide the user through them: a unique compatible
 /// saved credential is linked without a prompt, a missing token is asked for
-/// once per host, and public/SSH access that already worked is never
-/// disturbed. Returns the repo ids that ended up linked to a credential.
-/// Never invents required permissions: inferred groups carry no permissions
-/// and only the provider's known token kinds.
+/// once per host, a rejected existing link is rotated in place, and
+/// public/SSH access that already worked is never disturbed. Returns the
+/// repo ids that ended up linked to a credential. Never invents required
+/// permissions: inferred groups carry no permissions and only the provider's
+/// known token kinds.
 pub(crate) fn guided_inferred_setup(
     root: &Path,
     project: &KnitProject,
@@ -1103,10 +1383,10 @@ pub(crate) fn guided_inferred_setup(
             id: host.clone(),
             name: host.clone(),
             host,
-            token_types: crate::model::token_types_for_provider(&provider)
-                .iter()
-                .map(|kind| (*kind).to_owned())
-                .collect(),
+            // No invented kinds: the token is asked for once, stays
+            // unclassified, and its owner can classify it in `knit auth
+            // setup` later.
+            token_types: Vec::new(),
             provider,
             repos,
             permissions: Vec::new(),
@@ -1118,12 +1398,15 @@ pub(crate) fn guided_inferred_setup(
     setup_project.auth = Some(crate::model::ProjectAuth {
         groups: groups.clone(),
     });
-    let before = linked_repos(root, project)?;
-    guided_group_setup(root, &setup_project, ask, read_token)?;
-    let after = linked_repos(root, project)?;
-    Ok(after
-        .into_iter()
-        .filter(|repo| !before.contains(repo))
+    let repair: BTreeSet<String> = failing.iter().map(|(repo, _)| repo.clone()).collect();
+    guided_group_setup(root, &setup_project, &repair, ask, read_token)?;
+    // Every failing repository that has a binding now (newly linked, or a
+    // rejected one whose token was rotated in place) is worth a retry.
+    let linked = linked_repos(root, project)?;
+    Ok(failing
+        .iter()
+        .map(|(repo, _)| repo.clone())
+        .filter(|repo| linked.contains(repo))
         .collect())
 }
 
@@ -1149,6 +1432,7 @@ pub(crate) fn clone_group_setup(root: &Path, project: &KnitProject) -> Result<()
     let result = guided_group_setup(
         root,
         project,
+        &BTreeSet::new(),
         &mut prompt,
         &mut |message| rpassword::prompt_password(message).context("Could not read token"),
     );
@@ -1167,13 +1451,27 @@ pub(crate) fn inferred_fallback_setup(
 ) -> Result<Vec<String>> {
     require_terminal()?;
     let previous = auth::current_project_override();
-    let result = guided_inferred_setup(
-        root,
-        project,
-        failing,
-        &mut prompt,
-        &mut |message| rpassword::prompt_password(message).context("Could not read token"),
-    );
+    let result = guided_inferred_setup(root, project, failing, &mut prompt, &mut |message| {
+        rpassword::prompt_password(message).context("Could not read token")
+    });
+    auth::set_project_override(previous);
+    result
+}
+
+/// Guided setup during pull recovery, with the repositories whose
+/// authentication just failed: declared groups whose links were rejected get
+/// the repair path (rotate the rejected token) instead of being skipped as
+/// "already linked".
+pub(crate) fn recovery_group_setup(
+    root: &Path,
+    project: &KnitProject,
+    repair: &BTreeSet<String>,
+) -> Result<()> {
+    require_terminal()?;
+    let previous = auth::current_project_override();
+    let result = guided_group_setup(root, project, repair, &mut prompt, &mut |message| {
+        rpassword::prompt_password(message).context("Could not read token")
+    });
     auth::set_project_override(previous);
     result
 }
@@ -1345,6 +1643,7 @@ struct RepoStatusRow {
     state: String,
     auth_group: Option<String>,
     covered: bool,
+    ambient: bool,
 }
 
 type Probe = dyn FnMut(&Path, &str) -> Result<()>;
@@ -1382,6 +1681,7 @@ fn status_project_with(
     let store = auth::load()?;
     let key = auth::project_key(root, &project.id)?;
     let bindings = store.projects.get(&key);
+    let ambient = store.ambient.get(&key).cloned().unwrap_or_default();
     let explicit = bindings.is_some_and(|p| !p.is_empty());
     let groups = project
         .auth
@@ -1406,6 +1706,17 @@ fn status_project_with(
                 .is_some_and(|r| !auth::is_local_remote(r));
         let name = bindings.and_then(|p| p.get(&repo.id));
         let group = group_by_repo.get(repo.id.as_str()).copied();
+        // An ambient allowance recorded for exactly this repository's current
+        // remote: it was cloned or verified without a Knit credential. It is
+        // not a link (no credential counts), but the repository is allowed
+        // and probeable. A declared group member never inherits it — the
+        // allowance went stale when the group claimed the repository — and a
+        // URL change invalidates it: the recorded target no longer matches,
+        // and the repository falls back to strict reporting.
+        let ambient_ok = group.is_none()
+            && target
+                .as_ref()
+                .is_some_and(|(host, path)| auth::ambient_allows(&ambient, &repo.id, host, path));
         let mut covered = false;
         let state = if unsupported {
             failed = true;
@@ -1458,9 +1769,11 @@ fn status_project_with(
         } else if let Some(group) = group {
             failed = true;
             format!("needs credential assignment (auth group `{}`)", group.id)
-        } else if explicit {
+        } else if explicit && !ambient_ok {
             failed = true;
             "needs credential assignment".into()
+        } else if explicit {
+            "ambient Git access (recorded for this remote)".into()
         } else {
             "existing Git/forge authentication".into()
         };
@@ -1470,7 +1783,7 @@ fn status_project_with(
         let probe_eligible = if group.is_some() {
             covered
         } else {
-            !explicit || covered
+            !explicit || covered || ambient_ok
         };
         let state = if check && target.is_some() && probe_eligible {
             // Use the project root and explicit remote, including when checkout does not yet exist.
@@ -1491,6 +1804,7 @@ fn status_project_with(
             state,
             auth_group: group.map(|g| g.id.clone()),
             covered,
+            ambient: ambient_ok && name.is_none(),
         });
     }
     // Group coverage is reported even while drafting: repositories no group
@@ -1536,6 +1850,7 @@ fn status_project_with(
                     "credential": row.credential,
                     "status": row.state,
                     "authGroup": row.auth_group,
+                    "ambient": row.ambient,
                 })
             })
             .collect();
@@ -2211,6 +2526,227 @@ mod tests {
                 assert_eq!(store.projects[&key]["api"], "mc");
                 assert_eq!(store.projects[&key]["web"], "mc");
             }
+            // An ungrouped public repository cloned with ambient access: a
+            // recorded allowance for its exact remote keeps status green and
+            // probeable without counting it as a linked credential, and a
+            // URL change revokes the allowance.
+            "status-ambient" => {
+                let path = root.join(".knit/projects/tools.project.json");
+                let mut with_pub = serde_json::to_value(&project).unwrap();
+                with_pub["repos"].as_array_mut().unwrap().push(json!({
+                    "id":"pub","path":"pub",
+                    "remote":"https://github.com/org/pub.git","baseBranch":"main"}));
+                std::fs::write(&path, serde_json::to_vec(&with_pub).unwrap()).unwrap();
+                let project: KnitProject =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut store = auth::load().unwrap();
+                store.credentials.insert(
+                    "gh1".into(),
+                    CredentialSpec {
+                        provider: "github".into(),
+                        host: "github.com".into(),
+                        username: None,
+                        token_type: Some("fine_grained_pat".into()),
+                        token_env: Some("KNIT_WIZARD_TOKEN".into()),
+                    },
+                );
+                store.credentials.insert(
+                    "bb1".into(),
+                    CredentialSpec {
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: None,
+                        token_type: Some("access_token".into()),
+                        token_env: Some("KNIT_WIZARD_TOKEN".into()),
+                    },
+                );
+                store.projects.insert(
+                    key.clone(),
+                    [
+                        ("api".to_string(), "gh1".to_string()),
+                        ("web".to_string(), "gh1".to_string()),
+                        ("bb".to_string(), "bb1".to_string()),
+                        ("bb2".to_string(), "bb1".to_string()),
+                    ]
+                    .into_iter()
+                    .collect(),
+                );
+                store.ambient.insert(
+                    key.clone(),
+                    BTreeMap::from([("pub".to_string(), "github.com/org/pub".to_string())]),
+                );
+                auth::save(&store).unwrap();
+                println!("<<AMBIENT-HUMAN>>");
+                status_project_with(&root, &project, false, false, &mut |_, _| Ok(())).unwrap();
+                println!("<<AMBIENT-HUMAN-END>>");
+                let probed = std::rc::Rc::new(std::cell::RefCell::new(Vec::<String>::new()));
+                let recorder = probed.clone();
+                status_project_with(&root, &project, true, false, &mut move |_, remote| {
+                    recorder.borrow_mut().push(remote.to_string());
+                    Ok(())
+                })
+                .unwrap();
+                println!(
+                    "<<AMBIENT-PROBES>>{}<<AMBIENT-PROBES-END>>",
+                    probed.borrow().join(",")
+                );
+                println!("<<AMBIENT-STATUS-JSON>>");
+                status_project_with(&root, &project, true, true, &mut |_, _| Ok(())).unwrap();
+                println!("<<AMBIENT-STATUS-JSON-END>>");
+                // URL change: the recorded allowance no longer matches, so
+                // the repository fails closed again.
+                let mut moved = with_pub.clone();
+                moved["repos"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|repo| repo["id"] == "pub")
+                    .unwrap()["remote"] = json!("https://github.com/org/pub-renamed.git");
+                std::fs::write(&path, serde_json::to_vec(&moved).unwrap()).unwrap();
+                let moved: KnitProject =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let error = format!(
+                    "{:#}",
+                    status_project_with(&root, &moved, true, false, &mut |_, _| Ok(()))
+                        .unwrap_err()
+                );
+                assert!(
+                    error.contains("Some repositories need attention"),
+                    "{error}"
+                );
+                println!("<<AMBIENT-REVOKED>>");
+                // Declaring a group over the previously-ambient repository
+                // makes the recorded allowance stale: status must demand the
+                // group's credential again instead of silently keeping
+                // ambient access.
+                let mut regrouped = with_pub.clone();
+                regrouped["auth"]["groups"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|group| group["id"] == "gh-work")
+                    .unwrap()["repos"] = json!(["api", "web", "pub"]);
+                std::fs::write(&path, serde_json::to_vec(&regrouped).unwrap()).unwrap();
+                let regrouped: KnitProject =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                println!("<<AMBIENT-REGROUPED-HUMAN>>");
+                status_project_with(&root, &regrouped, false, false, &mut |_, _| Ok(())).unwrap();
+                println!("<<AMBIENT-REGROUPED-HUMAN-END>>");
+                let error = format!(
+                    "{:#}",
+                    status_project_with(&root, &regrouped, true, false, &mut |_, _| Ok(()))
+                        .unwrap_err()
+                );
+                assert!(
+                    error.contains("Some repositories need attention"),
+                    "{error}"
+                );
+                println!("<<AMBIENT-REGROUPED-DONE>>");
+            }
+            // The inferred fallback resolves Bitbucket's actual token mode
+            // and account email (so Git gets x-bitbucket-api-token-auth),
+            // while GitHub's opaque token stays honestly unclassified.
+            "inferred-bitbucket" => {
+                let linked = guided_inferred_setup(
+                    &root,
+                    &project,
+                    &[
+                        (
+                            "api".to_string(),
+                            "https://github.com/org/api.git".to_string(),
+                        ),
+                        (
+                            "bb".to_string(),
+                            "https://bitbucket.org/team/backend.git".to_string(),
+                        ),
+                    ],
+                    &mut scripted(&["atlassian_api_token", "dev@example.org"]),
+                    &mut |_prompt| Ok("inferred-secret".to_string()),
+                )
+                .unwrap();
+                assert!(linked.contains(&"api".to_string()));
+                assert!(linked.contains(&"bb".to_string()));
+                let store = auth::load().unwrap();
+                let bb = &store.credentials["bitbucket.org"];
+                assert_eq!(bb.token_type.as_deref(), Some("atlassian_api_token"));
+                assert_eq!(bb.username.as_deref(), Some("dev@example.org"));
+                assert_eq!(
+                    auth::ResolvedCredential {
+                        name: "bitbucket.org".into(),
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: bb.username.clone().unwrap(),
+                        token: String::new(),
+                    }
+                    .git_username(),
+                    "x-bitbucket-api-token-auth"
+                );
+                let gh = &store.credentials["github.com"];
+                assert_eq!(gh.token_type, None);
+                assert_eq!(store.projects[&key]["api"], "github.com");
+                assert_eq!(store.projects[&key]["bb"], "bitbucket.org");
+            }
+            // Replacing an environment-backed credential's rejected token
+            // creates a new local credential: no environment reference, the
+            // kind preserved, and the Atlassian email reconciled.
+            "env-repair" => {
+                // Narrow the project to the one Bitbucket group so the
+                // scripted run exercises the repair path directly.
+                let path = root.join(".knit/projects/tools.project.json");
+                let bb_only = json!({
+                    "schemaVersion":"0.1", "kind":"KnitProject", "id":"tools",
+                    "createdAt":"2026-01-01T00:00:00Z", "updatedAt":"2026-01-01T00:00:00Z",
+                    "repos":[{"id":"bb","path":"bb","remote":"https://bitbucket.org/team/backend.git","baseBranch":"main"}],
+                    "auth": {"groups": [{
+                        "id": "bb-cloud", "name": "Bitbucket API", "provider": "bitbucket",
+                        "host": "bitbucket.org", "repos": ["bb"],
+                        "tokenTypes": ["atlassian_api_token"]
+                    }]}
+                });
+                std::fs::write(&path, serde_json::to_vec(&bb_only).unwrap()).unwrap();
+                let project: KnitProject =
+                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+                let mut store = auth::load().unwrap();
+                store.credentials.insert(
+                    "bb-env".into(),
+                    CredentialSpec {
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: None,
+                        token_type: Some("atlassian_api_token".into()),
+                        token_env: Some("KNIT_WIZARD_TOKEN".into()),
+                    },
+                );
+                store.projects.insert(
+                    key.clone(),
+                    BTreeMap::from([("bb".to_string(), "bb-env".to_string())]),
+                );
+                auth::save(&store).unwrap();
+                let repair = BTreeSet::from(["bb".to_string()]);
+                guided_group_setup(
+                    &root,
+                    &project,
+                    &repair,
+                    &mut scripted(&["dev@example.org"]),
+                    &mut |_prompt| Ok("replacement-secret".to_string()),
+                )
+                .unwrap();
+                let store = auth::load().unwrap();
+                let new_name = store.projects[&key]["bb"].clone();
+                assert_ne!(new_name, "bb-env", "failing repo must be rebound");
+                let new_spec = &store.credentials[&new_name];
+                assert_eq!(
+                    new_spec.token_env, None,
+                    "replacement must not ride the env var"
+                );
+                assert_eq!(new_spec.token_type.as_deref(), Some("atlassian_api_token"));
+                assert_eq!(new_spec.username.as_deref(), Some("dev@example.org"));
+                assert_eq!(
+                    store.credentials["bb-env"].token_env.as_deref(),
+                    Some("KNIT_WIZARD_TOKEN"),
+                    "the env-backed credential keeps its reference"
+                );
+            }
             other => panic!("unknown mode {other}"),
         }
     }
@@ -2354,5 +2890,96 @@ mod tests {
         assert_eq!(groups[2]["linked"], 1);
         assert_eq!(groups[3]["missing"], serde_json::json!(["extra"]));
         assert_eq!(json["reposWithoutAuthGroup"], serde_json::json!([]));
+    }
+
+    #[test]
+    fn grouped_status_recognizes_recorded_ambient_allowances() {
+        let (stdout, stderr, ok) = run_grouped_child("status-ambient", false);
+        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        let human_start = stdout.find("<<AMBIENT-HUMAN>>").unwrap() + "<<AMBIENT-HUMAN>>".len();
+        let human_end = stdout.find("<<AMBIENT-HUMAN-END>>").unwrap();
+        let human = &stdout[human_start..human_end];
+        assert!(
+            human.contains("pub\t—\tambient Git access (recorded for this remote)"),
+            "ambient row missing in:\n{human}"
+        );
+        assert!(!human.contains("pub\t—\tneeds credential assignment"));
+        let probes_start = stdout.find("<<AMBIENT-PROBES>>").unwrap() + "<<AMBIENT-PROBES>>".len();
+        let probes_end = stdout.find("<<AMBIENT-PROBES-END>>").unwrap();
+        let probes = &stdout[probes_start..probes_end];
+        assert!(
+            probes.contains("https://github.com/org/pub.git"),
+            "ambient repo was not probed by --check: {probes}"
+        );
+        let json_start =
+            stdout.find("<<AMBIENT-STATUS-JSON>>").unwrap() + "<<AMBIENT-STATUS-JSON>>".len();
+        let json_end = stdout.find("<<AMBIENT-STATUS-JSON-END>>").unwrap();
+        let json: serde_json::Value =
+            serde_json::from_str(stdout[json_start..json_end].trim()).unwrap();
+        let pub_row = json["repositories"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|row| row["repo"] == "pub")
+            .unwrap();
+        assert_eq!(pub_row["ambient"], serde_json::json!(true));
+        assert_eq!(pub_row["credential"], serde_json::json!(null));
+        // No false linked counts: the grouped repositories keep exactly the
+        // links they had, and the ambient repo stays a non-link.
+        let groups = json["authGroups"].as_array().unwrap();
+        assert_eq!(groups[0]["linked"], 2);
+        assert_eq!(groups[1]["linked"], 1);
+        assert_eq!(json["reposWithoutAuthGroup"], serde_json::json!(["pub"]));
+        // The URL change revoked the allowance in the same child run.
+        assert!(stdout.contains("<<AMBIENT-REVOKED>>"), "{stdout}");
+        // Declaring a group over the ambient repository stales the
+        // allowance: the row demands the group's credential and --check
+        // fails until one is assigned.
+        let regrouped_start = stdout
+            .find("<<AMBIENT-REGROUPED-HUMAN>>")
+            .map(|at| at + "<<AMBIENT-REGROUPED-HUMAN>>".len())
+            .unwrap();
+        let regrouped_end = stdout.find("<<AMBIENT-REGROUPED-HUMAN-END>>").unwrap();
+        let regrouped = &stdout[regrouped_start..regrouped_end];
+        assert!(
+            regrouped.contains("pub\t—\tneeds credential assignment (auth group `gh-work`)"),
+            "declared member must not keep ambient access:\n{regrouped}"
+        );
+        assert!(
+            regrouped.contains("Auth group gh-work (github @ github.com): 2/3 repository(ies) linked; missing: pub"),
+            "{regrouped}"
+        );
+        assert!(!regrouped.contains("ambient Git access"), "{regrouped}");
+        assert!(stdout.contains("<<AMBIENT-REGROUPED-DONE>>"), "{stdout}");
+    }
+
+    #[test]
+    fn inferred_fallback_resolves_bitbucket_mode_and_email() {
+        let (stdout, stderr, ok) = run_grouped_child("inferred-bitbucket", false);
+        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains("Which kind of Bitbucket token is it? (name/number): "),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("Atlassian account email for this API token: "),
+            "{stdout}"
+        );
+        // GitHub's opaque token is never asked for a kind.
+        assert!(!stdout.contains("Which kind of GitHub"), "{stdout}");
+    }
+
+    #[test]
+    fn env_backed_replacement_becomes_new_local_credential() {
+        let (stdout, stderr, ok) = run_grouped_child("env-repair", false);
+        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains("was used and access was denied for bb."),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("Recorded the account email for `bitbucket.org-bb-cloud`."),
+            "{stdout}"
+        );
     }
 }

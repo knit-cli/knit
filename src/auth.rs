@@ -89,24 +89,63 @@ pub struct CloneCredentialTarget {
 /// Activated after the clone scope is resolved and before any Git runs, and
 /// restored on every result path; nothing relies on process exit, so library
 /// callers are unaffected once the guarded clone section finishes.
-static CLONE_CREDENTIALS: Mutex<Option<Vec<CloneCredentialTarget>>> = Mutex::new(None);
+///
+/// `root` pins the selection to the clone's target workspace: a remote the
+/// selection does not cover resolves its project assignments there and only
+/// there, so a surrounding workspace's assignments are unreachable even if a
+/// child Git process runs with a different cwd.
+#[derive(Clone)]
+struct CloneCredentialScope {
+    root: Option<PathBuf>,
+    targets: Vec<CloneCredentialTarget>,
+}
+
+static CLONE_CREDENTIALS: Mutex<Option<CloneCredentialScope>> = Mutex::new(None);
 
 /// Activates an exact-target clone credential selection and returns the guard
-/// that restores the previous state when dropped.
+/// that restores the previous state when dropped. Project-assignment
+/// fallbacks continue to resolve from the caller's cwd.
 pub fn activate_clone_credentials(targets: Vec<CloneCredentialTarget>) -> CloneCredentialGuard {
-    let previous = {
-        let mut active = CLONE_CREDENTIALS
-            .lock()
-            .expect("clone credential lock poisoned");
-        active.replace(targets)
-    };
+    activate_scope(CloneCredentialScope {
+        root: None,
+        targets,
+    })
+}
+
+/// Activates an exact-target clone credential selection pinned to one clone
+/// target root: uncovered remotes resolve assignments only inside that root.
+pub fn activate_clone_credentials_at(
+    root: PathBuf,
+    targets: Vec<CloneCredentialTarget>,
+) -> CloneCredentialGuard {
+    activate_scope(CloneCredentialScope {
+        root: Some(root),
+        targets,
+    })
+}
+
+/// Activates the isolation without any selected targets — a grouped or
+/// ambient clone section whose project-assignment fallbacks must stay inside
+/// the clone target root.
+pub fn activate_clone_root(root: PathBuf) -> CloneCredentialGuard {
+    activate_scope(CloneCredentialScope {
+        root: Some(root),
+        targets: Vec::new(),
+    })
+}
+
+fn activate_scope(scope: CloneCredentialScope) -> CloneCredentialGuard {
+    let previous = CLONE_CREDENTIALS
+        .lock()
+        .expect("clone credential lock poisoned")
+        .replace(scope);
     CloneCredentialGuard { previous }
 }
 
 /// Restores the clone credential selection that was active before the guard
 /// was created, on every exit path (return, `?`, panic).
 pub struct CloneCredentialGuard {
-    previous: Option<Vec<CloneCredentialTarget>>,
+    previous: Option<CloneCredentialScope>,
 }
 
 impl Drop for CloneCredentialGuard {
@@ -122,7 +161,17 @@ pub fn clone_credentials() -> Option<Vec<CloneCredentialTarget>> {
     CLONE_CREDENTIALS
         .lock()
         .expect("clone credential lock poisoned")
-        .clone()
+        .as_ref()
+        .map(|scope| scope.targets.clone())
+}
+
+/// The root a guarded clone section pinned its assignment fallbacks to.
+pub fn clone_credential_root() -> Option<PathBuf> {
+    CLONE_CREDENTIALS
+        .lock()
+        .expect("clone credential lock poisoned")
+        .as_ref()
+        .and_then(|scope| scope.root.clone())
 }
 
 /// The credential selected for exactly this forge target, if any.
@@ -226,6 +275,16 @@ pub struct AuthStore {
     /// Canonical project artifact path -> repository id -> credential name.
     #[serde(default)]
     pub projects: BTreeMap<String, BTreeMap<String, String>>,
+    /// Canonical project artifact path -> repository id -> normalized remote
+    /// target ("host/path") that already works with ambient Git access: it
+    /// was cloned or verified without any Knit credential (public HTTPS, or
+    /// an SSH key). Once a project has assignments the resolver refuses to
+    /// send its other forge repositories through unknown ambient credentials
+    /// — this allowance is the recorded exception, and it is bound to the
+    /// exact remote: a URL change revokes it until the new remote is
+    /// verified again.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub ambient: BTreeMap<String, BTreeMap<String, String>>,
 }
 
 /// Intentionally does not implement Debug or Serialize: it contains a secret.
@@ -273,6 +332,55 @@ fn personal_path(name: &str) -> Result<PathBuf> {
 pub fn load() -> Result<AuthStore> {
     load_file(&personal_path("forge-auth.json")?)
 }
+
+/// Record that one repository already works with ambient Git access, bound
+/// to the exact normalized remote target. Best-effort and caller-friendly:
+/// an unparseable remote is skipped, not an error.
+pub fn record_ambient_access(
+    root: &Path,
+    project: &str,
+    repo_id: &str,
+    remote: &str,
+) -> Result<()> {
+    let target = remote_target(remote).ok();
+    let _lock = lock()?;
+    let mut store = load()?;
+    let key = project_key(root, project)?;
+    let mut projects = store.ambient.remove(&key).unwrap_or_default();
+    match target {
+        Some((host, path)) => {
+            projects.insert(repo_id.to_owned(), format!("{host}/{path}"));
+        }
+        None => {
+            projects.remove(repo_id);
+        }
+    }
+    if projects.is_empty() {
+        store.ambient.remove(&key);
+    } else {
+        store.ambient.insert(key, projects);
+    }
+    save(&store)
+}
+
+/// The ambient allowance for this project, for the resolver's strict gate.
+fn ambient_for<'a>(store: &'a AuthStore, key: &str) -> &'a BTreeMap<String, String> {
+    store.ambient.get(key).unwrap_or(&EMPTY_MAP)
+}
+
+/// Whether this repository's recorded ambient allowance still matches the
+/// exact remote target being resolved. The allowance is bound to one
+/// host/path, so a URL change revokes it until the new remote is verified.
+pub(crate) fn ambient_allows(
+    ambient: &BTreeMap<String, String>,
+    repo_id: &str,
+    host: &str,
+    path: &str,
+) -> bool {
+    ambient.get(repo_id).map(String::as_str) == Some(format!("{host}/{path}").as_str())
+}
+
+static EMPTY_MAP: BTreeMap<String, String> = BTreeMap::new();
 
 fn load_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
     match fs::read(path) {
@@ -936,7 +1044,9 @@ pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<Str
     }
     let target = remote_target(remote)?;
     let pending = load_known_pending_repos(&root, &project.id);
-    let Some(name) = binding_for_target(&registry, bindings, &project, &target, &pending)? else {
+    let ambient = ambient_for(&registry, &key);
+    let Some(name) = binding_for_target(&registry, bindings, &project, &target, &pending, ambient)?
+    else {
         return Ok(None);
     };
     // binding_for_target validates the credential metadata and exact host.
@@ -946,19 +1056,31 @@ pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<Str
 pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCredential>> {
     // An exact-target clone selection authenticates only the repositories it
     // names. A remote it does not cover is not forced to ambient credentials:
-    // the selection falls through to this workspace's project assignments, so
-    // grouped mappings (written by guided setup before the guard activated)
-    // keep serving their repositories while the selection is active. The
-    // surrounding workspace is never borrowed — clone-section Git runs with
-    // the clone target as its cwd.
-    let selection = clone_credentials();
-    let mut selected = None;
-    if let Some(selection) = selection.as_deref() {
-        selected = resolve_clone_selection(selection, cwd, remote)?;
+    // the selection falls through to the clone workspace's project
+    // assignments, so grouped mappings (written by guided setup before the
+    // guard activated) keep serving their repositories while the selection is
+    // active. The fallback is pinned to the clone's target root when the
+    // guard carries one, so the surrounding workspace is never borrowed.
+    if clone_credentials().is_some() {
+        let root = clone_credential_root();
+        if let Some(selected) =
+            resolve_clone_selection(&clone_credentials().expect("just checked"), cwd, remote)?
+        {
+            return Ok(Some(selected));
+        }
+        if let Some(root) = root.as_deref() {
+            return resolve_clone_root_assignment(root, remote);
+        }
     }
-    if selected.is_some() {
-        return Ok(selected);
-    }
+    resolve_project_assignment(cwd, remote)
+}
+
+/// Resolve a remote against this workspace's project assignments (and the
+/// recorded ambient allowances), without any clone selection involved.
+fn resolve_project_assignment(
+    cwd: &Path,
+    remote: Option<&str>,
+) -> Result<Option<ResolvedCredential>> {
     let registry = load()?;
     if registry.projects.values().all(BTreeMap::is_empty) || context_root(cwd).is_none() {
         return Ok(None);
@@ -970,13 +1092,58 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
     let Some(bindings) = registry.projects.get(&key).filter(|b| !b.is_empty()) else {
         return Ok(None);
     };
+    resolve_remote_in_project(&registry, &root, &project, bindings, cwd, remote)
+}
+
+/// Resolve a remote inside a guarded clone section's pinned root. The clone
+/// workspace's own `activeProject` is authoritative here: the surrounding
+/// process's project override or bundle selection (an outer bundle worktree
+/// the clone was invoked from) must not redirect assignment fallbacks into a
+/// different project's bindings.
+fn resolve_clone_root_assignment(
+    root: &Path,
+    remote: Option<&str>,
+) -> Result<Option<ResolvedCredential>> {
+    let registry = load()?;
+    if registry.projects.values().all(BTreeMap::is_empty) {
+        return Ok(None);
+    }
+    let config = store::load_config(root)?;
+    let Some(project_id) = config.active_project else {
+        return Ok(None);
+    };
+    validate_name(&project_id).context("Invalid project id")?;
+    let project_path = store::project_path(root, &project_id);
+    if !project_path.exists() {
+        return Ok(None);
+    }
+    let project: KnitProject = store::read_json(&project_path)?;
+    let key = project_key(root, &project_id)?;
+    let Some(bindings) = registry.projects.get(&key).filter(|b| !b.is_empty()) else {
+        return Ok(None);
+    };
+    resolve_remote_in_project(&registry, root, &project, bindings, root, remote)
+}
+
+/// The shared assignment resolution once the workspace root, project, and
+/// bindings are known: remote normalization, the strict gate, and the
+/// credential lookup. `origin_cwd` is where `origin` is read from when no
+/// explicit remote is given (the caller's cwd, or the pinned root).
+fn resolve_remote_in_project(
+    registry: &AuthStore,
+    root: &Path,
+    project: &KnitProject,
+    bindings: &BTreeMap<String, String>,
+    origin_cwd: &Path,
+    remote: Option<&str>,
+) -> Result<Option<ResolvedCredential>> {
     let origin;
     let remote = match remote {
         Some(remote) => remote,
         None => {
             let output = Command::new("git")
                 .args(["remote", "get-url", "origin"])
-                .current_dir(cwd)
+                .current_dir(origin_cwd)
                 .output()
                 .context("Cannot inspect repository origin for forge credentials")?;
             if !output.status.success() {
@@ -992,8 +1159,10 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
         return Ok(None);
     }
     let target = remote_target(remote)?;
-    let pending = load_known_pending_repos(&root, &project.id);
-    let Some(name) = binding_for_target(&registry, bindings, &project, &target, &pending)? else {
+    let pending = load_known_pending_repos(root, &project.id);
+    let ambient = ambient_for(registry, &project_key(root, &project.id)?);
+    let Some(name) = binding_for_target(registry, bindings, project, &target, &pending, ambient)?
+    else {
         return Ok(None);
     };
     let resolved = credential(name)?;
@@ -1056,12 +1225,26 @@ fn clone_selection_match<'a>(
         .map(|target| target.name.as_str())
 }
 
+/// Whether a declared auth group claims this repository id (membership can
+/// also be a pending repository the workspace has not materialized). A
+/// declared member must authenticate through its group's credential: an
+/// ambient allowance recorded while it was still ungrouped is stale the
+/// moment the group claims it, and never satisfies the gate.
+fn declared_group_member(project: &KnitProject, repo_id: &str) -> bool {
+    project.auth.as_ref().is_some_and(|auth| {
+        auth.groups
+            .iter()
+            .any(|group| group.repos.iter().any(|repo| repo == repo_id))
+    })
+}
+
 fn binding_for_target<'a>(
     registry: &'a AuthStore,
     bindings: &'a BTreeMap<String, String>,
     project: &KnitProject,
     target: &(String, String),
     pending: &BTreeMap<String, String>,
+    ambient: &BTreeMap<String, String>,
 ) -> Result<Option<&'a str>> {
     let matches: Vec<_> = project
         .repos
@@ -1078,13 +1261,24 @@ fn binding_for_target<'a>(
         bail!("Several project repositories match this forge remote; credential assignment is ambiguous");
     }
     if let Some(repo) = matches.first() {
-        let name = bindings.get(&repo.id).with_context(|| {
-            format!(
-                "Project `{}` repository `{}` has no assigned credential; run `knit auth setup`",
-                project.id, repo.id
-            )
-        })?;
-        return validated_binding(registry, name, &target.0);
+        if let Some(name) = bindings.get(&repo.id) {
+            return validated_binding(registry, name, &target.0);
+        }
+        // Recorded ambient access — a public HTTPS or SSH repository this
+        // project already cloned or verified without a credential — keeps
+        // working after assignments exist, but only for the exact remote it
+        // was recorded for, and never once a declared group claims the
+        // repository: group members need the group's credential.
+        if !declared_group_member(project, &repo.id)
+            && ambient_allows(ambient, &repo.id, &target.0, &target.1)
+        {
+            return Ok(None);
+        }
+        bail!(
+            "Project `{}` repository `{}` has no assigned credential; run `knit auth setup`",
+            project.id,
+            repo.id
+        );
     }
     // No tracked repository matches. A repository the full membership knows
     // but this workspace has not materialized yet (out of clone scope, or a
@@ -1099,13 +1293,23 @@ fn binding_for_target<'a>(
         bail!("Several pending repositories match this forge remote; credential assignment is ambiguous");
     }
     if let Some((repo_id, _)) = pending_matches.first() {
-        let name = bindings.get(repo_id.as_str()).with_context(|| {
-            format!(
-                "Project `{}` repository `{repo_id}` has no assigned credential yet; run `knit auth setup`, then `knit pull` to clone it",
-                project.id
-            )
-        })?;
-        return validated_binding(registry, name, &target.0);
+        // The same precedence as a materialized repository: an explicit
+        // binding wins, an exact recorded ambient allowance lets the remote
+        // through without one — unless a declared group claims the pending
+        // repository, in which case the allowance is stale — and anything
+        // else stays strict.
+        if let Some(name) = bindings.get(repo_id.as_str()) {
+            return validated_binding(registry, name, &target.0);
+        }
+        if !declared_group_member(project, repo_id)
+            && ambient_allows(ambient, repo_id, &target.0, &target.1)
+        {
+            return Ok(None);
+        }
+        bail!(
+            "Project `{}` repository `{repo_id}` has no assigned credential yet; run `knit auth setup`, then `knit pull` to clone it",
+            project.id
+        );
     }
     bail!("Remote is not a configured repository in this project; refusing to select a forge credential")
 }
@@ -1137,6 +1341,221 @@ mod tests {
             "repos": [{"id":"app", "path":"app", "remote":"git@github.com:org/app.git", "baseBranch":"main"},
                       {"id":"lib", "path":"lib", "remote":"https://github.com/org/lib", "baseBranch":"main"}]
         })).unwrap()
+    }
+
+    #[test]
+    fn ambient_allowance_lets_recorded_remotes_through_the_strict_gate() {
+        // The project has one assignment (`app` -> work), so the strict gate
+        // applies to `lib`. A recorded ambient allowance bound to the exact
+        // remote lets `lib` resolve to ambient; anything else still fails.
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_type: None,
+                token_env: None,
+            },
+        );
+        let bindings = BTreeMap::from([("app".to_string(), "work".to_string())]);
+        let target = remote_target("https://github.com/org/lib").unwrap();
+        let ambient = BTreeMap::from([("lib".to_string(), "github.com/org/lib".to_string())]);
+        // Exact recorded remote: ambient access, no credential.
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &target,
+            &BTreeMap::new(),
+            &ambient
+        )
+        .unwrap()
+        .is_none());
+        // A different repository with no allowance stays strict.
+        let app_target = remote_target("git@github.com:org/app.git").unwrap();
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &app_target,
+            &BTreeMap::new(),
+            &ambient
+        )
+        .unwrap()
+        .is_some());
+        // A URL change (renamed repository) revokes the allowance: the
+        // recorded target no longer matches, so the gate fails closed.
+        let moved = remote_target("https://github.com/org/lib-renamed").unwrap();
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &moved,
+            &BTreeMap::new(),
+            &ambient
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn pending_repositories_get_the_same_ambient_allowance_as_materialized_ones() {
+        // A repository the membership knows but this workspace has not
+        // materialized (the pending sidecar) follows the same precedence as a
+        // tracked repo: binding first, exact ambient allowance second, strict
+        // error otherwise.
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_type: None,
+                token_env: None,
+            },
+        );
+        let bindings = BTreeMap::from([("app".to_string(), "work".to_string())]);
+        let target = remote_target("https://github.com/org/pend.git").unwrap();
+        let pending = BTreeMap::from([(
+            "pend".to_string(),
+            "https://github.com/org/pend.git".to_string(),
+        )]);
+        let ambient = BTreeMap::from([("pend".to_string(), "github.com/org/pend".to_string())]);
+        // Ambient allowance, no binding: through, no credential selected.
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &target,
+            &pending,
+            &ambient
+        )
+        .unwrap()
+        .is_none());
+        // An existing binding wins over the recorded allowance.
+        let mut bound = bindings.clone();
+        bound.insert("pend".to_string(), "work".to_string());
+        assert_eq!(
+            binding_for_target(&registry, &bound, &project(), &target, &pending, &ambient).unwrap(),
+            Some("work")
+        );
+        // A URL change revokes the allowance: the pending remote moved, the
+        // allowance still names the old target, so the gate fails closed.
+        let moved = remote_target("https://github.com/org/pend-renamed.git").unwrap();
+        let pending_moved = BTreeMap::from([(
+            "pend".to_string(),
+            "https://github.com/org/pend-renamed.git".to_string(),
+        )]);
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &moved,
+            &pending_moved,
+            &ambient
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn declared_group_members_never_accept_stale_ambient_allowances() {
+        // `lib` was public and cloned ambient (allowance recorded); the
+        // remote later added it to a declared group. The allowance is stale:
+        // the gate must demand the group's credential, in the tracked and
+        // the pending shape alike, while an existing binding keeps winning.
+        let grouped = serde_json::from_value::<KnitProject>(serde_json::json!({
+            "schemaVersion": "1", "kind": "KnitProject", "id": "one", "createdAt": "", "updatedAt": "",
+            "repos": [{"id":"app", "path":"app", "remote":"git@github.com:org/app.git", "baseBranch":"main"},
+                      {"id":"lib", "path":"lib", "remote":"https://github.com/org/lib", "baseBranch":"main"}],
+            "auth": {"groups": [{
+                "id": "lib-group", "name": "Library", "provider": "github",
+                "host": "github.com", "repos": ["lib"], "tokenTypes": ["fine_grained_pat"]
+            }]}
+        }))
+        .unwrap();
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_type: None,
+                token_env: None,
+            },
+        );
+        let bindings = BTreeMap::from([("app".to_string(), "work".to_string())]);
+        let target = remote_target("https://github.com/org/lib").unwrap();
+        let ambient = BTreeMap::from([("lib".to_string(), "github.com/org/lib".to_string())]);
+        // Tracked member: the exact-match allowance no longer applies.
+        let error = binding_for_target(
+            &registry,
+            &bindings,
+            &grouped,
+            &target,
+            &BTreeMap::new(),
+            &ambient,
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("no assigned credential"),
+            "{error}"
+        );
+        // An explicit binding for the member still wins over the stale
+        // allowance and over the strict error.
+        let mut bound = bindings.clone();
+        bound.insert("lib".to_string(), "work".to_string());
+        assert_eq!(
+            binding_for_target(
+                &registry,
+                &bound,
+                &grouped,
+                &target,
+                &BTreeMap::new(),
+                &ambient
+            )
+            .unwrap(),
+            Some("work")
+        );
+        // Pending member: same rule. `pend` sits only in the membership
+        // sidecar but is declared in the group.
+        let pending = BTreeMap::from([(
+            "pend".to_string(),
+            "https://github.com/org/pend.git".to_string(),
+        )]);
+        let pending_target = remote_target("https://github.com/org/pend.git").unwrap();
+        let mut grouped_pending = grouped.clone();
+        grouped_pending.auth.as_mut().unwrap().groups[0]
+            .repos
+            .push("pend".into());
+        let pending_ambient =
+            BTreeMap::from([("pend".to_string(), "github.com/org/pend".to_string())]);
+        assert!(
+            binding_for_target(
+                &registry,
+                &bindings,
+                &grouped_pending,
+                &pending_target,
+                &pending,
+                &pending_ambient
+            )
+            .is_err(),
+            "declared pending member must not resolve through a stale allowance"
+        );
+        // The same pending repository without group coverage keeps its
+        // allowance.
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &grouped,
+            &pending_target,
+            &pending,
+            &pending_ambient
+        )
+        .unwrap()
+        .is_none());
     }
 
     #[test]
@@ -1189,6 +1608,7 @@ mod tests {
                 &bindings,
                 &project(),
                 &remote_target("https://github.com/org/app").unwrap(),
+                &BTreeMap::new(),
                 &BTreeMap::new()
             )
             .unwrap(),
@@ -1199,6 +1619,7 @@ mod tests {
             &bindings,
             &project(),
             &remote_target("https://github.com/org/lib").unwrap(),
+            &BTreeMap::new(),
             &BTreeMap::new()
         )
         .is_err());
@@ -1207,6 +1628,7 @@ mod tests {
             &bindings,
             &project(),
             &remote_target("https://gitlab.com/other/app").unwrap(),
+            &BTreeMap::new(),
             &BTreeMap::new()
         )
         .is_err());
@@ -1215,6 +1637,7 @@ mod tests {
             &bindings,
             &project(),
             &remote_target("https://github.com/other/app").unwrap(),
+            &BTreeMap::new(),
             &BTreeMap::new()
         )
         .is_err());
@@ -1236,22 +1659,39 @@ mod tests {
         for name in ["narrow", "classic"] {
             let bindings = BTreeMap::from([("app".into(), name.into())]);
             assert_eq!(
-                binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
-                    .unwrap(),
+                binding_for_target(
+                    &registry,
+                    &bindings,
+                    &project(),
+                    &target,
+                    &BTreeMap::new(),
+                    &BTreeMap::new()
+                )
+                .unwrap(),
                 Some(name)
             );
         }
         let bindings = BTreeMap::from([("app".into(), "missing".into())]);
-        assert!(
-            binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
-                .is_err()
-        );
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &target,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        )
+        .is_err());
         registry.credentials.get_mut("narrow").unwrap().host = "gitlab.com".into();
         let bindings = BTreeMap::from([("app".into(), "narrow".into())]);
-        assert!(
-            binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
-                .is_err()
-        );
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project(),
+            &target,
+            &BTreeMap::new(),
+            &BTreeMap::new()
+        )
+        .is_err());
     }
 
     #[test]
@@ -1263,6 +1703,7 @@ mod tests {
             &BTreeMap::new(),
             &project,
             &remote_target("https://github.com/org/app").unwrap(),
+            &BTreeMap::new(),
             &BTreeMap::new()
         )
         .is_err());
@@ -1387,15 +1828,28 @@ mod tests {
         );
         let target = remote_target("https://github.com/org/lib").unwrap();
         let no_binding = BTreeMap::new();
-        assert!(
-            binding_for_target(&registry, &no_binding, &project, &target, &pending)
-                .unwrap_err()
-                .to_string()
-                .contains("run `knit auth setup`, then `knit pull`")
-        );
+        assert!(binding_for_target(
+            &registry,
+            &no_binding,
+            &project,
+            &target,
+            &pending,
+            &BTreeMap::new()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("run `knit auth setup`, then `knit pull`"));
         let bindings = BTreeMap::from([("lib".into(), "work".into())]);
         assert_eq!(
-            binding_for_target(&registry, &bindings, &project, &target, &pending).unwrap(),
+            binding_for_target(
+                &registry,
+                &bindings,
+                &project,
+                &target,
+                &pending,
+                &BTreeMap::new()
+            )
+            .unwrap(),
             Some("work")
         );
         let mut two = pending.clone();
@@ -1403,12 +1857,17 @@ mod tests {
             "lib2".to_string(),
             "https://github.com/org/lib.git".to_string(),
         );
-        assert!(
-            binding_for_target(&registry, &bindings, &project, &target, &two)
-                .unwrap_err()
-                .to_string()
-                .contains("ambiguous")
-        );
+        assert!(binding_for_target(
+            &registry,
+            &bindings,
+            &project,
+            &target,
+            &two,
+            &BTreeMap::new()
+        )
+        .unwrap_err()
+        .to_string()
+        .contains("ambiguous"));
     }
 
     #[test]
@@ -1441,6 +1900,7 @@ mod tests {
                 provider: "github".into(),
                 host: "GitHub.com".into(),
                 username: None,
+                token_type: None,
                 token_env: None,
             },
         );
@@ -1450,6 +1910,7 @@ mod tests {
                 provider: "github".into(),
                 host: "github.com".into(),
                 username: None,
+                token_type: None,
                 token_env: None,
             },
         );
@@ -1459,6 +1920,7 @@ mod tests {
                 provider: "bitbucket".into(),
                 host: "bitbucket.org".into(),
                 username: None,
+                token_type: None,
                 token_env: None,
             },
         );
@@ -1589,6 +2051,119 @@ mod tests {
                 0o700
             );
         }
+        fs::remove_dir_all(temporary).unwrap();
+    }
+
+    /// Child body for the clone-root resolver test; runs with an isolated
+    /// KNIT_HOME and a cwd inside the outer workspace.
+    #[test]
+    fn clone_root_resolver_child() {
+        let Ok(outer) = std::env::var("KNIT_CLONE_ROOT_OUTER") else {
+            return;
+        };
+        let outer = PathBuf::from(outer);
+        let clone_root = PathBuf::from(std::env::var("KNIT_CLONE_ROOT_TARGET").unwrap());
+        let key_outer = project_key(&outer, "outerproj").unwrap();
+        let key_clone = project_key(&clone_root, "cloneproj").unwrap();
+        let mut store = AuthStore::default();
+        store.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_type: None,
+                token_env: None,
+            },
+        );
+        save_credential(&store, "work", Some("synthetic-child-token")).unwrap();
+        store.projects.insert(
+            key_outer,
+            BTreeMap::from([("o-r".to_string(), "work".to_string())]),
+        );
+        store.projects.insert(
+            key_clone,
+            BTreeMap::from([("c-r".to_string(), "work".to_string())]),
+        );
+        store.ambient.clear();
+        save(&store).unwrap();
+
+        // The outer process context selects the outer project (as a command
+        // run from a parent bundle worktree would). The guarded clone section
+        // pins assignments to the clone root: its project must answer, not
+        // the override — the outer project has no `c-r` repository at all.
+        set_project_override(Some("outerproj".into()));
+        let guard = activate_clone_root(clone_root.clone());
+        let resolved = resolve(&outer, Some("https://github.com/org/c.git"))
+            .expect("clone root assignment resolution failed");
+        assert_eq!(
+            resolved.as_ref().map(|credential| credential.name.as_str()),
+            Some("work"),
+            "clone root's own project must resolve the clone repositories"
+        );
+        drop(guard);
+        set_project_override(None);
+
+        // Normal (non-clone) context is unchanged: the outer project's own
+        // repository resolves through the regular path.
+        let resolved = resolve(&outer, Some("https://github.com/org/o.git"))
+            .expect("outer assignment resolution failed")
+            .expect("outer repository should resolve");
+        assert_eq!(resolved.name, "work");
+    }
+
+    #[test]
+    fn clone_root_assignments_ignore_outer_bundle_context() {
+        let temporary =
+            std::env::temp_dir().join(format!("knit-clone-root-{}", std::process::id()));
+        let outer = temporary.join("outer");
+        let clone_root = temporary.join("clonetarget");
+        for (root, project_id, repo_id, remote) in [
+            (&outer, "outerproj", "o-r", "https://github.com/org/o.git"),
+            (
+                &clone_root,
+                "cloneproj",
+                "c-r",
+                "https://github.com/org/c.git",
+            ),
+        ] {
+            fs::create_dir_all(root.join(".knit/projects")).unwrap();
+            fs::write(
+                root.join(".knit/config.json"),
+                format!(r#"{{"schemaVersion":"0.1","activeProject":"{project_id}"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                root.join(format!(".knit/projects/{project_id}.project.json")),
+                serde_json::json!({
+                    "schemaVersion": "1", "kind": "KnitProject", "id": project_id,
+                    "createdAt": "", "updatedAt": "",
+                    "repos": [{"id": repo_id, "path": repo_id, "remote": remote,
+                               "baseBranch": "main"}]
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "auth::tests::clone_root_resolver_child",
+                "--nocapture",
+            ])
+            .current_dir(&outer)
+            .env("KNIT_CLONE_ROOT_OUTER", &outer)
+            .env("KNIT_CLONE_ROOT_TARGET", &clone_root)
+            .env("KNIT_HOME", temporary.join("home"))
+            .env_remove("KNIT_BUNDLE")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
         fs::remove_dir_all(temporary).unwrap();
     }
 }

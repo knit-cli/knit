@@ -233,6 +233,14 @@ pub fn prepare_remote_pull(
     Ok(None)
 }
 
+/// Whether a reconcile failure should enter guided credential setup: a Git
+/// authentication-shaped error, or Knit's own strict-gate error for a
+/// repository a declared group covers without an assigned credential (the
+/// pending-map variant names `knit pull` in its hint).
+fn needs_guided_auth(reason: &str) -> bool {
+    super::clone::is_auth_shaped_failure(reason) || reason.contains("no assigned credential")
+}
+
 /// Reconcile the local project's tracked repositories with the remote
 /// project's *membership* — the deliberate repo list in the exported
 /// `knitProject` payload — so repos added or removed on the remote flow into
@@ -466,20 +474,25 @@ fn reconcile_project_repositories(
     }
 
     // Guided auth for repositories the anonymous probe could not reach, in a
-    // terminal: missing credentials enter setup right here — the project's
+    // terminal. Two failure shapes reach it: authentication-shaped Git errors
+    // (a private repository without working access — Knit disables raw Git
+    // prompts, so it surfaces as "terminal prompts disabled" or "could not
+    // read Username"), and Knit's own strict-gate error for a repository a
+    // declared group covers but no credential is assigned to yet (including
+    // old partial clones whose missing repositories live only in the pending
+    // map). Missing credentials enter setup right here — the project's
     // declared groups projected onto the failing repositories first, then one
     // inferred group per remaining host — and every linked repository is
-    // re-probed before the apply phase clones anything. This is also the
-    // recovery path for old partial clones whose failed repositories were
-    // omitted from the local project: the pending map written above carries
-    // their remotes, so a binding created now resolves for them. Existing
-    // checkouts — successful or dirty — are never touched; only repositories
-    // that already failed are retried. Noninteractive pulls keep the reported
+    // re-probed before the apply phase clones anything. A public repository
+    // that only hit the strict gate needs no token: its exact remote is
+    // recorded as ambient access and re-probed. Existing checkouts —
+    // successful or dirty — are never touched; only repositories that
+    // already failed are retried. Noninteractive pulls keep the reported
     // failure and the `knit auth setup` + rerun path.
     if std::io::stdin().is_terminal() {
         let needs_auth: Vec<RemoteExportRepository> = failed
             .iter()
-            .filter(|(_, reason)| super::clone::is_auth_shaped_failure(reason))
+            .filter(|(_, reason)| needs_guided_auth(reason))
             .filter_map(|(local_id, _)| {
                 records
                     .get(local_id.as_str())
@@ -492,13 +505,47 @@ fn reconcile_project_repositories(
                     .is_some_and(|url| !url.trim().is_empty())
             })
             .collect();
-        if !needs_auth.is_empty() {
+        // A repository a declared group covers is never given ambient
+        // access, public or not: the group is the project's statement that a
+        // credential is required, so it takes the guided group path.
+        let group_members: BTreeSet<String> = project
+            .auth
+            .iter()
+            .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
+            .collect();
+        // Public repositories whose only problem is the missing assignment —
+        // and that no group covers — are recorded as ambient access instead
+        // of prompting.
+        let (public_gate, prompt): (Vec<RemoteExportRepository>, Vec<RemoteExportRepository>) =
+            needs_auth.into_iter().partition(|record| {
+                !group_members.contains(&export_repo_local_id(record))
+                    && record.visibility.as_deref() == Some("public")
+                    && failed.iter().any(|(id, reason)| {
+                        *id == export_repo_local_id(record)
+                            && reason.contains("no assigned credential")
+                    })
+            });
+        for record in &public_gate {
+            let local_id = export_repo_local_id(record);
+            if let Err(error) = crate::auth::record_ambient_access(
+                root,
+                &project.id,
+                &local_id,
+                record.remote_url.as_deref().unwrap_or_default(),
+            ) {
+                println!(
+                    "{} {local_id}: {error:#}",
+                    out::warn("ambient access not recorded:")
+                );
+            }
+        }
+        if !prompt.is_empty() {
             println!(
                 "{} {} repo(s) need a forge token (no working access); setting that up now:",
                 out::heading("Private repositories:"),
-                needs_auth.len()
+                prompt.len()
             );
-            let failing: Vec<(String, String)> = needs_auth
+            let failing: Vec<(String, String)> = prompt
                 .iter()
                 .map(|record| {
                     (
@@ -522,14 +569,17 @@ fn reconcile_project_repositories(
                 .iter()
                 .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
                 .collect();
-            setup_project.repos.extend(
-                needs_auth
-                    .iter()
-                    .map(|record| project_repo_entry_from_export(record, &root.join(&export_repo_local_id(record)))),
-            );
+            setup_project.repos.extend(prompt.iter().map(|record| {
+                project_repo_entry_from_export(record, &root.join(export_repo_local_id(record)))
+            }));
             let mut guided: Result<()> = Ok(());
-            if setup_project.auth.as_ref().is_some_and(|auth| !auth.groups.is_empty()) {
-                guided = crate::commands::auth::clone_group_setup(root, &setup_project);
+            if setup_project
+                .auth
+                .as_ref()
+                .is_some_and(|auth| !auth.groups.is_empty())
+            {
+                let repair: BTreeSet<String> = prompt.iter().map(export_repo_local_id).collect();
+                guided = crate::commands::auth::recovery_group_setup(root, &setup_project, &repair);
             }
             let uncovered: Vec<(String, String)> = failing
                 .into_iter()
@@ -543,27 +593,35 @@ fn reconcile_project_repositories(
                 )
                 .map(|_| ());
             }
-            match guided {
+            if let Err(error) = guided {
+                println!(
+                    "{} {error:#}",
+                    out::warn("Guided setup failed; repositories keep their recovery entries:")
+                );
+            }
+        }
+        // Re-probe everything the gate or setup may have unblocked: public
+        // ambient recordings and newly linked repositories alike.
+        let reprobe = public_gate
+            .iter()
+            .chain(prompt.iter())
+            .cloned()
+            .collect::<Vec<_>>();
+        for repository in reprobe {
+            let local_id = export_repo_local_id(&repository);
+            let url = repository.remote_url.as_deref().unwrap_or_default();
+            match crate::git::remote_repo_reachable(root, url) {
                 Ok(()) => {
-                    for repository in needs_auth {
-                        let local_id = export_repo_local_id(&repository);
-                        let url = repository.remote_url.as_deref().unwrap_or_default();
-                        match crate::git::remote_repo_reachable(root, url) {
-                            Ok(()) => {
-                                failed.retain(|(id, _)| *id != local_id);
-                                verified.push(repository);
-                            }
-                            Err(error) => {
-                                failed.retain(|(id, _)| *id != local_id);
-                                failed.push((
-                                    local_id.clone(),
-                                    format!("repository not found or no access: {error}; {NO_ACCESS_HINT}"),
-                                ));
-                            }
-                        }
-                    }
+                    failed.retain(|(id, _)| *id != local_id);
+                    verified.push(repository);
                 }
-                Err(error) => println!("{} {error:#}", out::warn("Guided setup failed:")),
+                Err(error) => {
+                    failed.retain(|(id, _)| *id != local_id);
+                    failed.push((
+                        local_id.clone(),
+                        format!("repository not found or no access: {error}; {NO_ACCESS_HINT}"),
+                    ));
+                }
             }
         }
     }
@@ -620,6 +678,71 @@ fn reconcile_project_repositories(
             &root.join(&local_id),
         ));
         unresolved_ids.push(local_id);
+    }
+
+    // Repositories with working ambient access (no credential involved) get
+    // their exact remote recorded, so the project's strict
+    // assigned-credentials gate keeps letting them through later: the ones
+    // this pull cloned, and — the recovery path for older partial clones —
+    // any member that already has a standard-layout checkout but no binding.
+    // A repository a declared group covers is never recorded ambient: the
+    // group is the project's statement that a credential is required. The
+    // strict gate only exists once the project has assignments; with none,
+    // ambient repositories resolve fine untouched and no personal state is
+    // written at all.
+    {
+        let bindings = crate::auth::load()
+            .ok()
+            .and_then(|store| {
+                crate::auth::project_key(root, &project.id)
+                    .ok()
+                    .and_then(|key| store.projects.get(&key).cloned())
+            })
+            .unwrap_or_default();
+        let group_members: BTreeSet<String> = project
+            .auth
+            .iter()
+            .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
+            .collect();
+        if !bindings.is_empty() {
+            let mut ambient_ids: Vec<String> =
+                added.iter().chain(recovered.iter()).cloned().collect();
+            for repo in &project.repos {
+                if !bindings.contains_key(&repo.id)
+                    && !group_members.contains(&repo.id)
+                    && crate::git::is_git_worktree(&root.join(&repo.id))
+                {
+                    ambient_ids.push(repo.id.clone());
+                }
+            }
+            for id in ambient_ids {
+                if group_members.contains(&id) {
+                    continue;
+                }
+                let Some(remote) = project
+                    .repos
+                    .iter()
+                    .find(|repo| repo.id == id)
+                    .and_then(|repo| repo.remote.clone())
+                else {
+                    continue;
+                };
+                if bindings.contains_key(&id) {
+                    continue;
+                }
+                if crate::auth::is_local_remote(&remote) {
+                    continue;
+                }
+                if let Err(error) =
+                    crate::auth::record_ambient_access(root, &project.id, &id, &remote)
+                {
+                    println!(
+                        "{} {id}: {error:#}",
+                        out::warn("ambient access not recorded:")
+                    );
+                }
+            }
+        }
     }
 
     // Removals are destructive under uncertainty: apply them only when every

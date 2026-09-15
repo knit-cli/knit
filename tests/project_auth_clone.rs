@@ -671,3 +671,28 @@ fn scoped_all_failed_clone_records_scope_view_and_recovers() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+// The fixture drives a real PTY through the three guided credential flows:
+// grouped clone prompts (same-host groups distinct), the no-metadata
+// inferred fallback inside the clone, and pull recovery through the strict
+// missing-assignment gate. Unix-only like the other PTY fixtures.
+#[cfg(unix)]
+#[test]
+fn guided_clone_credentials_pty_grouped_inferred_and_pull_recovery() {
+    let root = std::env::temp_dir().join(format!("knit-clone-guided-pty-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let result = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/clone_guided_pty.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_knit"))
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let _ = fs::remove_dir_all(&root);
+    assert!(result.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("all conversations PASS"), "{stdout}");
+}
