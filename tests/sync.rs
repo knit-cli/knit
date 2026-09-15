@@ -195,6 +195,45 @@ fn workspace_status_distinguishes_current_checkout_from_configured_base() {
 }
 
 #[test]
+fn plain_pull_updates_project_without_an_active_bundle() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Both a new project and a clone containing only archived history have
+    // source checkouts to pull, even though neither has an active bundle.
+    for archived_history in [false, true] {
+        if archived_history {
+            knit(&workspace, ["bundle", "finished work"]);
+            knit(&workspace, ["bundle", "archive", "finished-work"]);
+        }
+        let before = git(&backend, ["rev-parse", "HEAD"]);
+        append_line(&collaborator.join("app.txt"), "remote update");
+        git(&collaborator, ["commit", "-am", "Remote update"]);
+        git(&collaborator, ["push", "origin", "main"]);
+        let expected = git(&collaborator, ["rev-parse", "HEAD"]);
+
+        // Invalid explicit contexts must still fail, never silently broaden
+        // the operation to the entire project.
+        knit_fails(&workspace, ["--bundle", "missing", "pull"]);
+        knit_fails_with_env(&workspace, ["pull"], &[("KNIT_BUNDLE", "missing")]);
+        assert_eq!(git(&backend, ["rev-parse", "HEAD"]), before);
+
+        let report = knit(&workspace, ["pull"]);
+        assert!(report.contains("Current checkouts:"), "{report}");
+        assert!(report.contains(&expected[..7]), "{report}");
+        assert_eq!(git(&backend, ["rev-parse", "HEAD"]), expected);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");

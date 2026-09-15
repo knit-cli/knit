@@ -483,31 +483,8 @@ pub(crate) fn resolve_bundle_id(
     cwd: &Path,
     config: &KnitConfig,
 ) -> Result<(String, BundleResolutionSource)> {
-    if let Some(bundle_id) = BUNDLE_OVERRIDE
-        .lock()
-        .expect("bundle override lock poisoned")
-        .clone()
-    {
-        ensure_bundle_exists(root, &bundle_id)?;
-        return Ok((bundle_id, BundleResolutionSource::Explicit));
-    }
-
-    if let Ok(bundle_id) = std::env::var("KNIT_BUNDLE") {
-        let bundle_id = bundle_id.trim().to_string();
-        if !bundle_id.is_empty() {
-            ensure_bundle_exists(root, &bundle_id)?;
-            return Ok((bundle_id, BundleResolutionSource::Env));
-        }
-    }
-
-    if let Some(bundle_id) = infer_worktree_bundle(root, cwd) {
-        ensure_bundle_exists(root, &bundle_id)?;
-        return Ok((bundle_id, BundleResolutionSource::Worktree));
-    }
-
-    if let Some(bundle_id) = &config.active_bundle {
-        ensure_bundle_exists(root, bundle_id)?;
-        return Ok((bundle_id.clone(), BundleResolutionSource::Config));
+    if let Some(resolved) = resolve_optional_bundle_id(root, cwd, config)? {
+        return Ok(resolved);
     }
 
     // No fallback is set. Whether that is "make a bundle" or "say which one"
@@ -525,6 +502,41 @@ pub(crate) fn resolve_bundle_id(
             many.join(", ")
         ),
     }
+}
+
+pub(crate) fn resolve_optional_bundle_id(
+    root: &Path,
+    cwd: &Path,
+    config: &KnitConfig,
+) -> Result<Option<(String, BundleResolutionSource)>> {
+    if let Some(bundle_id) = BUNDLE_OVERRIDE
+        .lock()
+        .expect("bundle override lock poisoned")
+        .clone()
+    {
+        ensure_bundle_exists(root, &bundle_id)?;
+        return Ok(Some((bundle_id, BundleResolutionSource::Explicit)));
+    }
+
+    if let Ok(bundle_id) = std::env::var("KNIT_BUNDLE") {
+        let bundle_id = bundle_id.trim().to_string();
+        if !bundle_id.is_empty() {
+            ensure_bundle_exists(root, &bundle_id)?;
+            return Ok(Some((bundle_id, BundleResolutionSource::Env)));
+        }
+    }
+
+    if let Some(bundle_id) = infer_worktree_bundle(root, cwd) {
+        ensure_bundle_exists(root, &bundle_id)?;
+        return Ok(Some((bundle_id, BundleResolutionSource::Worktree)));
+    }
+
+    if let Some(bundle_id) = &config.active_bundle {
+        ensure_bundle_exists(root, bundle_id)?;
+        return Ok(Some((bundle_id.clone(), BundleResolutionSource::Config)));
+    }
+
+    Ok(None)
 }
 
 pub fn ensure_workspace_fallback_status_is_unambiguous(active: &ActiveBundle) -> Result<()> {
