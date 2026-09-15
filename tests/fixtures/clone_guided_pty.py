@@ -22,6 +22,7 @@ import json
 import os
 from pathlib import Path
 import socketserver
+import shlex
 import subprocess
 import sys
 import threading
@@ -101,73 +102,11 @@ def write_fake_git(mapping):
     fake_bin = root / 'bin'
     fake_bin.mkdir(parents=True, exist_ok=True)
     cases = ''.join(
-        f'  {url}) mode={mode}; src={src} ;;\n' for url, src, mode in mapping)
-    script = r'''#!/bin/sh
-set -u
-real_git=__REAL_GIT__
-root=__ROOT__
-op=
-url=
-for arg in "$@"; do
-  if [ -n "$op" ] && [ -z "$url" ]; then
-    case "$arg" in
-      -*) ;;
-      *) url="$arg" ;;
-    esac
-  fi
-  case "$arg" in
-    clone|ls-remote) op="$arg" ;;
-  esac
-done
-if [ -z "$op" ]; then
-  exec "$real_git" "$@"
-fi
-n=$(cat "$root/git-seq" 2>/dev/null || echo 0); n=$((n + 1))
-printf '%s\n' "$n" > "$root/git-seq"
-d="$root/git-call-$n"; mkdir -p "$d"
-printf '%s\n' "$@" > "$d/args"
-helper=
-for arg in "$@"; do
-  case "$arg" in
-    credential.https://*.helper=!*) helper=${arg#*=!} ;;
-  esac
-done
-printf '%s' "$helper" > "$d/helper"
-mode=
-src=
-case "$url" in
-__CASES__
-  *) mode=unknown ;;
-esac
-printf '%s' "${mode:-unknown}" > "$d/mode"
-if [ "$op" = ls-remote ]; then
-  if [ "$mode" = auth ] && [ -z "$helper" ]; then
-    printf 'fatal: could not read Username: terminal prompts disabled\n' >&2
-    exit 128
-  fi
-  if [ -f "$root/forge-rejects" ] && [ "$mode" = auth ]; then
-    printf "fatal: Authentication failed for '%s/'\n" "$url" >&2
-    exit 128
-  fi
-  exit 0
-fi
-if [ "$mode" = unknown ]; then
-  printf 'fake git: unexpected network url %s\n' "$url" >&2
-  exit 1
-fi
-if [ "$mode" = auth ] && [ -z "$helper" ]; then
-  printf "fatal: could not read Username for '%s': terminal prompts disabled\n" "$url" >&2
-  exit 128
-fi
-if [ -f "$root/forge-rejects" ] && [ "$mode" = auth ]; then
-  printf "fatal: Authentication failed for '%s/'\n" "$url" >&2
-  exit 128
-fi
-target=
-for arg in "$@"; do target="$arg"; done
-"$real_git" clone -q "$src" "$target" || exit $?
-exec "$real_git" -C "$target" remote set-url origin "$url"
-'''.replace('__REAL_GIT__', f"'{real_git}'").replace('__ROOT__', f"'{root}'").replace('__CASES__', cases)
+        f'  {shlex.quote(url)}) mode={mode}; src={shlex.quote(str(src))} ;;\n' for url, src, mode in mapping)
+    script = (Path(__file__).with_name('forge_git.sh').read_text()
+              .replace('__REAL_GIT__', shlex.quote(real_git))
+              .replace('__ROOT__', shlex.quote(str(root)))
+              .replace('__CASES__', cases))
     git = fake_bin / 'git'
     git.write_text(script)
     git.chmod(0o755)

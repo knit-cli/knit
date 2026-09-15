@@ -448,63 +448,19 @@ pub(super) fn clone_fetched_export(
         }
     }
 
-    // Repositories no declared group covers and nothing binds keep their
-    // first-fetch ambient access: their exact remote is recorded as an
-    // allowance so the workspace's strict assigned-credentials gate — active
-    // once the guided setup bound the grouped repositories — cannot lock a
-    // public HTTPS or SSH-working repository out of the access it already
-    // has. Grouped repositories and deliberate bindings are never touched,
-    // and nothing is recorded while the project has no bindings at all (the
-    // gate is inert then, and no personal state is needed).
-    record_ungrouped_ambient_access(
-        &target_root,
-        &bootstrap.project,
-        &scoped_repositories,
-        credential_selection,
-        auth_requirements.as_ref(),
-    );
+    // Save explicit overrides before Git runs so failed clones can use the
+    // same ordinary project resolution when resumed through pull.
+    persist_clone_credential_assignments(&target_root, &bootstrap.project, credential_selection)?;
+    record_ungrouped_ambient_access(&target_root, &bootstrap.project, &scoped_repositories);
+    let _credential_guard = crate::auth::activate_clone_root(target_root.clone());
+    let locals_cover_all =
+        local_assignments_cover(&target_root, &bootstrap.project, &scoped_repositories);
 
-    // Credential isolation starts before any Git runs — the guided setup's
-    // reuses, the `--prefer-https` probes, and the clones themselves. An
-    // explicit selection activates as exact (host, path) targets of the
-    // scoped export repositories; every clone (selection or not) pins its
-    // assignment fallbacks to the clone target root, so the surrounding
-    // workspace's credentials are unreachable for the whole guarded section.
-    // The guard restores the previous state on every result path, including
-    // materialize fetches below. A target the selection does not cover keeps
-    // the clone workspace's grouped assignments instead of being forced to
-    // ambient credentials.
-    let coverage = clone_credential_coverage(&scoped_repositories, credential_selection);
-    let _credential_guard = if credential_selection.is_empty() {
-        crate::auth::activate_clone_root(target_root.clone())
-    } else {
-        crate::auth::activate_clone_credentials_at(target_root.clone(), coverage.targets.clone())
-    };
-    // Whether every scoped forge repository will be cloned with a Knit-known
-    // credential: the explicit selection's exact targets, or the guided
-    // setup's grouped assignments. Such a clone never needs the hosted
-    // connected-forge lookup (which restricted sync tokens cannot read) or
-    // the hosted helper install.
-    let selection_covers_all = !credential_selection.is_empty() && coverage.uncovered.is_empty();
-    let locals_cover_all = !selection_covers_all
-        && local_assignments_cover(&target_root, &bootstrap.project, &scoped_repositories);
-
-    // `--prefer-https` probes run only after the bootstrap (and interactive
-    // setup) so a private repository's probe resolves the credential the user
-    // just linked, exactly like the clone that follows. Hosts the explicit
-    // `--credential` selection covers are never probed — probing them would
-    // authenticate with ambient credentials before the selection's own exact
-    // rewrite applies — and a selection or grouped-assignment set covering
-    // every scoped forge repository skips the hosted connected-forge lookup
-    // entirely.
     let mut rewrote_urls = false;
-    if prefer_https && !selection_covers_all && !locals_cover_all && token.is_some() {
+    if prefer_https && !locals_cover_all && token.is_some() {
         let hosts = super::helpers::automatic_forge_hosts(&remote, token.as_deref().unwrap())
             .unwrap_or_default();
         for repository in &mut export.repositories {
-            if !prefer_https_probes_repository(repository, credential_selection) {
-                continue;
-            }
             if let Some(url) = repository.remote_url.clone() {
                 if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
                     if super::handoff::reachable(&target_root, &url, &remote_name, &hosts).is_err()
@@ -537,21 +493,14 @@ pub(super) fn clone_fetched_export(
         refresh_clone_pending(&target_root, &export, &refreshed)?;
     }
 
-    if selection_covers_all || locals_cover_all {
+    if locals_cover_all {
         crate::human!(
             "{} {}",
             out::heading("Credential helper:"),
-            out::muted(if selection_covers_all {
-                "skipped; the selected credential(s) cover every forge repository"
-            } else {
-                "skipped; linked project credentials cover every forge repository"
-            })
+            out::muted("skipped; local credentials cover every forge repository")
         );
     } else {
         super::helpers::ensure_helpers_for_git(&remote_name);
-    }
-    if !credential_selection.is_empty() {
-        report_clone_credential_coverage(credential_selection, &coverage);
     }
     let (mut repo_paths, mut failed_repos) =
         clone_export_repositories_collecting(&target_root, &scoped_repositories);
@@ -585,91 +534,12 @@ pub(super) fn clone_fetched_export(
                 out::heading("Private repositories:"),
                 failing.len()
             );
-            let failing_ids: BTreeSet<&str> = failing.iter().map(|(id, _)| id.as_str()).collect();
-            let declared_covered: BTreeSet<String> = auth_requirements
-                .iter()
-                .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
-                .filter(|repo| failing_ids.contains(repo.as_str()))
-                .collect();
-            let mut linked: Vec<String> = Vec::new();
-            if !declared_covered.is_empty() {
-                // The declared groups projected onto the failing repositories,
-                // repaired through the same setup pull recovery uses.
-                let mut setup_project = bootstrap.project.clone();
-                if let Some(auth) = setup_project.auth.as_mut() {
-                    for group in &mut auth.groups {
-                        group
-                            .repos
-                            .retain(|repo| failing_ids.contains(repo.as_str()));
-                    }
-                    auth.groups.retain(|group| !group.repos.is_empty());
-                }
-                let repair: BTreeSet<String> =
-                    failing.iter().map(|(repo, _)| repo.clone()).collect();
-                crate::commands::auth::recovery_group_setup(
-                    &target_root,
-                    &setup_project,
-                    &repair,
-                )
-                .with_context(|| {
-                    format!(
-                        "guided credential repair failed; a recoverable workspace was left at {} — fix credentials there, then run `knit pull --bundles`",
-                        target_root.display()
-                    )
-                })?;
-                // A repair creates a fresh local credential for the rejected
-                // repositories, or a missing group's first token becomes the
-                // host's default with no per-repository links: retry
-                // everything that has a binding or a host default now.
-                let key = crate::auth::project_key(&target_root, &bootstrap.project.id)
-                    .with_context(|| {
-                        format!(
-                            "guided credential repair failed; a recoverable workspace was left at {} — fix credentials there, then run `knit pull --bundles`",
-                            target_root.display()
-                        )
-                    })?;
-                let store = crate::auth::load()?;
-                linked.extend(
-                    store
-                        .projects
-                        .get(&key)
-                        .into_iter()
-                        .flat_map(|bindings| bindings.keys().cloned())
-                        .filter(|repo| failing_ids.contains(repo.as_str())),
-                );
-                linked.extend(
-                    failing
-                        .iter()
-                        .filter(|(_, remote)| {
-                            crate::auth::remote_target(remote)
-                                .ok()
-                                .and_then(|(host, _)| store.default_for_host(&host).map(|_| ()))
-                                .is_some()
-                        })
-                        .map(|(repo, _)| repo.clone()),
-                );
-            }
-            let uncovered: Vec<(String, String)> = failing
-                .iter()
-                .filter(|(repo, _)| !declared_covered.contains(repo))
-                .cloned()
-                .collect();
-            if !uncovered.is_empty() {
-                linked.extend(crate::commands::auth::inferred_fallback_setup(
-                    &target_root,
-                    &bootstrap.project,
-                    &uncovered,
-                )
-                .with_context(|| {
-                    format!(
-                        "guided credential setup failed; a recoverable workspace was left at {} — fix credentials there, then run `knit pull --bundles`",
-                        target_root.display()
-                    )
-                })?);
-            }
+            crate::commands::auth::repair_credentials(&target_root, &bootstrap.project, &failing)
+                .with_context(|| format!("guided credential repair failed; a recoverable workspace was left at {} — fix credentials there, then run `knit pull --bundles`", target_root.display()))?;
+            let retry_ids: BTreeSet<_> = failing.iter().map(|(id, _)| id).collect();
             let retry: Vec<RemoteExportRepository> = scoped_repositories
                 .iter()
-                .filter(|repository| linked.contains(&export_repo_local_id(repository)))
+                .filter(|repository| retry_ids.contains(&export_repo_local_id(repository)))
                 .cloned()
                 .collect();
             if !retry.is_empty() {
@@ -715,27 +585,13 @@ pub(super) fn clone_fetched_export(
         local_project_from_export(&export, &scoped_repositories, &repo_paths, &target_root)?;
     write_json(&project_path(&target_root, &project.id), &project)?;
     refresh_clone_pending(&target_root, &export, &project)?;
-    // Record which personal credential cloned each repository so later Knit
-    // operations in the new workspace use it without setup. Personal state
-    // only: nothing is written to project artifacts or sync remotes. A
-    // repository the grouped setup already linked keeps that mapping — the
-    // explicit selection never overwrites grouped assignments.
-    if !credential_selection.is_empty() {
-        persist_clone_credential_assignments(
-            &target_root,
-            &project,
-            &repo_paths,
-            credential_selection,
-        );
-    }
-    // Repositories that cloned with working ambient access (public HTTPS, or
-    // an SSH key) keep it — recorded after the explicit assignments above,
-    // so a partially selected clone (the selection covers one host, public
-    // repositories sit on another) leaves the public repositories allowed
-    // through the now-active strict gate. Bound repositories — grouped or
-    // explicitly assigned — are never overwritten. Best effort: a recording
-    // failure warns and never fails a finished clone.
-    record_ambient_clone_access(&target_root, &project, &repo_paths, credential_selection);
+    // Repair may have added bindings after an earlier ambient clone succeeded.
+    let cloned: Vec<_> = scoped_repositories
+        .iter()
+        .filter(|repo| repo_paths.contains_key(&export_repo_local_id(repo)))
+        .cloned()
+        .collect();
+    record_ungrouped_ambient_access(&target_root, &project, &cloned);
 
     // Bundles localize against repos with real checkouts only: the project
     // now keeps entries for in-scope repos whose clone failed (they are the
@@ -1695,134 +1551,7 @@ fn prepare_clone_target(target: &Path, repositories: &[RemoteExportRepository]) 
     Ok(())
 }
 
-/// How the explicit clone credential selection relates to the repositories
-/// about to be cloned: repo ids on hosts a selected credential covers, the
-/// uncovered hosts with the repo ids left to ambient Git authentication, and
-/// the exact (host, path) targets the selection will authenticate.
-#[derive(Default)]
-struct CloneCredentialCoverage {
-    covered: BTreeMap<String, Vec<String>>,
-    uncovered: BTreeMap<String, Vec<String>>,
-    targets: Vec<crate::auth::CloneCredentialTarget>,
-}
-
-/// Split the repositories' forge remotes by whether the clone's explicit
-/// credential selection covers their host, and collect the exact
-/// (host, path) targets the covered repositories contribute. Local remotes
-/// and repos without a clone URL need no credential; unparseable URLs are
-/// skipped (their clone fails on its own, so hosted helper setup is not
-/// decided by them).
-fn clone_credential_coverage(
-    repositories: &[RemoteExportRepository],
-    selection: &[(String, String)],
-) -> CloneCredentialCoverage {
-    let mut coverage = CloneCredentialCoverage::default();
-    for repository in repositories {
-        let Some(url) = repository
-            .remote_url
-            .as_deref()
-            .filter(|url| !url.trim().is_empty())
-        else {
-            continue;
-        };
-        if crate::auth::is_local_remote(url) {
-            continue;
-        }
-        let Ok((host, path)) = crate::auth::remote_target(url) else {
-            continue;
-        };
-        let Some((name, _)) = selection
-            .iter()
-            .find(|(_, selected)| selected.eq_ignore_ascii_case(&host))
-        else {
-            coverage
-                .uncovered
-                .entry(host)
-                .or_default()
-                .push(export_repo_local_id(repository));
-            continue;
-        };
-        coverage
-            .covered
-            .entry(host.clone())
-            .or_default()
-            .push(export_repo_local_id(repository));
-        coverage.targets.push(crate::auth::CloneCredentialTarget {
-            name: name.clone(),
-            host,
-            path,
-        });
-    }
-    coverage
-}
-
-/// Whether the hosted prefer-HTTPS reachability probe may touch this
-/// repository: it must carry a parseable forge remote and sit on a host the
-/// explicit selection does not cover — covered repositories authenticate
-/// through the selection's own exact HTTPS rewrite once it activates, and
-/// probing them first would use ambient credentials. Out-of-scope
-/// repositories stay probeable: their pending-map entries are tomorrow's
-/// credential-backed recovery clones, so they should carry the rewritten
-/// HTTPS form too.
-fn prefer_https_probes_repository(
-    repository: &RemoteExportRepository,
-    selection: &[(String, String)],
-) -> bool {
-    repository
-        .remote_url
-        .as_deref()
-        .filter(|url| !url.trim().is_empty())
-        .is_some_and(|url| {
-            !crate::auth::is_local_remote(url)
-                && crate::auth::remote_target(url).is_ok_and(|(host, _)| {
-                    !selection
-                        .iter()
-                        .any(|(_, selected)| selected.eq_ignore_ascii_case(&host))
-                })
-        })
-}
-
-/// Tell the user exactly what the explicit selection does and does not cover.
-fn report_clone_credential_coverage(
-    selection: &[(String, String)],
-    coverage: &CloneCredentialCoverage,
-) {
-    for (name, host) in selection {
-        let count = coverage.covered.get(host).map(Vec::len).unwrap_or(0);
-        crate::human!(
-            "{} {} {}",
-            out::heading("Credential:"),
-            out::repo(name),
-            out::muted(format!(
-                "({host}) authenticates {count} repo(s) for this clone"
-            ))
-        );
-    }
-    for (host, repos) in &coverage.uncovered {
-        crate::human!(
-            "{} {} {}",
-            out::warn("No selected credential for"),
-            out::repo(host),
-            out::muted(format!(
-                "({}); {} existing Git credentials",
-                repos.join(", "),
-                if repos.len() == 1 {
-                    "it uses"
-                } else {
-                    "they use"
-                }
-            ))
-        );
-    }
-}
-
-/// Whether every scoped forge repository will be cloned with a Knit-known
-/// credential or a recorded ambient allowance: the explicit selection's
-/// exact targets, the guided setup's grouped assignments, or the exact-repo
-/// ambient allowances recorded for repositories no group covers. Such a
-/// clone never needs the hosted connected-forge lookup (which restricted
-/// sync tokens cannot read) or the hosted helper install. Repositories
-/// without a forge remote need nothing.
+/// Whether normal project resolution covers every scoped forge repository.
 fn local_assignments_cover(
     target_root: &Path,
     project: &KnitProject,
@@ -1847,28 +1576,24 @@ fn local_assignments_cover(
             continue;
         };
         any = true;
-        if crate::auth::project_credential_name(&store, target_root, project, &(host, path))
-            .is_err()
-        {
+        // An ambient allowance permits Git to try; it does not prove a
+        // credential helper is installed or that access already works.
+        if !matches!(
+            crate::auth::project_credential_name(&store, target_root, project, &(host, path)),
+            Ok(Some(_))
+        ) {
             return false;
         }
     }
     any
 }
 
-/// Record the exact-remote ambient allowance for every scoped repository no
-/// declared group covers and nothing binds: they keep the public HTTPS or
-/// SSH access they clone with, instead of being locked out by the strict
-/// assigned-credentials gate once the grouped repositories get bindings.
-/// Hosts the explicit selection covers are skipped (the selection
-/// authenticates them). No personal state is written while the project has
-/// no bindings at all — the gate is inert then. Best effort: failures warn.
+/// Ungrouped repositories retain ambient Git access when explicit bindings
+/// activate the project's credential gate. Declared groups never get allowances.
 fn record_ungrouped_ambient_access(
     target_root: &Path,
     project: &KnitProject,
     repositories: &[RemoteExportRepository],
-    selection: &[(String, String)],
-    auth: Option<&crate::model::ProjectAuth>,
 ) {
     let result = (|| -> Result<()> {
         let store = crate::auth::load()?;
@@ -1877,172 +1602,76 @@ fn record_ungrouped_ambient_access(
             return Ok(());
         };
         for repository in repositories {
-            let local_id = export_repo_local_id(repository);
-            let Some(url) = repository
-                .remote_url
-                .as_deref()
-                .filter(|url| !url.trim().is_empty())
-            else {
+            let id = export_repo_local_id(repository);
+            let Some(url) = repository.remote_url.as_deref() else {
                 continue;
             };
-            if crate::auth::is_local_remote(url) {
-                continue;
-            }
-            if bindings.contains_key(&local_id) {
-                continue;
-            }
-            if auth.is_some_and(|auth| {
-                auth.groups
+            if crate::auth::is_local_remote(url)
+                || bindings.contains_key(&id)
+                || project
+                    .auth
                     .iter()
-                    .any(|group| group.repos.contains(&local_id))
-            }) {
+                    .flat_map(|auth| &auth.groups)
+                    .any(|group| group.repos.contains(&id))
+            {
                 continue;
             }
-            if let Ok((host, _)) = crate::auth::remote_target(url) {
-                if selection
-                    .iter()
-                    .any(|(_, selected)| selected.eq_ignore_ascii_case(&host))
-                {
-                    continue;
-                }
-                // A host default serves this repository on later fetches;
-                // ambient access is not what it will use.
-                if store.default_for_host(&host).is_some() {
-                    continue;
-                }
+            if crate::auth::remote_target(url)
+                .is_ok_and(|(host, _)| store.default_for_host(&host).is_some())
+            {
+                continue;
             }
-            crate::auth::record_ambient_access(target_root, &project.id, &local_id, url)?;
+            crate::auth::record_ambient_access(target_root, &project.id, &id, url)?;
         }
         Ok(())
     })();
     if let Err(error) = result {
-        crate::human!(
-            "{} {error:#}; repositories without group coverage may need `knit auth setup` before their next fetch",
-            out::warn("ambient access not recorded:")
-        );
+        crate::human!("{} {error:#}; repositories without group coverage may need `knit auth setup` before their next fetch",
+            out::warn("ambient access not recorded:"));
     }
 }
 
-/// Record ambient (credential-less) access for every successfully cloned
-/// repository that neither carries an assignment nor was covered by the
-/// explicit selection: public HTTPS and SSH-key clones stay working once the
-/// project gains assignments. Best effort — failures warn, never fail.
-fn record_ambient_clone_access(
-    target_root: &Path,
-    project: &KnitProject,
-    repo_paths: &BTreeMap<String, PathBuf>,
-    selection: &[(String, String)],
-) {
-    let result = (|| -> Result<()> {
-        let store = crate::auth::load()?;
-        let key = crate::auth::project_key(target_root, &project.id)?;
-        let bindings = store.projects.get(&key);
-        // The strict gate only exists once the project has assignments; with
-        // none, ambient repositories resolve fine untouched and no personal
-        // state needs to be written at all.
-        if bindings.is_none_or(|bindings| bindings.is_empty()) {
-            return Ok(());
-        }
-        for repo in &project.repos {
-            let Some(remote) = repo.remote.as_deref() else {
-                continue;
-            };
-            if !repo_paths.contains_key(&repo.id) {
-                continue;
-            }
-            if bindings.is_some_and(|bindings| bindings.contains_key(&repo.id)) {
-                continue;
-            }
-            if let Ok((host, _)) = crate::auth::remote_target(remote) {
-                if selection
-                    .iter()
-                    .any(|(_, selected)| selected.eq_ignore_ascii_case(&host))
-                {
-                    continue;
-                }
-                // A host default serves this repository on later fetches;
-                // ambient access is not what it will use.
-                if store.default_for_host(&host).is_some() {
-                    continue;
-                }
-            }
-            crate::auth::record_ambient_access(target_root, &project.id, &repo.id, remote)?;
-        }
-        Ok(())
-    })();
-    if let Err(error) = result {
-        crate::human!(
-            "{} {error:#}; ambient-access repositories may need `knit auth setup` before their next fetch",
-            out::warn("ambient access not recorded:")
-        );
-    }
-}
-
-/// After a successful clone, bind each cloned repository to the selected
-/// credential covering its host in the user's personal assignment store.
-/// Only repositories actually cloned are bound; failures warn without
-/// failing the finished clone. Never touches project artifacts or remotes.
-/// A repository the grouped setup already linked keeps its mapping: the
-/// explicit selection must not overwrite grouped assignments.
+/// An optional clone selection is just a personal project override. Persist
+/// before cloning (including failed repos), never in portable project metadata.
 fn persist_clone_credential_assignments(
     target_root: &Path,
     project: &KnitProject,
-    repo_paths: &BTreeMap<String, PathBuf>,
     selection: &[(String, String)],
-) {
-    let result = (|| -> Result<Vec<String>> {
-        // repo id -> credential name, for the repositories this clone created.
-        let mut assigned: Vec<(String, String)> = Vec::new();
-        for repo in &project.repos {
-            let Some(remote) = repo.remote.as_deref() else {
-                continue;
-            };
-            if !repo_paths.contains_key(&repo.id) {
-                continue;
-            }
-            let Ok((host, _)) = crate::auth::remote_target(remote) else {
-                continue;
-            };
-            if let Some((name, _)) = selection
-                .iter()
-                .find(|(_, selected)| selected.eq_ignore_ascii_case(&host))
-            {
-                assigned.push((repo.id.clone(), name.clone()));
-            }
-        }
-        if assigned.is_empty() {
-            return Ok(Vec::new());
-        }
-        let key = crate::auth::project_key(target_root, &project.id)?;
-        let _lock = crate::auth::lock()?;
-        let mut store = crate::auth::load()?;
-        let bindings = store.projects.entry(key).or_default();
-        for (repo_id, name) in &assigned {
-            if bindings.contains_key(repo_id) {
-                // Grouped setup already mapped this repository deliberately.
-                continue;
-            }
-            bindings.insert(repo_id.clone(), name.clone());
-        }
-        crate::auth::save(&store)?;
-        Ok(assigned
-            .into_iter()
-            .map(|(repo_id, name)| format!("{} → {}", out::repo(&repo_id), name))
-            .collect())
-    })();
-    match result {
-        Ok(assigned) if !assigned.is_empty() => crate::human!(
-            "{} {}",
-            out::heading("Assigned credential:"),
-            out::muted(assigned.join(", "))
-        ),
-        Ok(_) => {}
-        Err(error) => crate::human!(
-            "{} {error:#}; run `knit auth use <credential> --project {} --repo <repo>` later",
-            out::warn("credential assignments not saved:"),
-            project.id
-        ),
+) -> Result<()> {
+    if selection.is_empty() {
+        return Ok(());
     }
+    let key = crate::auth::project_key(target_root, &project.id)?;
+    let _lock = crate::auth::lock()?;
+    let mut store = crate::auth::load()?;
+    let bindings = store.projects.entry(key).or_default();
+    for (name, host) in selection {
+        let mut count = 0;
+        for repo in &project.repos {
+            if repo.remote.as_deref().is_some_and(|url| {
+                !crate::auth::is_local_remote(url)
+                    && crate::auth::remote_target(url)
+                        .is_ok_and(|(target, _)| target.eq_ignore_ascii_case(host))
+            }) {
+                if let Some(existing) = bindings.get(&repo.id) {
+                    if existing != name {
+                        bail!("Repository `{}` already uses credential `{existing}`; change its project assignment with `knit auth use` before retrying", repo.id);
+                    }
+                }
+                bindings.insert(repo.id.clone(), name.clone());
+                count += 1;
+            }
+        }
+        crate::human!(
+            "{} {} {}",
+            out::heading("Credential:"),
+            out::repo(name),
+            out::muted(format!(
+                "({host}) authenticates {count} repo(s) for this clone"
+            ))
+        );
+    }
+    crate::auth::save(&store).context("Could not save clone credential assignments before fetching")
 }
 
 /// How to update a selected credential, matched to how it stores its token:
@@ -2098,17 +1727,21 @@ pub(super) fn is_auth_shaped_failure(failure: &str) -> bool {
 /// (DNS, timeout, TLS) must not be reported as a token rejection. The update
 /// advice follows the credential's own token storage, or points at the help
 /// text instead of inventing a command.
-fn selected_credential_failure_hint(remote_url: &str, failure: &str) -> Option<String> {
-    let (host, path) = crate::auth::remote_target(remote_url).ok()?;
-    let name = crate::auth::clone_credential_for(&host, &path)?;
+fn selected_credential_failure_hint(
+    root: &Path,
+    remote_url: &str,
+    failure: &str,
+) -> Option<String> {
+    let target = crate::auth::remote_target(remote_url).ok()?;
+    let registry = crate::auth::load().ok()?;
+    let name = crate::auth::select_credential(&registry, root, &target).ok()??;
     let denied = is_auth_shaped_failure(failure);
-    let update = match crate::auth::load()
-        .ok()
-        .and_then(|registry| registry.credentials.get(&name).cloned())
-    {
-        Some(spec) => credential_update_advice(&name, &spec),
-        None => "update it as described in `knit auth add --help`".to_string(),
-    };
+    let update = credential_update_advice(&name, registry.credentials.get(&name)?);
+    if failure.contains("requires environment variable") || failure.contains("has no saved token") {
+        return Some(format!(
+            "credential `{name}` is unavailable locally; {update}"
+        ));
+    }
     Some(if denied {
         format!(
             "the selected credential `{name}` was used and access was denied; check that its token can read this repository, or {update}"
@@ -2191,7 +1824,9 @@ pub(super) fn clone_one_export_repository(
             anyhow::anyhow!(
                 "{error:#}; the sync remote marked this repository missing on its forge — it does not exist (or was deleted/renamed)"
             )
-        } else if let Some(hint) = selected_credential_failure_hint(remote_url, &failure_text) {
+        } else if let Some(hint) =
+            selected_credential_failure_hint(target_root, remote_url, &failure_text)
+        {
             anyhow::anyhow!("{error:#}; {hint}")
         } else if repository.visibility.as_deref() == Some("public") {
             error
@@ -2811,38 +2446,6 @@ mod tests {
         let text = format_repo_failures(&failures);
         assert!(text.contains("backend: Repository not found"));
         assert!(text.contains("frontend: permission denied"));
-    }
-
-    #[test]
-    fn prefer_https_probe_skips_covered_and_local_repositories() {
-        let github_selection = vec![("work".to_string(), "github.com".to_string())];
-        // Uncovered forge host: the hosted probe may touch it. Out-of-scope
-        // repositories are probeable too — their pending-map entries are
-        // tomorrow's credential-backed recovery clones.
-        assert!(prefer_https_probes_repository(
-            &export_repo("cloud", "git@bitbucket.org:team/cloud.git"),
-            &github_selection
-        ));
-        // Covered host: the selection's own exact rewrite applies instead.
-        assert!(!prefer_https_probes_repository(
-            &export_repo("api", "git@github.com:acme/api.git"),
-            &github_selection
-        ));
-        // Local remotes and missing URLs never reach the hosted probe.
-        assert!(!prefer_https_probes_repository(
-            &export_repo("local", "/repos/local.git"),
-            &github_selection
-        ));
-        assert!(!prefer_https_probes_repository(
-            &export_repo("bare", ""),
-            &github_selection
-        ));
-        // Without a selection every forge repository is probed, preserving
-        // the pre-selection behavior.
-        assert!(prefer_https_probes_repository(
-            &export_repo("api", "git@github.com:acme/api.git"),
-            &[]
-        ));
     }
 
     #[test]

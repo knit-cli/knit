@@ -1359,97 +1359,54 @@ fn inferred_groups(
     Ok(by_host.into_values().collect())
 }
 
-/// Infer guidance only for repositories whose Git access failed.
-pub(crate) fn guided_inferred_setup(
+/// Clone and pull share group projection and repair; callers retry failed Git
+/// operations once after setup. Successful repositories are never included.
+fn repair_with_prompt(
     root: &Path,
     project: &KnitProject,
     failing: &[(String, String)],
     ask: &mut impl FnMut(&str) -> Result<String>,
     read_token: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<Vec<String>> {
-    let groups = inferred_groups(failing, ask)?;
-    let mut setup_project = project.clone();
-    setup_project.auth = Some(crate::model::ProjectAuth { groups });
-    let repair: BTreeSet<String> = failing.iter().map(|(repo, _)| repo.clone()).collect();
-    guided_group_setup(root, &setup_project, &repair, ask, read_token)?;
-    // Every failing repository that has a binding now, or whose host gained
-    // a default token (the first token entered becomes the host's default
-    // with no per-repository links), is worth a retry.
-    let linked = linked_repos(root, project)?;
-    let store = auth::load()?;
-    Ok(failing
+) -> Result<()> {
+    let repair: BTreeSet<String> = failing.iter().map(|(id, _)| id.clone()).collect();
+    let mut setup = project.clone();
+    let groups = &mut setup.auth.get_or_insert_with(Default::default).groups;
+    for group in groups.iter_mut() {
+        group.repos.retain(|repo| repair.contains(repo));
+    }
+    groups.retain(|group| !group.repos.is_empty());
+    let declared: BTreeSet<_> = groups
         .iter()
-        .filter(|(repo, remote)| {
-            linked.contains(repo)
-                || auth::remote_target(remote)
-                    .ok()
-                    .and_then(|(host, _)| store.default_for_host(&host).map(|_| ()))
-                    .is_some()
-        })
-        .map(|(repo, _)| repo.clone())
-        .collect())
+        .flat_map(|group| group.repos.iter().cloned())
+        .collect();
+    let uncovered: Vec<_> = failing
+        .iter()
+        .filter(|(id, _)| !declared.contains(id))
+        .cloned()
+        .collect();
+    groups.extend(inferred_groups(&uncovered, ask)?);
+    guided_group_setup(root, &setup, &repair, ask, read_token)
 }
 
-/// Repo ids this project has a credential binding for right now.
-fn linked_repos(root: &Path, project: &KnitProject) -> Result<Vec<String>> {
-    let key = auth::project_key(root, &project.id)?;
-    Ok(auth::load()?
-        .projects
-        .get(&key)
-        .map(|bindings| bindings.keys().cloned().collect())
-        .unwrap_or_default())
+pub(crate) fn repair_credentials(
+    root: &Path,
+    project: &KnitProject,
+    failing: &[(String, String)],
+) -> Result<()> {
+    require_terminal()?;
+    repair_with_prompt(root, project, failing, &mut prompt, &mut read_hidden)
 }
 
-/// Interactive grouped setup before the first private git fetch needs a
-/// credential: `knit clone` and pull recovery. Only ever runs with a real
-/// terminal: without one the caller reports the groups and the scriptable
-/// `knit auth add`/`auth use` path instead of hanging on a prompt. The global
-/// project selection the caller had in flight is restored afterwards,
-/// whatever happens here.
+/// Initial setup uses declared guidance; host defaults need no assignments.
 pub(crate) fn clone_group_setup(root: &Path, project: &KnitProject) -> Result<()> {
     require_terminal()?;
-    let previous = auth::current_project_override();
-    let result = guided_group_setup(
+    guided_group_setup(
         root,
         project,
         &BTreeSet::new(),
         &mut prompt,
         &mut read_hidden,
-    );
-    auth::set_project_override(previous);
-    result
-}
-
-/// Guided setup for repositories that just failed authenticated access
-/// without declared groups (or alongside them): infer one group per failing
-/// host, link or create a credential, and report which repositories can now
-/// be retried. Terminal-only like the clone setup.
-pub(crate) fn inferred_fallback_setup(
-    root: &Path,
-    project: &KnitProject,
-    failing: &[(String, String)],
-) -> Result<Vec<String>> {
-    require_terminal()?;
-    let previous = auth::current_project_override();
-    let result = guided_inferred_setup(root, project, failing, &mut prompt, &mut read_hidden);
-    auth::set_project_override(previous);
-    result
-}
-
-/// Guided setup during pull recovery, with the repositories whose
-/// authentication just failed: declared groups whose links were rejected get
-/// the repair path (create a scoped replacement) instead of being skipped as
-/// "already linked".
-pub(crate) fn recovery_group_setup(
-    root: &Path,
-    project: &KnitProject,
-    repair: &BTreeSet<String>,
-) -> Result<()> {
-    require_terminal()?;
-    let previous = auth::current_project_override();
-    let result = guided_group_setup(root, project, repair, &mut prompt, &mut read_hidden);
-    auth::set_project_override(previous);
-    result
+    )
 }
 
 fn permission_help(provider: &str) -> &'static str {
@@ -1566,90 +1523,59 @@ fn status_project_with(
             "unsupported forge remote; correct host/protocol/path".to_string()
         } else if target.is_none() {
             "local / no forge remote".to_string()
-        } else if let Some(name) = name {
-            match auth::credential(name) {
-                Ok(c) if target.as_ref().is_some_and(|(h, _)| *h == c.host) => {
-                    let spec = store.credentials.get(name);
-                    let provider_ok = match group {
-                        Some(group) => spec.is_some_and(|spec| {
-                            canonical_provider(&spec.provider) == group.provider
-                        }),
-                        // Without a group there is no provider expectation.
-                        None => true,
-                    };
-                    if !provider_ok {
+        } else if let Some(selected) = name
+            .map(String::as_str)
+            .or_else(|| host_default.as_ref().map(|(name, _)| name.as_str()))
+        {
+            let prefix = if name.is_some() { "" } else { "host default " };
+            match auth::credential(selected) {
+                Ok(c) if target.as_ref().is_some_and(|(host, _)| *host == c.host) => {
+                    let spec = &store.credentials[selected];
+                    if let Some(group) =
+                        group.filter(|group| canonical_provider(&spec.provider) != group.provider)
+                    {
                         failed = true;
                         format!(
-                            "credential provider mismatch (group `{}` expects {})",
-                            group.map(|g| g.id.as_str()).unwrap_or_default(),
-                            group.map(|g| g.provider.as_str()).unwrap_or_default()
+                            "{prefix}credential provider mismatch (group `{}` expects {})",
+                            group.id, group.provider
                         )
                     } else {
                         covered = true;
-                        match group.zip(spec) {
-                            Some((group, spec)) => match &spec.token_type {
-                                Some(token_type) if !group.token_types.contains(token_type) => {
-                                    format!(
-                                        "configured (unchecked; `{token_type}` not among group `{}` recommended types)",
-                                        group.id
-                                    )
+                        if name.is_none() {
+                            let inherited = host_default.as_ref().is_some_and(|(_, source)| {
+                                *source == auth::DefaultSource::Inherited
+                            });
+                            format!(
+                                "host default `{selected}` ({}unchecked)",
+                                if inherited {
+                                    "only credential on host, "
+                                } else {
+                                    ""
                                 }
-                                _ => "configured (unchecked)".into(),
-                            },
-                            None => "configured (unchecked)".into(),
+                            )
+                        } else if let Some((group, kind)) = group
+                            .zip(spec.token_type.as_deref())
+                            .filter(|(group, kind)| {
+                                !group
+                                    .token_types
+                                    .iter()
+                                    .any(|token_type| token_type == kind)
+                            })
+                        {
+                            format!("configured (unchecked; `{kind}` not among group `{}` recommended types)", group.id)
+                        } else {
+                            "configured (unchecked)".into()
                         }
                     }
                 }
-                Ok(_) => {
+                result => {
                     failed = true;
-                    "credential host mismatch".into()
-                }
-                Err(_) => {
-                    failed = true;
-                    "credential unavailable".into()
-                }
-            }
-        } else if let Some((default_name, source)) = host_default.clone() {
-            // The host's default credential serves this repository with no
-            // per-repository assignment. Provider expectations and token
-            // availability are validated exactly like an explicit row.
-            let spec = store.credentials.get(&default_name);
-            let provider_ok = match group {
-                Some(group) => {
-                    spec.is_some_and(|spec| canonical_provider(&spec.provider) == group.provider)
-                }
-                None => true,
-            };
-            if !provider_ok {
-                failed = true;
-                format!(
-                    "host default provider mismatch (group `{}` expects {})",
-                    group.map(|g| g.id.as_str()).unwrap_or_default(),
-                    group.map(|g| g.provider.as_str()).unwrap_or_default()
-                )
-            } else {
-                match auth::credential(&default_name) {
-                    Ok(resolved) if target.as_ref().is_some_and(|(h, _)| *h == resolved.host) => {
-                        covered = true;
-                        match source {
-                            auth::DefaultSource::Chosen => {
-                                format!("host default `{default_name}` (unchecked)")
-                            }
-                            auth::DefaultSource::Inherited => {
-                                format!(
-                                    "host default `{default_name}` (only credential on host, unchecked)"
-                                )
-                            }
-                        }
-                    }
-                    Ok(_) => {
-                        failed = true;
-                        "host default credential host mismatch".into()
-                    }
-                    Err(_) => {
-                        failed = true;
-                        "host default credential unavailable".into()
-                    }
+                    let reason = if result.is_ok() {
+                        "host mismatch"
+                    } else {
+                        "unavailable"
+                    };
+                    format!("{prefix}credential {reason}")
                 }
             }
         } else if let Some(group) = group {
@@ -2358,9 +2284,11 @@ mod tests {
             // and account email (so Git gets x-bitbucket-api-token-auth),
             // while GitHub's opaque token stays honestly unclassified.
             "inferred-bitbucket" => {
-                let linked = guided_inferred_setup(
+                let mut ungrouped = project.clone();
+                ungrouped.auth = None;
+                repair_with_prompt(
                     &root,
-                    &project,
+                    &ungrouped,
                     &[
                         (
                             "api".to_string(),
@@ -2375,8 +2303,7 @@ mod tests {
                     &mut |_prompt| Ok("inferred-secret".to_string()),
                 )
                 .unwrap();
-                assert!(linked.contains(&"api".to_string()));
-                assert!(linked.contains(&"bb".to_string()));
+
                 let store = auth::load().unwrap();
                 let bb = &store.credentials["bitbucket.org"];
                 assert_eq!(bb.token_type.as_deref(), Some("atlassian_api_token"));

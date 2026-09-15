@@ -161,7 +161,11 @@ fn handle_recording_remote(stream: &mut std::net::TcpStream, dir: &Path) -> std:
             .and_then(|value| value.trim().parse().ok())
             .unwrap_or(403);
         if (200..300).contains(&status) {
-            (status, "{\"data\":[]}".to_string())
+            (
+                status,
+                fs::read_to_string(dir.join("forge-credentials.json"))
+                    .unwrap_or_else(|_| "{\"data\":[]}".to_string()),
+            )
         } else {
             (
                 status,
@@ -295,91 +299,10 @@ fn write_fake_git(root: &Path, mapping: &[(&str, &str, &str)]) -> PathBuf {
             shell_quote(source)
         ));
     }
-    let script = r#"#!/bin/sh
-set -u
-real_git=__REAL_GIT__
-root=__ROOT__
-op=
-url=
-for arg in "$@"; do
-  if [ -n "$op" ] && [ -z "$url" ]; then
-    case "$arg" in
-      -*) ;;
-      *) url="$arg" ;;
-    esac
-  fi
-  case "$arg" in
-    clone|ls-remote) op="$arg" ;;
-  esac
-done
-if [ -z "$op" ]; then
-  exec "$real_git" "$@"
-fi
-n=$(cat "$root/git-seq" 2>/dev/null || echo 0)
-n=$((n + 1))
-printf '%s\n' "$n" > "$root/git-seq"
-d="$root/git-call-$n"
-mkdir -p "$d"
-printf '%s\n' "$@" > "$d/args"
-printf '%s' "${KNIT_GIT_AUTH_HEADER_0-UNSET}" > "$d/header0"
-printf '%s|%s|%s' "${GIT_TERMINAL_PROMPT-UNSET}" "${GIT_CURL_VERBOSE-UNSET}" "${GIT_TRACE_REDACT-UNSET}" > "$d/env"
-helper=
-scope=
-for arg in "$@"; do
-  case "$arg" in
-    credential.https://*.helper=!*) helper=${arg#*=!}; scope=${arg%%=*} ;;
-  esac
-done
-if [ -n "$helper" ]; then
-  t=${scope#credential.https://}
-  t=${t%.helper}
-  h=${t%%/*}
-  p=${t#*/}
-  printf 'protocol=https\nhost=%s\npath=%s\n\n' "$h" "$p" | /bin/sh -c "$helper get" > "$d/helper-out" 2> "$d/helper-err" || true
-else
-  : > "$d/helper-undef"
-fi
-mode=
-src=
-case "$url" in
-__CASES__
-  *) mode=unknown ;;
-esac
-printf '%s' "${mode:-unknown}" > "$d/mode"
-if [ "$op" = ls-remote ]; then
-  if [ -f "$root/forge-rejects" ] && [ "$mode" = auth ]; then
-    printf 'fatal: Authentication failed\n' >&2
-    exit 128
-  fi
-  exit 0
-fi
-if [ "$mode" = unknown ]; then
-  printf 'fake git: unexpected network url %s\n' "$url" >&2
-  exit 1
-fi
-if [ "$mode" = auth ] && [ -z "$helper" ]; then
-  : > "$d/no-credential"
-  printf "fatal: could not read Username for '%s': terminal prompts disabled\n" "$url" >&2
-  exit 128
-fi
-if [ -f "$root/forge-rejects" ]; then
-  : > "$d/rejected"
-  printf "fatal: Authentication failed for '%s/'\n" "$url" >&2
-  cat "$d/helper-out" >&2
-  printf '%s\n' "${KNIT_GIT_AUTH_HEADER_0-}" >&2
-  exit 128
-fi
-if [ "$mode" = public ] && [ -n "$helper" ]; then
-  : > "$d/unexpected-helper"
-fi
-target=
-for arg in "$@"; do target="$arg"; done
-"$real_git" clone -q "$src" "$target" || exit $?
-exec "$real_git" -C "$target" remote set-url origin "$url"
-"#
-    .replace("__REAL_GIT__", &shell_quote(&git_path))
-    .replace("__ROOT__", &shell_quote(&root.to_string_lossy()))
-    .replace("__CASES__", &cases);
+    let script = include_str!("fixtures/forge_git.sh")
+        .replace("__REAL_GIT__", &shell_quote(&git_path))
+        .replace("__ROOT__", &shell_quote(&root.to_string_lossy()))
+        .replace("__CASES__", &cases);
     let script_path = fake_bin.join("git");
     fs::write(&script_path, script).unwrap();
     fs::set_permissions(&script_path, fs::Permissions::from_mode(0o755)).unwrap();
@@ -703,11 +626,10 @@ fn selected_credential_clones_scoped_private_repo_without_borrowing_the_parent()
         "{output}"
     );
     assert!(
-        output.contains("skipped; the selected credential(s) cover every forge repository"),
+        output.contains("skipped; local credentials cover every forge repository"),
         "{output}"
     );
     assert!(!output.contains("No selected credential for"), "{output}");
-    assert!(output.contains("Assigned credential:"), "{output}");
     let leaked = walk_contains(&target, SELECTED_SECRET);
     assert!(leaked.is_empty(), "credential leaked into: {leaked:?}");
 
@@ -850,17 +772,137 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
     assert_eq!(call_file(call, "env"), "0|UNSET|1");
     assert!(call_file(call, "helper-out").contains(&format!("password={SELECTED_SECRET}")));
 
-    // Nothing was cloned and no assignment was recorded for the failure.
+    // Failed clones retain their personal assignment for a normal pull retry.
     assert!(!target.join("backend").exists());
     let store: Value =
         serde_json::from_str(&fs::read_to_string(home.join("forge-auth.json")).unwrap()).unwrap();
-    assert!(
-        store["projects"]
-            .as_object()
-            .map(|projects| projects.is_empty())
-            .unwrap_or(true),
-        "{}",
-        store["projects"]
+    let assignments = store["projects"].as_object().unwrap();
+    assert_eq!(assignments.len(), 1);
+    assert_eq!(assignments.values().next().unwrap()["backend"], "work");
+
+    // Repair the saved token and retry in the existing workspace without flags.
+    let (out, err, ok) = knit_run(
+        &root,
+        &[
+            "auth",
+            "add",
+            "work",
+            "--provider",
+            "github",
+            "--token-stdin",
+            "--replace",
+        ],
+        &env,
+        Some("replacement-secret\n"),
+    );
+    assert!(ok, "{out}{err}");
+    fs::remove_file(root.join("forge-rejects")).unwrap();
+    let path = fake_path_env(&fake_bin);
+    let mut retry_env = env.clone();
+    retry_env.push(("PATH", &path));
+    retry_env.push(("KNIT_REMOTE_HOSTED_TOKEN", "test-ledger-token"));
+    let project_path = target.join(".knit/projects/demo.project.json");
+    let mut project = read_json_cargo(&project_path);
+    project["repos"][0]["includeByDefault"] = json!(false);
+    fs::write(&project_path, project.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("export.json"),
+        export_with_repos(&[
+            ("backend", "https://gitlab.com/stale/backend.git", "private"),
+            ("unrelated", "https://gitlab.com/other/repo.git", "private"),
+        ]),
+    )
+    .unwrap();
+    let (out, err, ok) = knit_run(&target, &["pull", "--bundles"], &retry_env, None);
+    assert!(ok, "{out}{err}");
+    assert!(target.join("backend/.git").exists(), "{out}{err}");
+    assert_eq!(
+        read_json_cargo(&project_path)["repos"],
+        project["repos"],
+        "legacy recovery changed local repository configuration"
+    );
+    // Restore inventory for the independent clone failure cases below.
+    fs::write(
+        fake_dir.join("export.json"),
+        export_with_repos(&[("backend", "https://github.com/org/repo.git", "private")]),
+    )
+    .unwrap();
+    assert!(git_calls(&root)
+        .iter()
+        .any(|call| call_file(call, "helper-out").contains("password=replacement-secret")));
+
+    // A second clone cannot fetch before its personal assignments are saved.
+    let lock_dir = home.join(".knit/locks");
+    fs::create_dir_all(&lock_dir).unwrap();
+    let lock = lock_dir.join("forge-auth.lock");
+    fs::write(&lock, std::process::id().to_string()).unwrap();
+    let blocked = root.join("blocked");
+    let before = git_calls(&root).len();
+    let (out, err, ok) = knit_run(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            blocked.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--credential",
+            "work",
+            "--no-worktree",
+        ],
+        &retry_env,
+        None,
+    );
+    fs::remove_file(lock).unwrap();
+    assert!(!ok && err.contains("Another Knit process"), "{out}{err}");
+    assert_eq!(
+        git_calls(&root).len(),
+        before,
+        "Git ran before saving assignments"
+    );
+
+    // Missing local token material must not be described as a forge rejection.
+    let absent_variable = format!("KNIT_TEST_ABSENT_CREDENTIAL_{}", std::process::id());
+    let (out, err, ok) = knit_run(
+        &root,
+        &[
+            "auth",
+            "add",
+            "work",
+            "--provider",
+            "github",
+            "--token-env",
+            &absent_variable,
+            "--replace",
+        ],
+        &env,
+        None,
+    );
+    assert!(ok, "{out}{err}");
+    let unavailable = root.join("unavailable");
+    let (out, err, ok) = knit_run(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            unavailable.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--no-worktree",
+        ],
+        &retry_env,
+        None,
+    );
+    assert!(!ok && err.contains("unavailable locally"), "{out}{err}");
+    assert!(!err.contains("was used and access was denied"), "{err}");
+    assert_eq!(
+        git_calls(&root).len(),
+        before,
+        "Git ran with unavailable credentials"
     );
 
     fs::remove_dir_all(root).unwrap();
@@ -1771,16 +1813,43 @@ fn partial_selection_records_ambient_after_assignments_so_check_passes() {
     assert!(ok, "{stdout}{stderr}");
 
     let export = export_with_repos(&[
-        ("app", "https://github.com/org/repo.git", "private"),
+        ("app", "git@github.com:org/repo.git", "private"),
         ("docs", "https://gitlab.com/acme/docs.git", "public"),
     ]);
     let fake_dir = root.join("fake-remote");
     let base_url = spawn_recording_remote(&fake_dir, export);
+    fs::write(fake_dir.join("forge-credentials-status"), "200").unwrap();
+    fs::write(
+        fake_dir.join("forge-credentials.json"),
+        json!({"data":[
+            {"connected":true,"hosts":["github.com","gitlab.com"]}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let (out, err, ok) = knit_run(
+        &root,
+        &[
+            "remote",
+            "add",
+            "hosted",
+            &base_url,
+            "--global",
+            "--token-stdin",
+        ],
+        &env,
+        Some("test-ledger-token\n"),
+    );
+    assert!(ok, "{out}{err}");
+    if git_config.exists() {
+        fs::remove_file(&git_config).unwrap();
+    }
+    let exports_before = forge_credential_requests(&fake_dir);
     let fake_bin = write_fake_git(
         &root,
         &[
             (
-                "https://github.com/org/repo.git",
+                "git@github.com:org/repo.git",
                 app_source.to_str().unwrap(),
                 "auth",
             ),
@@ -1810,6 +1879,7 @@ fn partial_selection_records_ambient_after_assignments_so_check_passes() {
             &base_url,
             "--token",
             "test-token",
+            "--prefer-https",
             "--credential",
             "work",
             "--no-worktree",
@@ -1820,6 +1890,32 @@ fn partial_selection_records_ambient_after_assignments_so_check_passes() {
     assert!(ok, "{stdout}{stderr}");
     assert!(target.join("app/.git").exists());
     assert!(target.join("docs/.git").exists());
+    assert!(
+        forge_credential_requests(&fake_dir) > exports_before,
+        "ambient allowance must not suppress helper setup"
+    );
+    let probes: Vec<_> = git_calls(&root)
+        .into_iter()
+        .filter(|call| {
+            call_file(call, "mode") == "auth" && call_file(call, "args").contains("ls-remote")
+        })
+        .collect();
+    assert!(
+        !probes.is_empty(),
+        "prefer-HTTPS must exercise the selected repository probe"
+    );
+    for probe in probes {
+        assert!(
+            call_file(&probe, "helper-out").contains(&format!("password={SELECTED_SECRET}")),
+            "prefer-HTTPS bypassed the local credential"
+        );
+    }
+    assert!(
+        fs::read_to_string(&git_config)
+            .unwrap()
+            .contains("gitlab.com"),
+        "uncovered host helper not installed"
+    );
 
     // The public GitLab repository must keep working under the strict gate
     // the explicit GitHub assignment activated: its exact remote was recorded

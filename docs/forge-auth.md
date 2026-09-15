@@ -76,7 +76,7 @@ If a credential is rejected, recovery saves a **new project-only credential for 
 
 An interrupted clone that has checkouts but no configured workspace can resume with the same `knit clone` command and destination. Knit adopts only real checkout roots whose repository IDs and origins match, preserving branches and dirty work. Unrelated files, foreign checkouts, and symlinked scaffolding are refused. Finished bundles remain imported history; they are not automatically selected as active work.
 
-For an explicit automation override, `knit clone --credential NAME` remains available and repeatable, with at most one credential per host. Names and token availability are validated before export fetch or destination changes. The selection applies only to exact repository targets in the clone scope; other targets use the destination's own assignments and defaults. Successful selected clones save assignments locally without replacing an existing deliberate mapping. No credential from the surrounding workspace is borrowed.
+For an explicit automation override, `knit clone --credential NAME` remains available and repeatable, with at most one credential per host. Names and token availability are validated before export fetch or destination changes. The selection saves personal assignments for in-scope repositories before fetching, using the same resolver as later pull/push operations. Assignments survive failed clones so a token repair followed by `knit pull --bundles` recovers in place. An existing conflicting destination assignment is an error. No credential from the surrounding workspace is borrowed.
 
 ## Scriptable setup and inspection
 

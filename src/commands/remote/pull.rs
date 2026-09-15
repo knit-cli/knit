@@ -255,17 +255,38 @@ fn needs_guided_auth(reason: &str) -> bool {
 /// successful additions are always persisted, and removals are persisted only
 /// when every planned addition succeeded — a reconcile that failed half-way
 /// must not leave the local project matching neither side.
+fn repository_from_entry(entry: &crate::model::ProjectRepoEntry) -> RemoteExportRepository {
+    RemoteExportRepository {
+        local_id: Some(entry.id.clone()),
+        name: entry.id.clone(),
+        default_branch: Some(entry.base_branch.clone()),
+        remote_url: entry.remote.clone(),
+        visibility: None,
+        metadata: serde_json::json!({
+            "checkoutMode": entry.checkout_mode.as_str(),
+            "includeByDefault": entry.include_by_default,
+        }),
+    }
+}
+
 fn reconcile_project_repositories(
     root: &Path,
     project: &mut KnitProject,
     export: &RemoteProjectExport,
 ) -> Result<()> {
-    let Some(membership) = export
+    // Legacy exports have no portable membership. They cannot reshape this
+    // project, but its existing entries still need failed-checkout recovery.
+    let authoritative = export
         .knit_project
         .as_ref()
-        .filter(|knit_project| !knit_project.repos.is_empty())
-    else {
-        return Ok(());
+        .is_some_and(|p| !p.repos.is_empty());
+    let fallback;
+    let membership = match export.knit_project.as_ref().filter(|p| !p.repos.is_empty()) {
+        Some(membership) => membership,
+        None => {
+            fallback = project.clone();
+            &fallback
+        }
     };
 
     let membership_ids: BTreeSet<&str> = membership
@@ -293,8 +314,16 @@ fn reconcile_project_repositories(
     // records for clone detail (remote URL, visibility, forge state). A
     // membership entry without a record still reconciles from its own fields.
     let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
-    let records: BTreeMap<String, &RemoteExportRepository> = export
-        .repositories
+    // Without authoritative membership, recovery uses local identity and
+    // configuration, never possibly stale inventory with the same local id.
+    let local_records: Vec<_>;
+    let inventory = if authoritative {
+        &export.repositories
+    } else {
+        local_records = project.repos.iter().map(repository_from_entry).collect();
+        &local_records
+    };
+    let records: BTreeMap<String, &RemoteExportRepository> = inventory
         .iter()
         .map(|repository| (export_repo_local_id(repository), repository))
         .collect();
@@ -317,17 +346,7 @@ fn reconcile_project_repositories(
         })
         .map(|entry| match records.get(entry.id.as_str()) {
             Some(record) => (*record).clone(),
-            None => RemoteExportRepository {
-                local_id: Some(entry.id.clone()),
-                name: entry.id.clone(),
-                default_branch: Some(entry.base_branch.clone()),
-                remote_url: entry.remote.clone(),
-                visibility: None,
-                metadata: serde_json::json!({
-                    "checkoutMode": entry.checkout_mode.as_str(),
-                    "includeByDefault": entry.include_by_default,
-                }),
-            },
+            None => repository_from_entry(entry),
         })
         .collect();
 
@@ -365,17 +384,7 @@ fn reconcile_project_repositories(
         let record = records
             .get(repo.id.as_str())
             .map(|record| (*record).clone())
-            .unwrap_or_else(|| RemoteExportRepository {
-                local_id: Some(repo.id.clone()),
-                name: repo.id.clone(),
-                default_branch: Some(repo.base_branch.clone()),
-                remote_url: repo.remote.clone(),
-                visibility: None,
-                metadata: serde_json::json!({
-                    "checkoutMode": repo.checkout_mode.as_str(),
-                    "includeByDefault": repo.include_by_default,
-                }),
-            });
+            .unwrap_or_else(|| repository_from_entry(repo));
         if record
             .remote_url
             .as_deref()
@@ -565,44 +574,10 @@ fn reconcile_project_repositories(
                 })
                 .collect();
             let mut setup_project = project.clone();
-            let failing_ids: BTreeSet<&str> = failing.iter().map(|(id, _)| id.as_str()).collect();
-            if let Some(auth) = setup_project.auth.as_mut() {
-                for group in &mut auth.groups {
-                    group
-                        .repos
-                        .retain(|repo| failing_ids.contains(repo.as_str()));
-                }
-                auth.groups.retain(|group| !group.repos.is_empty());
-            }
-            let declared_covered: BTreeSet<String> = setup_project
-                .auth
-                .iter()
-                .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
-                .collect();
             setup_project.repos.extend(prompt.iter().map(|record| {
                 project_repo_entry_from_export(record, &root.join(export_repo_local_id(record)))
             }));
-            let mut guided: Result<()> = Ok(());
-            if setup_project
-                .auth
-                .as_ref()
-                .is_some_and(|auth| !auth.groups.is_empty())
-            {
-                let repair: BTreeSet<String> = prompt.iter().map(export_repo_local_id).collect();
-                guided = crate::commands::auth::recovery_group_setup(root, &setup_project, &repair);
-            }
-            let uncovered: Vec<(String, String)> = failing
-                .into_iter()
-                .filter(|(id, _)| !declared_covered.contains(id))
-                .collect();
-            if guided.is_ok() && !uncovered.is_empty() {
-                guided = crate::commands::auth::inferred_fallback_setup(
-                    root,
-                    &setup_project,
-                    &uncovered,
-                )
-                .map(|_| ());
-            }
+            let guided = crate::commands::auth::repair_credentials(root, &setup_project, &failing);
             if let Err(error) = guided {
                 println!(
                     "{} {error:#}",
@@ -650,7 +625,9 @@ fn reconcile_project_repositories(
                         if let Some(entry) =
                             project.repos.iter_mut().find(|repo| repo.id == local_id)
                         {
-                            *entry = project_repo_entry_from_export(repository, repo_path);
+                            if authoritative {
+                                *entry = project_repo_entry_from_export(repository, repo_path);
+                            }
                         }
                         recovered.push(local_id);
                     } else {

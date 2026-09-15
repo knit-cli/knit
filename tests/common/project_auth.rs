@@ -109,3 +109,45 @@ pub fn make_bare_named(root: &Path, name: &str) -> std::path::PathBuf {
     );
     bare
 }
+
+/// All these integration cases clone the same demo ledger project.
+pub fn clone_args<'a>(target: &'a Path, url: &'a str, extra: &[&'a str]) -> Vec<&'a str> {
+    let mut args = vec![
+        "clone",
+        "acme/demo",
+        target.to_str().unwrap(),
+        "--remote",
+        "hosted",
+        "--url",
+        url,
+        "--token",
+        "test-token",
+        "--no-worktree",
+    ];
+    args.extend_from_slice(extra);
+    args
+}
+
+pub fn assign_test_credential(target: &Path, home: &Path, repo: &str) -> String {
+    let env = [("KNIT_HOME", home.to_str().unwrap())];
+    super::knit_with_env(
+        target,
+        [
+            "auth",
+            "add",
+            "ci",
+            "--provider",
+            "github",
+            "--host",
+            "forge.example",
+            "--token-env",
+            "KNIT_TEST_TOKEN",
+        ],
+        &env,
+    );
+    super::knit_with_env(
+        target,
+        ["auth", "use", "ci", "--project", "demo", "--repo", repo],
+        &env,
+    )
+}

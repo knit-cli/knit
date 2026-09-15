@@ -40,22 +40,7 @@ fn pull_imports_auth_group_before_failed_add_and_recovers_after_setup() {
     fs::create_dir_all(&home).unwrap();
     let home_env = ("KNIT_HOME", home.to_str().unwrap());
 
-    let clone = knit_with_env(
-        &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-        ],
-        &[home_env],
-    );
+    let clone = knit_with_env(&root, clone_args(&target, &base_url, &[]), &[home_env]);
     assert!(clone.contains("cloned"), "{clone}");
     assert!(
         !target.join(".knit/projects/demo.known-repos.json").exists(),
@@ -119,34 +104,7 @@ fn pull_imports_auth_group_before_failed_add_and_recovers_after_setup() {
     assert!(!home.join("forge-auth.json").exists());
 
     // Recovery, executed: bind a credential for the new group's repository...
-    knit_with_env(
-        &target,
-        [
-            "auth",
-            "add",
-            "ci",
-            "--provider",
-            "github",
-            "--host",
-            "forge.example",
-            "--token-env",
-            "KNIT_TEST_TOKEN",
-        ],
-        &[home_env],
-    );
-    let assigned = knit_with_env(
-        &target,
-        [
-            "auth",
-            "use",
-            "ci",
-            "--project",
-            "demo",
-            "--repo",
-            "newrepo",
-        ],
-        &[home_env],
-    );
+    let assigned = assign_test_credential(&target, &home, "newrepo");
     assert!(
         assigned.contains("Assigned `ci` to newrepo"),
         "setup must be able to bind the failed repo: {assigned}"
@@ -202,20 +160,7 @@ fn pull_prunes_known_pending_from_authoritative_membership() {
 
     knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--repo",
-            "backend",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--repo", "backend"]),
         &[home_env],
     );
     let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
@@ -467,22 +412,7 @@ fn partial_export_preserves_local_groups_full_export_clears() {
     let home_env = ("KNIT_HOME", home.to_str().unwrap());
 
     // The private repo fails to clone, but its entry and the group land.
-    knit_with_env(
-        &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-        ],
-        &[home_env],
-    );
+    knit_with_env(&root, clone_args(&target, &base_url, &[]), &[home_env]);
     let project = read_json(&target.join(".knit/projects/demo.project.json"));
     assert_eq!(
         project["auth"]["groups"][0]["id"],
@@ -572,20 +502,7 @@ fn scoped_partial_export_keeps_hidden_pending_and_validates() {
     // full remote membership).
     knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--repo",
-            "backend",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--repo", "backend"]),
         &[home_env],
     );
     let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
@@ -694,20 +611,7 @@ fn scoped_pull_failed_add_out_of_scope_group_and_pending_before_errors() {
 
     knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--view",
-            "core",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--view", "core"]),
         &[home_env],
     );
     let config = read_json(&target.join(".knit/config.json"));
@@ -812,34 +716,7 @@ fn scoped_pull_failed_add_out_of_scope_group_and_pending_before_errors() {
 
     // Recovery, executed: bind the failed repo and pull — the retry works
     // because the scope view was recorded and the entry never left.
-    knit_with_env(
-        &target,
-        [
-            "auth",
-            "add",
-            "ci",
-            "--provider",
-            "github",
-            "--host",
-            "forge.example",
-            "--token-env",
-            "KNIT_TEST_TOKEN",
-        ],
-        &[home_env],
-    );
-    let assigned = knit_with_env(
-        &target,
-        [
-            "auth",
-            "use",
-            "ci",
-            "--project",
-            "demo",
-            "--repo",
-            "newrepo",
-        ],
-        &[home_env],
-    );
+    let assigned = assign_test_credential(&target, &home, "newrepo");
     assert!(
         assigned.contains("Assigned `ci` to newrepo"),
         "setup must bind the failed in-scope repo: {assigned}"

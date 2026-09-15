@@ -73,112 +73,29 @@ pub fn save_known_pending_repos(
     store::write_json(&path, &Known { repos })
 }
 
-/// One exact repository target an explicit clone credential applies to,
-/// resolved from the export's clone URL (`remote_target` normalization:
-/// lowercase host, `.git`-trimmed path). Matching is exact — host and path —
-/// so repositories Git happens to touch outside the cloned selection never
-/// receive the credential.
-#[derive(Clone, PartialEq, Eq)]
-pub struct CloneCredentialTarget {
-    pub name: String,
-    pub host: String,
-    pub path: String,
-}
+// Clone resolution uses the destination project, regardless of the caller's cwd.
+static CLONE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
 
-/// The exact-target clone selection, active only while a Drop guard holds it.
-/// Activated after the clone scope is resolved and before any Git runs, and
-/// restored on every result path; nothing relies on process exit, so library
-/// callers are unaffected once the guarded clone section finishes.
-///
-/// `root` pins the selection to the clone's target workspace: a remote the
-/// selection does not cover resolves its project assignments there and only
-/// there, so a surrounding workspace's assignments are unreachable even if a
-/// child Git process runs with a different cwd.
-#[derive(Clone)]
-struct CloneCredentialScope {
-    root: Option<PathBuf>,
-    targets: Vec<CloneCredentialTarget>,
-}
-
-static CLONE_CREDENTIALS: Mutex<Option<CloneCredentialScope>> = Mutex::new(None);
-
-/// Activates an exact-target clone credential selection and returns the guard
-/// that restores the previous state when dropped. Project-assignment
-/// fallbacks continue to resolve from the caller's cwd.
-pub fn activate_clone_credentials(targets: Vec<CloneCredentialTarget>) -> CloneCredentialGuard {
-    activate_scope(CloneCredentialScope {
-        root: None,
-        targets,
-    })
-}
-
-/// Activates an exact-target clone credential selection pinned to one clone
-/// target root: uncovered remotes resolve assignments only inside that root.
-pub fn activate_clone_credentials_at(
-    root: PathBuf,
-    targets: Vec<CloneCredentialTarget>,
-) -> CloneCredentialGuard {
-    activate_scope(CloneCredentialScope {
-        root: Some(root),
-        targets,
-    })
-}
-
-/// Activates the isolation without any selected targets — a grouped or
-/// ambient clone section whose project-assignment fallbacks must stay inside
-/// the clone target root.
 pub fn activate_clone_root(root: PathBuf) -> CloneCredentialGuard {
-    activate_scope(CloneCredentialScope {
-        root: Some(root),
-        targets: Vec::new(),
-    })
-}
-
-fn activate_scope(scope: CloneCredentialScope) -> CloneCredentialGuard {
-    let previous = CLONE_CREDENTIALS
+    let previous = CLONE_ROOT
         .lock()
-        .expect("clone credential lock poisoned")
-        .replace(scope);
+        .expect("clone root lock poisoned")
+        .replace(root);
     CloneCredentialGuard { previous }
 }
 
-/// Restores the clone credential selection that was active before the guard
-/// was created, on every exit path (return, `?`, panic).
 pub struct CloneCredentialGuard {
-    previous: Option<CloneCredentialScope>,
+    previous: Option<PathBuf>,
 }
 
 impl Drop for CloneCredentialGuard {
     fn drop(&mut self) {
-        *CLONE_CREDENTIALS
-            .lock()
-            .expect("clone credential lock poisoned") = self.previous.take();
+        *CLONE_ROOT.lock().expect("clone root lock poisoned") = self.previous.take();
     }
 }
 
-/// The active exact-target clone selection, if a guarded clone section set one.
-pub fn clone_credentials() -> Option<Vec<CloneCredentialTarget>> {
-    CLONE_CREDENTIALS
-        .lock()
-        .expect("clone credential lock poisoned")
-        .as_ref()
-        .map(|scope| scope.targets.clone())
-}
-
-/// The root a guarded clone section pinned its assignment fallbacks to.
 pub fn clone_credential_root() -> Option<PathBuf> {
-    CLONE_CREDENTIALS
-        .lock()
-        .expect("clone credential lock poisoned")
-        .as_ref()
-        .and_then(|scope| scope.root.clone())
-}
-
-/// The credential selected for exactly this forge target, if any.
-pub fn clone_credential_for(host: &str, path: &str) -> Option<String> {
-    clone_credentials()?.into_iter().find_map(|target| {
-        (target.host.eq_ignore_ascii_case(host) && target.path == path).then_some(target.name)
-    })
+    CLONE_ROOT.lock().expect("clone root lock poisoned").clone()
 }
 
 /// Validate `--credential` names before a clone changes anything: each name
@@ -1251,27 +1168,17 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
     Ok(Some(resolved))
 }
 
-/// Explicit clone target, project override, host default, then permitted
+/// Project override, host default, then permitted
 /// ambient access. A clone pins context to its destination, never its parent.
-fn select_credential(
+pub(crate) fn select_credential(
     registry: &AuthStore,
     cwd: &Path,
     target: &(String, String),
 ) -> Result<Option<String>> {
-    let scope = CLONE_CREDENTIALS
-        .lock()
-        .expect("clone credential lock poisoned")
-        .clone();
-    if let Some(name) = scope
-        .as_ref()
-        .and_then(|scope| clone_selection_match(&scope.targets, &target.0, &target.1))
-    {
-        return validated_binding(registry, name, &target.0).map(|name| name.map(str::to_owned));
-    }
     if registry.projects.values().all(BTreeMap::is_empty) {
         return default_binding(registry, &target.0).map(|name| name.map(str::to_owned));
     }
-    let context = match scope.and_then(|scope| scope.root) {
+    let context = match clone_credential_root() {
         Some(root) => {
             // The clone's active project ignores outer --project and bundle context.
             let project = store::load_config(&root)?
@@ -1325,18 +1232,6 @@ pub(crate) fn project_credential_name(
         ambient_for(registry, &key),
     )
     .map(|name| name.map(str::to_owned))
-}
-
-/// The credential selected for exactly this target, if the selection has one.
-fn clone_selection_match<'a>(
-    selection: &'a [CloneCredentialTarget],
-    host: &str,
-    path: &str,
-) -> Option<&'a str> {
-    selection
-        .iter()
-        .find(|target| target.host.eq_ignore_ascii_case(host) && target.path == path)
-        .map(|target| target.name.as_str())
 }
 
 /// Whether a declared auth group claims this repository id (membership can
@@ -2230,44 +2125,6 @@ mod tests {
         assert_eq!(
             validated_clone_selection(&registry, &[]).unwrap(),
             Vec::<(String, String)>::new()
-        );
-    }
-
-    #[test]
-    fn clone_selection_matches_only_the_exact_target() {
-        let targets = |paths: &[(&str, &str)]| {
-            paths
-                .iter()
-                .map(|(name, path)| CloneCredentialTarget {
-                    name: (*name).to_string(),
-                    host: "github.com".to_string(),
-                    path: (*path).to_string(),
-                })
-                .collect::<Vec<_>>()
-        };
-        let selection = targets(&[("work", "acme/backend"), ("other", "other/repo")]);
-        assert_eq!(
-            clone_selection_match(&selection, "github.com", "acme/backend"),
-            Some("work")
-        );
-        // Same host, different path: not covered.
-        assert_eq!(
-            clone_selection_match(&selection, "github.com", "acme/another"),
-            None
-        );
-        // Path is compared with its normalized (`.git`-trimmed) form only;
-        // `.git` variants never widen the scope.
-        assert_eq!(
-            clone_selection_match(&selection, "github.com", "acme/backend.git"),
-            None
-        );
-        assert_eq!(
-            clone_selection_match(&selection, "GITHUB.COM", "acme/backend"),
-            Some("work")
-        );
-        assert_eq!(
-            clone_selection_match(&selection, "bitbucket.org", "acme/backend"),
-            None
         );
     }
 

@@ -43,18 +43,7 @@ fn failed_private_clone_stays_in_project_and_recovers_via_auth_and_pull() {
     // Noninteractive clone: one public repo clones, the private one cannot.
     let output = knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &[]),
         &[("KNIT_HOME", home.to_str().unwrap())],
     );
     assert!(output.contains("Auth requirements:"), "{output}");
@@ -96,35 +85,7 @@ fn failed_private_clone_stays_in_project_and_recovers_via_auth_and_pull() {
     assert!(!home.join("forge-auth.json").exists());
 
     // Recovery, executed: scriptable setup binds the failed repo's group...
-    let add = knit_with_env(
-        &target,
-        [
-            "auth",
-            "add",
-            "ci",
-            "--provider",
-            "github",
-            "--host",
-            "forge.example",
-            "--token-env",
-            "KNIT_TEST_TOKEN",
-        ],
-        &[("KNIT_HOME", home.to_str().unwrap())],
-    );
-    assert!(add.contains("ci"), "{add}");
-    let assigned = knit_with_env(
-        &target,
-        [
-            "auth",
-            "use",
-            "ci",
-            "--project",
-            "demo",
-            "--repo",
-            "private",
-        ],
-        &[("KNIT_HOME", home.to_str().unwrap())],
-    );
+    let assigned = assign_test_credential(&target, &home, "private");
     assert!(
         assigned.contains("Assigned `ci` to private"),
         "auth use must bind the failed repo's entry: {assigned}"
@@ -184,21 +145,7 @@ fn clone_with_no_cloneable_repo_bails_but_leaves_a_recoverable_workspace() {
     let base_url = spawn_fake_remote_with_body(export.to_string());
     let target = root.join("workspace");
 
-    let output = knit_fails(
-        &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-        ],
-    );
+    let output = knit_fails(&root, clone_args(&target, &base_url, &[]));
     assert!(
         output.contains("Failed to clone any repository"),
         "{output}"
@@ -228,21 +175,7 @@ fn clone_with_no_cloneable_repo_bails_but_leaves_a_recoverable_workspace() {
     // A retry of `knit clone` into the same target refuses (no clobbering),
     // which is why the failure message must direct recovery through the
     // workspace instead.
-    let retry = knit_fails(
-        &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--no-worktree",
-        ],
-    );
+    let retry = knit_fails(&root, clone_args(&target, &base_url, &[]));
     assert!(
         retry.contains("already a Knit workspace"),
         "retry must refuse the existing target: {retry}"
@@ -274,20 +207,7 @@ fn scoped_clone_preserves_full_groups_and_pends_only_out_of_scope() {
 
     let output = knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--repo",
-            "backend",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--repo", "backend"]),
         &[("KNIT_HOME", home.to_str().unwrap())],
     );
     assert!(output.contains("Auth requirements:"), "{output}");
@@ -374,21 +294,7 @@ fn prefer_https_rewrites_the_urls_a_scoped_clone_uses_and_persists() {
     fs::create_dir_all(&home).unwrap();
     let output = knit_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--repo",
-            "backend",
-            "--prefer-https",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--repo", "backend", "--prefer-https"]),
         &[
             ("KNIT_HOME", home.to_str().unwrap()),
             ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
@@ -448,20 +354,7 @@ fn scoped_all_failed_clone_records_scope_view_and_recovers() {
 
     let output = knit_fails_with_env(
         &root,
-        [
-            "clone",
-            "acme/demo",
-            target.to_str().unwrap(),
-            "--remote",
-            "hosted",
-            "--url",
-            &base_url,
-            "--token",
-            "test-token",
-            "--repo",
-            "private",
-            "--no-worktree",
-        ],
+        clone_args(&target, &base_url, &["--repo", "private"]),
         &[home_env],
     );
     assert!(
@@ -501,34 +394,7 @@ fn scoped_all_failed_clone_records_scope_view_and_recovers() {
     );
 
     // Recovery, executed: bind the failed repo and pull inside the scope.
-    knit_with_env(
-        &target,
-        [
-            "auth",
-            "add",
-            "ci",
-            "--provider",
-            "github",
-            "--host",
-            "forge.example",
-            "--token-env",
-            "KNIT_TEST_TOKEN",
-        ],
-        &[home_env],
-    );
-    let assigned = knit_with_env(
-        &target,
-        [
-            "auth",
-            "use",
-            "ci",
-            "--project",
-            "demo",
-            "--repo",
-            "private",
-        ],
-        &[home_env],
-    );
+    let assigned = assign_test_credential(&target, &home, "private");
     assert!(
         assigned.contains("Assigned `ci` to private"),
         "setup must bind the scoped failed repo: {assigned}"
