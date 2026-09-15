@@ -60,6 +60,18 @@ pub fn bundle_path() -> Result<()> {
     Ok(())
 }
 
+/// `knit bundle --cd [<repo>]` with no title: navigate the resolved existing
+/// bundle instead of creating one. Resolution follows the normal context rules
+/// (explicit `--bundle`, `KNIT_BUNDLE`, worktree cwd, then workspace fallback),
+/// the shared creation-time navigation helper starts the shell, and nothing is
+/// created or switched along the way — no branches, no worktrees, no workspace
+/// fallback change.
+pub fn enter_bundle_shell(selector: &str) -> Result<()> {
+    let active = load_active_bundle()?;
+    let path = crate::commands::init::cd_target_dir(&active, selector)?;
+    crate::commands::init::start_shell_in(&active, &path)
+}
+
 pub fn print_bundle() -> Result<()> {
     let active = load_active_bundle()?;
     let text =

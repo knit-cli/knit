@@ -140,7 +140,7 @@ pub enum Commands {
     /// Show the resolved bundle, create one (`knit bundle "feature title"`), or manage it.
     #[command(args_conflicts_with_subcommands = true)]
     Bundle {
-        /// Title of a new bundle to create. With no title and no subcommand, shows the current bundle.
+        /// Title of a new bundle to create. With no title and no subcommand, shows the current bundle, or enters it with --cd.
         title: Option<String>,
         /// Project template to use. Defaults to the active project when present.
         #[arg(long)]
@@ -178,7 +178,7 @@ pub enum Commands {
         /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
         #[arg(long)]
         agents: bool,
-        /// Start a shell in .knit/worktrees/<bundle>. Pass a repo selector to cd into that repo checkout instead.
+        /// Start a shell in .knit/worktrees/<bundle>: with a title the bundle is created first, without one the resolved existing bundle is entered. Pass a repo selector to cd into that repo checkout instead.
         #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
         cd: Option<String>,
         #[command(subcommand)]

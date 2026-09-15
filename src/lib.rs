@@ -270,7 +270,10 @@ pub fn run(cli: Cli) -> Result<()> {
                     agents,
                     cd.as_deref(),
                 ),
-                None => commands::show_current_bundle(),
+                None => match cd.as_deref() {
+                    Some(selector) => commands::enter_bundle_shell(selector),
+                    None => commands::show_current_bundle(),
+                },
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
             Some(BundleCommand::Pull { slug, json }) => commands::pull_bundle_by_slug(&slug, json),

@@ -78,6 +78,7 @@ knit view default [name] [--clear] [--project <name>]
 knit view rm <name> [--project <name>]
 knit view edit [--project <name>]
 knit bundle                          # show the resolved bundle
+knit bundle --cd [<repo>]            # start a shell in the resolved existing bundle's worktree
 knit bundle "<title>"                # create a bundle (git-branch-style shorthand)
 knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--view <name>] [--include <repo>]... [--exclude <repo>]... [--offline|--from-local-base] [--no-worktree] [--in-place] [--force] [--agents] [--cd [<repo>]]
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--offline|--from-local-base] [--in-place] [--no-worktree]
@@ -159,7 +160,7 @@ knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 ```
 
-A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one, and creation flags go straight on it, e.g. `knit bundle "<title>" --project <name> --repo <repo>`. A project is initialized once with `knit init <name>` (like `git init`). Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, …) live at the top level; bundle/repo management lives under `knit bundle`.
+A bundle is the cross-repo analogue of a git branch: `knit bundle "<title>"` creates one (like `git branch <name>`), `knit bundle` shows the current one (or enters it with `--cd [<repo>]`), and creation flags go straight on it, e.g. `knit bundle "<title>" --project <name> --repo <repo>`. A project is initialized once with `knit init <name>` (like `git init`). Everyday VCS verbs (`add`, `commit`, `push`, `pull`, `switch`, `status`, `diff`, `log`, `revert`, …) live at the top level; bundle/repo management lives under `knit bundle`.
 
 ## Projects And Bundles
 
@@ -442,6 +443,8 @@ knit bundle add docs
 Bundles are the branch-like feature units. The same source repo can appear in many bundles at once. Knit creates separate feature branches and generated worktrees, for example `.knit/worktrees/fix-a/backend` and `.knit/worktrees/fix-b/backend`.
 
 Use `knit bundle "<title>" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+
+Without a title, `knit bundle --cd [<repo>]` enters the resolved existing bundle instead of creating one: the same shell starts in `.knit/worktrees/<bundle>` (or the named repo checkout), using the normal bundle context resolution — explicit `--bundle`, `KNIT_BUNDLE`, worktree cwd, then the workspace fallback — without switching anything. A missing or unmaterialized worktree is an error pointing at `knit bundle worktree` (or `knit bundle restore` for archived bundles); no branches or worktrees are created.
 
 For parallel agent work, move each agent into the generated checkout it owns, such as `.knit/worktrees/fix-a/backend`. Commands run from inside a generated checkout resolve that checkout's bundle from the path, independent of the shared workspace fallback.
 

@@ -201,13 +201,19 @@ fn rollback_empty_new_bundle(
     true
 }
 
-fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
+/// Resolve the directory a `--cd` shell should start in: the bundle worktree
+/// root for an empty selector, or the checkout of the one repo a selector
+/// matches. Shared by bundle creation and by entering an existing bundle, so
+/// both spellings navigate identically.
+pub(crate) fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
     if active.bundle.repos.is_empty() {
         bail!("Cannot cd into a checkout because the bundle has no tracked repos.");
     }
 
     if selector.trim().is_empty() {
-        return Ok(active.root.join(".knit/worktrees").join(&active.bundle.id));
+        let root = active.root.join(".knit/worktrees").join(&active.bundle.id);
+        ensure_enterable_worktree_root(active, &root)?;
+        return Ok(root);
     }
 
     let selectors = [selector.to_string()];
@@ -216,6 +222,39 @@ fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
         bail!("Repo selector `{selector}` matched multiple repos; pass a more specific repo id.");
     }
     checkout_for_repo(active, indexes[0])
+}
+
+/// A shell may only start in a bundle worktree root that exists and holds at
+/// least one materialized checkout. Creation-time `--cd` always passes
+/// (materialization precedes navigation); entering an existing bundle can
+/// reach one that was never materialized or whose worktrees were removed, and
+/// that gets an actionable error instead of a shell in a missing or empty
+/// directory. Nothing is created here — no branches, no worktrees.
+fn ensure_enterable_worktree_root(active: &ActiveBundle, root: &Path) -> Result<()> {
+    let materialized = active
+        .bundle
+        .repos
+        .iter()
+        .any(|repo| checkout_dir(active, repo).is_some());
+    if root.is_dir() && materialized {
+        return Ok(());
+    }
+    if crate::commands::bundle::bundle_state(&active.bundle)
+        == crate::commands::bundle::BundleStatus::Archived
+    {
+        bail!(
+            "Bundle `{}` is archived and its generated worktrees were removed. Run `knit bundle restore {}` and then `knit --bundle {} bundle worktree` before entering it.",
+            active.bundle.id,
+            active.bundle.id,
+            active.bundle.id
+        );
+    }
+    bail!(
+        "Bundle `{}` has no materialized worktree at {}. Run `knit --bundle {} bundle worktree` first.",
+        active.bundle.id,
+        out::path(root.display()),
+        active.bundle.id
+    );
 }
 
 fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
@@ -228,7 +267,10 @@ fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
     })
 }
 
-fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
+/// Start the user's shell in `path` with the bundle context exported. The one
+/// navigation helper shared by creation-time `--cd` and by entering an
+/// existing bundle with `knit bundle --cd`.
+pub(crate) fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(default_shell);
     println!("{} {}", out::heading("cd:"), out::path(path.display()));
     let status = Command::new(&shell)
@@ -636,7 +678,7 @@ knit bundle "feature a" --repo backend
 knit bundle "feature b" --repo backend
 ```
 
-Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead. Without a title, `knit bundle --cd [<repo>]` enters the resolved existing bundle the same way; a missing or unmaterialized worktree is an error pointing at `knit bundle worktree`, never a silently created branch.
 
 Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
 
@@ -773,6 +815,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
+- `knit bundle --cd [<repo>]` starts a shell in the resolved existing bundle's worktree (or one repo checkout) without creating or switching anything.
 - `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
