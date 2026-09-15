@@ -215,6 +215,7 @@ pub fn run(cli: Cli) -> Result<()> {
             prefer_https,
             view,
             repos,
+            credentials,
             json,
         } => commands::clone_project_from_remote(
             &project,
@@ -229,6 +230,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 view: view.as_deref(),
                 repos: &repos,
             },
+            &credentials,
             json,
         ),
         Commands::Add {

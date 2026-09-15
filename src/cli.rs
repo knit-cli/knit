@@ -100,6 +100,15 @@ pub enum Commands {
         /// Remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.
         #[arg(long)]
         token: Option<String>,
+        /// Authenticate the clone with a saved personal credential
+        /// (`knit auth add`), selected by name and matched to the export's
+        /// repository hosts. Repeat to select one credential per forge:
+        /// `knit auth add work-github --provider github`, then `knit clone
+        /// team-project --remote hosted --credential work-github`. Applies
+        /// only to this clone's repositories, never to the remote's API, and
+        /// is saved as the new workspace's repository assignments.
+        #[arg(long = "credential", value_name = "NAME")]
+        credentials: Vec<String>,
         /// Bundle to make active after clone. Defaults to the latest open exported bundle.
         #[arg(long = "active-bundle")]
         active_bundle: Option<String>,

@@ -4,7 +4,7 @@ use crate::cli::AuthCommand;
 use crate::model::{KnitProject, ProjectAuthGroup, ProjectRepoEntry};
 use anyhow::{bail, Context, Result};
 use serde_json::json;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::{self, IsTerminal, Read, Write};
 use std::path::Path;
 
@@ -832,15 +832,348 @@ pub(crate) fn group_setup_with_prompt(
     )
 }
 
-/// Grouped setup for `knit clone`, before the first private git fetch needs a
-/// credential. Only ever runs with a real terminal: without one the clone
-/// reports the groups and the scriptable `knit auth add`/`auth use` path
-/// instead of hanging on a prompt. The global project selection the caller
-/// had in flight is restored afterwards, whatever happens here.
+/// Guided setup for `knit clone` and pull recovery — the tight path. For each
+/// group (already projected to the repositories this clone or recovery
+/// actually needs): reuse the unique compatible saved credential without
+/// asking; pick from several with one numbered answer (Enter takes the
+/// first); or prompt for the token itself — hidden, once per group, no
+/// credential-name choreography. New credentials get automatic names derived
+/// from host and group id, so distinct groups on the same host stay distinct.
+/// Repositories are linked as each group resolves; `knit auth setup` keeps
+/// the full wizard for later review and edits. An empty token answer skips
+/// that group, keeping whatever access already works.
+pub(crate) fn guided_group_setup(
+    root: &Path,
+    project: &KnitProject,
+    ask: &mut impl FnMut(&str) -> Result<String>,
+    read_token: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    let auth_requirements = project
+        .auth
+        .as_ref()
+        .context("Project has no auth requirements")?;
+    let key = auth::project_key(root, &project.id)?;
+    let mut bound_any = false;
+    for group in &auth_requirements.groups {
+        if group.repos.is_empty() {
+            continue;
+        }
+        // A group whose repositories are all linked already (a recovery
+        // rerun) is left alone; guided setup never rewrites deliberate links.
+        if auth::load()?
+            .projects
+            .get(&key)
+            .is_some_and(|bindings| group.repos.iter().all(|repo| bindings.contains_key(repo)))
+        {
+            continue;
+        }
+        describe_group(group, &[]);
+        let store = auth::load()?;
+        let compatible: Vec<(String, CredentialSpec)> = store
+            .credentials
+            .iter()
+            .filter(|(_, spec)| credential_matches_group(spec, group))
+            .map(|(name, spec)| (name.clone(), spec.clone()))
+            .collect();
+        let name = match compatible.len() {
+            1 => {
+                let (name, spec) = &compatible[0];
+                println!(
+                    "Using saved credential `{name}` ({} @ {}) for this group.",
+                    spec.provider, spec.host
+                );
+                name.clone()
+            }
+            n if n > 1 => {
+                println!("Saved credentials for {} @ {}:", group.provider, group.host);
+                for (i, (name, spec)) in compatible.iter().enumerate() {
+                    println!(
+                        "  {}. {name} ({})",
+                        i + 1,
+                        spec.token_type
+                            .as_deref()
+                            .unwrap_or("token type unclassified")
+                    );
+                }
+                loop {
+                    let choice = ask(&format!(
+                        "Credential for {} @ {} (1-{n}, Enter = 1): ",
+                        group.provider, group.host
+                    ))?;
+                    let picked = if choice.is_empty() {
+                        Some(compatible[0].0.clone())
+                    } else {
+                        choice
+                            .parse::<usize>()
+                            .ok()
+                            .and_then(|number| number.checked_sub(1))
+                            .and_then(|index| compatible.get(index).map(|(name, _)| name.clone()))
+                            .or_else(|| {
+                                compatible
+                                    .iter()
+                                    .find(|(name, _)| *name == choice)
+                                    .map(|(name, _)| name.clone())
+                            })
+                    };
+                    match picked {
+                        Some(name) => break name,
+                        None => println!("Choose a displayed credential, or press Enter."),
+                    }
+                }
+            }
+            _ => {
+                // No compatible saved credential: ask for the token itself.
+                let token_type = choose_group_token_type(group, ask)?;
+                println!("{}", permission_help(&group.provider));
+                let token =
+                    read_token(&format!("Token for {} ({} — hidden): ", group.host, group.id))?;
+                let token = token.trim();
+                if token.is_empty() {
+                    println!(
+                        "Skipped group `{}`; its repositories keep whatever access they have.",
+                        group.id
+                    );
+                    continue;
+                }
+                let username = if group.provider == "bitbucket" {
+                    bitbucket_username_for_token_type(&token_type, ask)?
+                } else {
+                    None
+                };
+                let spec = CredentialSpec {
+                    provider: group.provider.clone(),
+                    // Group hosts are case-insensitive; store the canonical
+                    // lowercase form so later exact host comparisons hold.
+                    host: group.host.to_ascii_lowercase(),
+                    username,
+                    token_type: Some(token_type),
+                    token_env: None,
+                };
+                let name = unique_credential_name(&auto_credential_name(group))?;
+                save_new_credential(&name, &spec, token)?;
+                name
+            }
+        };
+        // A reused Bitbucket credential may have drifted from its token kind
+        // (API token without its account email, or the reverse); one question
+        // fixes what would otherwise authenticate wrongly.
+        let store = auth::load()?;
+        if let Some(spec) = store.credentials.get(&name) {
+            if group.provider == "bitbucket" {
+                if let Some(token_type) = spec.token_type.clone() {
+                    reconcile_bitbucket_username(&name, &token_type, spec.username.is_some(), ask)?;
+                }
+            }
+        }
+        assign_in(root, project, &group.repos, &name)?;
+        bound_any = true;
+    }
+    if !bound_any {
+        println!("Every group is already linked; nothing to set up.");
+    }
+    Ok(())
+}
+
+/// Credential name for a guided group: the host, plus the group id when the
+/// group is not the host's own inferred stand-in, with characters outside the
+/// credential-name charset folded to hyphens.
+fn auto_credential_name(group: &ProjectAuthGroup) -> String {
+    let sanitize = |value: &str| -> String {
+        value
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "-_.".contains(c) {
+                    c
+                } else {
+                    '-'
+                }
+            })
+            .collect()
+    };
+    if group.id.eq_ignore_ascii_case(&group.host) {
+        sanitize(&group.host)
+    } else {
+        format!("{}-{}", sanitize(&group.host), sanitize(&group.id))
+    }
+}
+
+/// The base name, or its `-2`, `-3`, … successors until one is unused.
+fn unique_credential_name(base: &str) -> Result<String> {
+    let store = auth::load()?;
+    if !store.credentials.contains_key(base) {
+        return Ok(base.to_owned());
+    }
+    Ok((2..)
+        .map(|suffix| format!("{base}-{suffix}"))
+        .find(|candidate| !store.credentials.contains_key(candidate))
+        .expect("a finite credential namespace always has a free name"))
+}
+
+/// Save a brand-new credential with an already-read token (guided setup read
+/// it hidden; `knit auth add`'s interactive path stays in `add`).
+fn save_new_credential(name: &str, spec: &CredentialSpec, token: &str) -> Result<()> {
+    validate_name(name)?;
+    auth::validate_spec(spec)?;
+    if token.is_empty() || token.chars().any(char::is_control) {
+        bail!("Token must be nonempty and on one line.");
+    }
+    let _lock = auth::lock()?;
+    let mut store = auth::load()?;
+    if store.credentials.contains_key(name) {
+        bail!("Credential `{name}` exists. Use `knit auth add {name} --replace` to rotate it.");
+    }
+    store.credentials.insert(name.to_owned(), spec.clone());
+    auth::save_credential(&mut store, name, Some(token))?;
+    println!(
+        "Saved `{name}` in your personal Knit credential store (private file, not encrypted). Repository access has not been checked."
+    );
+    Ok(())
+}
+
+/// Infer one group per distinct forge host from repositories that just failed
+/// authenticated access, and guide the user through them: a unique compatible
+/// saved credential is linked without a prompt, a missing token is asked for
+/// once per host, and public/SSH access that already worked is never
+/// disturbed. Returns the repo ids that ended up linked to a credential.
+/// Never invents required permissions: inferred groups carry no permissions
+/// and only the provider's known token kinds.
+pub(crate) fn guided_inferred_setup(
+    root: &Path,
+    project: &KnitProject,
+    failing: &[(String, String)],
+    ask: &mut impl FnMut(&str) -> Result<String>,
+    read_token: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<String>> {
+    let mut by_target: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
+    for (repo_id, remote) in failing {
+        if let Ok((host, _)) = auth::remote_target(remote) {
+            by_target
+                .entry((host, remote.clone()))
+                .or_default()
+                .push(repo_id.clone());
+        }
+    }
+    // One group per distinct host: (host, repos).
+    let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for ((host, _), repo_ids) in &by_target {
+        by_host
+            .entry(host.clone())
+            .or_default()
+            .extend(repo_ids.iter().cloned());
+    }
+    if by_host.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut groups = Vec::new();
+    for (host, repos) in by_host {
+        let provider = crate::providers::for_remote(
+            failing
+                .iter()
+                .find(|(_, remote)| {
+                    auth::remote_target(remote)
+                        .is_ok_and(|(candidate, _)| candidate.eq_ignore_ascii_case(&host))
+                })
+                .map(|(_, remote)| remote.as_str())
+                .unwrap_or_default(),
+        )
+        .map(|forge| forge.id().to_owned())
+        .or_else(|| {
+            // Unknown host: the provider decides the token kinds and the Git
+            // username scheme, so one question is warranted.
+            match host.as_str() {
+                "github.com" => Some("github".to_owned()),
+                "gitlab.com" => Some("gitlab".to_owned()),
+                "bitbucket.org" => Some("bitbucket".to_owned()),
+                _ => None,
+            }
+        });
+        let provider = match provider {
+            Some(provider) => provider,
+            None => loop {
+                let answer = ask(&format!(
+                    "Provider for {host} (github/gitlab/bitbucket/forgejo): "
+                ))?;
+                if ["github", "gitlab", "bitbucket", "forgejo"].contains(&answer.as_str()) {
+                    break answer;
+                }
+                println!("Choose one of the listed providers.");
+            },
+        };
+        groups.push(ProjectAuthGroup {
+            id: host.clone(),
+            name: host.clone(),
+            host,
+            token_types: crate::model::token_types_for_provider(&provider)
+                .iter()
+                .map(|kind| (*kind).to_owned())
+                .collect(),
+            provider,
+            repos,
+            permissions: Vec::new(),
+            instructions: None,
+            token_url: None,
+        });
+    }
+    let mut setup_project = project.clone();
+    setup_project.auth = Some(crate::model::ProjectAuth {
+        groups: groups.clone(),
+    });
+    let before = linked_repos(root, project)?;
+    guided_group_setup(root, &setup_project, ask, read_token)?;
+    let after = linked_repos(root, project)?;
+    Ok(after
+        .into_iter()
+        .filter(|repo| !before.contains(repo))
+        .collect())
+}
+
+/// Repo ids this project has a credential binding for right now.
+fn linked_repos(root: &Path, project: &KnitProject) -> Result<Vec<String>> {
+    let key = auth::project_key(root, &project.id)?;
+    Ok(auth::load()?
+        .projects
+        .get(&key)
+        .map(|bindings| bindings.keys().cloned().collect())
+        .unwrap_or_default())
+}
+
+/// Interactive grouped setup before the first private git fetch needs a
+/// credential: `knit clone` and pull recovery. Only ever runs with a real
+/// terminal: without one the caller reports the groups and the scriptable
+/// `knit auth add`/`auth use` path instead of hanging on a prompt. The global
+/// project selection the caller had in flight is restored afterwards,
+/// whatever happens here.
 pub(crate) fn clone_group_setup(root: &Path, project: &KnitProject) -> Result<()> {
     require_terminal()?;
     let previous = auth::current_project_override();
-    let result = group_setup_with_prompt(root, project, &[], &mut prompt);
+    let result = guided_group_setup(
+        root,
+        project,
+        &mut prompt,
+        &mut |message| rpassword::prompt_password(message).context("Could not read token"),
+    );
+    auth::set_project_override(previous);
+    result
+}
+
+/// Guided setup for repositories that just failed authenticated access
+/// without declared groups (or alongside them): infer one group per failing
+/// host, link or create a credential, and report which repositories can now
+/// be retried. Terminal-only like the clone setup.
+pub(crate) fn inferred_fallback_setup(
+    root: &Path,
+    project: &KnitProject,
+    failing: &[(String, String)],
+) -> Result<Vec<String>> {
+    require_terminal()?;
+    let previous = auth::current_project_override();
+    let result = guided_inferred_setup(
+        root,
+        project,
+        failing,
+        &mut prompt,
+        &mut |message| rpassword::prompt_password(message).context("Could not read token"),
+    );
     auth::set_project_override(previous);
     result
 }

@@ -33,6 +33,7 @@ use anyhow::{anyhow, bail, Context, Result};
 use serde::Serialize;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -460,6 +461,109 @@ fn reconcile_project_repositories(
                 if !is_retry && repository.visibility.as_deref() != Some("public") {
                     unresolved.push(repository);
                 }
+            }
+        }
+    }
+
+    // Guided auth for repositories the anonymous probe could not reach, in a
+    // terminal: missing credentials enter setup right here — the project's
+    // declared groups projected onto the failing repositories first, then one
+    // inferred group per remaining host — and every linked repository is
+    // re-probed before the apply phase clones anything. This is also the
+    // recovery path for old partial clones whose failed repositories were
+    // omitted from the local project: the pending map written above carries
+    // their remotes, so a binding created now resolves for them. Existing
+    // checkouts — successful or dirty — are never touched; only repositories
+    // that already failed are retried. Noninteractive pulls keep the reported
+    // failure and the `knit auth setup` + rerun path.
+    if std::io::stdin().is_terminal() {
+        let needs_auth: Vec<RemoteExportRepository> = failed
+            .iter()
+            .filter(|(_, reason)| super::clone::is_auth_shaped_failure(reason))
+            .filter_map(|(local_id, _)| {
+                records
+                    .get(local_id.as_str())
+                    .map(|record| (*record).clone())
+            })
+            .filter(|record| {
+                record
+                    .remote_url
+                    .as_deref()
+                    .is_some_and(|url| !url.trim().is_empty())
+            })
+            .collect();
+        if !needs_auth.is_empty() {
+            println!(
+                "{} {} repo(s) need a forge token (no working access); setting that up now:",
+                out::heading("Private repositories:"),
+                needs_auth.len()
+            );
+            let failing: Vec<(String, String)> = needs_auth
+                .iter()
+                .map(|record| {
+                    (
+                        export_repo_local_id(record),
+                        record.remote_url.clone().unwrap_or_default(),
+                    )
+                })
+                .collect();
+            let mut setup_project = project.clone();
+            let failing_ids: BTreeSet<&str> = failing.iter().map(|(id, _)| id.as_str()).collect();
+            if let Some(auth) = setup_project.auth.as_mut() {
+                for group in &mut auth.groups {
+                    group
+                        .repos
+                        .retain(|repo| failing_ids.contains(repo.as_str()));
+                }
+                auth.groups.retain(|group| !group.repos.is_empty());
+            }
+            let declared_covered: BTreeSet<String> = setup_project
+                .auth
+                .iter()
+                .flat_map(|auth| auth.groups.iter().flat_map(|g| g.repos.clone()))
+                .collect();
+            setup_project.repos.extend(
+                needs_auth
+                    .iter()
+                    .map(|record| project_repo_entry_from_export(record, &root.join(&export_repo_local_id(record)))),
+            );
+            let mut guided: Result<()> = Ok(());
+            if setup_project.auth.as_ref().is_some_and(|auth| !auth.groups.is_empty()) {
+                guided = crate::commands::auth::clone_group_setup(root, &setup_project);
+            }
+            let uncovered: Vec<(String, String)> = failing
+                .into_iter()
+                .filter(|(id, _)| !declared_covered.contains(id))
+                .collect();
+            if guided.is_ok() && !uncovered.is_empty() {
+                guided = crate::commands::auth::inferred_fallback_setup(
+                    root,
+                    &setup_project,
+                    &uncovered,
+                )
+                .map(|_| ());
+            }
+            match guided {
+                Ok(()) => {
+                    for repository in needs_auth {
+                        let local_id = export_repo_local_id(&repository);
+                        let url = repository.remote_url.as_deref().unwrap_or_default();
+                        match crate::git::remote_repo_reachable(root, url) {
+                            Ok(()) => {
+                                failed.retain(|(id, _)| *id != local_id);
+                                verified.push(repository);
+                            }
+                            Err(error) => {
+                                failed.retain(|(id, _)| *id != local_id);
+                                failed.push((
+                                    local_id.clone(),
+                                    format!("repository not found or no access: {error}; {NO_ACCESS_HINT}"),
+                                ));
+                            }
+                        }
+                    }
+                }
+                Err(error) => println!("{} {error:#}", out::warn("Guided setup failed:")),
             }
         }
     }

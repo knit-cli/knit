@@ -73,6 +73,122 @@ pub fn save_known_pending_repos(
     store::write_json(&path, &Known { repos })
 }
 
+/// One exact repository target an explicit clone credential applies to,
+/// resolved from the export's clone URL (`remote_target` normalization:
+/// lowercase host, `.git`-trimmed path). Matching is exact — host and path —
+/// so repositories Git happens to touch outside the cloned selection never
+/// receive the credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct CloneCredentialTarget {
+    pub name: String,
+    pub host: String,
+    pub path: String,
+}
+
+/// The exact-target clone selection, active only while a Drop guard holds it.
+/// Activated after the clone scope is resolved and before any Git runs, and
+/// restored on every result path; nothing relies on process exit, so library
+/// callers are unaffected once the guarded clone section finishes.
+static CLONE_CREDENTIALS: Mutex<Option<Vec<CloneCredentialTarget>>> = Mutex::new(None);
+
+/// Activates an exact-target clone credential selection and returns the guard
+/// that restores the previous state when dropped.
+pub fn activate_clone_credentials(targets: Vec<CloneCredentialTarget>) -> CloneCredentialGuard {
+    let previous = {
+        let mut active = CLONE_CREDENTIALS
+            .lock()
+            .expect("clone credential lock poisoned");
+        active.replace(targets)
+    };
+    CloneCredentialGuard { previous }
+}
+
+/// Restores the clone credential selection that was active before the guard
+/// was created, on every exit path (return, `?`, panic).
+pub struct CloneCredentialGuard {
+    previous: Option<Vec<CloneCredentialTarget>>,
+}
+
+impl Drop for CloneCredentialGuard {
+    fn drop(&mut self) {
+        *CLONE_CREDENTIALS
+            .lock()
+            .expect("clone credential lock poisoned") = self.previous.take();
+    }
+}
+
+/// The active exact-target clone selection, if a guarded clone section set one.
+pub fn clone_credentials() -> Option<Vec<CloneCredentialTarget>> {
+    CLONE_CREDENTIALS
+        .lock()
+        .expect("clone credential lock poisoned")
+        .clone()
+}
+
+/// The credential selected for exactly this forge target, if any.
+pub fn clone_credential_for(host: &str, path: &str) -> Option<String> {
+    clone_credentials()?.into_iter().find_map(|target| {
+        (target.host.eq_ignore_ascii_case(host) && target.path == path).then_some(target.name)
+    })
+}
+
+/// Validate `--credential` names before a clone changes anything: each name
+/// must exist, its token must be resolvable now, and no two names may claim
+/// the same host. Returns the deduplicated (name, host) selection. With no
+/// names, the private credential registry is not read at all, so ordinary
+/// clones are unaffected.
+pub fn validate_clone_credentials(names: &[String]) -> Result<Vec<(String, String)>> {
+    if names.is_empty() {
+        return Ok(Vec::new());
+    }
+    let registry = load()?;
+    let selection = validated_clone_selection(&registry, names)?;
+    for (name, _) in &selection {
+        // Fail before any clone starts when the token is determinably
+        // missing (unsaved token, unset environment reference). A token the
+        // forge refuses surfaces at clone time with the credential named.
+        credential(name)
+            .with_context(|| format!("Credential `{name}` cannot be used for this clone"))?;
+    }
+    Ok(selection)
+}
+
+fn validated_clone_selection(
+    registry: &AuthStore,
+    names: &[String],
+) -> Result<Vec<(String, String)>> {
+    let mut selection: Vec<(String, String)> = Vec::new();
+    for name in names {
+        if selection.iter().any(|(selected, _)| selected == name) {
+            continue;
+        }
+        validate_name(name)?;
+        let spec = registry.credentials.get(name).with_context(|| {
+            let available: Vec<&str> = registry.credentials.keys().map(String::as_str).collect();
+            format!(
+                "Credential `{name}` is not configured; run `knit auth add` first. {}",
+                if available.is_empty() {
+                    "No credentials are saved on this machine.".to_string()
+                } else {
+                    format!("Saved credentials: {}.", available.join(", "))
+                }
+            )
+        })?;
+        validate_spec(spec)?;
+        let host = spec.host.to_ascii_lowercase();
+        if let Some((other, _)) = selection
+            .iter()
+            .find(|(_, selected)| selected.eq_ignore_ascii_case(&host))
+        {
+            bail!(
+                "Credentials `{other}` and `{name}` are both for {host}; a clone can select only one credential per host"
+            );
+        }
+        selection.push((name.clone(), host));
+    }
+    Ok(selection)
+}
+
 /// Serialize read-modify-write operations across Knit processes.
 pub fn lock() -> Result<store::KnitLock> {
     let path = personal_path("forge-auth.json")?;
@@ -828,6 +944,21 @@ pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<Str
 }
 
 pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCredential>> {
+    // An exact-target clone selection authenticates only the repositories it
+    // names. A remote it does not cover is not forced to ambient credentials:
+    // the selection falls through to this workspace's project assignments, so
+    // grouped mappings (written by guided setup before the guard activated)
+    // keep serving their repositories while the selection is active. The
+    // surrounding workspace is never borrowed — clone-section Git runs with
+    // the clone target as its cwd.
+    let selection = clone_credentials();
+    let mut selected = None;
+    if let Some(selection) = selection.as_deref() {
+        selected = resolve_clone_selection(selection, cwd, remote)?;
+    }
+    if selected.is_some() {
+        return Ok(selected);
+    }
     let registry = load()?;
     if registry.projects.values().all(BTreeMap::is_empty) || context_root(cwd).is_none() {
         return Ok(None);
@@ -870,6 +1001,59 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
         bail!("Assigned credential host does not match the repository host");
     }
     Ok(Some(resolved))
+}
+
+/// Resolve one Git remote against the active clone selection: a selected
+/// credential is used only when its exact (host, path) target matches the
+/// remote; every other repository falls back to the caller's normal
+/// resolution (project assignments, then ambient Git authentication).
+fn resolve_clone_selection(
+    selection: &[CloneCredentialTarget],
+    cwd: &Path,
+    remote: Option<&str>,
+) -> Result<Option<ResolvedCredential>> {
+    let origin;
+    let remote = match remote {
+        Some(remote) => remote,
+        None => {
+            let output = Command::new("git")
+                .args(["remote", "get-url", "origin"])
+                .current_dir(cwd)
+                .output()
+                .context("Cannot inspect repository origin for forge credentials")?;
+            if !output.status.success() {
+                return Ok(None);
+            }
+            origin = String::from_utf8(output.stdout).context("Repository origin is not UTF-8")?;
+            origin.trim()
+        }
+    };
+    if is_local_remote(remote) {
+        return Ok(None);
+    }
+    let (host, path) = remote_target(remote)?;
+    let Some(name) = clone_selection_match(selection, &host, &path) else {
+        return Ok(None);
+    };
+    // credential() fails closed when the credential or its token disappeared
+    // since validation; an explicit selection never falls back silently.
+    let resolved = credential(name)?;
+    if resolved.host != host {
+        bail!("Selected credential host does not match the repository host");
+    }
+    Ok(Some(resolved))
+}
+
+/// The credential selected for exactly this target, if the selection has one.
+fn clone_selection_match<'a>(
+    selection: &'a [CloneCredentialTarget],
+    host: &str,
+    path: &str,
+) -> Option<&'a str> {
+    selection
+        .iter()
+        .find(|target| target.host.eq_ignore_ascii_case(host) && target.path == path)
+        .map(|target| target.name.as_str())
 }
 
 fn binding_for_target<'a>(
@@ -1246,6 +1430,112 @@ mod tests {
         // Forgejo aliases share the same token kinds.
         spec.provider = "codeberg".into();
         assert!(validate_spec(&spec).is_ok());
+    }
+
+    #[test]
+    fn clone_selection_rejects_unknown_and_duplicate_hosts() {
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "GitHub.com".into(),
+                username: None,
+                token_env: None,
+            },
+        );
+        registry.credentials.insert(
+            "legacy".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_env: None,
+            },
+        );
+        registry.credentials.insert(
+            "cloud".into(),
+            CredentialSpec {
+                provider: "bitbucket".into(),
+                host: "bitbucket.org".into(),
+                username: None,
+                token_env: None,
+            },
+        );
+
+        // Repeating one name is idempotent; different providers coexist.
+        assert_eq!(
+            validated_clone_selection(
+                &registry,
+                &["work".to_string(), "work".to_string(), "cloud".to_string()]
+            )
+            .unwrap(),
+            vec![
+                ("work".to_string(), "github.com".to_string()),
+                ("cloud".to_string(), "bitbucket.org".to_string())
+            ]
+        );
+
+        let error = validated_clone_selection(&registry, &["missing".to_string()])
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("`missing` is not configured"), "{error}");
+        assert!(
+            error.contains("Saved credentials: cloud, legacy, work"),
+            "{error}"
+        );
+
+        let error =
+            validated_clone_selection(&registry, &["work".to_string(), "legacy".to_string()])
+                .unwrap_err()
+                .to_string();
+        assert!(
+            error.contains("`work` and `legacy` are both for github.com"),
+            "{error}"
+        );
+
+        assert_eq!(
+            validated_clone_selection(&registry, &[]).unwrap(),
+            Vec::<(String, String)>::new()
+        );
+    }
+
+    #[test]
+    fn clone_selection_matches_only_the_exact_target() {
+        let targets = |paths: &[(&str, &str)]| {
+            paths
+                .iter()
+                .map(|(name, path)| CloneCredentialTarget {
+                    name: (*name).to_string(),
+                    host: "github.com".to_string(),
+                    path: (*path).to_string(),
+                })
+                .collect::<Vec<_>>()
+        };
+        let selection = targets(&[("work", "acme/backend"), ("other", "other/repo")]);
+        assert_eq!(
+            clone_selection_match(&selection, "github.com", "acme/backend"),
+            Some("work")
+        );
+        // Same host, different path: not covered.
+        assert_eq!(
+            clone_selection_match(&selection, "github.com", "acme/another"),
+            None
+        );
+        // Path is compared with its normalized (`.git`-trimmed) form only;
+        // `.git` variants never widen the scope.
+        assert_eq!(
+            clone_selection_match(&selection, "github.com", "acme/backend.git"),
+            None
+        );
+        assert_eq!(
+            clone_selection_match(&selection, "GITHUB.COM", "acme/backend"),
+            Some("work")
+        );
+        assert_eq!(
+            clone_selection_match(&selection, "bitbucket.org", "acme/backend"),
+            None
+        );
     }
 
     #[test]

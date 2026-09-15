@@ -18,6 +18,23 @@ pub fn configure(
     let Some((operation, targets)) = network_targets(cwd, args)? else {
         return Ok(Vec::new());
     };
+    // Knit owns authentication for every network operation it runs: raw Git
+    // username/password prompts are disabled for the child so a private
+    // HTTPS remote without a usable credential fails fast instead of hanging
+    // the command on a prompt nobody answers (the failure then feeds guided
+    // local token setup). Working ambient access is untouched — SSH agent
+    // keys and credential helpers, ambient or Knit-installed, never reach
+    // the terminal-prompt path.
+    command.env("GIT_TERMINAL_PROMPT", "0");
+    command.env("GIT_ASKPASS", "");
+    for (name, _) in std::env::vars_os() {
+        if name.to_string_lossy().starts_with("GIT_TRACE") {
+            command.env_remove(name);
+        }
+    }
+    command.env_remove("GIT_CURL_VERBOSE");
+    command.env("GIT_TRACE_REDACT", "1");
+    command.arg("-c").arg("core.askPass=");
     if changes_repository(args) {
         let registry = auth::load()?;
         if let Ok((root, project)) = auth::project_context(cwd, None) {
@@ -48,24 +65,8 @@ pub fn configure(
                     "-c",
                     "credential.useHttpPath=true",
                 ]);
-                command.env("GIT_TERMINAL_PROMPT", "0");
-                command.env("GIT_ASKPASS", "");
                 command.env("SSH_ASKPASS", "");
-                for (name, _) in std::env::vars_os() {
-                    if name.to_string_lossy().starts_with("GIT_TRACE") {
-                        command.env_remove(name);
-                    }
-                }
-                command.env_remove("GIT_CURL_VERBOSE");
-                command.env("GIT_TRACE_REDACT", "1");
-                command.args([
-                    "-c",
-                    "core.askPass=",
-                    "-c",
-                    "http.followRedirects=false",
-                    "-c",
-                    "http.extraHeader=",
-                ]);
+                command.args(["-c", "http.followRedirects=false", "-c", "http.extraHeader="]);
             }
             let executable = std::env::current_exe().context("locating Knit credential helper")?;
             let helper = format!(
@@ -90,13 +91,17 @@ pub fn configure(
             let scope = format!("credential.https://{host}/{path}.helper");
             command.arg("-c").arg(format!("{scope}="));
             command.arg("-c").arg(format!("{scope}={helper}"));
-            // SSH origins must use the selected PAT, rather than silently
-            // bypassing the project binding through the user's SSH agent.
-            if !remote.starts_with("https://") {
-                command
-                    .arg("-c")
-                    .arg(format!("url.https://{host}/{path}.insteadOf={remote}"));
-            }
+            // The selected credential must ride the HTTPS transport: an SSH
+            // origin is rewritten to HTTPS instead of bypassing the token
+            // through the user's SSH agent, and an HTTPS origin gets the same
+            // exact identity rewrite so an inherited broad rewrite (a global
+            // SSH workaround like url.ssh://git@host/.insteadOf=https://host/)
+            // cannot divert this exact URL back to SSH. Git resolves insteadOf
+            // by longest matching prefix, so the exact key always outranks the
+            // inherited one for this invocation only.
+            command
+                .arg("-c")
+                .arg(format!("url.https://{host}/{path}.insteadOf={remote}"));
             selected.push(credential);
         }
     }
@@ -563,6 +568,45 @@ mod tests {
             ("github.com".into(), "org/repo.git".into())
         );
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn exact_identity_rewrite_outranks_inherited_ssh_workaround() {
+        // What configure adds for an HTTPS target whose credential resolved:
+        // an exact url.https/<host>/<path>.insteadOf of the URL itself.
+        let identity =
+            "url.https://github.com/org/repo.git.insteadOf=https://github.com/org/repo.git";
+        let inherited = "url.ssh://git@github.com/.insteadOf=https://github.com/";
+        let resolved_url = |config: &[&str]| {
+            let mut command = Command::new("git");
+            command
+                .current_dir(std::env::temp_dir())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    std::env::temp_dir().join("knit-nonexistent-global-config"),
+                );
+            for entry in config {
+                command.arg("-c").arg(entry);
+            }
+            let output = command
+                .args(["ls-remote", "--get-url", "https://github.com/org/repo.git"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        // Without the identity key, the inherited SSH rewrite wins and the
+        // URL leaves HTTPS (bypassing the selected credential's transport).
+        assert_eq!(
+            resolved_url(&[inherited]),
+            "ssh://git@github.com/org/repo.git"
+        );
+        // With it, the exact match outranks the broader inherited prefix.
+        assert_eq!(
+            resolved_url(&[inherited, identity]),
+            "https://github.com/org/repo.git"
+        );
     }
     #[test]
     fn network_operands_follow_options_and_explicit_remote() {
