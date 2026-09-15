@@ -189,7 +189,13 @@ def seed_source(name):
     src = root / 'sources' / name
     src.mkdir(parents=True, exist_ok=True)
     env = {'PATH': os.environ['PATH'], 'GIT_CONFIG_GLOBAL': str(root / 'empty.gitconfig'),
-           'GIT_CONFIG_NOSYSTEM': '1', 'HOME': str(root / 'fixture-home')}
+           'GIT_CONFIG_NOSYSTEM': '1', 'HOME': str(root / 'fixture-home'),
+           # Deterministic identity: the empty isolated config and scrubbed
+           # HOME leave nothing ambient for git to fall back on (CI runners
+           # have no GECOS name, so commits would fail with "Author
+           # identity unknown").
+           'GIT_AUTHOR_NAME': 'Test', 'GIT_AUTHOR_EMAIL': 'test@example.test',
+           'GIT_COMMITTER_NAME': 'Test', 'GIT_COMMITTER_EMAIL': 'test@example.test'}
     subprocess.run(['git', 'init', '-q', str(src)], env=env, check=True)
     (src / 'README').write_text(f'{name}-{_seed_counter[0]}')
     subprocess.run(['git', 'add', '.'], cwd=src, env=env, check=True)
