@@ -1101,6 +1101,205 @@ fn bundle_start_cd_accepts_repo_selector() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[cfg(unix)]
+#[test]
+fn bundle_cd_without_title_enters_existing_bundle_root() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "existing feature"]);
+
+    // The bare print is preserved without --cd.
+    let shown = knit(&workspace, ["bundle"]);
+    assert!(shown.contains("Bundle:"), "{shown}");
+    assert!(shown.contains("existing-feature"), "{shown}");
+
+    // With --cd and no title, the same navigation helper as creation starts a
+    // shell in the existing bundle's worktree root.
+    let output = knit_with_env(&workspace, ["bundle", "--cd"], &[("SHELL", "/bin/pwd")]);
+    let checkout = workspace
+        .join(".knit/worktrees/existing-feature")
+        .canonicalize()
+        .unwrap();
+    assert!(output.contains("cd:"), "{output}");
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == checkout.to_str().unwrap()),
+        "{output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_cd_without_title_accepts_repo_selector() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "existing feature"]);
+
+    let output = knit_with_env(
+        &workspace,
+        ["bundle", "--cd", "frontend"],
+        &[("SHELL", "/bin/pwd")],
+    );
+    let checkout = workspace
+        .join(".knit/worktrees/existing-feature/frontend")
+        .canonicalize()
+        .unwrap();
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == checkout.to_str().unwrap()),
+        "{output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn bundle_cd_without_title_honors_explicit_bundle_flag() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "first feature"]);
+    // Creating the second bundle makes it the workspace fallback.
+    knit(&workspace, ["bundle", "second feature"]);
+
+    let output = knit_with_env(
+        &workspace,
+        ["--bundle", "first-feature", "bundle", "--cd"],
+        &[("SHELL", "/bin/pwd")],
+    );
+    let checkout = workspace
+        .join(".knit/worktrees/first-feature")
+        .canonicalize()
+        .unwrap();
+    assert!(
+        output
+            .lines()
+            .any(|line| line.trim() == checkout.to_str().unwrap()),
+        "{output}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_cd_without_title_missing_worktree_errors_without_materializing() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["bundle", "unmaterialized feature", "--no-worktree"],
+    );
+
+    let failure = knit_fails(&workspace, ["bundle", "--cd"]);
+    assert!(failure.contains("no materialized worktree"), "{failure}");
+    assert!(failure.contains("bundle worktree"), "{failure}");
+
+    // Navigation must not silently create branches or worktrees.
+    assert!(!workspace
+        .join(".knit/worktrees/unmaterialized-feature/backend")
+        .exists());
+    assert!(!git_success(
+        &backend,
+        ["rev-parse", "--verify", "knit/unmaterialized-feature"]
+    ));
+
+    // The advised command makes --cd work. The recovery shell check needs a
+    // Unix SHELL stand-in, so it only runs on Unix.
+    #[cfg(unix)]
+    {
+        knit(&workspace, ["bundle", "worktree"]);
+        let output = knit_with_env(
+            &workspace,
+            ["bundle", "--cd", "backend"],
+            &[("SHELL", "/bin/pwd")],
+        );
+        let checkout = workspace
+            .join(".knit/worktrees/unmaterialized-feature/backend")
+            .canonicalize()
+            .unwrap();
+        assert!(
+            output
+                .lines()
+                .any(|line| line.trim() == checkout.to_str().unwrap()),
+            "{output}"
+        );
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_cd_archived_bundle_points_at_restore() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "done feature"]);
+    knit(&workspace, ["bundle", "archive", "done-feature"]);
+
+    let failure = knit_fails(&workspace, ["--bundle", "done-feature", "bundle", "--cd"]);
+    assert!(failure.contains("archived"), "{failure}");
+    assert!(
+        failure.contains("knit bundle restore done-feature"),
+        "{failure}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn project_remove_deletes_template_and_clears_active_project() {
     let root = unique_temp_dir();

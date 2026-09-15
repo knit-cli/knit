@@ -40,8 +40,8 @@ pub mod worktree;
 
 pub use base::BundleBaseMode;
 pub use bundle::{
-    archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
-    restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
+    archive_bundle, bundle_path, delete_bundle, enter_bundle_shell, list_bundles, print_bundle,
+    prune_merged_bundles, restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
 };
 pub use check::{record_check, run_check, show_check_status};
 pub use cherrypick::cherrypick_from_bundle;
