@@ -87,12 +87,21 @@ fn read_json(path: &Path) -> serde_json::Value {
 /// A global git config that maps one reserved forge URL onto a local bare
 /// repository: the stand-in for the access a linked credential grants.
 fn instead_of_config(root: &Path, url: &str, bare: &Path) -> std::path::PathBuf {
+    // Serialize through `git config`: a hand-written `[url "C:\..."]` loses
+    // the backslashes when Git parses the subsection, while `git config`
+    // escapes it portably. `--replace-all` keeps the old overwrite semantic.
     let config = root.join("recovery.gitconfig");
-    fs::write(
-        &config,
-        format!("[url \"{}\"]\n\tinsteadOf = {url}\n", bare.display()),
-    )
-    .unwrap();
+    git(
+        root,
+        [
+            "config",
+            "--file",
+            config.to_str().unwrap(),
+            "--replace-all",
+            &format!("url.{}.insteadOf", bare.display()),
+            url,
+        ],
+    );
     config
 }
 
@@ -449,15 +458,24 @@ fn prefer_https_rewrites_the_urls_a_scoped_clone_uses_and_persists() {
     let backend_bare = make_bare_named(&root, "backend-bare");
     let frontend_bare = make_bare_named(&root, "frontend-bare");
     let gitconfig = root.join("prefer-https.gitconfig");
-    fs::write(
-        &gitconfig,
-        format!(
-            "[url \"{}\"]\n\tinsteadOf = {backend_https}\n[url \"{}\"]\n\tinsteadOf = {frontend_https}\n",
-            backend_bare.display(),
-            frontend_bare.display()
-        ),
-    )
-    .unwrap();
+    // Serialize through `git config` so Git escapes the subsection itself
+    // (a hand-written `[url "C:\..."]` loses its backslashes on parse).
+    for (bare, https) in [
+        (backend_bare, backend_https),
+        (frontend_bare, frontend_https),
+    ] {
+        git(
+            &root,
+            [
+                "config",
+                "--file",
+                gitconfig.to_str().unwrap(),
+                "--replace-all",
+                &format!("url.{}.insteadOf", bare.display()),
+                https,
+            ],
+        );
+    }
 
     let target = root.join("workspace");
     let home = root.join("knit-home");

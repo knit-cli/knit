@@ -85,12 +85,21 @@ fn make_bare_repo(root: &Path, name: &str) -> std::path::PathBuf {
 }
 
 fn instead_of_config(root: &Path, url: &str, bare: &Path) -> std::path::PathBuf {
+    // Serialize through `git config`: a hand-written `[url "C:\..."]` loses
+    // the backslashes when Git parses the subsection, while `git config`
+    // escapes it portably. `--replace-all` keeps the old overwrite semantic.
     let config = root.join("recovery.gitconfig");
-    fs::write(
-        &config,
-        format!("[url \"{}\"]\n\tinsteadOf = {url}\n", bare.display()),
-    )
-    .unwrap();
+    git(
+        root,
+        [
+            "config",
+            "--file",
+            config.to_str().unwrap(),
+            "--replace-all",
+            &format!("url.{}.insteadOf", bare.display()),
+            url,
+        ],
+    );
     config
 }
 

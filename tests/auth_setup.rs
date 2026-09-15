@@ -512,6 +512,8 @@ fn grouped_setup_without_terminal_stays_scriptable_and_never_hangs() {
     assert!(!f.home.join("forge-auth.json").exists());
 }
 
+// The fixture drives a real PTY (Unix pty/termios); other auth tests stay cross-platform.
+#[cfg(unix)]
 #[test]
 fn grouped_setup_pty_two_forges_hidden_tokens_and_absent_group_skip() {
     let root = std::env::temp_dir().join(format!("knit-auth-groups-pty-{}", std::process::id()));
