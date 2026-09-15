@@ -2431,7 +2431,9 @@ fn select_active_bundle(
             bundle.state.unwrap_or(crate::model::BundleState::Open)
                 == crate::model::BundleState::Open
         })
-        .or_else(|| bundles.first())
+        // Archived/closed bundles remain available as history, but their
+        // feature branches may have been deleted. A project with no open
+        // bundle clones successfully without materializing one.
         .map(|bundle| bundle.id.clone()))
 }
 
@@ -2514,6 +2516,40 @@ mod tests {
             visibility: None,
             metadata: Value::Null,
         }
+    }
+
+    #[test]
+    fn clone_does_not_activate_finished_bundles_when_no_open_bundle_exists() {
+        let mut archived = ChangeGroup::new(
+            "finished".into(),
+            "Finished".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        archived.state = Some(crate::model::BundleState::Archived);
+        let mut closed = archived.clone();
+        closed.id = "closed".into();
+        closed.state = Some(crate::model::BundleState::Closed);
+        let mut bundles = vec![archived, closed];
+        assert_eq!(select_active_bundle(&bundles, &[], None).unwrap(), None);
+
+        let mut open = ChangeGroup::new(
+            "current".into(),
+            "Current".into(),
+            "2026-01-02T00:00:00Z".into(),
+        );
+        bundles.push(open.clone());
+        assert_eq!(
+            select_active_bundle(&bundles, &[], None)
+                .unwrap()
+                .as_deref(),
+            Some("current")
+        );
+        // Older artifacts without lifecycle metadata remain open.
+        open.state = None;
+        assert_eq!(
+            select_active_bundle(&[open], &[], None).unwrap().as_deref(),
+            Some("current")
+        );
     }
 
     #[test]
