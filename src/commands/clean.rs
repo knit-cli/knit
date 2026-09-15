@@ -353,28 +353,20 @@ fn remove_git_worktree(repo_root: &Path, worktree: &Path, force: bool) -> Result
     Ok(())
 }
 
-/// Remove a linked worktree by running git inside it, for checkouts whose
-/// source repo is only known through the worktree itself (orphan dirs,
-/// leftovers for repos a bundle no longer tracks). The source repo is
-/// resolved first so its worktree list can be pruned once the directory is
-/// gone.
+/// Remove a linked worktree whose source repo is only known through the
+/// worktree itself (orphan dirs, leftovers for repos a bundle no longer
+/// tracks). The source repo is resolved first so the removal can run from
+/// there instead of inside the target directory — a process cwd inside the
+/// checkout blocks its deletion on Windows — and so its worktree list can be
+/// pruned once the directory is gone.
 pub(crate) fn remove_git_worktree_from_self(worktree: &Path, force: bool) -> Result<()> {
     let common_dir = git_output(
         worktree,
         ["rev-parse", "--path-format=absolute", "--git-common-dir"],
     )
-    .ok()
-    .map(|dir| PathBuf::from(dir.trim()));
-    let mut args = vec![OsString::from("worktree"), OsString::from("remove")];
-    if force {
-        args.push(OsString::from("--force"));
-    }
-    args.push(worktree.as_os_str().to_os_string());
-    git_output(worktree, args)?;
-    if let Some(common_dir) = common_dir.filter(|dir| dir.is_dir()) {
-        prune_git_worktrees(&common_dir);
-    }
-    Ok(())
+    .map(|dir| PathBuf::from(dir.trim()))
+    .context("failed to resolve the git common dir from the worktree")?;
+    remove_git_worktree(&common_dir, worktree, force)
 }
 
 /// Drop git's bookkeeping for worktrees whose directories are gone. Best
