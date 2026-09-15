@@ -575,6 +575,16 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
     if incoming.requirements.is_some() {
         project.requirements = incoming.requirements;
     }
+    if incoming.auth.is_some() {
+        // Validate the imported auth groups against this workspace's repos
+        // before accepting them; metadata outside auth is preserved as-is.
+        let mut candidate = project.clone();
+        candidate.auth = incoming.auth.clone();
+        crate::auth::validate_project_auth(&candidate).context(
+            "Refusing to import invalid project auth requirements from the stack repo config",
+        )?;
+        project.auth = incoming.auth;
+    }
     if incoming.runtime.is_some() {
         project.runtime = incoming.runtime;
     }

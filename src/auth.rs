@@ -21,6 +21,58 @@ pub fn set_project_override(project: Option<String>) {
         .expect("project override lock poisoned") = project;
 }
 
+/// The currently selected project override, for callers that temporarily
+/// change it and must restore the previous value afterwards.
+pub fn current_project_override() -> Option<String> {
+    PROJECT_OVERRIDE
+        .lock()
+        .expect("project override lock poisoned")
+        .clone()
+}
+
+/// Repo id → remote URL for repositories the project's full membership knows
+/// but this workspace has not materialized: out of a clone scope, or a pull
+/// add that failed before the checkout existed. Local-only bookkeeping that
+/// keeps those references discoverable — guided setup validates against
+/// them and the credential resolver can serve them once a binding exists —
+/// without ever creating an assignment silently. Never exported, and never
+/// a place for secrets.
+pub fn known_pending_repos_path(root: &Path, project: &str) -> PathBuf {
+    store::project_path(root, project).with_file_name(format!("{project}.known-repos.json"))
+}
+
+pub fn load_known_pending_repos(root: &Path, project: &str) -> BTreeMap<String, String> {
+    #[derive(serde::Deserialize, Default)]
+    struct Known {
+        #[serde(default)]
+        repos: BTreeMap<String, String>,
+    }
+    fs::read(known_pending_repos_path(root, project))
+        .ok()
+        .and_then(|bytes| serde_json::from_slice::<Known>(&bytes).ok())
+        .map(|known| known.repos)
+        .unwrap_or_default()
+}
+
+pub fn save_known_pending_repos(
+    root: &Path,
+    project: &str,
+    repos: &BTreeMap<String, String>,
+) -> Result<()> {
+    #[derive(serde::Serialize)]
+    struct Known<'a> {
+        repos: &'a BTreeMap<String, String>,
+    }
+    let path = known_pending_repos_path(root, project);
+    if repos.is_empty() {
+        // Absent file and empty file mean the same thing; keep the
+        // workspace free of bookkeeping nobody needs.
+        let _ = fs::remove_file(&path);
+        return Ok(());
+    }
+    store::write_json(&path, &Known { repos })
+}
+
 /// Serialize read-modify-write operations across Knit processes.
 pub fn lock() -> Result<store::KnitLock> {
     let path = personal_path("forge-auth.json")?;
@@ -43,6 +95,11 @@ pub struct CredentialSpec {
     pub username: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_env: Option<String>,
+    /// Which of the provider's token kinds this credential is, when known.
+    /// Never inferred from the opaque token value: an unknown stays `None`
+    /// until the person who owns the credential classifies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_type: Option<String>,
 }
 
 #[derive(Clone, Default, Serialize, Deserialize)]
@@ -110,7 +167,17 @@ fn load_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T>
     }
 }
 
-fn validate_store(value: &AuthStore) -> Result<()> {
+/// Hosts are case-insensitive domain names; store the canonical lowercase
+/// form so exact comparisons elsewhere stay sound, whatever case a group,
+/// CLI flag, or older store entry carried.
+fn normalize_store(value: &mut AuthStore) {
+    for spec in value.credentials.values_mut() {
+        spec.host = spec.host.to_ascii_lowercase();
+    }
+}
+
+fn validate_store(value: &mut AuthStore) -> Result<()> {
+    normalize_store(value);
     for (name, spec) in &value.credentials {
         validate_name(name)?;
         validate_spec(spec)?;
@@ -119,17 +186,19 @@ fn validate_store(value: &AuthStore) -> Result<()> {
 }
 
 pub fn save(value: &AuthStore) -> Result<()> {
-    validate_store(value)?;
-    write_private(&personal_path("forge-auth.json")?, value)
+    let mut normalized = value.clone();
+    validate_store(&mut normalized)?;
+    write_private(&personal_path("forge-auth.json")?, &normalized)
 }
 
 /// Save one credential and its token-source transition while the caller holds
 /// the auth lock. Validate and stage everything before changing either file.
 /// The secret is replaced last: a failed save leaves the old token untouched.
 pub fn save_credential(value: &AuthStore, name: &str, token: Option<&str>) -> Result<()> {
-    validate_store(value)?;
+    let mut normalized = value.clone();
+    validate_store(&mut normalized)?;
     validate_name(name)?;
-    let spec = value
+    let spec = normalized
         .credentials
         .get(name)
         .context("Credential is not configured")?;
@@ -157,7 +226,7 @@ pub fn save_credential(value: &AuthStore, name: &str, token: Option<&str>) -> Re
             return Err(error).context("Cannot read previous forge credential configuration")
         }
     };
-    let registry = prepare_private(&registry_path, value)?;
+    let registry = prepare_private(&registry_path, &normalized)?;
     let secrets = prepare_private(&secrets_path, &secrets)?;
     commit_registry_and_secret(registry, secrets, rollback)
 }
@@ -348,6 +417,118 @@ pub fn validate_spec(spec: &CredentialSpec) -> Result<()> {
         {
             bail!("Token environment variable must be a valid environment variable name");
         }
+    }
+    if let Some(token_type) = &spec.token_type {
+        let supported = crate::model::token_types_for_provider(&spec.provider);
+        if !supported.contains(&token_type.as_str()) {
+            bail!(
+                "Token type `{token_type}` is not one of the {} token kinds this provider offers",
+                spec.provider
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Full semantic validation of a project's auth requirements: structure, plus
+/// resolution of every referenced repository against the project's repos.
+/// Repository references must exist and sit on the group's forge (matching
+/// host, and matching provider whenever the remote identifies one — the URL
+/// is authoritative for known forges, a declared provider covers custom
+/// hosts). Callers that import a deliberately partial project — a scoped
+/// clone, or a pull whose new repo failed to clone — validate against the
+/// full membership instead, via [`validate_project_auth_with_pending`].
+pub fn validate_project_auth(project: &KnitProject) -> Result<()> {
+    validate_project_auth_with_pending(project, &BTreeMap::new())
+}
+
+/// Like [`validate_project_auth`], but repository references missing from
+/// the local project may resolve against `pending`: repo id → remote URL for
+/// repositories known to the project's full membership but not present in
+/// this workspace yet (out of clone scope, or not yet cloned). A reference
+/// that is neither local nor pending is a typo and fails loudly.
+pub fn validate_project_auth_with_pending(
+    project: &KnitProject,
+    pending: &BTreeMap<String, String>,
+) -> Result<()> {
+    let Some(auth) = &project.auth else {
+        return Ok(());
+    };
+    auth.validate_structure()
+        .map_err(|error| anyhow::anyhow!("Invalid project auth requirements: {error}"))?;
+    // A project with ambiguous local ids can never match a group reliably.
+    let mut local_ids = std::collections::BTreeSet::new();
+    for repo in &project.repos {
+        if !local_ids.insert(repo.id.clone()) {
+            bail!(
+                "Invalid project auth requirements: project lists repository `{}` more than once",
+                repo.id
+            );
+        }
+    }
+    for group in &auth.groups {
+        for repo_id in &group.repos {
+            let remote = match project.repos.iter().find(|repo| &repo.id == repo_id) {
+                Some(repo) => match &repo.remote {
+                    Some(remote) => Some(remote.clone()),
+                    None => bail!(
+                        "Invalid project auth requirements: group `{}` references repository `{repo_id}`, which has no forge remote",
+                        group.id
+                    ),
+                },
+                None => pending.get(repo_id).cloned(),
+            };
+            let Some(remote) = remote else {
+                bail!(
+                    "Invalid project auth requirements: group `{}` references unknown repository `{repo_id}`; this workspace lists {}",
+                    group.id,
+                    if project.repos.is_empty() {
+                        "no repositories".to_string()
+                    } else {
+                        project.repos.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", ")
+                    }
+                );
+            };
+            validate_auth_group_remote(group, repo_id, &remote)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_auth_group_remote(
+    group: &crate::model::ProjectAuthGroup,
+    repo_id: &str,
+    remote: &str,
+) -> Result<()> {
+    let target = remote_target(remote).map_err(|_| {
+        anyhow::anyhow!(
+            "Invalid project auth requirements: group `{}` references repository `{repo_id}`, whose remote is not a supported forge remote",
+            group.id
+        )
+    })?;
+    if !target.0.eq_ignore_ascii_case(&group.host) {
+        bail!(
+            "Invalid project auth requirements: group `{}` is for host `{}` but repository `{repo_id}` is on `{}`",
+            group.id,
+            group.host,
+            target.0
+        );
+    }
+    let declared = crate::providers::for_remote(remote)
+        .map(|forge| forge.id().to_owned())
+        .unwrap_or_default();
+    let declared = match declared.as_str() {
+        "codeberg" | "gitea" => "forgejo".to_owned(),
+        value => value.to_owned(),
+    };
+    // Known forges identify themselves by host; a custom host with no
+    // recognizable name trusts the group's declared provider.
+    if !declared.is_empty() && declared != group.provider {
+        bail!(
+            "Invalid project auth requirements: group `{}` declares provider `{}` but repository `{repo_id}` is a `{declared}` remote",
+            group.id,
+            group.provider
+        );
     }
     Ok(())
 }
@@ -638,7 +819,8 @@ pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<Str
         return Ok(None);
     }
     let target = remote_target(remote)?;
-    let Some(name) = binding_for_target(&registry, bindings, &project, &target)? else {
+    let pending = load_known_pending_repos(&root, &project.id);
+    let Some(name) = binding_for_target(&registry, bindings, &project, &target, &pending)? else {
         return Ok(None);
     };
     // binding_for_target validates the credential metadata and exact host.
@@ -679,7 +861,8 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
         return Ok(None);
     }
     let target = remote_target(remote)?;
-    let Some(name) = binding_for_target(&registry, bindings, &project, &target)? else {
+    let pending = load_known_pending_repos(&root, &project.id);
+    let Some(name) = binding_for_target(&registry, bindings, &project, &target, &pending)? else {
         return Ok(None);
     };
     let resolved = credential(name)?;
@@ -694,6 +877,7 @@ fn binding_for_target<'a>(
     bindings: &'a BTreeMap<String, String>,
     project: &KnitProject,
     target: &(String, String),
+    pending: &BTreeMap<String, String>,
 ) -> Result<Option<&'a str>> {
     let matches: Vec<_> = project
         .repos
@@ -716,18 +900,47 @@ fn binding_for_target<'a>(
                 project.id, repo.id
             )
         })?;
-        validate_name(name)?;
-        let spec = registry
-            .credentials
-            .get(name)
-            .with_context(|| format!("Assigned credential `{name}` is not configured"))?;
-        validate_spec(spec)?;
-        if !spec.host.eq_ignore_ascii_case(&target.0) {
-            bail!("Assigned credential host does not match the repository host");
-        }
-        return Ok(Some(name));
+        return validated_binding(registry, name, &target.0);
+    }
+    // No tracked repository matches. A repository the full membership knows
+    // but this workspace has not materialized yet (out of clone scope, or a
+    // pull add that failed) can still be served by its explicit binding —
+    // the pull retry after `knit auth setup` depends on it. Ambiguous
+    // pending candidates fail instead of matching any one of them.
+    let pending_matches: Vec<_> = pending
+        .iter()
+        .filter(|(_, remote)| remote_target(remote).ok().as_ref() == Some(target))
+        .collect();
+    if pending_matches.len() > 1 {
+        bail!("Several pending repositories match this forge remote; credential assignment is ambiguous");
+    }
+    if let Some((repo_id, _)) = pending_matches.first() {
+        let name = bindings.get(repo_id.as_str()).with_context(|| {
+            format!(
+                "Project `{}` repository `{repo_id}` has no assigned credential yet; run `knit auth setup`, then `knit pull` to clone it",
+                project.id
+            )
+        })?;
+        return validated_binding(registry, name, &target.0);
     }
     bail!("Remote is not a configured repository in this project; refusing to select a forge credential")
+}
+
+fn validated_binding<'a>(
+    registry: &'a AuthStore,
+    name: &'a str,
+    host: &str,
+) -> Result<Option<&'a str>> {
+    validate_name(name)?;
+    let spec = registry
+        .credentials
+        .get(name)
+        .with_context(|| format!("Assigned credential `{name}` is not configured"))?;
+    validate_spec(spec)?;
+    if !spec.host.eq_ignore_ascii_case(host) {
+        bail!("Assigned credential host does not match the repository host");
+    }
+    Ok(Some(name))
 }
 
 #[cfg(test)]
@@ -782,6 +995,7 @@ mod tests {
                 host: "github.com".into(),
                 username: None,
                 token_env: None,
+                token_type: None,
             },
         );
         let bindings = BTreeMap::from([("app".into(), "work".into())]);
@@ -790,7 +1004,8 @@ mod tests {
                 &registry,
                 &bindings,
                 &project(),
-                &remote_target("https://github.com/org/app").unwrap()
+                &remote_target("https://github.com/org/app").unwrap(),
+                &BTreeMap::new()
             )
             .unwrap(),
             Some("work")
@@ -799,21 +1014,24 @@ mod tests {
             &registry,
             &bindings,
             &project(),
-            &remote_target("https://github.com/org/lib").unwrap()
+            &remote_target("https://github.com/org/lib").unwrap(),
+            &BTreeMap::new()
         )
         .is_err());
         assert!(binding_for_target(
             &registry,
             &bindings,
             &project(),
-            &remote_target("https://gitlab.com/other/app").unwrap()
+            &remote_target("https://gitlab.com/other/app").unwrap(),
+            &BTreeMap::new()
         )
         .is_err());
         assert!(binding_for_target(
             &registry,
             &bindings,
             &project(),
-            &remote_target("https://github.com/other/app").unwrap()
+            &remote_target("https://github.com/other/app").unwrap(),
+            &BTreeMap::new()
         )
         .is_err());
     }
@@ -825,6 +1043,7 @@ mod tests {
             host: "github.com".into(),
             username: None,
             token_env: None,
+            token_type: None,
         };
         let mut registry = AuthStore::default();
         registry.credentials.insert("narrow".into(), spec.clone());
@@ -833,15 +1052,22 @@ mod tests {
         for name in ["narrow", "classic"] {
             let bindings = BTreeMap::from([("app".into(), name.into())]);
             assert_eq!(
-                binding_for_target(&registry, &bindings, &project(), &target).unwrap(),
+                binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
+                    .unwrap(),
                 Some(name)
             );
         }
         let bindings = BTreeMap::from([("app".into(), "missing".into())]);
-        assert!(binding_for_target(&registry, &bindings, &project(), &target).is_err());
+        assert!(
+            binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
+                .is_err()
+        );
         registry.credentials.get_mut("narrow").unwrap().host = "gitlab.com".into();
         let bindings = BTreeMap::from([("app".into(), "narrow".into())]);
-        assert!(binding_for_target(&registry, &bindings, &project(), &target).is_err());
+        assert!(
+            binding_for_target(&registry, &bindings, &project(), &target, &BTreeMap::new())
+                .is_err()
+        );
     }
 
     #[test]
@@ -852,9 +1078,174 @@ mod tests {
             &AuthStore::default(),
             &BTreeMap::new(),
             &project,
-            &remote_target("https://github.com/org/app").unwrap()
+            &remote_target("https://github.com/org/app").unwrap(),
+            &BTreeMap::new()
         )
         .is_err());
+    }
+
+    fn authed_project() -> KnitProject {
+        let mut project = project();
+        project.auth = Some(
+            serde_json::from_value(serde_json::json!({
+                "groups": [{
+                    "id": "gh", "name": "GitHub", "provider": "github", "host": "github.com",
+                    "repos": ["app"], "tokenTypes": ["classic_pat"]
+                }]
+            }))
+            .unwrap(),
+        );
+        project
+    }
+
+    #[test]
+    fn project_auth_validation_rejects_unknown_mismatched_and_ambiguous_refs() {
+        let valid = authed_project();
+        assert!(validate_project_auth(&valid).is_ok());
+
+        // Unknown repository: a typo, never silently treated as scoped.
+        let mut typo = authed_project();
+        typo.auth.as_mut().unwrap().groups[0].repos = vec!["appp".into()];
+        let error = validate_project_auth(&typo).unwrap_err().to_string();
+        assert!(error.contains("unknown repository `appp`"), "{error}");
+
+        // Host mismatch: group host must be the repository's host.
+        let mut wrong_host = authed_project();
+        wrong_host.auth.as_mut().unwrap().groups[0].host = "ghe.example.com".into();
+        assert!(validate_project_auth(&wrong_host)
+            .unwrap_err()
+            .to_string()
+            .contains("is for host"));
+
+        // Provider mismatch on a known forge: the URL is authoritative.
+        let mut wrong_provider = authed_project();
+        wrong_provider.auth.as_mut().unwrap().groups[0].provider = "gitlab".into();
+        wrong_provider.auth.as_mut().unwrap().groups[0].token_types =
+            vec!["personal_access_token".into()];
+        assert!(validate_project_auth(&wrong_provider)
+            .unwrap_err()
+            .to_string()
+            .contains("declares provider `gitlab`"));
+
+        // A custom host trusts the declared provider (URL says nothing).
+        let mut custom = project();
+        custom.repos[0].remote = Some("https://git.example.test/org/app.git".into());
+        custom.auth = Some(serde_json::from_value(serde_json::json!({
+            "groups": [{
+                "id": "g", "name": "Self-hosted", "provider": "gitlab", "host": "git.example.test",
+                "repos": ["app"], "tokenTypes": ["personal_access_token"]
+            }]
+        }))
+        .unwrap());
+        assert!(validate_project_auth(&custom).is_ok());
+
+        // Ambiguous local ids never match any candidate.
+        let mut ambiguous = authed_project();
+        ambiguous.repos.push(ambiguous.repos[0].clone());
+        assert!(validate_project_auth(&ambiguous)
+            .unwrap_err()
+            .to_string()
+            .contains("more than once"));
+
+        // Host comparison is case-insensitive.
+        let mut case = authed_project();
+        case.auth.as_mut().unwrap().groups[0].host = "GitHub.com".into();
+        assert!(validate_project_auth(&case).is_ok());
+
+        // Several groups may share one host as long as repos do not overlap.
+        let mut shared = authed_project();
+        shared.auth.as_mut().unwrap().groups.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "gh2", "name": "Second GitHub", "provider": "github", "host": "github.com",
+                "repos": ["lib"], "tokenTypes": ["fine_grained_pat"]
+            }))
+            .unwrap(),
+        );
+        assert!(validate_project_auth(&shared).is_ok());
+    }
+
+    #[test]
+    fn pending_membership_references_validate_and_resolve() {
+        // Scoped workspace: `lib` was never cloned, but the membership knows
+        // it, so the reference validates and a binding can serve its URL.
+        let mut project = authed_project();
+        project.repos.truncate(1); // only `app` exists locally
+        project.auth.as_mut().unwrap().groups[0].repos = vec!["app".into(), "lib".into()];
+        let pending = BTreeMap::from([(
+            "lib".to_string(),
+            "https://github.com/org/lib.git".to_string(),
+        )]);
+        assert!(validate_project_auth_with_pending(&project, &pending).is_ok());
+        // Without the membership record the same reference is a typo.
+        assert!(validate_project_auth(&project).is_err());
+
+        // A pending reference must still sit on the group's forge.
+        let mut off_host = project.clone();
+        off_host.auth.as_mut().unwrap().groups[0].repos = vec!["lib".into()];
+        let wrong = BTreeMap::from([(
+            "lib".to_string(),
+            "https://gitlab.com/org/lib.git".to_string(),
+        )]);
+        assert!(validate_project_auth_with_pending(&off_host, &wrong).is_err());
+
+        // The resolver serves a pending repository once it has a binding,
+        // fails actionably without one, and refuses ambiguity.
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "work".into(),
+            CredentialSpec {
+                provider: "github".into(),
+                host: "github.com".into(),
+                username: None,
+                token_env: None,
+                token_type: None,
+            },
+        );
+        let target = remote_target("https://github.com/org/lib").unwrap();
+        let no_binding = BTreeMap::new();
+        assert!(
+            binding_for_target(&registry, &no_binding, &project, &target, &pending)
+                .unwrap_err()
+                .to_string()
+                .contains("run `knit auth setup`, then `knit pull`")
+        );
+        let bindings = BTreeMap::from([("lib".into(), "work".into())]);
+        assert_eq!(
+            binding_for_target(&registry, &bindings, &project, &target, &pending).unwrap(),
+            Some("work")
+        );
+        let mut two = pending.clone();
+        two.insert(
+            "lib2".to_string(),
+            "https://github.com/org/lib.git".to_string(),
+        );
+        assert!(
+            binding_for_target(&registry, &bindings, &project, &target, &two)
+                .unwrap_err()
+                .to_string()
+                .contains("ambiguous")
+        );
+    }
+
+    #[test]
+    fn token_type_metadata_is_validated_against_the_provider() {
+        let mut spec = CredentialSpec {
+            provider: "bitbucket".into(),
+            host: "bitbucket.org".into(),
+            username: None,
+            token_env: None,
+            token_type: Some("atlassian_api_token".into()),
+        };
+        assert!(validate_spec(&spec).is_ok());
+        spec.token_type = Some("fine_grained_pat".into());
+        assert!(validate_spec(&spec).is_err());
+        spec.provider = "forgejo".into();
+        spec.host = "codeberg.org".into();
+        spec.token_type = Some("access_token".into());
+        assert!(validate_spec(&spec).is_ok());
+        // Forgejo aliases share the same token kinds.
+        spec.provider = "codeberg".into();
+        assert!(validate_spec(&spec).is_ok());
     }
 
     #[test]

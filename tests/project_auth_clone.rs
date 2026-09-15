@@ -1,0 +1,655 @@
+//! Remote clone integration with project-defined auth requirements: the
+//! bootstrap that lands before any private repository fetch, recovery of a
+//! clone whose private repositories failed for missing credentials, and the
+//! pending known-repos map for membership a scope left out.
+//!
+//! Network is limited to local fixtures: the fake sync remote is a loopback
+//! HTTP server, "private" forge repositories use reserved `.example` hosts
+//! (NXDOMAIN, fail fast, no real forge), and the recovery phase rewrites the
+//! reserved URL to a local bare repository through Git's `insteadOf` in an
+//! isolated global config, standing in for the access a linked credential
+//! grants. No real tokens or networks are involved.
+
+mod common;
+
+use common::*;
+use std::fs;
+use std::path::Path;
+
+/// A knitProject membership entry: local id, forge remote, base branch.
+fn membership_repo(id: &str, remote: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "path": "",
+        "remote": remote,
+        "baseBranch": "main",
+    })
+}
+
+/// An export repository record for the same repo.
+fn export_record(id: &str, remote: &str) -> serde_json::Value {
+    serde_json::json!({
+        "localId": id,
+        "name": id,
+        "defaultBranch": None::<String>,
+        "remoteUrl": remote,
+        "metadata": {},
+    })
+}
+
+fn auth_group(id: &str, host: &str, repos: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "name": id,
+        "provider": "github",
+        "host": host,
+        "repos": repos,
+        "tokenTypes": ["classic_pat"],
+    })
+}
+
+/// Build a project export body with the given membership, records, and auth.
+fn export_body(repos: &[(String, String)], auth: Option<serde_json::Value>) -> serde_json::Value {
+    let membership: Vec<_> = repos
+        .iter()
+        .map(|(id, remote)| membership_repo(id, remote))
+        .collect();
+    let records: Vec<_> = repos
+        .iter()
+        .map(|(id, remote)| export_record(id, remote))
+        .collect();
+    let mut knit_project = serde_json::json!({
+        "schemaVersion": "1",
+        "kind": "KnitProject",
+        "id": "demo",
+        "createdAt": "2026-01-01T00:00:00Z",
+        "updatedAt": "2026-01-01T00:00:00Z",
+        "repos": membership,
+    });
+    if let Some(auth) = auth {
+        knit_project["auth"] = auth;
+    }
+    serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": knit_project,
+            "repositories": records,
+            "bundles": [],
+            "historyEvents": [],
+        }
+    })
+}
+
+fn read_json(path: &Path) -> serde_json::Value {
+    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
+}
+
+/// A global git config that maps one reserved forge URL onto a local bare
+/// repository: the stand-in for the access a linked credential grants.
+fn instead_of_config(root: &Path, url: &str, bare: &Path) -> std::path::PathBuf {
+    let config = root.join("recovery.gitconfig");
+    fs::write(
+        &config,
+        format!("[url \"{}\"]\n\tinsteadOf = {url}\n", bare.display()),
+    )
+    .unwrap();
+    config
+}
+
+fn make_bare_repo(root: &Path) -> std::path::PathBuf {
+    make_bare_named(root, "private")
+}
+
+fn make_bare_named(root: &Path, name: &str) -> std::path::PathBuf {
+    let work = root.join(format!("{name}-source"));
+    init_repo(&work, name);
+    let bare = root.join(format!("{name}.git"));
+    git(
+        root,
+        [
+            "clone",
+            "--bare",
+            "--quiet",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    bare
+}
+
+/// A clone whose private repository fails for a missing credential keeps the
+/// repository as a project entry, keeps the auth requirements, and is
+/// recoverable in place: link a credential (scriptable setup), and the next
+/// remote pull re-clones the missing checkout through the binding.
+#[test]
+fn failed_private_clone_stays_in_project_and_recovers_via_auth_and_pull() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend-source");
+    init_repo(&backend, "backend");
+    let private_url = "https://forge.example/org/private.git";
+    let export = export_body(
+        &[
+            ("backend".to_string(), backend.to_string_lossy().to_string()),
+            ("private".to_string(), private_url.to_string()),
+        ],
+        Some(serde_json::json!({"groups": [auth_group("gh", "forge.example", &["private"])]})),
+    );
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+    let home = root.join("knit-home");
+    fs::create_dir_all(&home).unwrap();
+
+    // Noninteractive clone: one public repo clones, the private one cannot.
+    let output = knit_with_env(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--no-worktree",
+        ],
+        &[("KNIT_HOME", home.to_str().unwrap())],
+    );
+    assert!(output.contains("Auth requirements:"), "{output}");
+    assert!(output.contains("1 credential group(s)"), "{output}");
+    assert!(output.contains("Skipped:"), "{output}");
+    assert!(output.contains("private"), "{output}");
+
+    // The workspace is complete and recoverable: project with the full group
+    // and an entry for the failed repo, config with the chosen sync remote.
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    assert_eq!(
+        project["auth"]["groups"][0]["repos"],
+        serde_json::json!(["private"])
+    );
+    let ids: Vec<&str> = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["backend", "private"]);
+    let private_entry = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["id"] == "private")
+        .unwrap();
+    assert_eq!(
+        private_entry["path"].as_str().unwrap(),
+        target.join("private").to_string_lossy()
+    );
+    let config = read_json(&target.join(".knit/config.json"));
+    assert_eq!(config["remotes"]["hosted"]["url"], base_url);
+    assert_eq!(config["syncRemotes"], serde_json::json!(["hosted"]));
+    // In-scope failures are project entries, never pending-only: the failed
+    // repo must stay bindable by `knit auth setup`.
+    assert!(!target.join(".knit/projects/demo.known-repos.json").exists());
+    // Nothing was assigned silently.
+    assert!(!home.join("forge-auth.json").exists());
+
+    // Recovery, executed: scriptable setup binds the failed repo's group...
+    let add = knit_with_env(
+        &target,
+        [
+            "auth",
+            "add",
+            "ci",
+            "--provider",
+            "github",
+            "--host",
+            "forge.example",
+            "--token-env",
+            "KNIT_TEST_TOKEN",
+        ],
+        &[("KNIT_HOME", home.to_str().unwrap())],
+    );
+    assert!(add.contains("ci"), "{add}");
+    let assigned = knit_with_env(
+        &target,
+        [
+            "auth",
+            "use",
+            "ci",
+            "--project",
+            "demo",
+            "--repo",
+            "private",
+        ],
+        &[("KNIT_HOME", home.to_str().unwrap())],
+    );
+    assert!(
+        assigned.contains("Assigned `ci` to private"),
+        "auth use must bind the failed repo's entry: {assigned}"
+    );
+    let bindings = read_json(&home.join("forge-auth.json"));
+    let bound: Vec<&str> = bindings["projects"]
+        .as_object()
+        .unwrap()
+        .values()
+        .flat_map(|bindings| bindings.as_object().unwrap().keys())
+        .map(String::as_str)
+        .collect();
+    assert_eq!(bound, vec!["private"]);
+
+    // ...and the retried pull clones the checkout through the binding. The
+    // insteadOf rewrite stands in for the access the credential grants on the
+    // real forge; the binding resolution itself runs for real.
+    let bare = make_bare_repo(&root);
+    let config = instead_of_config(&root, private_url, &bare);
+    let pull = knit_with_env(
+        &target,
+        ["pull", "--bundles"],
+        &[
+            ("KNIT_HOME", home.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", config.to_str().unwrap()),
+            ("KNIT_TEST_TOKEN", "recovered-secret"),
+        ],
+    );
+    assert!(
+        pull.contains("recovered") && pull.contains("private"),
+        "pull must retry the missing checkout: {pull}"
+    );
+    assert!(target.join("private").join(".git").exists());
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    let private_entry = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["id"] == "private")
+        .unwrap();
+    assert!(Path::new(private_entry["path"].as_str().unwrap()).is_dir());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A clone where nothing could be cloned fails, but leaves a workspace valid
+/// enough to recover from instead of dead-ending: re-entering `knit clone`
+/// into the created target is refused, and the message says what to run.
+#[test]
+fn clone_with_no_cloneable_repo_bails_but_leaves_a_recoverable_workspace() {
+    let root = unique_temp_dir();
+    let private_url = "https://forge.example/org/private.git";
+    let export = export_body(
+        &[("private".to_string(), private_url.to_string())],
+        Some(serde_json::json!({"groups": [auth_group("gh", "forge.example", &["private"])]})),
+    );
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let output = knit_fails(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--no-worktree",
+        ],
+    );
+    assert!(
+        output.contains("Failed to clone any repository"),
+        "{output}"
+    );
+    assert!(
+        output.contains("knit auth setup") && output.contains("knit pull --bundles"),
+        "the failure must name the recovery commands: {output}"
+    );
+    assert!(output.contains("recoverable workspace"), "{output}");
+
+    // The workspace exists and carries everything recovery needs: the chosen
+    // sync remote, the project with its auth requirements, and the failed
+    // repo's entry.
+    let config = read_json(&target.join(".knit/config.json"));
+    assert_eq!(config["remotes"]["hosted"]["url"], base_url);
+    assert_eq!(config["activeProject"], "demo");
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    assert_eq!(
+        project["auth"]["groups"][0]["repos"],
+        serde_json::json!(["private"])
+    );
+    assert_eq!(
+        project["repos"][0]["remote"],
+        serde_json::json!(private_url)
+    );
+
+    // A retry of `knit clone` into the same target refuses (no clobbering),
+    // which is why the failure message must direct recovery through the
+    // workspace instead.
+    let retry = knit_fails(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--no-worktree",
+        ],
+    );
+    assert!(
+        retry.contains("already a Knit workspace"),
+        "retry must refuse the existing target: {retry}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A scoped clone keeps the remote's full group mappings (an out-of-scope
+/// group repo stays in the group), records the out-of-scope membership in the
+/// pending known-repos map, and never asks for an out-of-scope credential.
+#[test]
+fn scoped_clone_preserves_full_groups_and_pends_only_out_of_scope() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend-source");
+    init_repo(&backend, "backend");
+    let frontend_url = "https://forge.example/org/frontend.git";
+    let export = export_body(
+        &[
+            ("backend".to_string(), backend.to_string_lossy().to_string()),
+            ("frontend".to_string(), frontend_url.to_string()),
+        ],
+        Some(serde_json::json!({"groups": [auth_group("gh", "forge.example", &["frontend"])]})),
+    );
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+    let home = root.join("knit-home");
+    fs::create_dir_all(&home).unwrap();
+
+    let output = knit_with_env(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "backend",
+            "--no-worktree",
+        ],
+        &[("KNIT_HOME", home.to_str().unwrap())],
+    );
+    assert!(output.contains("Auth requirements:"), "{output}");
+
+    // Local projection: only the selected repo is a project entry...
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    let ids: Vec<&str> = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, vec!["backend"]);
+    // ...while the group mapping is preserved in full.
+    assert_eq!(
+        project["auth"]["groups"][0]["repos"],
+        serde_json::json!(["frontend"])
+    );
+    // Out-of-scope membership is the pending map, distinguishable from the
+    // in-scope failures that stay in the project.
+    let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
+    assert_eq!(
+        pending["repos"],
+        serde_json::json!({"frontend": frontend_url})
+    );
+    // No credential was requested or assigned for the out-of-scope group.
+    assert!(!home.join("forge-auth.json").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `--prefer-https` rewrites the export's repository URLs after the scoped
+/// selection was made; the clone, the persisted project entries, and the
+/// pending map must all carry the rewritten HTTPS URL, not the SSH form the
+/// probe replaced. Asserts the actual clone URL (the checkout's origin), not
+/// a printed message.
+#[test]
+fn prefer_https_rewrites_the_urls_a_scoped_clone_uses_and_persists() {
+    let root = unique_temp_dir();
+    // `spawn_fake_remote_api` reports `code.example.test` as a connected
+    // forge host, which is what gates the ssh->https rewrite.
+    let backend_ssh = "git@code.example.test:org/backend.git";
+    let backend_https = "https://code.example.test/org/backend.git";
+    let frontend_ssh = "git@code.example.test:org/frontend.git";
+    let frontend_https = "https://code.example.test/org/frontend.git";
+
+    let export = export_body(
+        &[
+            ("backend".to_string(), backend_ssh.to_string()),
+            ("frontend".to_string(), frontend_ssh.to_string()),
+        ],
+        None,
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+
+    // Two local bare repos stand in for the forge: the SSH probes fail (no
+    // such host), the HTTPS probes succeed because the isolated global git
+    // config rewrites them onto the bare repositories.
+    let backend_bare = make_bare_named(&root, "backend-bare");
+    let frontend_bare = make_bare_named(&root, "frontend-bare");
+    let gitconfig = root.join("prefer-https.gitconfig");
+    fs::write(
+        &gitconfig,
+        format!(
+            "[url \"{}\"]\n\tinsteadOf = {backend_https}\n[url \"{}\"]\n\tinsteadOf = {frontend_https}\n",
+            backend_bare.display(),
+            frontend_bare.display()
+        ),
+    )
+    .unwrap();
+
+    let target = root.join("workspace");
+    let home = root.join("knit-home");
+    fs::create_dir_all(&home).unwrap();
+    let output = knit_with_env(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "backend",
+            "--prefer-https",
+            "--no-worktree",
+        ],
+        &[
+            ("KNIT_HOME", home.to_str().unwrap()),
+            ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
+        ],
+    );
+    assert!(output.contains("Scope:"), "{output}");
+
+    // The clone actually used the rewritten URL: git records the requested
+    // URL as the checkout's origin (insteadOf only affects transport).
+    let origin = git(&target.join("backend"), ["remote", "get-url", "origin"]);
+    assert_eq!(origin.trim(), backend_https);
+    // ...and so does the persisted project entry.
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    assert_eq!(
+        project["repos"][0]["remote"],
+        serde_json::json!(backend_https)
+    );
+    // The out-of-scope repo's pending entry carries the rewritten URL too.
+    let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
+    assert_eq!(
+        pending["repos"],
+        serde_json::json!({"frontend": frontend_https})
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A scoped clone whose every selected repo fails (all private, no
+/// credential) bails, but the recovery promise holds: the scope view is
+/// saved locally before any fetch, the full auth groups and the pending map
+/// survive, and binding a credential followed by `knit pull --bundles`
+/// recovers the repo inside the scope without ever touching the
+/// out-of-scope one.
+#[test]
+fn scoped_all_failed_clone_records_scope_view_and_recovers() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend-source");
+    init_repo(&backend, "backend");
+    let private_url = "https://forge.example/org/private.git";
+    let frontend_url = "https://forge.example/org/frontend.git";
+    let export = export_body(
+        &[
+            ("backend".to_string(), backend.to_string_lossy().to_string()),
+            ("private".to_string(), private_url.to_string()),
+            ("frontend".to_string(), frontend_url.to_string()),
+        ],
+        Some(serde_json::json!({"groups": [
+            auth_group("gh", "forge.example", &["private"]),
+            auth_group("gh-out", "forge.example", &["frontend"]),
+        ]})),
+    );
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+    let home = root.join("knit-home");
+    fs::create_dir_all(&home).unwrap();
+    let home_env = ("KNIT_HOME", home.to_str().unwrap());
+
+    let output = knit_fails_with_env(
+        &root,
+        [
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--repo",
+            "private",
+            "--no-worktree",
+        ],
+        &[home_env],
+    );
+    assert!(
+        output.contains("Failed to clone any repository"),
+        "{output}"
+    );
+    assert!(output.contains("knit pull --bundles"), "{output}");
+
+    // The scope view was saved before the fetch: without it the recovery
+    // pull cannot resolve the workspace's scope and skips every retry.
+    let views = read_json(&target.join(".knit/views/demo.views.json"));
+    assert_eq!(
+        views["views"]["scope"]["include"],
+        serde_json::json!(["private"])
+    );
+    assert_eq!(views["views"]["scope"]["base"], serde_json::json!("none"));
+    let config = read_json(&target.join(".knit/config.json"));
+    assert_eq!(config["scopeView"], serde_json::json!("scope"));
+
+    // Full auth groups survive locally, and the out-of-scope membership
+    // (including the other group's repo) is the pending map.
+    let project = read_json(&target.join(".knit/projects/demo.project.json"));
+    let group_repos: Vec<&str> = project["auth"]["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|group| group["repos"][0].as_str().unwrap())
+        .collect();
+    assert_eq!(group_repos, vec!["private", "frontend"]);
+    let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
+    assert_eq!(
+        pending["repos"],
+        serde_json::json!({
+            "backend": backend.to_string_lossy(),
+            "frontend": frontend_url,
+        })
+    );
+
+    // Recovery, executed: bind the failed repo and pull inside the scope.
+    knit_with_env(
+        &target,
+        [
+            "auth",
+            "add",
+            "ci",
+            "--provider",
+            "github",
+            "--host",
+            "forge.example",
+            "--token-env",
+            "KNIT_TEST_TOKEN",
+        ],
+        &[home_env],
+    );
+    let assigned = knit_with_env(
+        &target,
+        [
+            "auth",
+            "use",
+            "ci",
+            "--project",
+            "demo",
+            "--repo",
+            "private",
+        ],
+        &[home_env],
+    );
+    assert!(
+        assigned.contains("Assigned `ci` to private"),
+        "setup must bind the scoped failed repo: {assigned}"
+    );
+    let bare = make_bare_named(&root, "private-bare");
+    let gitconfig = instead_of_config(&root, private_url, &bare);
+    let pull = knit_with_env(
+        &target,
+        ["pull", "--bundles"],
+        &[
+            home_env,
+            ("GIT_CONFIG_GLOBAL", gitconfig.to_str().unwrap()),
+            ("KNIT_TEST_TOKEN", "scoped-secret"),
+        ],
+    );
+    assert!(
+        pull.contains("recovered") && pull.contains("private"),
+        "the scoped recovery pull must clone the missing checkout: {pull}"
+    );
+    assert!(target.join("private").join(".git").exists());
+    // The out-of-scope repos were neither cloned nor added.
+    assert!(!target.join("frontend").exists());
+    assert!(!target.join("backend").exists());
+    let pending = read_json(&target.join(".knit/projects/demo.known-repos.json"));
+    assert_eq!(
+        pending["repos"],
+        serde_json::json!({
+            "backend": backend.to_string_lossy(),
+            "frontend": frontend_url,
+        })
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

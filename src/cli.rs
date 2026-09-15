@@ -1476,6 +1476,9 @@ pub enum AuthCommand {
         /// Bitbucket Atlassian account email for an API token; omit for a repository access token.
         #[arg(long)]
         username: Option<String>,
+        /// Which of the provider's token kinds this is, e.g. fine_grained_pat or atlassian_api_token.
+        #[arg(long)]
+        token_type: Option<String>,
         /// Store an environment variable reference instead of storing the token itself.
         #[arg(long, conflicts_with = "token_stdin")]
         token_env: Option<String>,

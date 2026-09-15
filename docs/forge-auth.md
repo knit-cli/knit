@@ -16,6 +16,62 @@ knit auth setup --project tools
 
 `knit auth setup --repo api --repo web` limits editable repositories, including what `all` selects. The wizard still displays coverage and missing links for the entire project. Links specify where Knit uses credentials; they do not grant or change permissions on the provider. Choose tokens whose provider permissions cover the repositories and operations you intend to use.
 
+## Project-defined authentication requirements
+
+A project can declare what credentials its repositories need, so collaborators do not have to guess. The declaration lives in the project artifact (`knit.project.json`, and the workspace copy under `.knit/projects/`) as `auth.groups`, travels with the portable `knitProject` export, and is edited by project maintainers through their hosted project settings — never by end users setting up a clone:
+
+```json
+{
+  "auth": {
+    "groups": [
+      {
+        "id": "github-work",
+        "name": "GitHub work token",
+        "provider": "github",
+        "host": "github.com",
+        "repos": ["api", "web"],
+        "tokenTypes": ["fine_grained_pat"],
+        "permissions": ["contents:read", "pull_requests:write"],
+        "instructions": "Create a fine-grained token in the org, scoped to both repositories.",
+        "tokenUrl": "https://github.com/settings/personal-access-tokens/new"
+      },
+      {
+        "id": "bitbucket-cloud",
+        "name": "Bitbucket Cloud",
+        "provider": "bitbucket",
+        "host": "bitbucket.org",
+        "repos": ["legacy"],
+        "tokenTypes": ["atlassian_api_token", "access_token"]
+      }
+    ]
+  }
+}
+```
+
+Rules the declaration must satisfy:
+
+- `id`, `name`, `provider`, `host`, `repos`, and `tokenTypes` are required; `repos` and `tokenTypes` are nonempty. Group ids are unique, and a repository id may appear in at most one group. Several groups may share a host.
+- `provider` is one of `github`, `gitlab`, `bitbucket`, `forgejo`. `tokenTypes` come from that provider: GitHub `fine_grained_pat`/`classic_pat`; Bitbucket `atlassian_api_token`/`access_token`; GitLab `personal_access_token`/`project_access_token`/`group_access_token`; Forgejo `access_token`.
+- Referenced repository ids must exist in the project and sit on the group's forge: the remote URL is authoritative for known hosts, the declared provider and host cover custom hosts. Ambiguous or unknown references are rejected rather than guessed.
+- `permissions`, `instructions`, and `tokenUrl` are optional descriptive text. `tokenUrl` must be plain HTTPS without embedded credentials. Knit displays them but never executes instructions or opens links.
+- Metadata never contains tokens or personal credential names, and unknown fields inside `auth` are rejected on import so credential material can never ride along. An explicit clear is `{"groups": []}`, which restores the no-recommendation behavior.
+
+When groups exist, `knit auth setup` runs the guided flow instead of the open wizard: each group shows its name, token kinds, permissions, instructions, and token creation URL; you pick a compatible saved credential or create one (choosing from the group's accepted token kinds), review the current and proposed repository mapping, and only an explicit confirmation assigns anything. Groups are projected onto the repositories this workspace actually has — a scoped clone (`--repo`/`--view`) keeps the full portable definition but only prompts and maps for repositories present locally, and a group with no local repositories is reported and skipped. During `knit clone`, the guided setup runs before the first private Git fetch when a terminal is available; without one the clone reports each group and the `knit auth setup` / `knit auth add` + `knit auth use` path instead of hanging.
+
+`knit auth status` includes each group's coverage (`authGroups` with `linked`/`missing` in `--json`, per-repo `authGroup` attribution, plus repositories no group covers). Missing coverage is allowed while drafting and reported, never silently assigned. A malformed declaration (unknown repository reference, off-host group, overlapping repositories) makes `status` fail with the offending group instead of rendering misleading coverage. Group hosts are matched case-insensitively; credentials created from a group store the lowercase host.
+
+### Token kinds and older credentials
+
+Saved credentials record which token kind they are (`--token-type` on `knit auth add`, or the guided flow's choice). The kind is never guessed from an opaque token value: selecting an older unclassified credential in the guided flow asks you to classify it once, and skipping the question honestly leaves the credential unclassified. Bitbucket credentials additionally keep their account email consistent with the kind — an Atlassian API token needs it, a repository/project/workspace access token must not carry one — and the guided flow repairs a mismatch (asking for a missing email, offering to clear a stale one) even for credentials that already carry a token kind. A credential whose recorded kind is not among a group's recommended types still works after an explicit confirmation; recommendations are defaults, not policy.
+
+### Advanced overrides
+
+Groups are requirements on what to set up, not enforcement of a specific credential: `knit auth add` and `knit auth use` remain available for deliberate overrides (a second credential on the same host, machine-specific access, or splitting a group's repositories across credentials). A project without groups — or with `{"groups": []}` — keeps the original unconfigured wizard exactly as before. A malformed group declaration fails setup loudly with the offending group and repository instead of silently falling back.
+
+### Permission limitations
+
+`auth status --check` performs a Git read probe (`git ls-remote`) only. A green check never proves API, push, pull-request, or merge access, regardless of what a group's `permissions` text recommends; publishing and landing validate access through the real forge operations. `permissions` is guidance for token creation, not something Knit enforces or verifies.
+
 ## Scriptable setup and repository overrides
 
 For the common case, use one credential for several repositories, even when their owners differ:

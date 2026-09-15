@@ -33,6 +33,8 @@ use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
+use std::io;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 
 /// Machine-readable `knit clone --json` result document. The shape is a
@@ -151,6 +153,7 @@ pub fn clone_project_from_remote(
         materialize,
         prefer_https,
         scope,
+        json,
     ) {
         Ok(document) => {
             if json {
@@ -184,30 +187,14 @@ fn clone_project_classified(
     materialize: bool,
     prefer_https: bool,
     scope: CloneScopeRequest<'_>,
+    json: bool,
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
     let reference = parse_clone_reference(project_identifier, url)
         .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
     let (remote_name, remote, stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, reference.remote_url.as_deref(), token)?;
-    let mut export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
+    let export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
         .map_err(|error| (RemoteErrorKind::Http, error))?;
-    if prefer_https {
-        if let Some(token) = token.as_deref() {
-            let hosts = super::helpers::connected_forge_hosts(&remote, token).unwrap_or_default();
-            let cwd = std::env::current_dir().map_err(|e| (RemoteErrorKind::Other, e.into()))?;
-            for repository in &mut export.repositories {
-                if let Some(url) = repository.remote_url.clone() {
-                    if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
-                        if super::handoff::reachable(&cwd, &url, &remote_name, &hosts).is_err()
-                            && super::handoff::reachable(&cwd, &https, &remote_name, &hosts).is_ok()
-                        {
-                            repository.remote_url = Some(https);
-                        }
-                    }
-                }
-            }
-        }
-    }
     if scope.view.is_some() && token.is_none() {
         return Err((
             RemoteErrorKind::NoToken,
@@ -226,7 +213,9 @@ fn clone_project_classified(
         export,
         active_bundle,
         materialize,
+        prefer_https,
         scope,
+        json,
     )
     .map_err(|error| (RemoteErrorKind::Other, error))
 }
@@ -239,10 +228,12 @@ pub(super) fn clone_fetched_export(
     remote: KnitRemote,
     stored_token: Option<String>,
     token: Option<String>,
-    export: RemoteProjectExport,
+    mut export: RemoteProjectExport,
     active_bundle: Option<&str>,
     materialize: bool,
+    prefer_https: bool,
     scope: CloneScopeRequest<'_>,
+    json: bool,
 ) -> Result<CloneDocument> {
     // Views are fetched before any repo is cloned: `--view` resolves against
     // them, and a whole-project clone restores them as before. A failure is
@@ -266,7 +257,7 @@ pub(super) fn clone_fetched_export(
         }
     };
     let resolved_scope = resolve_clone_scope(&export, scope, remote_views.as_ref())?;
-    let (scoped_repositories, repos_out_of_scope, repos_unavailable) =
+    let (mut scoped_repositories, repos_out_of_scope, repos_unavailable) =
         partition_export_repositories(&export, resolved_scope.as_ref());
 
     let target_root = resolve_clone_target(target, project_identifier)?;
@@ -291,7 +282,151 @@ pub(super) fn clone_fetched_export(
         )
     })?;
 
+    // Portable auth requirements ride the exported knitProject. Validate them
+    // against the export's full membership so a scoped clone keeps groups
+    // referencing repos outside its scope.
+    let auth_requirements = export
+        .knit_project
+        .as_ref()
+        .and_then(|project| project.auth.clone())
+        .filter(|auth| !auth.groups.is_empty());
+    if let Some(auth) = &auth_requirements {
+        let mut membership = export.knit_project.clone().unwrap_or_else(|| {
+            let mut synthetic = membership_project_from_export(&export);
+            synthetic.auth = None;
+            synthetic
+        });
+        membership.auth = Some(auth.clone());
+        crate::auth::validate_project_auth(&membership)
+            .context("Remote project carries invalid auth requirements")?;
+    }
+
+    // Bootstrap the workspace before anything touches a forge: clones, the
+    // `--prefer-https` probes, all of it. Credential resolution needs the
+    // project context in place at the target, and a clone whose private repos
+    // fail must leave a valid, recoverable workspace behind — project (with
+    // auth), config carrying the chosen sync remote, and the pending map of
+    // membership the selection left out.
+    let bootstrap = bootstrap_clone_workspace(
+        &target_root,
+        &export,
+        &scoped_repositories,
+        &remote_name,
+        &remote,
+        stored_token.clone(),
+        resolved_scope.as_ref(),
+    )?;
+
+    // The views artifact — including the `--repo` scope view — is saved
+    // locally before any repository is fetched and before the grouped
+    // prompt runs: a clone that fails entirely (every repo private, or a
+    // canceled prompt) must leave the scope recorded, or the recovery pull
+    // cannot resolve the workspace's scope and skips its retries. Pushing
+    // the scope view to the remote still waits for a successful clone.
+    let mut views = match remote_views {
+        Some(remote_views) => super::pull::views_from_remote(&project_id, remote_views),
+        None => KnitProjectViews::new(project_id.clone(), now_iso()),
+    };
+    let mut push_views = false;
+    if let Some(scope) = resolved_scope.as_ref().filter(|scope| scope.save_view) {
+        views
+            .views
+            .insert(scope.view_name.clone(), scope.view.clone());
+        views.updated_at = now_iso();
+        push_views = true;
+    }
+    if !views.views.is_empty() || views.default_view.is_some() {
+        crate::store::save_views(&target_root, &views)?;
+    }
+
+    if auth_requirements.is_some() && !json && io::stdin().is_terminal() {
+        // Interactive grouped setup before the first private git fetch needs a
+        // credential. Groups are projected to the selected repos for the
+        // prompt, so an out-of-scope group never requests a token; the saved
+        // project keeps the full mappings. A setup error fails the clone —
+        // with requirements declared there is no implicit ambient-credential
+        // fallback. Skipping a group in the prompt is the explicit ambient
+        // path and keeps cloning.
+        crate::human!(
+            "{} {}",
+            out::heading("Setting up project credentials before cloning:"),
+            out::path(target_root.display())
+        );
+        crate::commands::auth::clone_group_setup(&target_root, &bootstrap.setup_project())?;
+    } else if let Some(auth) = &auth_requirements {
+        crate::human!(
+            "{} this project defines {} credential group(s); private repositories need one before they can be cloned:",
+            out::heading("Auth requirements:"),
+            auth.groups.len()
+        );
+        for group in &auth.groups {
+            crate::human!(
+                "  {} ({} @ {}) for {} — token type(s): {}{}",
+                out::repo(&group.id),
+                group.provider,
+                group.host,
+                group.repos.join(", "),
+                group.token_types.join(", "),
+                group
+                    .token_url
+                    .as_deref()
+                    .map(|url| format!(" — create at {url}"))
+                    .unwrap_or_default()
+            );
+        }
+        crate::human!(
+            "{}",
+            out::muted(format!(
+                "Run `knit auth setup` inside {} to link credentials interactively (or `knit auth add` + `knit auth use` noninteractively), then `knit pull --bundles` to clone any repository that failed for missing access.",
+                target_root.display()
+            ))
+        );
+    }
+
     super::helpers::ensure_helpers_for_git(&remote_name);
+
+    // `--prefer-https` probes run only after the bootstrap (and interactive
+    // setup) so a private repository's probe resolves the credential the user
+    // just linked, exactly like the clone that follows.
+    let mut rewrote_urls = false;
+    if prefer_https {
+        if let Some(token) = token.as_deref() {
+            let hosts = super::helpers::connected_forge_hosts(&remote, token).unwrap_or_default();
+            for repository in &mut export.repositories {
+                if let Some(url) = repository.remote_url.clone() {
+                    if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
+                        if super::handoff::reachable(&target_root, &url, &remote_name, &hosts)
+                            .is_err()
+                            && super::handoff::reachable(&target_root, &https, &remote_name, &hosts)
+                                .is_ok()
+                        {
+                            repository.remote_url = Some(https);
+                            rewrote_urls = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if rewrote_urls {
+        // The scoped selection was cloned from the export before the rewrite;
+        // everything downstream — the clones, the persisted project entries,
+        // the pending map — must carry the rewritten URLs, not the SSH forms
+        // the probe replaced.
+        refresh_scoped_repository_urls(&mut scoped_repositories, &export);
+        let mut refreshed = bootstrap.project.clone();
+        for entry in &mut refreshed.repos {
+            if let Some(selected) = scoped_repositories
+                .iter()
+                .find(|repository| export_repo_local_id(repository) == entry.id)
+            {
+                entry.remote = selected.remote_url.clone();
+            }
+        }
+        write_json(&project_path(&target_root, &refreshed.id), &refreshed)?;
+        refresh_clone_pending(&target_root, &export, &refreshed)?;
+    }
+
     let (repo_paths, mut failed_repos) =
         clone_export_repositories_collecting(&target_root, &scoped_repositories);
     // A scope repo the export carries no record for (withheld by the server,
@@ -305,16 +440,35 @@ pub(super) fn clone_fetched_export(
     }
     if repo_paths.is_empty() {
         bail!(
-            "Failed to clone any repository for project `{}`:\n{}",
+            "Failed to clone any repository for project `{}`:\n{}\n\n\
+             A recoverable workspace was created at {} with the project, its auth requirements, and the {} sync remote. \
+             Run `knit auth setup` there to link credentials (re-entering `knit clone` into an existing workspace is refused), then `knit pull --bundles` to clone the remaining repositories.",
             export.project.slug,
-            format_repo_failures(&failed_repos)
+            format_repo_failures(&failed_repos),
+            target_root.display(),
+            remote_name
         );
     }
-    let project = local_project_from_export(&export, &repo_paths)?;
+    let project =
+        local_project_from_export(&export, &scoped_repositories, &repo_paths, &target_root)?;
     write_json(&project_path(&target_root, &project.id), &project)?;
+    refresh_clone_pending(&target_root, &export, &project)?;
 
-    let (bundles, dropped_bundles) =
-        localized_export_bundles(&export, &project, &remote, &remote_name, token.as_deref())?;
+    // Bundles localize against repos with real checkouts only: the project
+    // now keeps entries for in-scope repos whose clone failed (they are the
+    // recovery contract), but a bundle touching one still cannot be restored
+    // here and is reported as dropped instead.
+    let mut localization_project = project.clone();
+    localization_project
+        .repos
+        .retain(|repo| repo_paths.contains_key(&repo.id));
+    let (bundles, dropped_bundles) = localized_export_bundles(
+        &export,
+        &localization_project,
+        &remote,
+        &remote_name,
+        token.as_deref(),
+    )?;
     let out_of_scope: BTreeSet<&str> = repos_out_of_scope.iter().map(String::as_str).collect();
     let (out_of_scope_bundles, dropped_bundles): (Vec<DroppedBundle>, Vec<DroppedBundle>) =
         dropped_bundles.into_iter().partition(|dropped| {
@@ -356,22 +510,9 @@ pub(super) fn clone_fetched_export(
     };
     crate::store::save_config(&target_root, &config)?;
 
-    // Restore the cloning user's saved views, adding the `--repo` scope view
-    // when the clone made one so the scope can be extended like any view.
-    let mut views = match remote_views {
-        Some(remote_views) => super::pull::views_from_remote(&project.id, remote_views),
-        None => KnitProjectViews::new(project.id.clone(), now_iso()),
-    };
-    let mut push_views = false;
-    if let Some(scope) = resolved_scope.as_ref().filter(|scope| scope.save_view) {
-        views
-            .views
-            .insert(scope.view_name.clone(), scope.view.clone());
-        views.updated_at = now_iso();
-        push_views = true;
-    }
+    // The views artifact itself was saved before any repository was fetched
+    // (see the early block); a successful clone only reports it.
     if !views.views.is_empty() || views.default_view.is_some() {
-        crate::store::save_views(&target_root, &views)?;
         crate::human!("{} {} view(s)", out::heading("Views:"), views.views.len());
     }
     // The scope view has to outlive the next `knit sync pull --views`, which
@@ -669,6 +810,171 @@ fn partition_export_repositories(
         .cloned()
         .collect();
     (selected, left_out, unavailable)
+}
+
+/// The workspace state written into the clone target before any repository is
+/// fetched: the project artifact (full auth groups, entries for every selected
+/// repo) and a config carrying the chosen sync remote, so credential
+/// resolution has a root, a failed private clone is recoverable in place, and
+/// `knit pull` can reach the remote afterwards.
+struct CloneBootstrap {
+    project: KnitProject,
+    /// Repo ids the selection clones (groups are projected onto these for the
+    /// interactive prompt).
+    selected_ids: BTreeSet<String>,
+}
+
+impl CloneBootstrap {
+    /// The project handed to grouped setup: same id and repos, but with each
+    /// group's repositories limited to the selection — the prompt never
+    /// requests a credential for an out-of-scope group or repo. The saved
+    /// project keeps the full group mappings untouched.
+    fn setup_project(&self) -> KnitProject {
+        let mut setup = self.project.clone();
+        if let Some(auth) = setup.auth.as_mut() {
+            for group in &mut auth.groups {
+                group.repos.retain(|repo| self.selected_ids.contains(repo));
+            }
+            auth.groups.retain(|group| !group.repos.is_empty());
+        }
+        setup
+    }
+}
+
+/// Write the bootstrap project, config, and pending known-repos map into the
+/// clone target. In-scope repos are project entries from the start — failed
+/// clone and all — because the entry is what grouped setup maps a credential
+/// onto and what pull retries; the pending map records only the membership a
+/// scope deliberately left out. Both files are overwritten with finished
+/// versions when the clone succeeds, and remain valid as-is when it does not.
+fn bootstrap_clone_workspace(
+    target_root: &Path,
+    export: &RemoteProjectExport,
+    scoped_repositories: &[RemoteExportRepository],
+    remote_name: &str,
+    remote: &KnitRemote,
+    stored_token: Option<String>,
+    scope: Option<&ResolvedCloneScope>,
+) -> Result<CloneBootstrap> {
+    let mut project = export
+        .knit_project
+        .clone()
+        .unwrap_or_else(|| KnitProject::new(export_project_id(export), now_iso()));
+    project.id = slugify(&project.id);
+    let selected_ids: BTreeSet<String> = scoped_repositories
+        .iter()
+        .map(export_repo_local_id)
+        .collect();
+    project.repos = selected_ids
+        .iter()
+        .map(|local_id| {
+            let repository = scoped_repositories
+                .iter()
+                .find(|repository| &export_repo_local_id(repository) == local_id)
+                .expect("selected ids come from the scoped repositories");
+            project_repo_entry_from_export(repository, &target_root.join(local_id))
+        })
+        .collect();
+    project.updated_at = now_iso();
+    write_json(&project_path(target_root, &project.id), &project)?;
+
+    let mut remotes = BTreeMap::new();
+    remotes.insert(
+        remote_name.to_string(),
+        KnitRemote {
+            url: remote.url.clone(),
+            token: stored_token,
+        },
+    );
+    let config = KnitConfig {
+        schema_version: SCHEMA_VERSION.to_string(),
+        active_bundle: None,
+        active_project: Some(project.id.clone()),
+        sync_remote: Some(remote_name.to_string()),
+        sync_remotes: vec![remote_name.to_string()],
+        advice: true,
+        stealth: None,
+        auto_tag: None,
+        push_sync: true,
+        scope_view: scope.map(|scope| scope.view_name.clone()),
+        remotes,
+    };
+    crate::store::save_config(target_root, &config)?;
+
+    let pending = clone_pending_repos(export, &project);
+    crate::auth::save_known_pending_repos(target_root, &project.id, &pending)?;
+    Ok(CloneBootstrap {
+        project,
+        selected_ids,
+    })
+}
+
+/// Recompute and persist the pending known-repos map against the project as
+/// it now stands (after clones succeeded or failed, and after any URL
+/// rewrite `--prefer-https` made), so it names exactly the membership this
+/// workspace does not carry locally.
+fn refresh_clone_pending(
+    target_root: &Path,
+    export: &RemoteProjectExport,
+    project: &KnitProject,
+) -> Result<()> {
+    let pending = clone_pending_repos(export, project);
+    crate::auth::save_known_pending_repos(target_root, &project.id, &pending)
+}
+
+/// Carry `--prefer-https` rewrites from the export's repository records onto
+/// the scoped selection cloned from them, so the clones and every persisted
+/// artifact (project entries, pending map) use the URL the probe chose.
+fn refresh_scoped_repository_urls(
+    scoped: &mut [RemoteExportRepository],
+    export: &RemoteProjectExport,
+) {
+    for selected in scoped.iter_mut() {
+        let Some(rewritten) = export
+            .repositories
+            .iter()
+            .find(|repository| export_repo_local_id(repository) == export_repo_local_id(selected))
+            .and_then(|repository| repository.remote_url.clone())
+        else {
+            continue;
+        };
+        selected.remote_url = Some(rewritten);
+    }
+}
+
+/// Repo id → remote URL for the export's membership that no local project
+/// entry covers. Inventory records carry the clone URL; membership entries
+/// are the fallback for repos the export inventory did not include.
+fn clone_pending_repos(
+    export: &RemoteProjectExport,
+    project: &KnitProject,
+) -> BTreeMap<String, String> {
+    let local: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
+    let mut pending = BTreeMap::new();
+    for repository in &export.repositories {
+        let local_id = export_repo_local_id(repository);
+        if local.contains(local_id.as_str()) {
+            continue;
+        }
+        if let Some(url) = repository
+            .remote_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        {
+            pending.insert(local_id, url.to_string());
+        }
+    }
+    if let Some(membership) = export.knit_project.as_ref() {
+        for entry in &membership.repos {
+            if local.contains(entry.id.as_str()) || pending.contains_key(&entry.id) {
+                continue;
+            }
+            if let Some(url) = entry.remote.as_deref().filter(|url| !url.trim().is_empty()) {
+                pending.insert(entry.id.clone(), url.to_string());
+            }
+        }
+    }
+    pending
 }
 
 /// Assemble the `--json` result document from the clone's outcomes. Repos keep
@@ -1112,7 +1418,9 @@ fn checkout_export_base_branch(
 
 fn local_project_from_export(
     export: &RemoteProjectExport,
+    repositories: &[RemoteExportRepository],
     repo_paths: &BTreeMap<String, PathBuf>,
+    target_root: &Path,
 ) -> Result<KnitProject> {
     let mut project = export
         .knit_project
@@ -1121,16 +1429,19 @@ fn local_project_from_export(
     project.id = slugify(&project.id);
     project.repos.clear();
 
-    for repository in &export.repositories {
+    for repository in repositories {
         let local_id = export_repo_local_id(repository);
-        // Repos that failed to clone are absent from repo_paths; leave them out
-        // of the local project rather than recording an entry with no checkout.
-        let Some(repo_path) = repo_paths.get(&local_id) else {
-            continue;
-        };
+        // Repos whose clone failed keep their entry at the projected path
+        // (absent on disk): the entry is what grouped setup maps a credential
+        // onto and what a later pull retries. Dropping it would leave a
+        // failed private clone with no in-project handle, and no recovery.
+        let repo_path = repo_paths
+            .get(&local_id)
+            .cloned()
+            .unwrap_or_else(|| target_root.join(&local_id));
         project
             .repos
-            .push(project_repo_entry_from_export(repository, repo_path));
+            .push(project_repo_entry_from_export(repository, &repo_path));
     }
 
     project.updated_at = now_iso();

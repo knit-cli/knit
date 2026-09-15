@@ -346,3 +346,188 @@ fn one_to_many_links_mixed_backends_and_atomic_reassignment() {
     assert_eq!(rows[2]["credential"], "cloud");
     assert!(rows.iter().all(|r| r["status"] == "configured (unchecked)"));
 }
+
+// ---------------------------------------------------------------------------
+// Project-defined auth groups
+// ---------------------------------------------------------------------------
+
+fn write_auth_groups(fixture: &Fixture) {
+    let path = fixture.root.join(".knit/projects/tools.project.json");
+    let mut project: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    project["auth"] = json!({
+        "groups": [
+            {
+                "id": "gh", "name": "GitHub work", "provider": "github",
+                "host": "github.com", "repos": ["personal", "org"],
+                "tokenTypes": ["fine_grained_pat", "classic_pat"],
+                "permissions": ["contents:read"],
+                "instructions": "Create the token in the org.",
+                "tokenUrl": "https://github.com/settings/personal-access-tokens/new"
+            },
+            {
+                "id": "bb", "name": "Bitbucket Cloud", "provider": "bitbucket",
+                "host": "bitbucket.org", "repos": ["bb"],
+                "tokenTypes": ["access_token"]
+            }
+        ]
+    });
+    fs::write(path, serde_json::to_string(&project).unwrap()).unwrap();
+}
+
+#[test]
+fn status_reports_auth_group_requirements_and_accurate_coverage() {
+    let f = Fixture::new();
+    write_auth_groups(&f);
+    f.add("personal");
+    f.ok(
+        &[
+            "auth", "use", "personal", "--repo", "personal", "--repo", "org",
+        ],
+        None,
+    );
+
+    // JSON: per-repo group attribution plus per-group coverage.
+    let status = f.status("tools");
+    let repositories = status["repositories"].as_array().unwrap().clone();
+    assert_eq!(repositories[0]["authGroup"], json!("gh"));
+    assert_eq!(repositories[1]["authGroup"], json!("gh"));
+    assert_eq!(repositories[2]["authGroup"], json!("bb"));
+    assert_eq!(repositories[0]["status"], json!("configured (unchecked)"));
+    assert_eq!(
+        repositories[2]["status"],
+        json!("needs credential assignment (auth group `bb`)")
+    );
+    let groups = status["authGroups"].as_array().unwrap().clone();
+    assert_eq!(groups[0]["id"], json!("gh"));
+    assert_eq!(groups[0]["linked"], 2);
+    assert_eq!(groups[0]["missing"], json!([]));
+    assert_eq!(groups[1]["linked"], 0);
+    assert_eq!(groups[1]["missing"], json!(["bb"]));
+    assert_eq!(status["reposWithoutAuthGroup"], json!([]));
+
+    // Text: the same coverage with an actionable next step.
+    let text = f.ok(&["auth", "status", "--project", "tools"], None);
+    assert!(
+        text.contains("Auth group gh (github @ github.com): 2/2 repository(ies) linked"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "Auth group bb (bitbucket @ bitbucket.org): 0/1 repository(ies) linked; missing: bb"
+        ),
+        "{text}"
+    );
+    assert!(
+        text.contains("Run `knit auth setup --project tools` to link the missing repositories."),
+        "{text}"
+    );
+
+    // A repository a group does not cover is reported as uncovered, never
+    // silently assigned, and ambient authentication is still acceptable.
+    let path = f.root.join(".knit/projects/tools.project.json");
+    let mut project: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    project["auth"]["groups"][0]["repos"] = json!(["personal"]);
+    fs::write(path, serde_json::to_string(&project).unwrap()).unwrap();
+    let status = f.status("tools");
+    assert_eq!(status["reposWithoutAuthGroup"], json!(["org"]));
+    // `personal` is still assigned and covered; shrinking the group's repo
+    // list must not flip it to missing.
+    assert_eq!(status["authGroups"][0]["missing"], json!([]));
+    assert_eq!(status["authGroups"][0]["linked"], 1);
+
+    // --check fails accurately while a group repository is unassigned.
+    let checked = f.run(&["auth", "status", "--project", "tools", "--check"], None);
+    assert!(!checked.status.success());
+}
+
+#[test]
+fn auth_add_records_token_type_and_rejects_unsupported_kinds() {
+    let f = Fixture::new();
+    f.ok(
+        &[
+            "auth",
+            "add",
+            "fine",
+            "--provider",
+            "github",
+            "--token-type",
+            "fine_grained_pat",
+            "--token-env",
+            "KNIT_TEST_FORGE_TOKEN",
+        ],
+        None,
+    );
+    let registry: Value =
+        serde_json::from_str(&fs::read_to_string(f.home.join("forge-auth.json")).unwrap()).unwrap();
+    assert_eq!(
+        registry["credentials"]["fine"]["tokenType"],
+        json!("fine_grained_pat")
+    );
+    // Env-backed credentials keep an (empty) secret store on disk; snapshot
+    // both private files after the successful add so the rejected attempt
+    // can be proven not to touch either.
+    let registry_bytes = fs::read(f.home.join("forge-auth.json")).unwrap();
+    let secrets_bytes = fs::read(f.home.join("forge-secrets.json")).ok();
+    if let Some(bytes) = &secrets_bytes {
+        let secrets: Value = serde_json::from_slice(bytes).unwrap();
+        assert_eq!(secrets, json!({}), "env-backed credentials hold no secrets");
+    }
+    let rejected = f.run(
+        &[
+            "auth",
+            "add",
+            "wrong",
+            "--provider",
+            "github",
+            "--token-type",
+            "personal_access_token",
+            "--token-env",
+            "KNIT_TEST_FORGE_TOKEN",
+        ],
+        None,
+    );
+    assert!(!rejected.status.success());
+    assert_eq!(
+        fs::read(f.home.join("forge-auth.json")).unwrap(),
+        registry_bytes,
+        "the rejected add must not touch the registry"
+    );
+    assert_eq!(
+        fs::read(f.home.join("forge-secrets.json")).ok(),
+        secrets_bytes,
+        "the rejected add must not touch the secret store"
+    );
+}
+
+#[test]
+fn grouped_setup_without_terminal_stays_scriptable_and_never_hangs() {
+    let f = Fixture::new();
+    write_auth_groups(&f);
+    let result = f.run(&["auth", "setup"], None);
+    // Piped stdin is not a terminal: fail fast with the scriptable path
+    // instead of prompting (and never hang waiting for group answers).
+    assert!(!result.status.success());
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    assert!(stderr.contains("--token-stdin"), "{stderr}");
+    assert!(!f.home.join("forge-auth.json").exists());
+}
+
+#[test]
+fn grouped_setup_pty_two_forges_hidden_tokens_and_absent_group_skip() {
+    let root = std::env::temp_dir().join(format!("knit-auth-groups-pty-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    let result = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/auth_groups_pty.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_knit"))
+        .arg(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let _ = fs::remove_dir_all(&root);
+    assert!(result.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("PASS"), "{stdout}");
+}
