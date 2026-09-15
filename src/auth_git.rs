@@ -90,13 +90,17 @@ pub fn configure(
             let scope = format!("credential.https://{host}/{path}.helper");
             command.arg("-c").arg(format!("{scope}="));
             command.arg("-c").arg(format!("{scope}={helper}"));
-            // SSH origins must use the selected PAT, rather than silently
-            // bypassing the project binding through the user's SSH agent.
-            if !remote.starts_with("https://") {
-                command
-                    .arg("-c")
-                    .arg(format!("url.https://{host}/{path}.insteadOf={remote}"));
-            }
+            // The selected credential must ride the HTTPS transport: an SSH
+            // origin is rewritten to HTTPS instead of bypassing the token
+            // through the user's SSH agent, and an HTTPS origin gets the same
+            // exact identity rewrite so an inherited broad rewrite (a global
+            // SSH workaround like url.ssh://git@host/.insteadOf=https://host/)
+            // cannot divert this exact URL back to SSH. Git resolves insteadOf
+            // by longest matching prefix, so the exact key always outranks the
+            // inherited one for this invocation only.
+            command
+                .arg("-c")
+                .arg(format!("url.https://{host}/{path}.insteadOf={remote}"));
             selected.push(credential);
         }
     }
@@ -563,6 +567,45 @@ mod tests {
             ("github.com".into(), "org/repo.git".into())
         );
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
+    }
+
+    #[test]
+    fn exact_identity_rewrite_outranks_inherited_ssh_workaround() {
+        // What configure adds for an HTTPS target whose credential resolved:
+        // an exact url.https/<host>/<path>.insteadOf of the URL itself.
+        let identity =
+            "url.https://github.com/org/repo.git.insteadOf=https://github.com/org/repo.git";
+        let inherited = "url.ssh://git@github.com/.insteadOf=https://github.com/";
+        let resolved_url = |config: &[&str]| {
+            let mut command = Command::new("git");
+            command
+                .current_dir(std::env::temp_dir())
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .env(
+                    "GIT_CONFIG_GLOBAL",
+                    std::env::temp_dir().join("knit-nonexistent-global-config"),
+                );
+            for entry in config {
+                command.arg("-c").arg(entry);
+            }
+            let output = command
+                .args(["ls-remote", "--get-url", "https://github.com/org/repo.git"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            String::from_utf8(output.stdout).unwrap().trim().to_owned()
+        };
+        // Without the identity key, the inherited SSH rewrite wins and the
+        // URL leaves HTTPS (bypassing the selected credential's transport).
+        assert_eq!(
+            resolved_url(&[inherited]),
+            "ssh://git@github.com/org/repo.git"
+        );
+        // With it, the exact match outranks the broader inherited prefix.
+        assert_eq!(
+            resolved_url(&[inherited, identity]),
+            "https://github.com/org/repo.git"
+        );
     }
     #[test]
     fn network_operands_follow_options_and_explicit_remote() {
