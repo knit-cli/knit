@@ -2195,3 +2195,5 @@ pub fn recorded_history_pushes(dir: &Path) -> Vec<Vec<String>> {
         })
         .collect()
 }
+
+pub mod project_auth;

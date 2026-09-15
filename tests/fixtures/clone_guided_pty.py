@@ -18,19 +18,13 @@ arrives for a repository the workspace never cloned. `knit pull --bundles`
 hits the missing-assignment strict-gate failure mid-reconcile, prompts for
 the group's token, and clones the repository in place.
 """
-import errno
 import json
 import os
 from pathlib import Path
-import pty
-import select
-import signal
 import socketserver
 import subprocess
 import sys
-import termios
 import threading
-import time
 
 binary, directory = sys.argv[1:]
 root = Path(directory).resolve()
@@ -229,104 +223,15 @@ def membership(repos, groups):
 # ---------------------------------------------------------------------------
 # PTY conversation runner (mirrors auth_groups_pty.py).
 # ---------------------------------------------------------------------------
-DEADLINE = time.monotonic() + 180
 
 
 def conversation(cwd, home, args, script):
+    from pty_session import conversation as run
+    home.mkdir(parents=True, exist_ok=True)
     env = {'PATH': f'{root}/bin:/usr/bin:/bin', 'HOME': str(home),
            'KNIT_HOME': str(home), 'GIT_CONFIG_GLOBAL': str(root / 'empty.gitconfig'),
            'GIT_CONFIG_NOSYSTEM': '1', 'TERM': 'dumb'}
-    home.mkdir(parents=True, exist_ok=True)
-    pid, fd = pty.fork()
-    if pid == 0:
-        os.chdir(cwd)
-        os.execve(binary, [binary] + args, env)
-    transcript = b''
-    unread = b''
-    reaped = False
-
-    def watchdog():
-        while time.monotonic() < DEADLINE:
-            time.sleep(0.5)
-        print(f'FIXTURE TIMEOUT: {transcript.decode(errors="replace")!r}',
-              file=sys.stderr, flush=True)
-        try:
-            os.kill(pid, signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-        os._exit(1)
-
-    threading.Thread(target=watchdog, daemon=True).start()
-
-    def read_chunk(timeout=0.1):
-        ready, _, _ = select.select([fd], [], [], timeout)
-        if not ready:
-            return None
-        try:
-            return os.read(fd, 65536)
-        except OSError as e:
-            if e.errno == errno.EIO:
-                return b''
-            raise
-
-    def expect(needle):
-        nonlocal transcript, unread
-        wanted = needle.encode()
-        prompt_deadline = min(DEADLINE, time.monotonic() + 30)
-        while wanted not in unread:
-            assert time.monotonic() < prompt_deadline, (
-                f'timeout waiting for {needle!r}: {transcript.decode(errors="replace")}')
-            chunk = read_chunk()
-            if chunk is None:
-                continue
-            assert chunk, f'PTY closed waiting for {needle!r}: {transcript.decode(errors="replace")}'
-            transcript += chunk
-            unread += chunk
-        unread = unread.split(wanted, 1)[1]
-
-    def answer(prompt, text, hidden=False):
-        expect(prompt)
-        if hidden:
-            deadline = time.monotonic() + 5
-            while termios.tcgetattr(fd)[3] & termios.ECHO:
-                assert time.monotonic() < deadline, 'password prompt never disabled echo'
-                time.sleep(0.005)
-        os.write(fd, (text + '\n').encode())
-
-    try:
-        script(expect, answer)
-        exit_deadline = min(DEADLINE, time.monotonic() + 30)
-        eof = False
-        while not reaped:
-            waited, status = os.waitpid(pid, os.WNOHANG)
-            if waited:
-                reaped = True
-                assert os.waitstatus_to_exitcode(status) == 0, transcript.decode(errors='replace')
-                break
-            assert time.monotonic() < exit_deadline, (
-                'conversation did not exit: ' + transcript.decode(errors='replace'))
-            if eof:
-                time.sleep(0.02)
-                continue
-            chunk = read_chunk(0.05)
-            if chunk is None:
-                continue
-            if chunk:
-                transcript += chunk
-                unread += chunk
-            else:
-                eof = True
-        return transcript
-    finally:
-        if not reaped:
-            try:
-                os.kill(pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-            os.close(fd)
-            os.waitpid(pid, 0)
-        else:
-            os.close(fd)
+    return run(binary, cwd, env, args, script)
 
 
 def registry(home):
@@ -719,12 +624,12 @@ try:
     # Hosts iterate in sorted order: bitbucket.org before github.com.
     def project_wizard_script(expect, answer):
         expect('Project `demo` — per forge, use the shared default token or give this project its own.')
-        expect('bitbucket.org (docs): bitbucket.org (default token)')
+        expect('bitbucket.org (docs): default token `bitbucket.org`')
         answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
-        expect('Already using the default token for bitbucket.org.')
-        expect('github.com (svc): github.com (default token)')
+        expect('Using the default token for bitbucket.org.')
+        expect('github.com (svc): default token `github.com`')
         answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', 't')
-        answer('Project token for github.com (hidden): ', 'PROJ-TOK', hidden=True)
+        answer('Token for github.com (demo — hidden): ', 'PROJ-TOK', hidden=True)
         expect('`github.com-demo` is used for svc in this project only; the default token for github.com is untouched.')
         expect('Done.')
 
@@ -741,12 +646,12 @@ try:
     assert secrets(conv7 / 'home')['github.com'] == 'GH-MAIN'
 
     def switch_back_script(expect, answer):
-        expect('bitbucket.org (docs): bitbucket.org (default token)')
+        expect('bitbucket.org (docs): default token `bitbucket.org`')
         answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
-        expect('Already using the default token for bitbucket.org.')
-        expect('github.com (svc): github.com (default token); project token `github.com-demo` on svc')
+        expect('Using the default token for bitbucket.org.')
+        expect('svc: project token `github.com-demo`')
         answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
-        expect('Cleared project overrides for svc — the default token for github.com now applies.')
+        expect('Using the default token for github.com.')
         expect('Done.')
 
     conversation(conv7 / 'plain' / 'demo', conv7 / 'home',

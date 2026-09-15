@@ -1851,66 +1851,71 @@ fn ordinary_ledger_token_skips_optional_export_but_environment_denials_remain_vi
             false,
         ),
     ] {
-        let root = unique_temp_dir();
-        let (home, git_config) = isolated_home(&root);
-        let source = root.join("source");
-        init_repo(&source, "app");
-        let url = "https://github.com/team/app.git";
-        let fake_bin = write_fake_git(&root, &[(url, source.to_str().unwrap(), "public")]);
-        let path = fake_path_env(&fake_bin);
-        let mut env = home_env(&home, &git_config);
-        env.push(("PATH", &path));
-        let remote_dir = root.join("remote");
-        let base =
-            spawn_recording_remote(&remote_dir, export_with_repos(&[("app", url, "public")]));
-        fs::write(
-            remote_dir.join("access-token.json"),
-            json!({"data":{"tokenKind":kind,"scopes":scopes}}).to_string(),
-        )
-        .unwrap();
-        let (out, err, ok) = knit_run(
-            &root,
-            &[
-                "remote",
-                "add",
-                "hosted",
-                &base,
-                "--global",
-                "--token-stdin",
-            ],
-            &env,
-            Some(
-                "synthetic-ledger-token
+        for prefer_https in [false, true] {
+            let root = unique_temp_dir();
+            let (home, git_config) = isolated_home(&root);
+            let source = root.join("source");
+            init_repo(&source, "app");
+            let url = "https://github.com/team/app.git";
+            let fake_bin = write_fake_git(&root, &[(url, source.to_str().unwrap(), "public")]);
+            let path = fake_path_env(&fake_bin);
+            let mut env = home_env(&home, &git_config);
+            env.push(("PATH", &path));
+            let remote_dir = root.join("remote");
+            let base =
+                spawn_recording_remote(&remote_dir, export_with_repos(&[("app", url, "public")]));
+            fs::write(
+                remote_dir.join("access-token.json"),
+                json!({"data":{"tokenKind":kind,"scopes":scopes}}).to_string(),
+            )
+            .unwrap();
+            let (out, err, ok) = knit_run(
+                &root,
+                &[
+                    "remote",
+                    "add",
+                    "hosted",
+                    &base,
+                    "--global",
+                    "--token-stdin",
+                ],
+                &env,
+                Some(
+                    "synthetic-ledger-token
 ",
-            ),
-        );
-        assert!(ok, "{out}{err}");
-        let (out, err, ok) = knit_run(
-            &root,
-            &["clone", "demo", "--remote", "hosted", "--no-worktree"],
-            &env,
-            None,
-        );
-        assert!(ok, "{out}{err}");
-        let output = format!("{out}{err}");
-        assert!(root.join("demo/app/.git").exists());
-        assert_eq!(forge_credential_requests(&remote_dir), usize::from(!skip));
-        if skip {
-            assert!(
-                !output.contains("credential helper setup skipped"),
-                "{output}"
+                ),
             );
-            assert!(!output.contains("HTTP 403"), "{output}");
-            // The explicit diagnostic action still reports the restriction.
-            let (out, err, ok) = knit_run(&root, &["remote", "sync-helpers", "hosted"], &env, None);
-            assert!(!ok);
-            assert!(format!("{out}{err}").contains("knit auth"));
-        } else {
-            assert!(
-                output.contains("environment helper authorization"),
-                "{output}"
+            assert!(ok, "{out}{err}");
+            let mut args = vec!["clone", "demo", "--remote", "hosted", "--no-worktree"];
+            if prefer_https {
+                args.push("--prefer-https");
+            }
+            let (out, err, ok) = knit_run(&root, &args, &env, None);
+            assert!(ok, "{out}{err}");
+            let output = format!("{out}{err}");
+            assert!(root.join("demo/app/.git").exists());
+            assert_eq!(
+                forge_credential_requests(&remote_dir),
+                usize::from(!skip) * (1 + usize::from(prefer_https))
             );
+            if skip {
+                assert!(
+                    !output.contains("credential helper setup skipped"),
+                    "{output}"
+                );
+                assert!(!output.contains("HTTP 403"), "{output}");
+                // The explicit diagnostic action still reports the restriction.
+                let (out, err, ok) =
+                    knit_run(&root, &["remote", "sync-helpers", "hosted"], &env, None);
+                assert!(!ok);
+                assert!(format!("{out}{err}").contains("knit auth"));
+            } else {
+                assert!(
+                    output.contains("environment helper authorization"),
+                    "{output}"
+                );
+            }
+            fs::remove_dir_all(root).unwrap();
         }
-        fs::remove_dir_all(root).unwrap();
     }
 }

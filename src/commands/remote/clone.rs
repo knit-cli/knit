@@ -499,7 +499,7 @@ pub(super) fn clone_fetched_export(
     // entirely.
     let mut rewrote_urls = false;
     if prefer_https && !selection_covers_all && !locals_cover_all && token.is_some() {
-        let hosts = super::helpers::connected_forge_hosts(&remote, token.as_deref().unwrap())
+        let hosts = super::helpers::automatic_forge_hosts(&remote, token.as_deref().unwrap())
             .unwrap_or_default();
         for repository in &mut export.repositories {
             if !prefer_https_probes_repository(repository, credential_selection) {
@@ -1831,14 +1831,6 @@ fn local_assignments_cover(
     let Ok(store) = crate::auth::load() else {
         return false;
     };
-    // Bindings may not exist at all — a defaults-only workspace (the
-    // one-token-per-forge flow) can still cover everything, and must not be
-    // sent to the hosted helper lookup.
-    let Ok(key) = crate::auth::project_key(target_root, &project.id) else {
-        return false;
-    };
-    let bindings = store.projects.get(&key);
-    let ambient = store.ambient.get(&key);
     let mut any = false;
     for repository in repositories {
         let Some(url) = repository
@@ -1855,17 +1847,9 @@ fn local_assignments_cover(
             continue;
         };
         any = true;
-        let bound = bindings
-            .and_then(|map| map.get(&export_repo_local_id(repository)))
-            .and_then(|name| store.credentials.get(name))
-            .is_some_and(|spec| spec.host.eq_ignore_ascii_case(&host));
-        let ambient_ok = ambient
-            .and_then(|map| map.get(&export_repo_local_id(repository)))
-            .is_some_and(|recorded| *recorded == format!("{host}/{path}"));
-        // The host's default credential covers repositories with neither a
-        // binding nor an ambient allowance.
-        let default_ok = store.default_for_host(&host).is_some();
-        if !bound && !ambient_ok && !default_ok {
+        if crate::auth::project_credential_name(&store, target_root, project, &(host, path))
+            .is_err()
+        {
             return false;
         }
     }

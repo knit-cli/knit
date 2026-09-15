@@ -224,8 +224,15 @@ fn git_config(args: &[&str]) -> Result<()> {
     Ok(())
 }
 
-/// The remote's connected forge hosts, exact-HTTPS-host validated on our side
-/// regardless of what the server sent.
+/// Optional host discovery obeys the same capability gate as helper setup.
+pub(super) fn automatic_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<String>> {
+    if local_git_only(&introspect_token(remote, token)) {
+        return Ok(BTreeSet::new());
+    }
+    connected_forge_hosts(remote, token)
+}
+
+/// Connected forge hosts, exact-HTTPS-host validated regardless of the server response.
 pub(super) fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<BTreeSet<String>> {
     #[derive(Deserialize)]
     struct Descriptor {

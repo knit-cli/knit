@@ -170,165 +170,129 @@ fn global_defaults_wizard() -> Result<()> {
     }
 }
 
-/// The project-scoped wizard: for each forge this project uses, choose
-/// between the shared default token (Enter — clears this project's overrides
-/// so inheritance works) and a project-only token (saved as a new local
-/// credential bound to just this project's repositories on that forge; the
-/// global default and its secret are never touched).
 fn project_wizard(project_name: &str) -> Result<()> {
     let cwd = std::env::current_dir()?;
     let (root, project) = auth::project_context(&cwd, Some(project_name))?;
-    let key = auth::project_key(&root, &project.id)?;
-    println!(
-        "Project `{}` — per forge, use the shared default token or give this project its own. Other projects are never touched.",
-        project.id
-    );
-    // One entry per forge host the project actually uses.
-    let mut by_host: std::collections::BTreeMap<String, Vec<String>> =
-        std::collections::BTreeMap::new();
-    for repo in &project.repos {
-        if let Some(remote) = repo.remote.as_deref() {
-            if let Ok((host, _)) = auth::remote_target(remote) {
-                by_host.entry(host).or_default().push(repo.id.clone());
-            }
-        }
-    }
-    if by_host.is_empty() {
-        println!("This project has no forge repositories.");
-        return Ok(());
-    }
-    for (host, repos) in by_host {
-        let store = auth::load()?;
-        let default = store.default_for_host(&host);
-        let overrides: BTreeSet<&String> = repos
-            .iter()
-            .filter_map(|repo| store.projects.get(&key).and_then(|b| b.get(repo.as_str())))
-            .collect();
-        let override_note = if let [only] = overrides.iter().collect::<Vec<_>>()[..] {
-            format!("project token `{}` on {}", only, repos.join(", "))
-        } else if overrides.is_empty() {
-            String::new()
-        } else {
-            format!(
-                "project tokens {}",
-                overrides
-                    .iter()
-                    .map(|n| format!("`{n}`"))
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        };
-        match &default {
-            Some((name, source)) => {
-                let suffix = if override_note.is_empty() {
-                    String::new()
-                } else {
-                    format!("; {override_note}")
-                };
-                println!(
-                    "\n{host} ({}): {} (default token){}{}",
-                    repos.join(", "),
-                    name,
-                    match source {
-                        auth::DefaultSource::Chosen => "",
-                        auth::DefaultSource::Inherited => {
-                            " — the only one saved for this forge"
-                        }
-                    },
-                    suffix
-                )
-            }
-            None => println!(
-                "\n{host} ({}): no default token saved{}",
-                repos.join(", "),
-                override_note
-            ),
-        }
-        let answer = prompt(
-            "Use the default token (Enter), `t` for a project-only token, or `s` to skip: ",
-        )?;
-        match answer.trim() {
-            "" => {
-                let Some((_, _)) = &default else {
-                    println!("No default token for {host}; skipped.");
-                    continue;
-                };
-                // Inherit the default: clear this project's overrides for
-                // these repositories so the default applies.
-                let _lock = auth::lock()?;
-                let mut store = auth::load()?;
-                let bindings = store.projects.entry(key.clone()).or_default();
-                let cleared: Vec<String> = repos
-                    .iter()
-                    .filter(|repo| bindings.remove((*repo).as_str()).is_some())
-                    .cloned()
-                    .collect();
-                if store.projects.get(&key).is_some_and(|b| b.is_empty()) {
-                    store.projects.remove(&key);
-                }
-                auth::save(&store)?;
-                if cleared.is_empty() {
-                    println!("Already using the default token for {host}.");
-                } else {
-                    println!("Cleared project overrides for {} — the default token for {host} now applies.", cleared.join(", "));
-                }
-            }
-            "t" | "T" => {
-                let provider = default
-                    .as_ref()
-                    .and_then(|(name, _)| store.credentials.get(name))
-                    .map(|spec| spec.provider.clone())
-                    .unwrap_or_else(|| provider_for_host(&host).to_string());
-                println!("{}", permission_help(&provider));
-                let token_type = if provider == "bitbucket" {
-                    Some(ask_bitbucket_token_type(&mut prompt)?)
-                } else {
-                    None
-                };
-                let username = match &token_type {
-                    Some(kind) => bitbucket_username_for_token_type(kind, &mut prompt)?,
-                    None => None,
-                };
-                let token = read_hidden(&format!("Project token for {host} (hidden): "))?;
-                let token = token.trim();
-                if token.is_empty() {
-                    println!("Skipped {host}.");
-                    continue;
-                }
-                let spec = CredentialSpec {
-                    provider,
-                    host: host.clone(),
-                    username,
-                    token_type,
-                    token_env: None,
-                };
-                let name = unique_credential_name(&format!(
-                    "{host}-{}",
-                    sanitize_credential_name(&project.id)
-                ))?;
-                save_new_credential_scoped(&name, &spec, token, true)?;
-                assign_in(&root, &project, &repos, &name)?;
-                println!(
-                    "`{name}` is used for {} in this project only; the default token for {host} is untouched.",
-                    repos.join(", ")
-                );
-            }
-            _ => println!("Skipped {host}."),
-        }
-    }
-    println!("Done.");
-    Ok(())
+    setup_with_prompt(&root, &project, &[], &mut prompt, &mut read_hidden)
 }
 
-/// The provider a host belongs to by its well-known name; unknown hosts
-/// default to GitHub like the rest of Knit's host detection.
-fn provider_for_host(host: &str) -> &str {
-    for (_, provider, known) in WIZARD_FORGES {
-        if known == host {
-            return provider;
+/// Explicit project setup edits only the selected repositories. Requirements
+/// supply group boundaries and token guidance; ungrouped repos share a host.
+fn setup_with_prompt(
+    root: &Path,
+    project: &KnitProject,
+    ids: &[String],
+    ask: &mut impl FnMut(&str) -> Result<String>,
+    read_token: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<()> {
+    let pending = auth::load_known_pending_repos(root, &project.id);
+    auth::validate_project_auth_with_pending(project, &pending)
+        .context("Cannot run grouped auth setup")?;
+    let editable: BTreeSet<_> = selected_repos(project, ids)?
+        .iter()
+        .map(|r| r.id.clone())
+        .collect();
+    let key = auth::project_key(root, &project.id)?;
+    let mut groups = project
+        .auth
+        .as_ref()
+        .map(|a| a.groups.clone())
+        .unwrap_or_default();
+    let declared: BTreeSet<_> = groups
+        .iter()
+        .flat_map(|g| g.repos.iter().cloned())
+        .collect();
+    let ungrouped: Vec<_> = project
+        .repos
+        .iter()
+        .filter(|r| editable.contains(&r.id) && !declared.contains(&r.id))
+        .filter_map(|r| {
+            r.remote
+                .as_ref()
+                .map(|remote| (r.id.clone(), remote.clone()))
+        })
+        .collect();
+    groups.extend(
+        inferred_groups(&ungrouped, ask)?
+            .into_iter()
+            .map(|mut group| {
+                group.id = project.id.clone();
+                group
+            }),
+    );
+    println!(
+        "Project `{}` — per forge, use the shared default token or give this project its own.",
+        project.id
+    );
+    for group in groups {
+        let repos: Vec<_> = group
+            .repos
+            .iter()
+            .filter(|r| editable.contains(*r))
+            .cloned()
+            .collect();
+        if repos.is_empty() {
+            println!(
+                "Skipping group `{}`: no repositories in the selected workspace scope.",
+                group.id
+            );
+            continue;
+        }
+        describe_group(&group, &[]);
+        let host = &group.host;
+        let store = auth::load()?;
+        let default = store.default_for_host(host);
+        println!(
+            "{host} ({}): {}",
+            repos.join(", "),
+            describe_default(&store, host)
+        );
+        if let Some(bindings) = store.projects.get(&key) {
+            for repo in &repos {
+                if let Some(name) = bindings.get(repo) {
+                    println!("  {repo}: project token `{name}`");
+                }
+            }
+        }
+        loop {
+            let answer = ask(
+                "Use the default token (Enter), `t` for a project-only token, or `s` to skip: ",
+            )?;
+            match answer.trim() {
+                "" => {
+                    if default.is_none() {
+                        println!("No default token for {host}; run `knit auth` to add one, or choose `t`.");
+                        continue;
+                    }
+                    let _lock = auth::lock()?;
+                    let mut store = auth::load()?;
+                    if let Some(bindings) = store.projects.get_mut(&key) {
+                        bindings.retain(|repo, _| !repos.contains(repo));
+                        if bindings.is_empty() {
+                            store.projects.remove(&key);
+                        }
+                    }
+                    auth::save(&store)?;
+                    println!("Using the default token for {host}.");
+                }
+                "t" | "T" => {
+                    if let Some(name) = create_group_credential(&group, true, ask, read_token)? {
+                        assign_in(root, project, &repos, &name)?;
+                        println!("`{name}` is used for {} in this project only; the default token for {host} is untouched.", repos.join(", "));
+                    }
+                }
+                "s" | "S" => (),
+                _ => {
+                    println!("Choose Enter, t, or s.");
+                    continue;
+                }
+            }
+            break;
         }
     }
-    "github"
+    show_setup_mapping(root, project, ids)?;
+    println!("Done.");
+    Ok(())
 }
 
 pub fn run(command: AuthCommand) -> Result<()> {
@@ -649,39 +613,6 @@ fn prompt(message: &str) -> Result<String> {
 
 // Resolve the entire selection before any assignment is saved. IDs take precedence
 // over numbers; numbers refer only to the displayed compatible, editable list.
-fn repo_selection(input: &str, eligible: &[String]) -> Result<Vec<String>> {
-    if input == "all" {
-        return Ok(eligible.to_vec());
-    }
-    let mut selected = Vec::new();
-    for item in input
-        .split(|c: char| c == ',' || c.is_whitespace())
-        .filter(|s| !s.is_empty())
-    {
-        let id = eligible
-            .iter()
-            .find(|id| id.as_str() == item)
-            .or_else(|| {
-                item.parse::<usize>()
-                    .ok()
-                    .and_then(|n| n.checked_sub(1))
-                    .and_then(|n| eligible.get(n))
-            })
-            .with_context(|| {
-                format!(
-                    "Unknown or ineligible repository `{item}`. Use displayed IDs/numbers, or all."
-                )
-            })?;
-        if !selected.contains(id) {
-            selected.push(id.clone());
-        }
-    }
-    if selected.is_empty() {
-        bail!("Choose at least one repository, or Enter to cancel.");
-    }
-    Ok(selected)
-}
-
 fn show_setup_mapping(root: &Path, project: &KnitProject, ids: &[String]) -> Result<Vec<String>> {
     let store = auth::load()?;
     let key = auth::project_key(root, &project.id)?;
@@ -758,30 +689,7 @@ pub fn setup(project_name: Option<&str>, ids: &[String]) -> Result<()> {
     let (root, project) = auth::project_context(&cwd, project_name)?;
     selected_repos(&project, ids)?;
     require_terminal()?;
-    setup_with_prompt(&root, &project, ids, &mut prompt)
-}
-
-fn setup_with_prompt(
-    root: &Path,
-    project: &KnitProject,
-    ids: &[String],
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<()> {
-    match project.auth.as_ref().filter(|auth| !auth.groups.is_empty()) {
-        Some(_) => {
-            // Malformed groups are a configuration error, not a reason to
-            // quietly drop the project's requirements. Pending membership
-            // references (out of clone scope, or not yet cloned) validate
-            // against the recorded full membership; typos still fail.
-            let pending = auth::load_known_pending_repos(root, &project.id);
-            auth::validate_project_auth_with_pending(project, &pending)
-                .context("Cannot run grouped auth setup")?;
-            group_setup_with_prompt(root, project, ids, ask)
-        }
-        // Absent or empty groups are the legacy shape: no recommendation,
-        // so the unconfigured wizard stays exactly as it was.
-        None => legacy_setup_with_prompt(root, project, ids, ask),
-    }
+    setup_with_prompt(&root, &project, ids, &mut prompt, &mut read_hidden)
 }
 
 fn canonical_provider(value: &str) -> String {
@@ -978,360 +886,8 @@ fn reconcile_bitbucket_username(
     Ok(())
 }
 
-/// Select a credential for one group: a compatible saved one, or a new one.
-/// Returns the chosen credential name, or None when the group is skipped.
-fn choose_group_credential(
-    group: &ProjectAuthGroup,
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<Option<String>> {
-    loop {
-        let store = auth::load()?;
-        let compatible: Vec<&String> = store
-            .credentials
-            .iter()
-            .filter(|(_, spec)| credential_matches_group(spec, group))
-            .map(|(name, _)| name)
-            .collect();
-        if compatible.is_empty() {
-            println!(
-                "\nNo saved credential matches {} @ {}.",
-                group.provider, group.host
-            );
-        } else {
-            println!(
-                "\nSaved credentials compatible with {} @ {}:",
-                group.provider, group.host
-            );
-            for (i, name) in compatible.iter().enumerate() {
-                let spec = &store.credentials[*name];
-                println!(
-                    "  {}. {name} ({})",
-                    i + 1,
-                    spec.token_type
-                        .as_deref()
-                        .unwrap_or("token type unclassified")
-                );
-            }
-        }
-        let choice =
-            ask("Credential for this group (name/number), 'new', or Enter to skip it for now: ")?;
-        if choice.is_empty() {
-            return Ok(None);
-        }
-        if choice == "new" {
-            let token_type = choose_group_token_type(group, ask)?;
-            println!("{}", permission_help(&group.provider));
-            let name = loop {
-                let name = ask("Name for this credential: ")?;
-                if name.is_empty() {
-                    println!("Choose a name.");
-                    continue;
-                }
-                break name;
-            };
-            let username = if group.provider == "bitbucket" {
-                bitbucket_username_for_token_type(&token_type, ask)?
-            } else {
-                None
-            };
-            let env = ask(
-                "Token environment variable, or Enter to save a token in a private local file: ",
-            )?;
-            let spec = CredentialSpec {
-                provider: group.provider.clone(),
-                // Group hosts are case-insensitive; store the canonical
-                // lowercase form so later exact host comparisons hold.
-                host: group.host.to_ascii_lowercase(),
-                username,
-                token_type: Some(token_type),
-                token_env: (!env.is_empty()).then_some(env),
-            };
-            match add(&name, spec, false, false) {
-                Ok(()) => return Ok(Some(name)),
-                Err(error) => {
-                    println!("{error}");
-                    continue;
-                }
-            }
-        }
-        let selected = compatible
-            .iter()
-            .find(|name| name.as_str() == choice)
-            .or_else(|| {
-                choice
-                    .parse::<usize>()
-                    .ok()
-                    .and_then(|n| n.checked_sub(1))
-                    .and_then(|n| compatible.get(n))
-            });
-        let Some(name) = selected else {
-            println!("Choose a displayed credential, 'new', or Enter to skip.");
-            continue;
-        };
-        let name = (*name).clone();
-        let spec = store.credentials[&name].clone();
-        match spec.token_type.clone() {
-            Some(token_type) => {
-                // Even an already-classified Bitbucket credential may have
-                // drifted: an API token without its account email, or an
-                // access token still carrying one, authenticates wrongly.
-                if group.provider == "bitbucket" {
-                    reconcile_bitbucket_username(&name, &token_type, spec.username.is_some(), ask)?;
-                }
-                if !group.token_types.contains(&token_type) {
-                    let confirmed = ask(&format!(
-                        "This credential is a `{token_type}` token; the group recommends {}. Use it anyway? [y/N]: ",
-                        group.token_types.join(", ")
-                    ))?;
-                    if !matches!(confirmed.to_ascii_lowercase().as_str(), "y" | "yes") {
-                        continue;
-                    }
-                }
-                return Ok(Some(name));
-            }
-            None => {
-                // An old credential with no recorded kind: ask its owner
-                // what it truly is — every kind the provider offers, not
-                // just the group's recommendation — instead of guessing from
-                // the opaque token value. Group fit is checked afterwards.
-                println!("Credential `{name}` has no recorded token type.");
-                let options: Vec<String> = crate::model::token_types_for_provider(&group.provider)
-                    .iter()
-                    .map(|t| t.to_string())
-                    .collect();
-                for (i, token_type) in options.iter().enumerate() {
-                    println!("  {}. {token_type}", i + 1);
-                }
-                let answer = ask("Which kind of token is it? (name/number, Enter to skip): ")?;
-                if answer.is_empty() {
-                    println!("Using `{name}` without a recorded token type.");
-                    return Ok(Some(name));
-                }
-                let classified = options.iter().find(|t| *t == answer.as_str()).or_else(|| {
-                    answer
-                        .parse::<usize>()
-                        .ok()
-                        .and_then(|n| n.checked_sub(1))
-                        .and_then(|n| options.get(n))
-                });
-                let Some(classified) = classified else {
-                    println!("Choose one of the listed token types.");
-                    continue;
-                };
-                save_credential_token_type(&name, classified)?;
-                println!("Recorded `{name}` as a `{classified}` token.");
-                if group.provider == "bitbucket" {
-                    reconcile_bitbucket_username(&name, classified, spec.username.is_some(), ask)?;
-                }
-                if !group.token_types.contains(classified) {
-                    let confirmed = ask(&format!(
-                        "This credential is a `{classified}` token; the group recommends {}. Use it anyway? [y/N]: ",
-                        group.token_types.join(", ")
-                    ))?;
-                    if !matches!(confirmed.to_ascii_lowercase().as_str(), "y" | "yes") {
-                        continue;
-                    }
-                }
-                return Ok(Some(name));
-            }
-        }
-    }
-}
-
-/// Show the current and proposed repository mapping for one group, then apply
-/// it only after an explicit yes. Only repositories present in this
-/// workspace (`local`) can change; `--repo` narrows that further, and the
-/// full group coverage is still shown.
-fn apply_group_mapping(
-    root: &Path,
-    project: &KnitProject,
-    group: &ProjectAuthGroup,
-    local: &[String],
-    name: &str,
-    ids: &[String],
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<bool> {
-    let store = auth::load()?;
-    let key = auth::project_key(root, &project.id)?;
-    let bindings = store.projects.get(&key);
-    let mut to_assign = Vec::new();
-    println!("\nProposed mapping for group `{}`:", group.id);
-    for repo_id in &group.repos {
-        let current = bindings
-            .and_then(|b| b.get(repo_id))
-            .map(String::as_str)
-            .unwrap_or("unassigned");
-        if !local.contains(repo_id) {
-            println!("  {repo_id}: not in this workspace (out of scope or not cloned yet)");
-        } else if !ids.is_empty() && !ids.contains(repo_id) {
-            println!("  {repo_id}: {current} [outside --repo scope]");
-        } else if current == name {
-            println!("  {repo_id}: {current} (unchanged)");
-        } else {
-            println!("  {repo_id}: {current} -> {name}");
-            to_assign.push(repo_id.clone());
-        }
-    }
-    if to_assign.is_empty() {
-        println!("Nothing to change for this group.");
-        return Ok(false);
-    }
-    let confirmed = ask("Apply this mapping? [y/N]: ")?;
-    if matches!(confirmed.to_ascii_lowercase().as_str(), "y" | "yes") {
-        assign_in(root, project, &to_assign, name)?;
-        return Ok(true);
-    }
-    println!("Mapping skipped; existing links kept.");
-    Ok(false)
-}
-
-/// Interactive setup driven by the project's declared auth groups: show each
-/// group's requirements once, pick or create one credential for it, and map
-/// its repositories only after an explicit acceptance. Groups are projected
-/// onto the repositories this workspace actually has: a group whose
-/// repositories were all left out of a scoped clone is reported and skipped,
-/// never prompted, and a partially local group maps only its local subset.
-pub(crate) fn group_setup_with_prompt(
-    root: &Path,
-    project: &KnitProject,
-    ids: &[String],
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<()> {
-    let auth_requirements = project
-        .auth
-        .as_ref()
-        .context("Project has no auth requirements")?;
-    let local: std::collections::BTreeSet<&str> =
-        project.repos.iter().map(|repo| repo.id.as_str()).collect();
-    println!(
-        "This project defines {} authentication group(s). Groups describe what to create; nothing is assigned until you accept it.",
-        auth_requirements.groups.len()
-    );
-    for group in &auth_requirements.groups {
-        let group_local: Vec<String> = group
-            .repos
-            .iter()
-            .filter(|repo| local.contains(repo.as_str()))
-            .cloned()
-            .collect();
-        let absent: Vec<String> = group
-            .repos
-            .iter()
-            .filter(|repo| !local.contains(repo.as_str()))
-            .cloned()
-            .collect();
-        // The host's default credential covers this group with no prompts and
-        // no per-repository links: setup guides missing access only.
-        if !group_local.is_empty() {
-            let store = auth::load()?;
-            if let Some((default, source)) = store.default_for_host(&group.host) {
-                let provider_matches = store
-                    .credentials
-                    .get(&default)
-                    .is_some_and(|spec| canonical_provider(&spec.provider) == group.provider);
-                if provider_matches {
-                    println!(
-                        "Host default `{default}`{} covers {} — group `{}` needs no links; existing assignments keep winning.",
-                        match source {
-                            auth::DefaultSource::Chosen => "".to_string(),
-                            auth::DefaultSource::Inherited => {
-                                " (the only credential on this host)".to_string()
-                            }
-                        },
-                        group.host,
-                        group.id
-                    );
-                    continue;
-                }
-            }
-        }
-        describe_group(group, &absent);
-        let editable: Vec<String> = if ids.is_empty() {
-            group_local.clone()
-        } else {
-            group_local
-                .iter()
-                .filter(|repo| ids.contains(repo))
-                .cloned()
-                .collect()
-        };
-        if editable.is_empty() {
-            if group_local.is_empty() {
-                println!(
-                    "Skipping group `{}`: none of its repositories are in this workspace.",
-                    group.id
-                );
-            } else {
-                println!(
-                    "Skipping group `{}`: all of its repositories are outside the --repo scope.",
-                    group.id
-                );
-            }
-            continue;
-        }
-        let Some(name) = choose_group_credential(group, ask)? else {
-            println!(
-                "Skipped group `{}`; its repositories stay as they are.",
-                group.id
-            );
-            continue;
-        };
-        // The host's default serves the group without per-repository links —
-        // switching the default later applies everywhere. Only a genuine
-        // alternative gets mapped.
-        if auth::load()?
-            .default_for_host(&group.host)
-            .is_some_and(|(default, _)| default == name)
-        {
-            println!(
-                "No repository links needed: `{name}` is the default credential for {}.",
-                group.host
-            );
-            continue;
-        }
-        apply_group_mapping(root, project, group, &group_local, &name, ids, ask)?;
-    }
-    let missing = show_setup_mapping(root, project, ids)?;
-    if !missing.is_empty() {
-        println!(
-            "Setup incomplete: missing links for {}. Saved links have been kept.",
-            missing.join(", ")
-        );
-        return Ok(());
-    }
-    println!("All forge repositories have credential links; permissions remain unchecked.");
-    let check = ask("Check Git read access now? [y/N]: ")?;
-    status_project(
-        root,
-        project,
-        matches!(check.to_ascii_lowercase().as_str(), "y" | "yes"),
-        false,
-    )
-}
-
-/// Guided setup for `knit clone` and pull recovery — the tight path. For each
-/// group (already projected to the repositories this clone or recovery
-/// actually needs), in order:
-///
-/// * Repositories the group already links keep their links — assignment fills
-///   only the unlinked ones, never overwriting a deliberate per-repo override.
-/// * A group whose sibling repositories already share one credential is
-///   extended to its unlinked repositories without asking.
-/// * Otherwise the saved credentials are tiered: same provider and host with
-///   a token kind the group declares (or any, when the group declares none;
-///   unclassified ones are labeled honestly) are preferred over classified
-///   kinds the group does not declare. Exactly one preferred credential —
-///   and none created for a different group in this session — is reused with
-///   an announcement; anything less clean offers a numbered choice with a
-///   new-token option, so distinct groups on one host stay distinct.
-/// * A new token is prompted for directly — hidden, once per group, no
-///   credential-name choreography — and saved under an automatic name
-///   derived from host and group id.
-/// * `repair` names repositories whose authentication just failed despite a
-///   link; their group does not get skipped but offers one hidden token that
-///   rotates the rejected credential in place.
-///
-/// `knit auth setup` keeps the full wizard for review and edits.
+/// Clone and pull reuse defaults and existing assignments. Rejected access
+/// creates a project-scoped replacement; shared tokens are never rotated.
 pub(crate) fn guided_group_setup(
     root: &Path,
     project: &KnitProject,
@@ -1483,7 +1039,9 @@ pub(crate) fn guided_group_setup(
         let compatible: Vec<(String, CredentialSpec)> = store
             .credentials
             .iter()
-            .filter(|(_, spec)| credential_matches_group(spec, group))
+            .filter(|(name, spec)| {
+                !store.scoped_credentials.contains(*name) && credential_matches_group(spec, group)
+            })
             .map(|(name, spec)| (name.clone(), spec.clone()))
             .collect();
         // Tiered: a declared-kind (or unclassified) match outranks a
@@ -1528,10 +1086,7 @@ pub(crate) fn guided_group_setup(
                         ordered.len()
                     ))?;
                     if choice.eq_ignore_ascii_case("n") {
-                        if let Some(name) =
-                            create_group_credential(group, ask, read_token, &mut |base| {
-                                unique_credential_name(base)
-                            })?
+                        if let Some(name) = create_group_credential(group, false, ask, read_token)?
                         {
                             break name;
                         }
@@ -1558,9 +1113,7 @@ pub(crate) fn guided_group_setup(
                     }
                 }
             }
-            _ => match create_group_credential(group, ask, read_token, &mut |base| {
-                unique_credential_name(base)
-            })? {
+            _ => match create_group_credential(group, false, ask, read_token)? {
                 Some(name) => name,
                 None => {
                     println!(
@@ -1631,9 +1184,9 @@ pub(crate) fn guided_group_setup(
 /// empty and the group is declined for now.
 fn create_group_credential(
     group: &ProjectAuthGroup,
+    scoped: bool,
     ask: &mut impl FnMut(&str) -> Result<String>,
     read_token: &mut impl FnMut(&str) -> Result<String>,
-    unique_name: &mut impl FnMut(&str) -> Result<String>,
 ) -> Result<Option<String>> {
     let token_type = if group.token_types.is_empty() {
         // No declared kinds: Bitbucket still needs its actual mode — the kind
@@ -1673,29 +1226,9 @@ fn create_group_credential(
         token_type,
         token_env: None,
     };
-    let name = unique_name(&auto_credential_name(group))?;
-    save_new_credential(&name, &spec, token)?;
-    // The first token entered for a host becomes that host's default.
-    if promote_host_default(&spec.host, &name)? {
-        println!("`{name}` is now the default credential for {}.", spec.host);
-    }
+    let name = unique_credential_name(&auto_credential_name(group))?;
+    save_new_credential_scoped(&name, &spec, token, scoped)?;
     Ok(Some(name))
-}
-
-/// Replace a rejected credential's token in place, keeping its name, spec,
-/// and every project assignment that already points at it.
-/// Promote a just-created credential to its host's default when the host
-/// would otherwise have none: the first token entered for a forge becomes
-/// that forge's default everywhere. A second token never displaces it.
-fn promote_host_default(host: &str, name: &str) -> Result<bool> {
-    let _lock = auth::lock()?;
-    let mut store = auth::load()?;
-    if auth::stage_default_if_absent(&mut store, host, name) {
-        auth::save(&store)?;
-        Ok(true)
-    } else {
-        Ok(false)
-    }
 }
 
 /// Credential name for a guided group: the host, plus the group id when the
@@ -1773,21 +1306,60 @@ fn save_new_credential_scoped(
     if scoped {
         store.scoped_credentials.insert(name.to_owned());
     }
+    let becomes_default = !scoped && auth::stage_default_if_absent(&mut store, &spec.host, name);
     auth::save_credential(&store, name, Some(token))?;
     println!(
         "Saved `{name}` in your personal Knit credential store (private file, not encrypted). Repository access has not been checked."
     );
+    if becomes_default {
+        println!("`{name}` is now the default credential for {}.", spec.host);
+    }
     Ok(())
 }
 
-/// Infer one group per distinct forge host from repositories that just failed
-/// authenticated access, and guide the user through them: a unique compatible
-/// saved credential is linked without a prompt, a missing token is asked for
-/// once per host, a rejected existing link is rotated in place, and
-/// public/SSH access that already worked is never disturbed. Returns the
-/// repo ids that ended up linked to a credential. Never invents required
-/// permissions: inferred groups carry no permissions and only the provider's
-/// known token kinds.
+fn inferred_groups(
+    repos: &[(String, String)],
+    ask: &mut impl FnMut(&str) -> Result<String>,
+) -> Result<Vec<ProjectAuthGroup>> {
+    let mut by_host: BTreeMap<String, ProjectAuthGroup> = BTreeMap::new();
+    for (id, remote) in repos {
+        let Ok((host, _)) = auth::remote_target(remote) else {
+            continue;
+        };
+        if !by_host.contains_key(&host) {
+            let provider = match crate::providers::for_remote(remote) {
+                Some(forge) => forge.id().to_owned(),
+                None => loop {
+                    let answer = ask(&format!(
+                        "Provider for {host} (github/gitlab/bitbucket/forgejo): "
+                    ))?;
+                    if ["github", "gitlab", "bitbucket", "forgejo"].contains(&answer.as_str()) {
+                        break answer;
+                    }
+                    println!("Choose one of the listed providers.");
+                },
+            };
+            by_host.insert(
+                host.clone(),
+                ProjectAuthGroup {
+                    id: host.clone(),
+                    name: host.clone(),
+                    host: host.clone(),
+                    provider,
+                    repos: Vec::new(),
+                    token_types: Vec::new(),
+                    permissions: Vec::new(),
+                    instructions: None,
+                    token_url: None,
+                },
+            );
+        }
+        by_host.get_mut(&host).unwrap().repos.push(id.clone());
+    }
+    Ok(by_host.into_values().collect())
+}
+
+/// Infer guidance only for repositories whose Git access failed.
 pub(crate) fn guided_inferred_setup(
     root: &Path,
     project: &KnitProject,
@@ -1795,80 +1367,9 @@ pub(crate) fn guided_inferred_setup(
     ask: &mut impl FnMut(&str) -> Result<String>,
     read_token: &mut impl FnMut(&str) -> Result<String>,
 ) -> Result<Vec<String>> {
-    let mut by_target: BTreeMap<(String, String), Vec<String>> = BTreeMap::new();
-    for (repo_id, remote) in failing {
-        if let Ok((host, _)) = auth::remote_target(remote) {
-            by_target
-                .entry((host, remote.clone()))
-                .or_default()
-                .push(repo_id.clone());
-        }
-    }
-    // One group per distinct host: (host, repos).
-    let mut by_host: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for ((host, _), repo_ids) in &by_target {
-        by_host
-            .entry(host.clone())
-            .or_default()
-            .extend(repo_ids.iter().cloned());
-    }
-    if by_host.is_empty() {
-        return Ok(Vec::new());
-    }
-    let mut groups = Vec::new();
-    for (host, repos) in by_host {
-        let provider = crate::providers::for_remote(
-            failing
-                .iter()
-                .find(|(_, remote)| {
-                    auth::remote_target(remote)
-                        .is_ok_and(|(candidate, _)| candidate.eq_ignore_ascii_case(&host))
-                })
-                .map(|(_, remote)| remote.as_str())
-                .unwrap_or_default(),
-        )
-        .map(|forge| forge.id().to_owned())
-        .or_else(|| {
-            // Unknown host: the provider decides the token kinds and the Git
-            // username scheme, so one question is warranted.
-            match host.as_str() {
-                "github.com" => Some("github".to_owned()),
-                "gitlab.com" => Some("gitlab".to_owned()),
-                "bitbucket.org" => Some("bitbucket".to_owned()),
-                _ => None,
-            }
-        });
-        let provider = match provider {
-            Some(provider) => provider,
-            None => loop {
-                let answer = ask(&format!(
-                    "Provider for {host} (github/gitlab/bitbucket/forgejo): "
-                ))?;
-                if ["github", "gitlab", "bitbucket", "forgejo"].contains(&answer.as_str()) {
-                    break answer;
-                }
-                println!("Choose one of the listed providers.");
-            },
-        };
-        groups.push(ProjectAuthGroup {
-            id: host.clone(),
-            name: host.clone(),
-            host,
-            // No invented kinds: the token is asked for once, stays
-            // unclassified, and its owner can classify it in `knit auth
-            // setup` later.
-            token_types: Vec::new(),
-            provider,
-            repos,
-            permissions: Vec::new(),
-            instructions: None,
-            token_url: None,
-        });
-    }
+    let groups = inferred_groups(failing, ask)?;
     let mut setup_project = project.clone();
-    setup_project.auth = Some(crate::model::ProjectAuth {
-        groups: groups.clone(),
-    });
+    setup_project.auth = Some(crate::model::ProjectAuth { groups });
     let repair: BTreeSet<String> = failing.iter().map(|(repo, _)| repo.clone()).collect();
     guided_group_setup(root, &setup_project, &repair, ask, read_token)?;
     // Every failing repository that has a binding now, or whose host gained
@@ -1913,7 +1414,7 @@ pub(crate) fn clone_group_setup(root: &Path, project: &KnitProject) -> Result<()
         project,
         &BTreeSet::new(),
         &mut prompt,
-        &mut |message| rpassword::prompt_password(message).context("Could not read token"),
+        &mut read_hidden,
     );
     auth::set_project_override(previous);
     result
@@ -1930,16 +1431,14 @@ pub(crate) fn inferred_fallback_setup(
 ) -> Result<Vec<String>> {
     require_terminal()?;
     let previous = auth::current_project_override();
-    let result = guided_inferred_setup(root, project, failing, &mut prompt, &mut |message| {
-        rpassword::prompt_password(message).context("Could not read token")
-    });
+    let result = guided_inferred_setup(root, project, failing, &mut prompt, &mut read_hidden);
     auth::set_project_override(previous);
     result
 }
 
 /// Guided setup during pull recovery, with the repositories whose
 /// authentication just failed: declared groups whose links were rejected get
-/// the repair path (rotate the rejected token) instead of being skipped as
+/// the repair path (create a scoped replacement) instead of being skipped as
 /// "already linked".
 pub(crate) fn recovery_group_setup(
     root: &Path,
@@ -1948,152 +1447,9 @@ pub(crate) fn recovery_group_setup(
 ) -> Result<()> {
     require_terminal()?;
     let previous = auth::current_project_override();
-    let result = guided_group_setup(root, project, repair, &mut prompt, &mut |message| {
-        rpassword::prompt_password(message).context("Could not read token")
-    });
+    let result = guided_group_setup(root, project, repair, &mut prompt, &mut read_hidden);
     auth::set_project_override(previous);
     result
-}
-
-fn legacy_setup_with_prompt(
-    root: &Path,
-    project: &KnitProject,
-    ids: &[String],
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<()> {
-    let editable = selected_repos(project, ids)?;
-    let hosts: Vec<String> = project
-        .repos
-        .iter()
-        .filter_map(|r| {
-            r.remote
-                .as_deref()
-                .and_then(|r| auth::remote_target(r).ok())
-                .map(|(h, _)| h)
-        })
-        .collect::<BTreeSet<_>>()
-        .into_iter()
-        .collect();
-    println!("Choose a credential, then link the repositories where Knit should use it.\nOne credential can cover several repositories, even across owners; add more when needed.\nLinks do not grant provider permissions. Once linked, unassigned forge repositories require setup.");
-    loop {
-        let missing = show_setup_mapping(root, project, ids)?;
-        let store = auth::load()?;
-        for (name, spec) in &store.credentials {
-            if hosts.contains(&spec.host) {
-                println!(
-                    "  Saved credential: {name} ({}, {})",
-                    spec.provider, spec.host
-                );
-            }
-        }
-        let choice = ask("Credential name (or use NAME), 'new', or 'done' to finish: ")?;
-        if choice == "done" {
-            if !missing.is_empty() {
-                println!(
-                    "Setup incomplete: missing links for {}. Saved links have been kept.",
-                    missing.join(", ")
-                );
-                return Ok(());
-            }
-            println!("All forge repositories have credential links; permissions remain unchecked.");
-            let check = ask("Check Git read access now? [y/N]: ")?;
-            return status(
-                Some(&project.id),
-                matches!(check.to_ascii_lowercase().as_str(), "y" | "yes"),
-                false,
-            );
-        }
-        let name = if choice == "new" {
-            if hosts.is_empty() {
-                println!("No supported forge hosts in this project.");
-                continue;
-            }
-            for (i, host) in hosts.iter().enumerate() {
-                println!("  {}. {host}", i + 1);
-            }
-            let host = ask("Host (name or number): ")?;
-            let host = match repo_selection(&host, &hosts) {
-                Ok(selected) if selected.len() == 1 => selected[0].clone(),
-                _ => {
-                    println!("Choose one of the project's hosts.");
-                    continue;
-                }
-            };
-            let provider = match host.as_str() {
-                "github.com" => "github".into(),
-                "gitlab.com" => "gitlab".into(),
-                "bitbucket.org" => "bitbucket".into(),
-                "codeberg.org" => "forgejo".into(),
-                _ => ask("Provider (github/gitlab/bitbucket/forgejo): ")?,
-            };
-            println!("{}", permission_help(&provider));
-            let name = ask("Name for this credential: ")?;
-            let username = if provider == "bitbucket" {
-                let email = ask("Atlassian account email (API token), or Enter for a repository/project/workspace access token: ")?;
-                (!email.is_empty()).then_some(email)
-            } else {
-                None
-            };
-            let env = ask(
-                "Token environment variable, or Enter to save a token in a private local file: ",
-            )?;
-            let spec = CredentialSpec {
-                provider,
-                host,
-                username,
-                token_type: None,
-                token_env: (!env.is_empty()).then_some(env),
-            };
-            if let Err(err) = add(&name, spec, false, false) {
-                println!("{err}");
-                continue;
-            }
-            name
-        } else {
-            choice.strip_prefix("use ").unwrap_or(&choice).to_owned()
-        };
-        let store = auth::load()?;
-        let Some(spec) = store.credentials.get(&name) else {
-            println!("Unknown credential `{name}`. Choose a saved name or new.");
-            continue;
-        };
-        let eligible: Vec<String> = editable
-            .iter()
-            .filter(|r| {
-                r.remote
-                    .as_deref()
-                    .and_then(|r| auth::remote_target(r).ok())
-                    .is_some_and(|(h, _)| h == spec.host)
-            })
-            .map(|r| r.id.clone())
-            .collect();
-        if eligible.is_empty() {
-            println!("No compatible repositories in the editable selection for `{name}`.");
-            continue;
-        }
-        let key = auth::project_key(root, &project.id)?;
-        for (i, id) in eligible.iter().enumerate() {
-            let current = store.projects.get(&key).and_then(|p| p.get(id));
-            println!(
-                "  {}. {id} → {}",
-                i + 1,
-                current.map(String::as_str).unwrap_or("unassigned")
-            );
-        }
-        loop {
-            let selection = ask("Link repositories (IDs/numbers, comma or space separated; all; Enter to cancel). Existing links selected will be replaced: ")?;
-            if selection.is_empty() {
-                break;
-            }
-            match repo_selection(&selection, &eligible) {
-                Ok(repos) => {
-                    assign(&name, Some(&project.id), &repos)?;
-                    break;
-                }
-                Err(err) => println!("{err}"),
-            }
-        }
-    }
 }
 
 fn permission_help(provider: &str) -> &'static str {
@@ -2498,170 +1854,6 @@ fn probe_read_access(root: &Path, remote: &str) -> Result<()> {
 mod tests {
     use super::*;
 
-    #[test]
-    fn selections_validate_the_whole_list() {
-        let eligible = vec!["api".into(), "web".into(), "3".into()];
-        assert_eq!(
-            repo_selection("api, 2 api", &eligible).unwrap(),
-            ["api", "web"]
-        );
-        assert_eq!(repo_selection("all", &eligible).unwrap(), eligible);
-        assert_eq!(repo_selection("3", &eligible).unwrap(), ["3"]);
-        for invalid in ["api missing", "0", "4", ",", "all api"] {
-            assert!(repo_selection(invalid, &eligible).is_err());
-        }
-    }
-
-    // Run persistence and cwd changes in a child so concurrent library tests
-    // cannot see this synthetic project's personal credential store.
-    #[test]
-    fn credential_first_wizard() {
-        if std::env::var_os("KNIT_WIZARD_TEST_CHILD").is_none() {
-            let root = std::env::temp_dir().join(format!("knit-wizard-{}", std::process::id()));
-            std::fs::create_dir_all(&root).unwrap();
-            let result = std::process::Command::new(std::env::current_exe().unwrap())
-                .args([
-                    "--exact",
-                    "commands::auth::tests::credential_first_wizard",
-                    "--nocapture",
-                ])
-                .current_dir(&root)
-                .env("KNIT_WIZARD_TEST_CHILD", "1")
-                .env("KNIT_HOME", root.join("home"))
-                .env_remove("KNIT_BUNDLE")
-                .output()
-                .unwrap();
-            let _ = std::fs::remove_dir_all(root);
-            let stdout = String::from_utf8_lossy(&result.stdout);
-            assert!(
-                result.status.success(),
-                "{stdout}\n{}",
-                String::from_utf8_lossy(&result.stderr)
-            );
-            assert!(stdout.contains("Setup incomplete: missing links for bb"));
-            assert!(stdout.contains("[outside --repo scope]"));
-            assert!(stdout.contains("All forge repositories have credential links"));
-            return;
-        }
-        let root = std::env::current_dir().unwrap();
-        std::fs::create_dir_all(root.join(".knit/projects")).unwrap();
-        std::fs::write(
-            root.join(".knit/config.json"),
-            r#"{"schemaVersion":"0.1","activeProject":"tools"}"#,
-        )
-        .unwrap();
-        let project: KnitProject = serde_json::from_value(json!({
-            "schemaVersion":"0.1", "kind":"KnitProject", "id":"tools",
-            "createdAt":"2026-01-01T00:00:00Z", "updatedAt":"2026-01-01T00:00:00Z",
-            "repos":[
-                {"id":"api","path":root.join("api"),"remote":"https://github.com/one/api.git","baseBranch":"main"},
-                {"id":"web","path":root.join("web"),"remote":"git@github.com:two/web.git","baseBranch":"main"},
-                {"id":"bb","path":root.join("bb"),"remote":"https://bitbucket.org/team/backend.git","baseBranch":"main"}
-            ]
-        })).unwrap();
-        std::fs::write(
-            root.join(".knit/projects/tools.project.json"),
-            serde_json::to_vec(&project).unwrap(),
-        )
-        .unwrap();
-        let key = auth::project_key(&root, "tools").unwrap();
-        let run = |ids: &[String], inputs: &[&str]| {
-            let mut inputs = inputs.iter();
-            setup_with_prompt(&root, &project, ids, &mut |_| {
-                Ok(inputs.next().expect("unexpected prompt").to_string())
-            })
-            .unwrap();
-            assert!(inputs.next().is_none(), "unused answers");
-        };
-        run(&[], &["done"]);
-        run(
-            &[],
-            &[
-                "new",
-                "github.com",
-                "shared",
-                "SYNTHETIC_TOKEN",
-                "all",
-                "done",
-            ],
-        );
-        let links = auth::load().unwrap().projects[&key].clone();
-        assert_eq!(links["api"], "shared");
-        assert_eq!(links["web"], "shared");
-        assert!(!links.contains_key("bb"));
-        // A partially valid selection must not change any link.
-        run(&[], &["shared", "api,bb", "", "done"]);
-        assert_eq!(auth::load().unwrap().projects[&key], links);
-        // --repo limits both all and explicit IDs; full coverage is still shown.
-        run(
-            &["web".into()],
-            &[
-                "new",
-                "github.com",
-                "second",
-                "SYNTHETIC_TOKEN",
-                "api",
-                "all",
-                "done",
-            ],
-        );
-        let links = auth::load().unwrap().projects[&key].clone();
-        assert_eq!(links["api"], "shared");
-        assert_eq!(links["web"], "second");
-        run(
-            &[],
-            &[
-                "new",
-                "bitbucket.org",
-                "cloud",
-                "account@example.com",
-                "SYNTHETIC_TOKEN",
-                "1",
-                "done",
-                "n",
-            ],
-        );
-        assert_eq!(auth::load().unwrap().projects[&key]["bb"], "cloud");
-        assert_eq!(
-            auth::load().unwrap().credentials["cloud"]
-                .username
-                .as_deref(),
-            Some("account@example.com")
-        );
-        run(&[], &["shared", "1, web", "done", "n"]);
-        assert_eq!(auth::load().unwrap().projects[&key]["web"], "shared");
-
-        // A custom host asks for its backend instead of guessing from an owner.
-        let mut custom = project.clone();
-        custom.repos[2].remote = Some("https://git.example.test/team/backend.git".into());
-        std::fs::write(
-            root.join(".knit/projects/tools.project.json"),
-            serde_json::to_vec(&custom).unwrap(),
-        )
-        .unwrap();
-        let mut inputs = [
-            "new",
-            "git.example.test",
-            "gitlab",
-            "self-hosted",
-            "SYNTHETIC_TOKEN",
-            "all",
-            "done",
-            "n",
-        ]
-        .into_iter();
-        setup_with_prompt(&root, &custom, &[], &mut |_| {
-            Ok(inputs.next().expect("unexpected custom-host prompt").into())
-        })
-        .unwrap();
-        assert!(inputs.next().is_none());
-        let store = auth::load().unwrap();
-        assert_eq!(store.credentials["self-hosted"].provider, "gitlab");
-        assert_eq!(store.projects[&key]["bb"], "self-hosted");
-    }
-
-    // ----- Grouped setup -------------------------------------------------
-
     fn grouped_project_json(with_typo: bool) -> serde_json::Value {
         let gh_repos = if with_typo {
             vec!["appp"]
@@ -2780,142 +1972,123 @@ mod tests {
             ask
         };
         match mode.as_str() {
-            // Two forges end to end: one new credential per group, the
-            // known-type mismatch confirmed explicitly, and the group whose
-            // repos are all absent never prompting for a credential.
-            "two-forges" => {
-                setup_with_prompt(
-                    &root,
-                    &project,
-                    &[],
-                    &mut scripted(&[
-                        "new",
-                        "gh1",
-                        "KNIT_WIZARD_TOKEN", // gh-work: first token -> default
-                        "new",
-                        "bb1",
-                        "dev@example.com",
-                        "KNIT_WIZARD_TOKEN", // bb-cloud: first token -> default
-                        // bb-second reuses the bitbucket default unprompted;
-                        // the final read-check is declined.
-                        "n",
-                    ]),
-                )
-                .unwrap();
-                let store = auth::load().unwrap();
-                // The first token on each host became its default, and the
-                // groups needed no per-repository links at all: switching a
-                // default later applies everywhere.
-                assert_eq!(store.defaults["github.com"], "gh1");
-                assert_eq!(store.defaults["bitbucket.org"], "bb1");
-                assert!(store.projects.get(&key).is_none_or(|p| p.is_empty()));
-                assert_eq!(
-                    store.credentials["gh1"].token_type.as_deref(),
-                    Some("fine_grained_pat")
-                );
-                assert_eq!(
-                    store.credentials["bb1"].token_type.as_deref(),
-                    Some("atlassian_api_token")
-                );
-                assert_eq!(
-                    store.credentials["bb1"].username.as_deref(),
-                    Some("dev@example.com")
-                );
-            }
-            // Opaque legacy credentials are classified by their owner; an
-            // Atlassian API-token classification asks for the missing email,
-            // an access-token classification offers to clear a stale one.
-            "classify" => {
-                let mut store = auth::load().unwrap();
-                for (name, provider, host, username) in [
-                    ("legacy", "github", "github.com", None),
-                    // A second GitHub credential keeps the host default-less,
-                    // so the group still guides classification instead of
-                    // silently reusing an implicit default.
-                    ("legacy2", "github", "github.com", None),
-                    ("old-api", "bitbucket", "bitbucket.org", None),
-                    (
-                        "old-access",
-                        "bitbucket",
-                        "bitbucket.org",
-                        Some("stale@example.com"),
-                    ),
-                ] {
-                    store.credentials.insert(
-                        name.into(),
-                        CredentialSpec {
-                            provider: provider.into(),
-                            host: host.into(),
-                            username: username.map(str::to_owned),
-                            token_type: None,
-                            token_env: Some("KNIT_WIZARD_TOKEN".into()),
-                        },
-                    );
+            "two-forges" | "scoped" | "mixed-case" => {
+                let mut project = project.clone();
+                if mode == "mixed-case" {
+                    project.auth.as_mut().unwrap().groups[0].host = "GitHub.COM".into();
                 }
-                auth::save(&store).unwrap();
+                let ids = if mode == "two-forges" {
+                    vec![]
+                } else {
+                    vec!["api".into()]
+                };
+                let answers = if ids.is_empty() {
+                    vec!["t", "t", "dev@example.com", "t"]
+                } else {
+                    vec!["invalid", "", "t"]
+                };
+                setup_with_prompt(&root, &project, &ids, &mut scripted(&answers), &mut |_| {
+                    Ok("synthetic-secret".into())
+                })
+                .unwrap();
+                let store = auth::load().unwrap();
+                assert!(
+                    store.defaults.is_empty(),
+                    "project setup must never set global defaults"
+                );
+                let gh = &store.projects[&key]["api"];
+                assert_eq!(store.credentials[gh].host, "github.com");
+                assert!(store.scoped_credentials.contains(gh));
+                assert!(store.default_for_host("github.com").is_none());
+                if ids.is_empty() {
+                    assert_eq!(store.projects[&key]["web"], *gh);
+                    let bb = &store.credentials[&store.projects[&key]["bb"]];
+                    assert_eq!(bb.username.as_deref(), Some("dev@example.com"));
+                    assert_eq!(bb.token_type.as_deref(), Some("atlassian_api_token"));
+                    assert_ne!(store.projects[&key]["bb"], store.projects[&key]["bb2"]);
+                    assert_eq!(store.projects[&key].len(), 4);
+                } else {
+                    assert_eq!(store.projects[&key].len(), 1);
+                }
+                // Choosing a default clears only the selected override and
+                // does not mutate any token, recommendation, or other repo.
+                let mut defaults = store.clone();
+                defaults
+                    .credentials
+                    .insert("shared".into(), store.credentials[gh].clone());
+                defaults
+                    .defaults
+                    .insert("github.com".into(), "shared".into());
+                auth::save(&defaults).unwrap();
                 setup_with_prompt(
                     &root,
                     &project,
-                    &[],
-                    &mut scripted(&[
-                        "legacy",
-                        "2",
-                        "y",
-                        "y", // gh: honest classic, use anyway, apply
-                        "old-api",
-                        "1",
-                        "dev@example.com",
-                        "y", // bb: atlassian, email recorded, apply
-                        "old-access",
-                        "2",
-                        "y",
-                        "y", // bb2: access, clear stale email, apply
-                        "n", // final read-check prompt
-                    ]),
+                    &["api".into()],
+                    &mut scripted(&[""]),
+                    &mut |_| panic!("default must not ask for a token"),
                 )
                 .unwrap();
-                let store = auth::load().unwrap();
+                let after = auth::load().unwrap();
+                assert!(after
+                    .projects
+                    .get(&key)
+                    .is_none_or(|p| !p.contains_key("api")));
+                assert_eq!(after.defaults, defaults.defaults);
                 assert_eq!(
-                    store.credentials["legacy"].token_type.as_deref(),
-                    Some("classic_pat")
+                    serde_json::to_value(&after.credentials).unwrap(),
+                    serde_json::to_value(&defaults.credentials).unwrap()
                 );
-                assert_eq!(
-                    store.credentials["old-api"].token_type.as_deref(),
-                    Some("atlassian_api_token")
-                );
-                assert_eq!(
-                    store.credentials["old-api"].username.as_deref(),
-                    Some("dev@example.com")
-                );
-                assert_eq!(
-                    store.credentials["old-access"].token_type.as_deref(),
-                    Some("access_token")
-                );
-                assert_eq!(store.credentials["old-access"].username, None);
-                assert_eq!(store.projects[&key]["api"], "legacy");
-                assert_eq!(store.projects[&key]["bb"], "old-api");
-                assert_eq!(store.projects[&key]["bb2"], "old-access");
+                if ids.is_empty() {
+                    assert_eq!(after.projects[&key]["web"], *gh);
+                }
             }
-            // --repo limits edits; coverage is still shown for everything.
-            "scoped" => {
-                setup_with_prompt(
+            "scoped-reuse" => {
+                let mut project = project.clone();
+                project.auth.as_mut().unwrap().groups.truncate(1);
+                let spec = CredentialSpec {
+                    provider: "github".into(),
+                    host: "github.com".into(),
+                    username: None,
+                    token_type: Some("fine_grained_pat".into()),
+                    token_env: None,
+                };
+                save_new_credential_scoped("another-project", &spec, "private-project-token", true)
+                    .unwrap();
+                let mut prompts = 0;
+                guided_group_setup(
                     &root,
                     &project,
-                    &["api".to_string()],
-                    &mut scripted(&["new", "scoped", "KNIT_WIZARD_TOKEN"]),
+                    &BTreeSet::new(),
+                    &mut scripted(&[]),
+                    &mut |_| {
+                        prompts += 1;
+                        Ok("new-default-token".into())
+                    },
                 )
                 .unwrap();
+                assert_eq!(
+                    prompts, 1,
+                    "another project's scoped token must not be auto-selected"
+                );
                 let store = auth::load().unwrap();
-                assert_eq!(store.defaults["github.com"], "scoped");
+                assert_ne!(
+                    store.default_for_host("github.com").unwrap().0,
+                    "another-project"
+                );
+                assert_eq!(
+                    auth::credential("another-project").unwrap().token,
+                    "private-project-token"
+                );
                 assert!(store.projects.get(&key).is_none_or(|p| p.is_empty()));
             }
-            // A typo in the group config fails loudly; no manual fallback.
             "typo" => {
                 let error = format!(
                     "{:#}",
-                    setup_with_prompt(&root, &project, &[], &mut scripted(&[])).unwrap_err()
+                    setup_with_prompt(&root, &project, &[], &mut scripted(&[]), &mut |_| panic!(
+                        "invalid group must not ask for token"
+                    ))
+                    .unwrap_err()
                 );
-                assert!(error.contains("Cannot run grouped auth setup"), "{error}");
                 assert!(error.contains("unknown repository `appp`"), "{error}");
             }
             // Successful probes must not flip group coverage to missing.
@@ -3000,30 +2173,23 @@ mod tests {
                     },
                 );
                 auth::save(&store).unwrap();
-                setup_with_prompt(
-                    &root,
-                    &project,
-                    &[],
-                    &mut scripted(&[
-                        "", // gh-work skipped
-                        "api-tok",
-                        "dev@example.com",
-                        "y", // bb-cloud: email repair, apply
-                        "acc-tok",
-                        "y",
-                        "y", // bb-second: clear stale email, apply
-                        "n", // final read-check prompt
-                    ]),
-                )
-                .unwrap();
+                for name in ["api-tok", "acc-tok"] {
+                    let spec = &store.credentials[name];
+                    let mut ask = scripted(if name == "api-tok" {
+                        &["dev@example.com"]
+                    } else {
+                        &["y"]
+                    });
+                    let kind = ensure_bitbucket_token_type(name, spec, &mut ask).unwrap();
+                    reconcile_bitbucket_username(name, &kind, spec.username.is_some(), &mut ask)
+                        .unwrap();
+                }
                 let store = auth::load().unwrap();
                 assert_eq!(
                     store.credentials["api-tok"].username.as_deref(),
                     Some("dev@example.com")
                 );
                 assert_eq!(store.credentials["acc-tok"].username, None);
-                assert_eq!(store.projects[&key]["bb"], "api-tok");
-                assert_eq!(store.projects[&key]["bb2"], "acc-tok");
             }
             // Status fails clearly on invalid group declarations instead of
             // rendering coverage over a collapsed map.
@@ -3057,33 +2223,6 @@ mod tests {
                     status_project(&root, &duplicate, true, false).unwrap_err()
                 );
                 assert!(error.contains("more than one auth group"), "{error}");
-            }
-            // A mixed-case group host normalizes into the stored credential,
-            // and mapping succeeds against the lowercase remote host.
-            "mixed-case" => {
-                let path = root.join(".knit/projects/tools.project.json");
-                let mut mixed = serde_json::to_value(&project).unwrap();
-                mixed["auth"]["groups"][0]["host"] = json!("GitHub.COM");
-                std::fs::write(&path, serde_json::to_vec(&mixed).unwrap()).unwrap();
-                let mixed: KnitProject =
-                    serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
-                setup_with_prompt(
-                    &root,
-                    &mixed,
-                    &[],
-                    &mut scripted(&[
-                        "new",
-                        "mc",
-                        "KNIT_WIZARD_TOKEN", // gh-work: first token -> default
-                        "",                  // skip bb-cloud
-                        "",                  // skip bb-second
-                    ]),
-                )
-                .unwrap();
-                let store = auth::load().unwrap();
-                assert_eq!(store.credentials["mc"].host, "github.com");
-                assert_eq!(store.defaults["github.com"], "mc");
-                assert!(store.projects.get(&key).is_none_or(|p| p.is_empty()));
             }
             // An ungrouped public repository cloned with ambient access: a
             // recorded allowance for its exact remote keeps status green and
@@ -3325,63 +2464,24 @@ mod tests {
     }
 
     #[test]
-    fn grouped_setup_creates_one_credential_per_forge_and_skips_absent_groups() {
-        let (stdout, stderr, ok) = run_grouped_child("two-forges", false);
-        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
-        for expected in [
-            "Group gh-work: GitHub work token (github @ github.com)",
-            "Token type(s): fine_grained_pat",
-            "Permissions: contents:read, pull_requests:write",
-            "Create a token at: https://github.com/settings/personal-access-tokens/new",
-            "Instructions: Create the token in the org, scoped to the two repos.",
-            "Not in this workspace (out of clone scope or not cloned yet): extra",
-            "Skipping group `out-scope`: none of its repositories are in this workspace.",
-            "No repository links needed: `gh1` is the default credential for github.com.",
-            "No repository links needed: `bb1` is the default credential for bitbucket.org.",
-            "Host default `bb1` covers bitbucket.org — group `bb-second` needs no links",
-            "Atlassian account email for this API token:",
-            "github.com/org/api → default `gh1`",
-        ] {
-            assert!(
-                stdout.contains(expected),
-                "missing {expected:?} in:\n{stdout}"
-            );
+    fn project_setup_preserves_scope_defaults_and_group_guidance() {
+        for mode in ["two-forges", "scoped", "mixed-case"] {
+            let (stdout, stderr, ok) = run_grouped_child(mode, false);
+            assert!(ok, "{mode}: {stdout}\n{stderr}");
+            assert!(stdout.contains("Permissions: contents:read, pull_requests:write"));
+            assert!(stdout.contains(
+                "Create a token at: https://github.com/settings/personal-access-tokens/new"
+            ));
+            assert!(stdout
+                .contains("Instructions: Create the token in the org, scoped to the two repos."));
+            assert!(stdout.contains("Skipping group `out-scope`"));
         }
     }
 
     #[test]
-    fn grouped_setup_classifies_opaque_credentials_and_fixes_bitbucket_email() {
-        let (stdout, stderr, ok) = run_grouped_child("classify", false);
-        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
-        for expected in [
-            "Credential `legacy` has no recorded token type.",
-            "Recorded `legacy` as a `classic_pat` token.",
-            "the group recommends fine_grained_pat. Use it anyway?",
-            "Recorded the account email for `old-api`.",
-            "must not use one. Clear the email?",
-            "Cleared the account email from `old-access`.",
-        ] {
-            assert!(
-                stdout.contains(expected),
-                "missing {expected:?} in:\n{stdout}"
-            );
-        }
-    }
-
-    #[test]
-    fn grouped_setup_scopes_edits_but_reports_full_coverage() {
-        let (stdout, stderr, ok) = run_grouped_child("scoped", false);
-        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
-        assert!(
-            stdout.contains("github.com/org/web → default `scoped` [outside --repo scope]"),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains(
-                "Skipping group `bb-cloud`: all of its repositories are outside the --repo scope."
-            ),
-            "{stdout}"
-        );
+    fn clone_does_not_reuse_another_projects_scoped_token() {
+        let (stdout, stderr, ok) = run_grouped_child("scoped-reuse", false);
+        assert!(ok, "{stdout}\n{stderr}");
     }
 
     #[test]
@@ -3411,16 +2511,6 @@ mod tests {
     fn grouped_status_fails_clearly_on_invalid_group_declarations() {
         let (stdout, stderr, ok) = run_grouped_child("status-invalid", true);
         assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
-    }
-
-    #[test]
-    fn grouped_setup_normalizes_mixed_case_group_hosts() {
-        let (stdout, stderr, ok) = run_grouped_child("mixed-case", false);
-        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
-        assert!(
-            stdout.contains("github.com/org/api → default `mc`"),
-            "{stdout}"
-        );
     }
 
     #[test]

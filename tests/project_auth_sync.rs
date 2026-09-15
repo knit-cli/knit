@@ -15,93 +15,7 @@ use common::*;
 use std::fs;
 use std::path::Path;
 
-fn membership_repo(id: &str, remote: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "path": "",
-        "remote": remote,
-        "baseBranch": "main",
-    })
-}
-
-fn export_record(id: &str, remote: &str) -> serde_json::Value {
-    serde_json::json!({
-        "localId": id,
-        "name": id,
-        "defaultBranch": None::<String>,
-        "remoteUrl": remote,
-        "metadata": {},
-    })
-}
-
-fn export_body(repos: &[(String, String)], auth: Option<serde_json::Value>) -> serde_json::Value {
-    let mut knit_project = serde_json::json!({
-        "schemaVersion": "1",
-        "kind": "KnitProject",
-        "id": "demo",
-        "createdAt": "2026-01-01T00:00:00Z",
-        "updatedAt": "2026-01-01T00:00:00Z",
-        "repos": repos
-            .iter()
-            .map(|(id, remote)| membership_repo(id, remote))
-            .collect::<Vec<_>>(),
-    });
-    if let Some(auth) = auth {
-        knit_project["auth"] = auth;
-    }
-    serde_json::json!({
-        "data": {
-            "project": {"slug": "demo"},
-            "knitProject": knit_project,
-            "repositories": repos
-                .iter()
-                .map(|(id, remote)| export_record(id, remote))
-                .collect::<Vec<_>>(),
-            "bundles": [],
-            "historyEvents": [],
-        }
-    })
-}
-
-fn read_json(path: &Path) -> serde_json::Value {
-    serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
-}
-
-fn make_bare_repo(root: &Path, name: &str) -> std::path::PathBuf {
-    let work = root.join(format!("{name}-source"));
-    init_repo(&work, name);
-    let bare = root.join(format!("{name}-bare.git"));
-    git(
-        root,
-        [
-            "clone",
-            "--bare",
-            "--quiet",
-            work.to_str().unwrap(),
-            bare.to_str().unwrap(),
-        ],
-    );
-    bare
-}
-
-fn instead_of_config(root: &Path, url: &str, bare: &Path) -> std::path::PathBuf {
-    // Serialize through `git config`: a hand-written `[url "C:\..."]` loses
-    // the backslashes when Git parses the subsection, while `git config`
-    // escapes it portably. `--replace-all` keeps the old overwrite semantic.
-    let config = root.join("recovery.gitconfig");
-    git(
-        root,
-        [
-            "config",
-            "--file",
-            config.to_str().unwrap(),
-            "--replace-all",
-            &format!("url.{}.insteadOf", bare.display()),
-            url,
-        ],
-    );
-    config
-}
+use common::project_auth::*;
 
 /// The parent acceptance flow, end to end on the pull side: a remote gains a
 /// new private repository and a new auth group for it. The pull receives the
@@ -240,7 +154,7 @@ fn pull_imports_auth_group_before_failed_add_and_recovers_after_setup() {
 
     // ...and the next pull clones it through the binding (the insteadOf
     // rewrite stands in for the access the credential grants).
-    let bare = make_bare_repo(&root, "newrepo");
+    let bare = make_bare_named(&root, "newrepo");
     let config = instead_of_config(&root, newrepo_url, &bare);
     let pull = knit_with_env(
         &target,
@@ -930,7 +844,7 @@ fn scoped_pull_failed_add_out_of_scope_group_and_pending_before_errors() {
         assigned.contains("Assigned `ci` to newrepo"),
         "setup must bind the failed in-scope repo: {assigned}"
     );
-    let bare = make_bare_repo(&root, "newrepo");
+    let bare = make_bare_named(&root, "newrepo");
     let gitconfig = instead_of_config(&root, newrepo_url, &bare);
     let pull = knit_with_env(
         &target,

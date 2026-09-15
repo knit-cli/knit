@@ -1172,7 +1172,7 @@ pub fn resolve_repository(
         .map(|forge| forge.id().to_owned())
         .map(|value| canonical_provider(&value));
     if origin_provider.as_deref() == Some(wanted.as_str()) && path == repository {
-        return resolve_host_default(&registry, cwd, Some(&origin));
+        return resolve(cwd, Some(&origin));
     }
     bail!(
         "Checkout origin ({host}/{path}) does not match the explicit {provider} target \
@@ -1212,252 +1212,119 @@ pub fn is_local_remote(remote: &str) -> bool {
                 .is_some_and(|b| *b == b'/' || *b == b'\\'))
 }
 
-/// Discover the assigned adapter without reading a token or secret store.
-/// Use the explicit operation remote, never the current checkout's origin.
+/// Select metadata first, so adapter discovery never reads a secret.
 pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<String>> {
-    let registry = load()?;
     if is_local_remote(remote) {
         return Ok(None);
     }
+    let registry = load()?;
     let target = remote_target(remote)?;
-    // An explicit repository binding decides the adapter first — a custom
-    // host's adapter must not be overridden by a host default. Only when no
-    // binding serves the remote does the host default identify the provider,
-    // with or without a workspace.
-    let binding_provider = (|| -> Result<Option<String>> {
-        if registry.projects.values().all(BTreeMap::is_empty) || context_root(cwd).is_none() {
-            return Ok(None);
-        }
-        let Some((root, project)) = optional_project_context(cwd, None)? else {
-            return Ok(None);
-        };
-        let key = project_key(&root, &project.id)?;
-        let Some(bindings) = registry.projects.get(&key).filter(|b| !b.is_empty()) else {
-            return Ok(None);
-        };
-        let pending = load_known_pending_repos(&root, &project.id);
-        let ambient = ambient_for(&registry, &key);
-        let Some(name) =
-            binding_for_target(&registry, bindings, &project, &target, &pending, ambient)?
-        else {
-            return Ok(None);
-        };
-        // binding_for_target validates the credential metadata and exact host.
-        Ok(Some(registry.credentials[name].provider.clone()))
-    })()?;
-    if binding_provider.is_some() {
-        return Ok(binding_provider);
-    }
-    if let Some((name, _)) = registry.default_for_host(&target.0) {
-        if let Some(spec) = registry.credentials.get(&name) {
-            return Ok(Some(spec.provider.clone()));
-        }
-    }
-    Ok(None)
+    Ok(select_credential(&registry, cwd, &target)?
+        .map(|name| registry.credentials[&name].provider.clone()))
 }
 
 pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCredential>> {
-    // An exact-target clone selection authenticates only the repositories it
-    // names. A remote it does not cover is not forced to ambient credentials:
-    // the selection falls through to the clone workspace's project
-    // assignments, so grouped mappings (written by guided setup before the
-    // guard activated) keep serving their repositories while the selection is
-    // active. The fallback is pinned to the clone's target root when the
-    // guard carries one, so the surrounding workspace is never borrowed.
-    if clone_credentials().is_some() {
-        let root = clone_credential_root();
-        if let Some(selected) =
-            resolve_clone_selection(&clone_credentials().expect("just checked"), cwd, remote)?
-        {
-            return Ok(Some(selected));
-        }
-        if let Some(root) = root.as_deref() {
-            return resolve_clone_root_assignment(root, remote);
-        }
-    }
-    resolve_project_assignment(cwd, remote)
-}
-
-/// Resolve a remote against this workspace's project assignments (and the
-/// recorded ambient allowances), without any clone selection involved.
-fn resolve_project_assignment(
-    cwd: &Path,
-    remote: Option<&str>,
-) -> Result<Option<ResolvedCredential>> {
-    let registry = load()?;
-    if registry.projects.values().all(BTreeMap::is_empty) || context_root(cwd).is_none() {
-        // No workspace assignments anywhere: the personal host defaults
-        // still serve Git — the one-token-per-forge case that needs no
-        // workspace at all.
-        return resolve_host_default(&registry, cwd, remote);
-    }
-    let Some((root, project)) = optional_project_context(cwd, None)? else {
-        return resolve_host_default(&registry, cwd, remote);
-    };
-    let key = project_key(&root, &project.id)?;
-    let Some(bindings) = registry.projects.get(&key).filter(|b| !b.is_empty()) else {
-        // This project has no assignments: host defaults apply directly.
-        return resolve_host_default(&registry, cwd, remote);
-    };
-    resolve_remote_in_project(&registry, &root, &project, bindings, cwd, remote)
-}
-
-/// Resolve a remote against the personal host defaults alone — no workspace,
-/// project, or repository assignment involved. A host without a default
-/// resolves to `None` (ambient Git authentication).
-fn resolve_host_default(
-    registry: &AuthStore,
-    origin_cwd: &Path,
-    remote: Option<&str>,
-) -> Result<Option<ResolvedCredential>> {
     let origin;
     let remote = match remote {
         Some(remote) => remote,
         None => {
-            let output = Command::new("git")
-                .args(["remote", "get-url", "origin"])
-                .current_dir(origin_cwd)
-                .output()
-                .context("Cannot inspect repository origin for forge credentials")?;
-            if !output.status.success() {
+            origin = checkout_origin(cwd)?;
+            let Some(origin) = origin.as_deref() else {
                 return Ok(None);
-            }
-            origin = String::from_utf8(output.stdout).context("Repository origin is not UTF-8")?;
-            origin.trim()
+            };
+            origin
         }
     };
     if is_local_remote(remote) {
         return Ok(None);
     }
     let target = remote_target(remote)?;
-    match default_binding(registry, &target.0)? {
-        Some(name) => {
-            let resolved = credential(name)?;
-            if resolved.host != target.0 {
-                bail!("Default credential host does not match the repository host");
-            }
-            Ok(Some(resolved))
-        }
-        None => Ok(None),
-    }
-}
-
-/// Resolve a remote inside a guarded clone section's pinned root. The clone
-/// workspace's own `activeProject` is authoritative here: the surrounding
-/// process's project override or bundle selection (an outer bundle worktree
-/// the clone was invoked from) must not redirect assignment fallbacks into a
-/// different project's bindings.
-fn resolve_clone_root_assignment(
-    root: &Path,
-    remote: Option<&str>,
-) -> Result<Option<ResolvedCredential>> {
     let registry = load()?;
-    if registry.projects.values().all(BTreeMap::is_empty) {
-        return resolve_host_default(&registry, root, remote);
-    }
-    let config = store::load_config(root)?;
-    let Some(project_id) = config.active_project else {
-        return resolve_host_default(&registry, root, remote);
-    };
-    validate_name(&project_id).context("Invalid project id")?;
-    let project_path = store::project_path(root, &project_id);
-    if !project_path.exists() {
-        return resolve_host_default(&registry, root, remote);
-    }
-    let project: KnitProject = store::read_json(&project_path)?;
-    let key = project_key(root, &project_id)?;
-    let Some(bindings) = registry.projects.get(&key).filter(|b| !b.is_empty()) else {
-        return resolve_host_default(&registry, root, remote);
-    };
-    resolve_remote_in_project(&registry, root, &project, bindings, root, remote)
-}
-
-/// The shared assignment resolution once the workspace root, project, and
-/// bindings are known: remote normalization, the strict gate, and the
-/// credential lookup. `origin_cwd` is where `origin` is read from when no
-/// explicit remote is given (the caller's cwd, or the pinned root).
-fn resolve_remote_in_project(
-    registry: &AuthStore,
-    root: &Path,
-    project: &KnitProject,
-    bindings: &BTreeMap<String, String>,
-    origin_cwd: &Path,
-    remote: Option<&str>,
-) -> Result<Option<ResolvedCredential>> {
-    let origin;
-    let remote = match remote {
-        Some(remote) => remote,
-        None => {
-            let output = Command::new("git")
-                .args(["remote", "get-url", "origin"])
-                .current_dir(origin_cwd)
-                .output()
-                .context("Cannot inspect repository origin for forge credentials")?;
-            if !output.status.success() {
-                return Ok(None);
-            }
-            origin = String::from_utf8(output.stdout).context("Repository origin is not UTF-8")?;
-            origin.trim()
-        }
-    };
-    // A filesystem remote cannot receive a forge secret, and remains usable in
-    // projects that also contain authenticated forge repositories.
-    if is_local_remote(remote) {
-        return Ok(None);
-    }
-    let target = remote_target(remote)?;
-    let pending = load_known_pending_repos(root, &project.id);
-    let ambient = ambient_for(registry, &project_key(root, &project.id)?);
-    let Some(name) = binding_for_target(registry, bindings, project, &target, &pending, ambient)?
-    else {
+    let Some(name) = select_credential(&registry, cwd, &target)? else {
         return Ok(None);
     };
-    let resolved = credential(name)?;
+    let resolved = credential(&name)?;
+    // Recheck after loading: another process could have replaced the record.
     if resolved.host != target.0 {
         bail!("Assigned credential host does not match the repository host");
     }
     Ok(Some(resolved))
 }
 
-/// Resolve one Git remote against the active clone selection: a selected
-/// credential is used only when its exact (host, path) target matches the
-/// remote; every other repository falls back to the caller's normal
-/// resolution (project assignments, then ambient Git authentication).
-fn resolve_clone_selection(
-    selection: &[CloneCredentialTarget],
+/// Explicit clone target, project override, host default, then permitted
+/// ambient access. A clone pins context to its destination, never its parent.
+fn select_credential(
+    registry: &AuthStore,
     cwd: &Path,
-    remote: Option<&str>,
-) -> Result<Option<ResolvedCredential>> {
-    let origin;
-    let remote = match remote {
-        Some(remote) => remote,
-        None => {
-            let output = Command::new("git")
-                .args(["remote", "get-url", "origin"])
-                .current_dir(cwd)
-                .output()
-                .context("Cannot inspect repository origin for forge credentials")?;
-            if !output.status.success() {
-                return Ok(None);
-            }
-            origin = String::from_utf8(output.stdout).context("Repository origin is not UTF-8")?;
-            origin.trim()
+    target: &(String, String),
+) -> Result<Option<String>> {
+    let scope = CLONE_CREDENTIALS
+        .lock()
+        .expect("clone credential lock poisoned")
+        .clone();
+    if let Some(name) = scope
+        .as_ref()
+        .and_then(|scope| clone_selection_match(&scope.targets, &target.0, &target.1))
+    {
+        return validated_binding(registry, name, &target.0).map(|name| name.map(str::to_owned));
+    }
+    if registry.projects.values().all(BTreeMap::is_empty) {
+        return default_binding(registry, &target.0).map(|name| name.map(str::to_owned));
+    }
+    let context = match scope.and_then(|scope| scope.root) {
+        Some(root) => {
+            // The clone's active project ignores outer --project and bundle context.
+            let project = store::load_config(&root)?
+                .active_project
+                .map(|id| -> Result<Option<KnitProject>> {
+                    validate_name(&id).context("Invalid project id")?;
+                    let path = store::project_path(&root, &id);
+                    if path.exists() {
+                        Ok(Some(store::read_json(&path)?))
+                    } else {
+                        Ok(None)
+                    }
+                })
+                .transpose()?
+                .flatten();
+            project.map(|project| (root, project))
         }
+        None if context_root(cwd).is_some() => optional_project_context(cwd, None)?,
+        None => None,
     };
-    if is_local_remote(remote) {
-        return Ok(None);
+    if let Some((root, project)) = context {
+        let key = project_key(&root, &project.id)?;
+        if registry
+            .projects
+            .get(&key)
+            .is_some_and(|bindings| !bindings.is_empty())
+        {
+            return project_credential_name(registry, &root, &project, target);
+        }
     }
-    let (host, path) = remote_target(remote)?;
-    let Some(name) = clone_selection_match(selection, &host, &path) else {
-        return Ok(None);
-    };
-    // credential() fails closed when the credential or its token disappeared
-    // since validation; an explicit selection never falls back silently.
-    let resolved = credential(name)?;
-    if resolved.host != host {
-        bail!("Selected credential host does not match the repository host");
-    }
-    Ok(Some(resolved))
+    default_binding(registry, &target.0).map(|name| name.map(str::to_owned))
+}
+
+/// Shared project policy for Git/API resolution and clone helper coverage.
+/// `Ok(None)` means an exact recorded ambient allowance; errors mean missing
+/// or invalid access, including when the project has no assignments yet.
+pub(crate) fn project_credential_name(
+    registry: &AuthStore,
+    root: &Path,
+    project: &KnitProject,
+    target: &(String, String),
+) -> Result<Option<String>> {
+    let key = project_key(root, &project.id)?;
+    let empty = BTreeMap::new();
+    binding_for_target(
+        registry,
+        registry.projects.get(&key).unwrap_or(&empty),
+        project,
+        target,
+        &load_known_pending_repos(root, &project.id),
+        ambient_for(registry, &key),
+    )
+    .map(|name| name.map(str::to_owned))
 }
 
 /// The credential selected for exactly this target, if the selection has one.
@@ -1493,7 +1360,9 @@ fn binding_for_target<'a>(
     pending: &BTreeMap<String, String>,
     ambient: &BTreeMap<String, String>,
 ) -> Result<Option<&'a str>> {
-    let matches: Vec<_> = project
+    // Materialized membership is authoritative; pending entries are used
+    // only when no materialized repository matches the target.
+    let mut matches: Vec<&str> = project
         .repos
         .iter()
         .filter(|repo| {
@@ -1503,75 +1372,42 @@ fn binding_for_target<'a>(
                 .as_ref()
                 == Some(target)
         })
+        .map(|repo| repo.id.as_str())
         .collect();
+    let pending_only = matches.is_empty();
+    if pending_only {
+        matches.extend(
+            pending
+                .iter()
+                .filter(|(_, remote)| remote_target(remote).ok().as_ref() == Some(target))
+                .map(|(id, _)| id.as_str()),
+        );
+    }
     if matches.len() > 1 {
         bail!("Several project repositories match this forge remote; credential assignment is ambiguous");
     }
-    if let Some(repo) = matches.first() {
-        if let Some(name) = bindings.get(&repo.id) {
+    if let Some(id) = matches.first() {
+        if let Some(name) = bindings.get(*id) {
             return validated_binding(registry, name, &target.0);
         }
-        // The host's default credential — an explicit choice or the host's
-        // single token — serves any repository on that host, including
-        // declared group members, without a per-repository assignment.
-        if let Some(name) = default_binding(registry, &target.0)? {
-            return Ok(Some(name));
-        }
-        // Recorded ambient access — a public HTTPS or SSH repository this
-        // project already cloned or verified without a credential — keeps
-        // working after assignments exist, but only for the exact remote it
-        // was recorded for, and never once a declared group claims the
-        // repository: group members need the group's credential.
-        if !declared_group_member(project, &repo.id)
-            && ambient_allows(ambient, &repo.id, &target.0, &target.1)
-        {
-            return Ok(None);
-        }
-        bail!(
-            "Project `{}` repository `{}` has no assigned credential; run `knit auth setup`",
-            project.id,
-            repo.id
-        );
     }
-    // No tracked repository matches. A repository the full membership knows
-    // but this workspace has not materialized yet (out of clone scope, or a
-    // pull add that failed) can still be served by its explicit binding —
-    // the pull retry after `knit auth setup` depends on it. Ambiguous
-    // pending candidates fail instead of matching any one of them.
-    let pending_matches: Vec<_> = pending
-        .iter()
-        .filter(|(_, remote)| remote_target(remote).ok().as_ref() == Some(target))
-        .collect();
-    if pending_matches.len() > 1 {
-        bail!("Several pending repositories match this forge remote; credential assignment is ambiguous");
-    }
-    if let Some((repo_id, _)) = pending_matches.first() {
-        // The same precedence as a materialized repository: an explicit
-        // binding wins, the host's default serves its host, an exact
-        // recorded ambient allowance lets the remote through without one —
-        // unless a declared group claims the pending repository, in which
-        // case the allowance is stale — and anything else stays strict.
-        if let Some(name) = bindings.get(repo_id.as_str()) {
-            return validated_binding(registry, name, &target.0);
-        }
-        if let Some(name) = default_binding(registry, &target.0)? {
-            return Ok(Some(name));
-        }
-        if !declared_group_member(project, repo_id)
-            && ambient_allows(ambient, repo_id, &target.0, &target.1)
-        {
-            return Ok(None);
-        }
-        bail!(
-            "Project `{}` repository `{repo_id}` has no assigned credential yet; run `knit auth setup`, then `knit pull` to clone it",
-            project.id
-        );
-    }
-    // A remote no membership knows: the host's default still serves its own
-    // host — a personal token is for everything on that forge — and anything
-    // else stays strict rather than guessed.
     if let Some(name) = default_binding(registry, &target.0)? {
         return Ok(Some(name));
+    }
+    if let Some(id) = matches.first() {
+        if !declared_group_member(project, id) && ambient_allows(ambient, id, &target.0, &target.1)
+        {
+            return Ok(None);
+        }
+        bail!(
+            "Project `{}` repository `{id}` has no assigned credential; run `knit auth setup`{}",
+            project.id,
+            if pending_only {
+                ", then `knit pull` to clone it"
+            } else {
+                ""
+            }
+        );
     }
     bail!("Remote is not a configured repository in this project; refusing to select a forge credential")
 }

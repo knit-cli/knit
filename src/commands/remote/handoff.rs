@@ -78,7 +78,7 @@ impl HandoffExport {
     /// Resolve transport on this machine, without persisting a rewritten origin URL.
     pub fn probe_repositories(&mut self, cwd: &Path) -> Vec<(String, Result<()>)> {
         let mut results = Vec::new();
-        let hosts = helpers::connected_forge_hosts(&self.remote, &self.token).unwrap_or_default();
+        let hosts = helpers::automatic_forge_hosts(&self.remote, &self.token).unwrap_or_default();
         for repo in &self.bundle.repos {
             let result = (|| {
                 let record = self

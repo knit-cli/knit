@@ -1469,7 +1469,7 @@ pub enum HandoffCommand {
 
 #[derive(Subcommand)]
 pub enum AuthCommand {
-    /// Add or reuse credentials, then choose the project repositories each credential serves.
+    /// Choose host defaults or project-only tokens, with optional repository scope.
     Setup {
         #[arg(long)]
         project: Option<String>,
