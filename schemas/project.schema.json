@@ -88,6 +88,19 @@
     "repos": {
       "type": "array"
     },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "groups": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/authGroup"
+          }
+        }
+      }
+    },
     "commands": {
       "type": "object",
       "additionalProperties": {
@@ -356,6 +369,93 @@
     }
   },
   "$defs": {
+    "authGroup": {
+      "type": "object",
+      "description": "One recommended forge credential: repositories it serves and the token kind to create. Descriptive fields are untrusted text; Knit never embeds tokens here.",
+      "required": [
+        "id",
+        "name",
+        "provider",
+        "host",
+        "repos",
+        "tokenTypes"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 100,
+          "pattern": "^[A-Za-z0-9._-]+$"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 200,
+          "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
+        },
+        "provider": {
+          "enum": [
+            "github",
+            "gitlab",
+            "bitbucket",
+            "forgejo"
+          ]
+        },
+        "host": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253,
+          "pattern": "^[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?(\\.[A-Za-z0-9]([A-Za-z0-9-]*[A-Za-z0-9])?)*$"
+        },
+        "repos": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 200,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "tokenTypes": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 8,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          }
+        },
+        "permissions": {
+          "type": "array",
+          "maxItems": 50,
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200,
+            "pattern": "^[^\\u0000-\\u001F\\u007F-\\u009F]*$"
+          }
+        },
+        "instructions": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 8000,
+          "pattern": "^[^\\u0000-\\u0008\\u000B-\\u001F\\u007F-\\u009F]*$",
+          "description": "Free text for humans; ordinary newlines and tabs are allowed, other control characters are not."
+        },
+        "tokenUrl": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2000,
+          "pattern": "^https://",
+          "description": "Token creation page. HTTPS only, never carrying userinfo or whitespace; Knit displays it but never opens it.",
+          "not": {
+            "type": "string",
+            "pattern": "[@\\s\\u0000-\\u001F\\u007F-\\u009F]"
+          }
+        }
+      }
+    },
     "deployment": {
       "type": "object",
       "required": [

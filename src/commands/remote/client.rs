@@ -329,10 +329,12 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
 
         // Authentication comes from the installed Git credential helpers.
         if let Err(error) = git_output(&repo_path, ["fetch", "origin", branch]) {
-            return Err(
+            let error = if super::clone::is_auth_shaped_failure(&format!("{error:#}")) {
                 anyhow::anyhow!("{error:#}; {}", super::credentials::NO_ACCESS_HINT)
-                    .context(format!("{}: failed to fetch origin/{branch}", repo.id)),
-            );
+            } else {
+                error
+            };
+            return Err(error.context(format!("{}: failed to fetch origin/{branch}", repo.id)));
         }
         let remote_ref = format!("origin/{branch}");
         if !ref_exists(&repo_path, &remote_ref) {

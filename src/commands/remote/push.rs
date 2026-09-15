@@ -1013,6 +1013,16 @@ pub(super) fn publishable_project(
             merged.repos.push(repo.clone());
         }
     }
+    // The same asymmetry covers the auth definitions. The remote's groups are
+    // the shared whole; a scoped workspace's local copy may be stale or
+    // absent, so it must never shrink or clear hosted requirements. Publish
+    // the local definitions only when the remote carries none. Concretely:
+    // while scoped, local edits to the auth groups (including an intentional
+    // clear) are ignored — make them from a whole-project clone. (An unscoped
+    // workspace skips this merge entirely: its push is the authoritative
+    // shape, so an explicit empty `groups` clears and an absent field
+    // preserves, per the remote's compatibility contract.)
+    merged.auth = membership.auth.clone().or_else(|| project.auth.clone());
     Ok(Some(merged))
 }
 

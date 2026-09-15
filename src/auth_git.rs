@@ -18,6 +18,19 @@ pub fn configure(
     let Some((operation, targets)) = network_targets(cwd, args)? else {
         return Ok(Vec::new());
     };
+    // Operations that reach remotes Knit has no binding for — a clone, or a
+    // reachability probe — must never hang on a raw Git username/password
+    // prompt: with no credential selected there is nothing to answer it, so
+    // the prompts are disabled for the child and the fast failure feeds
+    // guided local token setup. Working ambient access is untouched — SSH
+    // agent keys and credential helpers, ambient or Knit-installed, never
+    // reach the terminal-prompt path. In-workspace fetch/push keeps its
+    // previous behavior (suppression only when a credential is selected).
+    if matches!(operation.as_str(), "clone" | "ls-remote") {
+        command.env("GIT_TERMINAL_PROMPT", "0");
+        command.env("GIT_ASKPASS", "");
+        command.arg("-c").arg("core.askPass=");
+    }
     if changes_repository(args) {
         let registry = auth::load()?;
         if let Ok((root, project)) = auth::project_context(cwd, None) {
