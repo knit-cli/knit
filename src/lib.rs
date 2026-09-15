@@ -35,7 +35,9 @@ pub fn run(cli: Cli) -> Result<()> {
     let bundle_context = cli.bundle.clone();
     store::set_bundle_override(cli.bundle);
     match cli.command {
-        Commands::Auth { command } => commands::auth::run(command),
+        Commands::Auth { command, project } => {
+            commands::auth::dispatch(command, project.as_deref())
+        }
         Commands::Handoff { command } => match command {
             cli::HandoffCommand::Out {
                 to,

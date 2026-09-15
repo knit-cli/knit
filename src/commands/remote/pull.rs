@@ -527,6 +527,16 @@ fn reconcile_project_repositories(
             });
         for record in &public_gate {
             let local_id = export_repo_local_id(record);
+            // A host default serves this repository; ambient access is not
+            // what it will use.
+            if let (Ok((host, _)), Ok(store)) = (
+                crate::auth::remote_target(record.remote_url.as_deref().unwrap_or_default()),
+                crate::auth::load(),
+            ) {
+                if store.default_for_host(&host).is_some() {
+                    continue;
+                }
+            }
             if let Err(error) = crate::auth::record_ambient_access(
                 root,
                 &project.id,

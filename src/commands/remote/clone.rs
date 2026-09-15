@@ -404,13 +404,48 @@ pub(super) fn clone_fetched_export(
                     .unwrap_or_default()
             );
         }
-        crate::human!(
-            "{}",
-            out::muted(format!(
-                "Run `knit auth setup` inside {} to link credentials interactively (or `knit auth add` + `knit auth use` noninteractively), then `knit pull --bundles` to clone any repository that failed for missing access.",
-                target_root.display()
-            ))
-        );
+        // Every group's host already has a default credential (or deliberate
+        // links): the clone authenticates through it with no flags and no
+        // setup step; the instructions below are only for what is missing.
+        // Coverage is per group, not per distinct host — two groups sharing a
+        // host are both covered by that host's default.
+        let defaults_cover_groups = !auth.groups.is_empty()
+            && crate::auth::load()
+                .map(|store| {
+                    let covers = |host: &str| {
+                        store
+                            .default_for_host(host)
+                            .and_then(|(name, _)| {
+                                store
+                                    .credentials
+                                    .get(&name)
+                                    .map(|spec| spec.host.eq_ignore_ascii_case(host))
+                            })
+                            .unwrap_or(false)
+                    };
+                    auth.groups.iter().all(|group| covers(&group.host))
+                })
+                .unwrap_or(false);
+        if defaults_cover_groups {
+            let hosts: BTreeSet<&str> = auth
+                .groups
+                .iter()
+                .map(|group| group.host.as_str())
+                .collect();
+            crate::human!(
+                "{} host default credential(s) cover every group ({})",
+                out::heading("Auth requirements:"),
+                hosts.into_iter().collect::<Vec<_>>().join(", ")
+            );
+        } else {
+            crate::human!(
+                "{}",
+                out::muted(format!(
+                    "Run `knit auth setup` inside {} to link credentials interactively (or `knit auth add` + `knit auth use` noninteractively), then `knit pull --bundles` to clone any repository that failed for missing access.",
+                    target_root.display()
+                ))
+            );
+        }
     }
 
     // Repositories no declared group covers and nothing binds keep their
@@ -582,9 +617,10 @@ pub(super) fn clone_fetched_export(
                         target_root.display()
                     )
                 })?;
-                // A repair may rotate a rejected link in place (binding
-                // unchanged) or create a missing one; retry everything that
-                // has a binding now.
+                // A repair creates a fresh local credential for the rejected
+                // repositories, or a missing group's first token becomes the
+                // host's default with no per-repository links: retry
+                // everything that has a binding or a host default now.
                 let key = crate::auth::project_key(&target_root, &bootstrap.project.id)
                     .with_context(|| {
                         format!(
@@ -592,13 +628,25 @@ pub(super) fn clone_fetched_export(
                             target_root.display()
                         )
                     })?;
+                let store = crate::auth::load()?;
                 linked.extend(
-                    crate::auth::load()?
+                    store
                         .projects
                         .get(&key)
                         .into_iter()
                         .flat_map(|bindings| bindings.keys().cloned())
                         .filter(|repo| failing_ids.contains(repo.as_str())),
+                );
+                linked.extend(
+                    failing
+                        .iter()
+                        .filter(|(_, remote)| {
+                            crate::auth::remote_target(remote)
+                                .ok()
+                                .and_then(|(host, _)| store.default_for_host(&host).map(|_| ()))
+                                .is_some()
+                        })
+                        .map(|(repo, _)| repo.clone()),
                 );
             }
             let uncovered: Vec<(String, String)> = failing
@@ -1783,12 +1831,13 @@ fn local_assignments_cover(
     let Ok(store) = crate::auth::load() else {
         return false;
     };
+    // Bindings may not exist at all — a defaults-only workspace (the
+    // one-token-per-forge flow) can still cover everything, and must not be
+    // sent to the hosted helper lookup.
     let Ok(key) = crate::auth::project_key(target_root, &project.id) else {
         return false;
     };
-    let Some(bindings) = store.projects.get(&key) else {
-        return false;
-    };
+    let bindings = store.projects.get(&key);
     let ambient = store.ambient.get(&key);
     let mut any = false;
     for repository in repositories {
@@ -1807,13 +1856,16 @@ fn local_assignments_cover(
         };
         any = true;
         let bound = bindings
-            .get(&export_repo_local_id(repository))
+            .and_then(|map| map.get(&export_repo_local_id(repository)))
             .and_then(|name| store.credentials.get(name))
             .is_some_and(|spec| spec.host.eq_ignore_ascii_case(&host));
         let ambient_ok = ambient
             .and_then(|map| map.get(&export_repo_local_id(repository)))
             .is_some_and(|recorded| *recorded == format!("{host}/{path}"));
-        if !bound && !ambient_ok {
+        // The host's default credential covers repositories with neither a
+        // binding nor an ambient allowance.
+        let default_ok = store.default_for_host(&host).is_some();
+        if !bound && !ambient_ok && !default_ok {
             return false;
         }
     }
@@ -1869,6 +1921,11 @@ fn record_ungrouped_ambient_access(
                 {
                     continue;
                 }
+                // A host default serves this repository on later fetches;
+                // ambient access is not what it will use.
+                if store.default_for_host(&host).is_some() {
+                    continue;
+                }
             }
             crate::auth::record_ambient_access(target_root, &project.id, &local_id, url)?;
         }
@@ -1917,6 +1974,11 @@ fn record_ambient_clone_access(
                     .iter()
                     .any(|(_, selected)| selected.eq_ignore_ascii_case(&host))
                 {
+                    continue;
+                }
+                // A host default serves this repository on later fetches;
+                // ambient access is not what it will use.
+                if store.default_for_host(&host).is_some() {
                     continue;
                 }
             }

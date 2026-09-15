@@ -136,10 +136,7 @@ try:
     answer('Name for this credential: ', 'gh')
     answer('private local file: ', '')
     answer('Token (hidden): ', 'PTY-GH-SECRET')
-    expect('Proposed mapping for group `gh-work`:')
-    expect('  api: unassigned -> gh')
-    expect('  web: unassigned -> gh')
-    answer('Apply this mapping? [y/N]: ', 'y')
+    expect('No repository links needed: `gh` is the default credential for github.com.')
     # Bitbucket credential: pick the API-token kind explicitly, then email.
     expect('Group bb-cloud: Bitbucket Cloud (bitbucket @ bitbucket.org)')
     expect('Token type(s): atlassian_api_token, access_token')
@@ -150,7 +147,7 @@ try:
     answer('Atlassian account email for this API token: ', 'dev@example.org')
     answer('private local file: ', '')
     answer('Token (hidden): ', 'PTY-BB-SECRET')
-    answer('Apply this mapping? [y/N]: ', 'y')
+    expect('No repository links needed: `bb` is the default credential for bitbucket.org.')
     # The group whose repositories were never cloned is skipped, not prompted.
     expect('Not in this workspace (out of clone scope or not cloned yet): extra')
     expect("Skipping group `absent`: none of its repositories are in this workspace.")
@@ -186,7 +183,8 @@ try:
     registry_path = home / 'forge-auth.json'
     registry = json.loads(registry_path.read_text())
     resolved = str(project_path.resolve())
-    assert registry['projects'][resolved] == {'api': 'gh', 'web': 'gh', 'bb': 'bb'}
+    assert not registry.get('projects', {}).get(resolved)
+    assert registry['defaults'] == {'github.com': 'gh', 'bitbucket.org': 'bb'}
     assert registry['credentials']['gh']['tokenType'] == 'fine_grained_pat'
     assert registry['credentials']['bb']['tokenType'] == 'atlassian_api_token'
     assert registry['credentials']['bb']['username'] == 'dev@example.org'

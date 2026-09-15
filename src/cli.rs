@@ -33,10 +33,13 @@ pub enum GitCredentialOperation {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Set up named forge credentials and personal project/repository assignments.
+    /// Set up forge tokens: bare `knit auth` manages the personal default tokens used for everything; `knit auth --project NAME` wires one project.
     Auth {
+        /// Scope the wizard to one project: use the default tokens or give the project its own.
+        #[arg(long)]
+        project: Option<String>,
         #[command(subcommand)]
-        command: AuthCommand,
+        command: Option<AuthCommand>,
     },
     /// Continue a bundle on another machine.
     Handoff {
@@ -1505,6 +1508,11 @@ pub enum AuthCommand {
         project: Option<String>,
         #[arg(short = 'r', long = "repo", required = true)]
         repos: Vec<String>,
+    },
+    /// Choose which saved credential is a host's default. The default serves every project on that forge unless overridden.
+    Default {
+        /// An existing credential name.
+        name: String,
     },
     /// Show per-repository assignments. --check probes Git read access without modifying repositories.
     Status {

@@ -7,6 +7,7 @@ All credentials are synthetic. The CONNECT proxy accepts only the four explicit
 
 import base64
 import collections
+import json
 import os
 import pathlib
 import shutil
@@ -200,6 +201,17 @@ def main(binary, root):
         redirect.clear()
         print('PASS: cross-repository redirect blocked', flush=True)
         run([binary, 'auth', 'clear', '--repo', 'a'])
+        before = len(calls)
+        run([binary, '--bundle', 'auth-validation', 'git', '--repo', 'a', 'ls-remote', 'origin', 'HEAD'])
+        assert len(calls) > before and all(accepted for *_, accepted in calls[before:])
+        print('PASS: clearing an override restores the shared host default', flush=True)
+        # With only project-scoped tokens, the same missing assignment must
+        # still fail before transport.
+        registry_path = root / 'personal' / 'forge-auth.json'
+        registry = json.loads(registry_path.read_text())
+        registry['defaults'].pop('github.auth.test')
+        registry['scopedCredentials'] = ['shared', 'restricted']
+        registry_path.write_text(json.dumps(registry))
         before = len(calls)
         run([binary, '--bundle', 'auth-validation', 'git', '--repo', 'a', 'ls-remote', 'origin', 'HEAD'], success=False)
         assert len(calls) == before, 'unassigned repository reached network'

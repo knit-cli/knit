@@ -645,15 +645,15 @@ creates one (like `git branch <name>`), `knit bundle` alone shows the current on
 creation flags go straight on it, e.g. `knit bundle "feature title" --project x --repo backend`.
 Bundle creation fetches each selected repo's configured `origin/<baseBranch>` and records that exact commit before creating any feature branch. Source checkouts are not moved, and a dirty source checkout does not make the new bundle stale. Use `--offline` to prefer cached remote bases or `--from-local-base` only when deliberately starting from local base branches.
 
-Set up personal forge credentials for the project directly in Knit (no hosted service or desktop app required):
+Set up personal forge credentials directly in Knit (no hosted service or desktop app required). Bare `knit auth` configures local per-forge-host defaults from any directory; `knit auth --project demo` optionally chooses between those defaults and a project-only token:
 
 ```sh
-knit auth setup
+knit auth
+knit auth --project demo
 knit auth status --check
-knit auth use shared-token --repo backend --repo frontend
 ```
 
-Choose a credential, then the repositories where Knit should use it. One credential can cover many repositories across owners; add more for separate access or different backends. Setup shows all links and missing coverage; `--repo` limits edits, and `done` finishes explicitly. Links do not grant provider permissions. Assignments stay in user-level config, outside shared project and bundle artifacts. Once a project has assignments, unassigned forge repositories require setup rather than falling back to ambient tokens.
+The defaults apply to clone, pull, and push and to forge API calls; the Svartal ledger token is separate. Per-repo assignments are not required. Advanced per-repository control remains for deliberate overrides (`knit auth use shared-token --repo backend --repo frontend`), one credential can cover many repositories across owners, and assignments stay in user-level config, outside shared project and bundle artifacts. Links do not grant provider permissions.
 
 Inspect and update the workspace's distinct Git states explicitly:
 

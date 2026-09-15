@@ -371,20 +371,19 @@ try:
 
     def grouped_script(expect, answer):
         expect('Setting up project credentials before cloning:')
-        # First group: one direct hidden token prompt.
+        # First group on the host: one direct hidden token prompt; the first
+        # token entered becomes the host's default.
         expect('Group gh-work: Work repos (github @ github.com)')
         expect('Token type(s): classic_pat')
         answer('Token for github.com (gh-work — hidden): ', 'CONV1-GH-WORK', hidden=True)
-        # Second group on the SAME host must not silently reuse the first
-        # group's brand-new credential: a choice with a new-token option.
-        expect('Group gh-mobile: Mobile team (github @ github.com)')
-        expect('Saved credentials for github @ github.com:')
-        expect('n. enter a new token for this group')
-        answer('Credential for github @ github.com (1-1, n, Enter = 1): ', 'n')
-        answer('Token for github.com (gh-mobile — hidden): ', 'CONV1-GH-MOBILE', hidden=True)
+        expect('`github.com-gh-work` is now the default credential for github.com.')
+        # The second group on the SAME host reuses that default with no
+        # prompt and no per-repository links.
+        expect('Host default `github.com-gh-work` covers github.com — using it for group `gh-mobile` without repository links.')
         # Third group on its own host: direct prompt again.
         expect('Group gl-infra: Infra (gitlab @ gitlab.com)')
         answer('Token for gitlab.com (gl-infra — hidden): ', 'CONV1-GL', hidden=True)
+        expect('`gitlab.com-gl-infra` is now the default credential for gitlab.com.')
         expect('Imported: 4 repo(s)')
 
     transcript1 = conversation(conv1, conv1 / 'home', [
@@ -398,15 +397,15 @@ try:
         'grouped clone read the hosted forge-credential endpoint'
     project_key = str((conv1 / 'demo' / '.knit/projects/demo.project.json').resolve())
     reg = registry(conv1 / 'home')
-    assert reg['projects'][project_key] == {
-        'api': 'github.com-gh-work', 'web': 'github.com-gh-work',
-        'mobile': 'github.com-gh-mobile', 'infra': 'gitlab.com-gl-infra'}
+    # Defaults serve both same-host groups; nothing was bound per-repository.
+    assert reg['defaults'] == {'github.com': 'github.com-gh-work',
+                               'gitlab.com': 'gitlab.com-gl-infra'}
+    assert reg['projects'].get(project_key) is None
     assert secrets(conv1 / 'home') == {'github.com-gh-work': 'CONV1-GH-WORK',
-                                       'github.com-gh-mobile': 'CONV1-GH-MOBILE',
                                        'gitlab.com-gl-infra': 'CONV1-GL'}
     assert (conv1 / 'demo' / 'api' / '.git').exists()
     assert (conv1 / 'demo' / 'mobile' / '.git').exists()
-    print('guided grouped clone: direct prompts, same-host groups distinct: PASS', flush=True)
+    print('guided grouped clone: first token defaults, same-host groups reuse it: PASS', flush=True)
 
     # -----------------------------------------------------------------------
     # Conversation 2: no declared groups; public clones ambiently, the private
@@ -427,6 +426,7 @@ try:
         expect('Private repositories: 1 repo(s) need a forge token')
         expect('Group github.com: github.com (github @ github.com)')
         answer('Token for github.com (github.com — hidden): ', 'CONV2-SEC', hidden=True)
+        expect('`github.com` is now the default credential for github.com.')
         expect('Recovered after setup: sec')
         expect('Imported: 2 repo(s)')
 
@@ -437,11 +437,13 @@ try:
     assert (conv2 / 'demo' / 'sec' / '.git').exists()
     project_key2 = str((conv2 / 'demo' / '.knit/projects/demo.project.json').resolve())
     reg2 = registry(conv2 / 'home')
-    assert reg2['projects'][project_key2] == {'sec': 'github.com'}
-    # The public repository keeps working through the strict gate: its exact
-    # remote is recorded as ambient access.
-    assert reg2['ambient'][project_key2]['pub'] == 'github.com/org/pub'
-    print('inferred fallback: public ambient + one hidden prompt, ambient recorded: PASS', flush=True)
+    # The inferred token became the github default and serves both repos —
+    # no per-repository binding, and the public repo needs no ambient
+    # allowance because the default covers it.
+    assert reg2['defaults'] == {'github.com': 'github.com'}
+    assert reg2['projects'].get(project_key2) is None
+    assert reg2.get('ambient', {}).get(project_key2) is None
+    print('inferred fallback: one hidden prompt, token becomes the host default: PASS', flush=True)
 
     # -----------------------------------------------------------------------
     # Conversation 3: a new declared group arrives via `knit pull --bundles`;
@@ -472,17 +474,19 @@ try:
         expect('Private repositories: 1 repo(s) need a forge token')
         expect('Group fresh-grp: New team (gitlab @ gitlab.com)')
         answer('Token for gitlab.com (fresh-grp — hidden): ', 'CONV3-FRESH', hidden=True)
+        expect('`gitlab.com-fresh-grp` is now the default credential for gitlab.com.')
         expect('Project repo: added fresh')
 
     workspace = conv2 / 'demo'
     conversation(workspace, conv2 / 'home', ['pull', '--bundles'], pull_script)
     assert (workspace / 'fresh' / '.git').exists()
     reg3 = registry(conv2 / 'home')
-    assert reg3['projects'][project_key2]['fresh'] == 'gitlab.com-fresh-grp'
+    assert reg3['defaults']['gitlab.com'] == 'gitlab.com-fresh-grp'
+    assert reg3['projects'].get(project_key2) is None
     assert secrets(conv2 / 'home')['gitlab.com-fresh-grp'] == 'CONV3-FRESH'
     # A group-covered repository never gains an ambient allowance, even
     # though the export marks it public.
-    assert 'fresh' not in reg3['ambient'].get(project_key2, {})
+    assert 'fresh' not in reg3.get('ambient', {}).get(project_key2, {})
     print('pull recovery: strict-gate failure prompts for the new group: PASS', flush=True)
 
     # -----------------------------------------------------------------------
@@ -512,6 +516,7 @@ try:
         expect('Setting up project credentials before cloning:')
         expect('Group d-gh-grp: Private work (github @ github.com)')
         answer('Token for github.com (d-gh-grp — hidden): ', 'CONV4-GH', hidden=True)
+        expect('`github.com-d-gh-grp` is now the default credential for github.com.')
         expect('Imported: 2 repo(s)')
 
     conversation(conv4, conv4 / 'home', [
@@ -521,14 +526,16 @@ try:
     assert (conv4 / 'demo' / 'd-pub' / '.git').exists()
     project_key4 = str((conv4 / 'demo' / '.knit/projects/demo.project.json').resolve())
     reg4 = registry(conv4 / 'home')
-    assert reg4['projects'][project_key4] == {'d-gh': 'github.com-d-gh-grp'}
-    # The ungrouped public repository keeps ambient access through the strict
-    # gate: its exact remote is recorded, and no hosted forge-credential
-    # lookup was needed even with --prefer-https.
-    assert reg4['ambient'][project_key4]['d-pub'] == 'github.com/org/d-pub', reg4
+    # The group's token became the github default and serves the ungrouped
+    # public repository too — intentionally: a personal default is used for
+    # EVERYTHING on its forge. No bindings, no ambient allowance, and no
+    # hosted forge-credential lookup even with --prefer-https.
+    assert reg4['defaults'] == {'github.com': 'github.com-d-gh-grp'}
+    assert reg4['projects'].get(project_key4) is None
+    assert reg4.get('ambient', {}).get(project_key4) is None
     assert forge_credential_hits() == before4, \
         'scenario D clone read the hosted forge-credential endpoint'
-    print('scenario D: grouped private + ungrouped public ambient, no helper query: PASS', flush=True)
+    print('scenario D: group token defaults, covers ungrouped public, no helper query: PASS', flush=True)
 
     # -----------------------------------------------------------------------
     # Conversation 5: the declared group's saved credential is revoked. The
@@ -559,17 +566,20 @@ try:
 
     def repair_script(expect, answer):
         expect('Setting up project credentials before cloning:')
-        # The unique compatible saved credential is reused without asking...
-        expect('Using saved credential `gh-bad` (github @ github.com) for this group.')
-        # ...the forge rejects it, and the repair path offers one rotation.
+        # gh-bad is the only github token, so it is the host's implicit
+        # default and the group reuses it without asking or linking.
+        expect('Host default `gh-bad` covers github.com — using it for group `gh` without repository links.')
+        # The forge rejects it; the repair offers a replacement that never
+        # touches the shared default's own token.
         expect('Private repositories: 1 repo(s) need a forge token')
         expect('Credential `gh-bad`')
         expect('was used and access was denied for solo.')
         # The forge starts accepting the replacement token: unblock it before
-        # answering the rotation prompt.
+        # answering the prompt.
         (root / 'forge-rejects').unlink()
-        answer('New token for `gh-bad` (Enter to keep the current one — hidden): ',
-               'ROTATED-TOKEN', hidden=True)
+        answer('Replacement token for github.com (saved as a new local credential for solo; '
+               '`gh-bad` keeps its token — hidden): ',
+               'REPLACEMENT-TOKEN', hidden=True)
         expect('Recovered after setup: solo')
         expect('Imported: 1 repo(s)')
 
@@ -577,10 +587,15 @@ try:
         'clone', 'demo', '--remote', 'hosted', '--url', BASE_URL,
         '--token', 'test-token', '--no-worktree'], repair_script)
     assert (conv5 / 'demo' / 'solo' / '.git').exists()
-    assert secrets(conv5 / 'home')['gh-bad'] == 'ROTATED-TOKEN'
+    reg5 = registry(conv5 / 'home')
     project_key5 = str((conv5 / 'demo' / '.knit/projects/demo.project.json').resolve())
-    assert registry(conv5 / 'home')['projects'][project_key5] == {'solo': 'gh-bad'}
-    print('revoked group token: denied clone rotates it in place and recovers: PASS', flush=True)
+    # The rejected repository moved to the scoped replacement; the shared
+    # default's secret and default status are untouched.
+    assert secrets(conv5 / 'home')['gh-bad'] == 'REJECTED-TOKEN'
+    assert secrets(conv5 / 'home')['github.com-gh'] == 'REPLACEMENT-TOKEN'
+    assert reg5['defaults'] == {'github.com': 'gh-bad'}
+    assert reg5['projects'][project_key5] == {'solo': 'github.com-gh'}
+    print('revoked default: scoped local replacement, original secret+default preserved: PASS', flush=True)
 
     # -----------------------------------------------------------------------
     # Conversation 6: the group's saved credential reads its token from an
@@ -612,13 +627,13 @@ try:
 
     def env_missing_script(expect, answer):
         expect('Setting up project credentials before cloning:')
-        expect('Using saved credential `gh-env` (github @ github.com) for this group.')
+        expect('Host default `gh-env` covers github.com — using it for group `gh` without repository links.')
         # The unset environment reference fails the clone and is classified
         # auth-shaped; the repair path never touches the env reference.
         expect('Private repositories: 1 repo(s) need a forge token')
         expect('Credential `gh-env`')
-        answer('Replacement token for github.com (saved as a new local credential; '
-               '`gh-env` keeps reading its environment variable — hidden): ',
+        answer('Replacement token for github.com (saved as a new local credential for solo; '
+               '`gh-env` keeps its token — hidden): ',
                'DIRECT-TOKEN', hidden=True)
         expect('Recovered after setup: solo')
         expect('Imported: 1 repo(s)')
@@ -636,6 +651,147 @@ try:
     assert 'gh-env' not in secrets(conv6 / 'home')
     assert reg6['credentials']['gh-env']['tokenEnv'] == 'GHOST_ENV'
     print('unset env credential: guided replacement without flags: PASS', flush=True)
+
+    # -----------------------------------------------------------------------
+    # Conversation 7 (the primary flow): bare `knit auth` sets personal
+    # default tokens for two forges with no project involved, then a normal
+    # clone needs no prompts, flags, or bindings; `knit auth --project`
+    # gives one project its own github token while the default and other
+    # state stay untouched, and switching back to the default clears only
+    # that project's override.
+    # -----------------------------------------------------------------------
+    conv7 = root / 'conv7'
+    (conv7 / 'plain').mkdir(parents=True)
+    (conv7 / 'home').mkdir(parents=True)
+
+    def global_wizard_script(expect, answer):
+        expect('Personal forge tokens')
+        expect('Current default tokens:')
+        expect('(none yet)')
+        expect('1. GitHub (github.com)')
+        answer('Forge (1-4, or Enter to finish): ', '1')
+        answer('Token for github.com (hidden): ', 'GH-MAIN', hidden=True)
+        expect('`github.com` is now the default token for github.com.')
+        answer('Forge (1-4, or Enter to finish): ', '3')
+        answer('Which kind of Bitbucket token is it? (name/number): ', '1')
+        answer('Atlassian account email for this API token: ', 'dev@example.org')
+        answer('Token for bitbucket.org (hidden): ', 'BB-MAIN', hidden=True)
+        expect('`bitbucket.org` is now the default token for bitbucket.org.')
+        answer('Forge (1-4, or Enter to finish): ', '')
+        expect('Done. Tokens are saved in your personal Knit store')
+
+    conversation(conv7 / 'plain', conv7 / 'home', ['auth'], global_wizard_script)
+    reg7 = registry(conv7 / 'home')
+    assert reg7['defaults'] == {'github.com': 'github.com',
+                                'bitbucket.org': 'bitbucket.org'}
+    assert secrets(conv7 / 'home') == {'github.com': 'GH-MAIN',
+                                       'bitbucket.org': 'BB-MAIN'}
+    assert reg7['credentials']['bitbucket.org']['username'] == 'dev@example.org'
+    assert reg7['projects'] == {}
+
+    # A normal clone on both forges: zero prompts, zero flags, zero bindings.
+    sources7 = {name: seed_source(name) for name in ['svc', 'docs']}
+    write_fake_git([
+        ('https://github.com/org/svc.git', str(sources7['svc']), 'auth'),
+        ('https://bitbucket.org/acme/docs.git', str(sources7['docs']), 'auth'),
+    ])
+    repos7 = [('svc', 'https://github.com/org/svc.git', 'private'),
+              ('docs', 'https://bitbucket.org/acme/docs.git', 'private')]
+    (remote_dir / 'export.json').write_text(export_body(repos7))
+    before7 = forge_credential_hits()
+
+    def defaults_clone_script(expect, answer):
+        expect('Imported: 2 repo(s)')
+
+    conversation(conv7 / 'plain', conv7 / 'home', [
+        'clone', 'demo', '--remote', 'hosted', '--url', BASE_URL,
+        '--token', 'test-token', '--no-worktree'], defaults_clone_script)
+    assert (conv7 / 'plain' / 'demo' / 'svc' / '.git').exists()
+    assert (conv7 / 'plain' / 'demo' / 'docs' / '.git').exists()
+    reg7b = registry(conv7 / 'home')
+    project_key7 = str((conv7 / 'plain' / 'demo' / '.knit/projects/demo.project.json').resolve())
+    assert reg7b.get('projects', {}).get(project_key7) is None
+    assert forge_credential_hits() == before7, \
+        'defaults-only clone read the hosted forge-credential endpoint'
+
+    # Project wizard: github gets a project-only token; bitbucket keeps the
+    # default; then switching github back clears only this project's override.
+    # Hosts iterate in sorted order: bitbucket.org before github.com.
+    def project_wizard_script(expect, answer):
+        expect('Project `demo` — per forge, use the shared default token or give this project its own.')
+        expect('bitbucket.org (docs): bitbucket.org (default token)')
+        answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
+        expect('Already using the default token for bitbucket.org.')
+        expect('github.com (svc): github.com (default token)')
+        answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', 't')
+        answer('Project token for github.com (hidden): ', 'PROJ-TOK', hidden=True)
+        expect('`github.com-demo` is used for svc in this project only; the default token for github.com is untouched.')
+        expect('Done.')
+
+    conversation(conv7 / 'plain' / 'demo', conv7 / 'home',
+                 ['auth', '--project', 'demo'], project_wizard_script)
+    reg7c = registry(conv7 / 'home')
+    assert reg7c['projects'][project_key7] == {'svc': 'github.com-demo'}
+    assert secrets(conv7 / 'home')['github.com-demo'] == 'PROJ-TOK'
+    # The project token is scoped: it never becomes the implicit default, and
+    # the global defaults/secrets are untouched.
+    assert 'github.com-demo' in reg7c.get('scopedCredentials', [])
+    assert reg7c['defaults'] == {'github.com': 'github.com',
+                                 'bitbucket.org': 'bitbucket.org'}
+    assert secrets(conv7 / 'home')['github.com'] == 'GH-MAIN'
+
+    def switch_back_script(expect, answer):
+        expect('bitbucket.org (docs): bitbucket.org (default token)')
+        answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
+        expect('Already using the default token for bitbucket.org.')
+        expect('github.com (svc): github.com (default token); project token `github.com-demo` on svc')
+        answer('Use the default token (Enter), `t` for a project-only token, or `s` to skip: ', '')
+        expect('Cleared project overrides for svc — the default token for github.com now applies.')
+        expect('Done.')
+
+    conversation(conv7 / 'plain' / 'demo', conv7 / 'home',
+                 ['auth', '--project', 'demo'], switch_back_script)
+    reg7d = registry(conv7 / 'home')
+    assert reg7d.get('projects', {}).get(project_key7) is None
+    assert reg7d['defaults'] == {'github.com': 'github.com',
+                                 'bitbucket.org': 'bitbucket.org'}
+    assert secrets(conv7 / 'home')['github.com'] == 'GH-MAIN'
+    print('bare `knit auth`: global defaults, prompt-free clone, project override and back: PASS', flush=True)
+
+    # A deliberate global replacement converts an environment-backed default
+    # to a saved secret, without changing its name or other host defaults.
+    reg7d['credentials']['github.com']['tokenEnv'] = 'KNIT_TEST_UNSET_DEFAULT'
+    (conv7 / 'home' / 'forge-auth.json').write_text(json.dumps(reg7d))
+
+    def replace_env_default(expect, answer):
+        answer('Forge (1-4, or Enter to finish): ', '1')
+        answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
+        answer('New token for github.com (hidden): ', 'GH-ROTATED', hidden=True)
+        expect('Updated the token on `github.com`; it stays the default for github.com.')
+        answer('Forge (1-4, or Enter to finish): ', '')
+
+    conversation(conv7 / 'plain', conv7 / 'home', ['auth'], replace_env_default)
+    rotated = registry(conv7 / 'home')
+    assert not rotated['credentials']['github.com'].get('tokenEnv')
+    assert secrets(conv7 / 'home')['github.com'] == 'GH-ROTATED'
+    assert rotated['defaults'] == reg7d['defaults']
+
+    # Legacy stores with several host tokens can explicitly establish a
+    # default through the same bare wizard.
+    rotated['defaults'].pop('github.com')
+    rotated.pop('scopedCredentials', None)
+    (conv7 / 'home' / 'forge-auth.json').write_text(json.dumps(rotated))
+
+    def choose_legacy_default(expect, answer):
+        answer('Forge (1-4, or Enter to finish): ', '1')
+        answer('Token for github.com (hidden): ', 'GH-CHOSEN', hidden=True)
+        expect('`github.com-2` is now the default token for github.com.')
+        answer('Forge (1-4, or Enter to finish): ', '')
+
+    conversation(conv7 / 'plain', conv7 / 'home', ['auth'], choose_legacy_default)
+    assert registry(conv7 / 'home')['defaults']['github.com'] == 'github.com-2'
+    assert secrets(conv7 / 'home')['github.com-2'] == 'GH-CHOSEN'
+    print('bare auth: environment replacement and ambiguous legacy default: PASS', flush=True)
 
     server.shutdown()
     print('clone_guided_pty: all conversations PASS')

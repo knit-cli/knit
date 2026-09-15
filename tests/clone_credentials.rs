@@ -1291,7 +1291,7 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
     init_repo(&priv_source, "priv");
 
     let export = export_with_repos(&[
-        ("pub", "https://github.com/org/repo.git", "public"),
+        ("pub", "https://gitlab.com/acme/repo.git", "public"),
         ("secret", "https://gitlab.com/acme/secret.git", "private"),
     ]);
     let fake_dir = root.join("fake-remote");
@@ -1300,7 +1300,7 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
         &root,
         &[
             (
-                "https://github.com/org/repo.git",
+                "https://gitlab.com/acme/repo.git",
                 pub_source.to_str().unwrap(),
                 "public",
             ),
@@ -1336,8 +1336,9 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
     assert!(ok, "{stdout}{stderr}");
     let output = format!("{stdout}{stderr}");
     assert!(output.contains("Imported: 2 repo(s)"), "{output}");
-    // The public repository cloned with plain ambient Git: no Knit credential
-    // helper rode the invocation, and the parent's secret stayed home.
+    // A host with no saved credential keeps plain ambient Git: no Knit
+    // credential helper rode the invocation, and the parent's secret stayed
+    // home (the parent's own project assignment is never borrowed).
     for call in git_calls(&root) {
         let args = call_file(&call, "args");
         assert!(
@@ -1350,6 +1351,74 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
         "parent credential borrowed into the cloned workspace"
     );
 
+    // The opposite is equally intentional: a personal host default is used
+    // for EVERYTHING on its forge — including a public repository on the
+    // host — with no per-repository binding and no flags.
+    {
+        let pub_gh_source = root.join("pub-gh-source");
+        init_repo(&pub_gh_source, "pub-gh");
+        let export_gh = export_with_repos(&[("pub", "https://github.com/org/repo.git", "public")]);
+        let gh_fake_dir = root.join("fake-remote-gh");
+        let gh_base = spawn_recording_remote(&gh_fake_dir, export_gh);
+        let gh_fake_bin = write_fake_git(
+            &root,
+            &[(
+                "https://github.com/org/repo.git",
+                pub_gh_source.to_str().unwrap(),
+                "public",
+            )],
+        );
+        let gh_target = root.join("gh-workspace");
+        let (stdout, stderr, ok) = knit_run(
+            &parent,
+            &[
+                "clone",
+                "acme/demo",
+                gh_target.to_str().unwrap(),
+                "--remote",
+                "hosted",
+                "--url",
+                &gh_base,
+                "--token",
+                "test-token",
+                "--no-worktree",
+            ],
+            &[
+                ("PATH", &fake_path_env(&gh_fake_bin)),
+                ("KNIT_HOME", home.to_str().unwrap()),
+                ("GIT_CONFIG_GLOBAL", git_config.to_str().unwrap()),
+            ],
+            None,
+        );
+        assert!(ok, "{stdout}{stderr}");
+        assert!(gh_target.join("pub/.git").exists());
+        let gh_calls: Vec<_> = git_calls(&root)
+            .into_iter()
+            .filter(|call| {
+                call_file(call, "args").contains("https://github.com/org/repo.git")
+                    && call_file(call, "mode") == "public"
+            })
+            .collect();
+        assert!(
+            gh_calls
+                .iter()
+                .any(|call| { call_file(call, "helper-out").contains("password=parent-secret") }),
+            "the personal github default must authenticate even a public same-host clone"
+        );
+        // No per-repository binding was created for it.
+        let registry = read_json_cargo(&home.join("forge-auth.json"));
+        assert!(
+            registry["projects"].as_object().is_none_or(|p| {
+                p.values().all(|bindings| {
+                    bindings
+                        .get("pub")
+                        .is_none_or(|v| v.as_str() != Some("other"))
+                })
+            }),
+            "public default-covered clone must not gain repository bindings"
+        );
+    }
+
     // A private repository without any credential fails fast — no prompts, no
     // hang — and leaves the recoverable workspace behind.
     let private_target = root.join("private-workspace");
@@ -1357,6 +1426,14 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
         export_with_repos(&[("secret", "https://gitlab.com/acme/secret.git", "private")]);
     let private_fake_dir = root.join("fake-remote-private");
     let private_base = spawn_recording_remote(&private_fake_dir, export_private);
+    let fake_bin = write_fake_git(
+        &root,
+        &[(
+            "https://gitlab.com/acme/secret.git",
+            priv_source.to_str().unwrap(),
+            "auth",
+        )],
+    );
     let (stdout, stderr, ok) = knit_run(
         &parent,
         &[
