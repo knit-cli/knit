@@ -231,6 +231,15 @@ pub(super) fn connected_forge_hosts(remote: &KnitRemote, token: &str) -> Result<
     }
 
     let response = request(remote, token, "GET", "/me/forge-credentials", None)?;
+    if response.status == 403 {
+        // The server refuses to export forge credentials to this token by
+        // policy (it lacks the forge-credential scope), regardless of which
+        // forge accounts are connected. Point at the local path instead of a
+        // bare status code.
+        bail!(
+            "Sync remote returned HTTP 403: this token cannot export forge credentials. Save a personal forge token locally with `knit auth add NAME --provider PROVIDER` and select it for the clone with `knit clone <project> --remote <name> --credential NAME`"
+        );
+    }
     if !(200..300).contains(&response.status) {
         bail!(
             "Sync remote returned HTTP {}: {}",

@@ -136,6 +136,7 @@ pub fn clone_project_from_remote(
     materialize: bool,
     prefer_https: bool,
     scope: CloneScopeRequest<'_>,
+    credentials: &[String],
     json: bool,
 ) -> Result<()> {
     if json {
@@ -151,6 +152,7 @@ pub fn clone_project_from_remote(
         materialize,
         prefer_https,
         scope,
+        credentials,
     ) {
         Ok(document) => {
             if json {
@@ -184,30 +186,22 @@ fn clone_project_classified(
     materialize: bool,
     prefer_https: bool,
     scope: CloneScopeRequest<'_>,
+    credentials: &[String],
 ) -> std::result::Result<CloneDocument, (RemoteErrorKind, anyhow::Error)> {
+    // Validate the explicit credential selection before anything changes:
+    // unknown names, ambiguous same-host pairs, and unusable tokens fail
+    // before the export is fetched or the target directory is touched. With
+    // no --credential, the private credential registry is not read at all.
+    // The selection activates (exact targets, Drop guard) only inside
+    // clone_fetched_export, after the scope is resolved.
+    let credential_selection = crate::auth::validate_clone_credentials(credentials)
+        .map_err(|error| (RemoteErrorKind::Other, error))?;
     let reference = parse_clone_reference(project_identifier, url)
         .map_err(|error| (RemoteErrorKind::NoRemote, error))?;
     let (remote_name, remote, stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, reference.remote_url.as_deref(), token)?;
-    let mut export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
+    let export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
         .map_err(|error| (RemoteErrorKind::Http, error))?;
-    if prefer_https {
-        if let Some(token) = token.as_deref() {
-            let hosts = super::helpers::connected_forge_hosts(&remote, token).unwrap_or_default();
-            let cwd = std::env::current_dir().map_err(|e| (RemoteErrorKind::Other, e.into()))?;
-            for repository in &mut export.repositories {
-                if let Some(url) = repository.remote_url.clone() {
-                    if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
-                        if super::handoff::reachable(&cwd, &url, &remote_name, &hosts).is_err()
-                            && super::handoff::reachable(&cwd, &https, &remote_name, &hosts).is_ok()
-                        {
-                            repository.remote_url = Some(https);
-                        }
-                    }
-                }
-            }
-        }
-    }
     if scope.view.is_some() && token.is_none() {
         return Err((
             RemoteErrorKind::NoToken,
@@ -226,7 +220,9 @@ fn clone_project_classified(
         export,
         active_bundle,
         materialize,
+        prefer_https,
         scope,
+        &credential_selection,
     )
     .map_err(|error| (RemoteErrorKind::Other, error))
 }
@@ -239,10 +235,12 @@ pub(super) fn clone_fetched_export(
     remote: KnitRemote,
     stored_token: Option<String>,
     token: Option<String>,
-    export: RemoteProjectExport,
+    mut export: RemoteProjectExport,
     active_bundle: Option<&str>,
     materialize: bool,
+    prefer_https: bool,
     scope: CloneScopeRequest<'_>,
+    credential_selection: &[(String, String)],
 ) -> Result<CloneDocument> {
     // Views are fetched before any repo is cloned: `--view` resolves against
     // them, and a whole-project clone restores them as before. A failure is
@@ -266,6 +264,61 @@ pub(super) fn clone_fetched_export(
         }
     };
     let resolved_scope = resolve_clone_scope(&export, scope, remote_views.as_ref())?;
+
+    // Prefer-HTTPS conversion is decided after the scope is resolved, so a
+    // `--view`/`--repo` scope whose forge repositories are all covered by the
+    // explicit credential selection never runs the hosted connected-forge
+    // lookup (which restricted sync tokens cannot read); covered SSH URLs
+    // still convert to HTTPS locally at clone time. With partial coverage,
+    // only in-scope repositories on uncovered hosts are probed: probing a
+    // covered host here would authenticate with ambient credentials before
+    // the selection's own exact rewrite applies.
+    if prefer_https {
+        let in_scope = |repository: &RemoteExportRepository| {
+            resolved_scope.as_ref().is_none_or(|resolved| {
+                resolved
+                    .repo_ids
+                    .contains(&export_repo_local_id(repository))
+            })
+        };
+        let scoped_candidates: Vec<RemoteExportRepository> = export
+            .repositories
+            .iter()
+            .filter(|repository| in_scope(repository))
+            .cloned()
+            .collect();
+        let fully_covered = !credential_selection.is_empty()
+            && clone_credential_coverage(&scoped_candidates, credential_selection)
+                .uncovered
+                .is_empty();
+        if !fully_covered {
+            if let Some(token) = token.as_deref() {
+                let hosts =
+                    super::helpers::connected_forge_hosts(&remote, token).unwrap_or_default();
+                let cwd = std::env::current_dir()?;
+                for repository in &mut export.repositories {
+                    if !prefer_https_probes_repository(
+                        repository,
+                        in_scope(repository),
+                        credential_selection,
+                    ) {
+                        continue;
+                    }
+                    if let Some(url) = repository.remote_url.clone() {
+                        if let Some(https) = super::handoff::prefer_https_url(&url, &hosts) {
+                            if super::handoff::reachable(&cwd, &url, &remote_name, &hosts).is_err()
+                                && super::handoff::reachable(&cwd, &https, &remote_name, &hosts)
+                                    .is_ok()
+                            {
+                                repository.remote_url = Some(https);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     let (scoped_repositories, repos_out_of_scope, repos_unavailable) =
         partition_export_repositories(&export, resolved_scope.as_ref());
 
@@ -291,7 +344,28 @@ pub(super) fn clone_fetched_export(
         )
     })?;
 
-    super::helpers::ensure_helpers_for_git(&remote_name);
+    // The explicit selection decides how Git authenticates before any Git
+    // runs. It activates as exact (host, path) targets of the scoped export
+    // repositories — never a host-wide process override — and the guard
+    // restores the previous state on every result path, including materialize
+    // fetches below. When the selection covers every forge repository about
+    // to be cloned, the hosted helper install (a remote-owner forge
+    // connection the token may not be allowed to read) is skipped entirely.
+    let coverage = clone_credential_coverage(&scoped_repositories, credential_selection);
+    let _credential_guard = (!credential_selection.is_empty())
+        .then(|| crate::auth::activate_clone_credentials(coverage.targets.clone()));
+    if !credential_selection.is_empty() && coverage.uncovered.is_empty() {
+        crate::human!(
+            "{} {}",
+            out::heading("Credential helper:"),
+            out::muted("skipped; the selected credential(s) cover every forge repository")
+        );
+    } else {
+        super::helpers::ensure_helpers_for_git(&remote_name);
+    }
+    if !credential_selection.is_empty() {
+        report_clone_credential_coverage(credential_selection, &coverage);
+    }
     let (repo_paths, mut failed_repos) =
         clone_export_repositories_collecting(&target_root, &scoped_repositories);
     // A scope repo the export carries no record for (withheld by the server,
@@ -312,6 +386,17 @@ pub(super) fn clone_fetched_export(
     }
     let project = local_project_from_export(&export, &repo_paths)?;
     write_json(&project_path(&target_root, &project.id), &project)?;
+    // Record which personal credential cloned each repository so later Knit
+    // operations in the new workspace use it without setup. Personal state
+    // only: nothing is written to project artifacts or sync remotes.
+    if !credential_selection.is_empty() {
+        persist_clone_credential_assignments(
+            &target_root,
+            &project,
+            &repo_paths,
+            credential_selection,
+        );
+    }
 
     let (bundles, dropped_bundles) =
         localized_export_bundles(&export, &project, &remote, &remote_name, token.as_deref())?;
@@ -966,6 +1051,247 @@ fn prepare_clone_target(target: &Path) -> Result<()> {
     Ok(())
 }
 
+/// How the explicit clone credential selection relates to the repositories
+/// about to be cloned: repo ids on hosts a selected credential covers, the
+/// uncovered hosts with the repo ids left to ambient Git authentication, and
+/// the exact (host, path) targets the selection will authenticate.
+#[derive(Default)]
+struct CloneCredentialCoverage {
+    covered: BTreeMap<String, Vec<String>>,
+    uncovered: BTreeMap<String, Vec<String>>,
+    targets: Vec<crate::auth::CloneCredentialTarget>,
+}
+
+/// Split the repositories' forge remotes by whether the clone's explicit
+/// credential selection covers their host, and collect the exact
+/// (host, path) targets the covered repositories contribute. Local remotes
+/// and repos without a clone URL need no credential; unparseable URLs are
+/// skipped (their clone fails on its own, so hosted helper setup is not
+/// decided by them).
+fn clone_credential_coverage(
+    repositories: &[RemoteExportRepository],
+    selection: &[(String, String)],
+) -> CloneCredentialCoverage {
+    let mut coverage = CloneCredentialCoverage::default();
+    for repository in repositories {
+        let Some(url) = repository
+            .remote_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+        else {
+            continue;
+        };
+        if crate::auth::is_local_remote(url) {
+            continue;
+        }
+        let Ok((host, path)) = crate::auth::remote_target(url) else {
+            continue;
+        };
+        let Some((name, _)) = selection
+            .iter()
+            .find(|(_, selected)| selected.eq_ignore_ascii_case(&host))
+        else {
+            coverage
+                .uncovered
+                .entry(host)
+                .or_default()
+                .push(export_repo_local_id(repository));
+            continue;
+        };
+        coverage
+            .covered
+            .entry(host.clone())
+            .or_default()
+            .push(export_repo_local_id(repository));
+        coverage.targets.push(crate::auth::CloneCredentialTarget {
+            name: name.clone(),
+            host,
+            path,
+        });
+    }
+    coverage
+}
+
+/// Whether the hosted prefer-HTTPS reachability probe may touch this
+/// repository: it must be inside the resolved scope, carry a parseable forge
+/// remote, and sit on a host the explicit selection does not cover — covered
+/// repositories authenticate through the selection's own exact HTTPS rewrite
+/// once it activates, and probing them first would use ambient credentials.
+fn prefer_https_probes_repository(
+    repository: &RemoteExportRepository,
+    in_scope: bool,
+    selection: &[(String, String)],
+) -> bool {
+    in_scope
+        && repository
+            .remote_url
+            .as_deref()
+            .filter(|url| !url.trim().is_empty())
+            .is_some_and(|url| {
+                !crate::auth::is_local_remote(url)
+                    && crate::auth::remote_target(url).is_ok_and(|(host, _)| {
+                        !selection
+                            .iter()
+                            .any(|(_, selected)| selected.eq_ignore_ascii_case(&host))
+                    })
+            })
+}
+
+/// Tell the user exactly what the explicit selection does and does not cover.
+fn report_clone_credential_coverage(
+    selection: &[(String, String)],
+    coverage: &CloneCredentialCoverage,
+) {
+    for (name, host) in selection {
+        let count = coverage.covered.get(host).map(Vec::len).unwrap_or(0);
+        crate::human!(
+            "{} {} {}",
+            out::heading("Credential:"),
+            out::repo(name),
+            out::muted(format!(
+                "({host}) authenticates {count} repo(s) for this clone"
+            ))
+        );
+    }
+    for (host, repos) in &coverage.uncovered {
+        crate::human!(
+            "{} {} {}",
+            out::warn("No selected credential for"),
+            out::repo(host),
+            out::muted(format!(
+                "({}); {} existing Git credentials",
+                repos.join(", "),
+                if repos.len() == 1 {
+                    "it uses"
+                } else {
+                    "they use"
+                }
+            ))
+        );
+    }
+}
+
+/// After a successful clone, bind each cloned repository to the selected
+/// credential covering its host in the user's personal assignment store.
+/// Only repositories actually cloned are bound; failures warn without
+/// failing the finished clone. Never touches project artifacts or remotes.
+fn persist_clone_credential_assignments(
+    target_root: &Path,
+    project: &KnitProject,
+    repo_paths: &BTreeMap<String, PathBuf>,
+    selection: &[(String, String)],
+) {
+    let result = (|| -> Result<Vec<String>> {
+        // repo id -> credential name, for the repositories this clone created.
+        let mut assigned: Vec<(String, String)> = Vec::new();
+        for repo in &project.repos {
+            let Some(remote) = repo.remote.as_deref() else {
+                continue;
+            };
+            if !repo_paths.contains_key(&repo.id) {
+                continue;
+            }
+            let Ok((host, _)) = crate::auth::remote_target(remote) else {
+                continue;
+            };
+            if let Some((name, _)) = selection
+                .iter()
+                .find(|(_, selected)| selected.eq_ignore_ascii_case(&host))
+            {
+                assigned.push((repo.id.clone(), name.clone()));
+            }
+        }
+        if assigned.is_empty() {
+            return Ok(Vec::new());
+        }
+        let key = crate::auth::project_key(target_root, &project.id)?;
+        let _lock = crate::auth::lock()?;
+        let mut store = crate::auth::load()?;
+        let bindings = store.projects.entry(key).or_default();
+        for (repo_id, name) in &assigned {
+            bindings.insert(repo_id.clone(), name.clone());
+        }
+        crate::auth::save(&store)?;
+        Ok(assigned
+            .into_iter()
+            .map(|(repo_id, name)| format!("{} → {}", out::repo(&repo_id), name))
+            .collect())
+    })();
+    match result {
+        Ok(assigned) if !assigned.is_empty() => crate::human!(
+            "{} {}",
+            out::heading("Assigned credential:"),
+            out::muted(assigned.join(", "))
+        ),
+        Ok(_) => {}
+        Err(error) => crate::human!(
+            "{} {error:#}; run `knit auth use <credential> --project {} --repo <repo>` later",
+            out::warn("credential assignments not saved:"),
+            project.id
+        ),
+    }
+}
+
+/// How to update a selected credential, matched to how it stores its token:
+/// an environment-backed credential is updated through its named variable
+/// (never the value), a file-backed one through the complete `knit auth add`
+/// replacement command. Name, provider, and host are charset-validated at
+/// save time; only the username (an email address) can carry shell-sensitive
+/// characters, so it is POSIX-quoted.
+fn credential_update_advice(name: &str, spec: &crate::auth::CredentialSpec) -> String {
+    if let Some(variable) = &spec.token_env {
+        return format!("update its token in the `{variable}` environment variable");
+    }
+    format!(
+        "update it with `knit auth add {name} --provider {} --host {} --replace{}`, which prompts for the new token",
+        spec.provider,
+        spec.host,
+        spec.username
+            .as_deref()
+            .map(|username| format!(" --username {}", super::helpers::shell_quote(username)))
+            .unwrap_or_default()
+    )
+}
+
+/// When the active clone selection covers this exact repository, the failure
+/// names that credential so the user knows which token was in play. Only an
+/// authentication-shaped failure says access was denied; a transport error
+/// (DNS, timeout, TLS) must not be reported as a token rejection. The update
+/// advice follows the credential's own token storage, or points at the help
+/// text instead of inventing a command.
+fn selected_credential_failure_hint(remote_url: &str, failure: &str) -> Option<String> {
+    let (host, path) = crate::auth::remote_target(remote_url).ok()?;
+    let name = crate::auth::clone_credential_for(&host, &path)?;
+    let failure = failure.to_ascii_lowercase();
+    let denied = [
+        "authentication failed",
+        "access denied",
+        "could not read username",
+        "terminal prompts disabled",
+        "invalid username or password",
+        "401",
+        "403",
+    ]
+    .iter()
+    .any(|marker| failure.contains(marker));
+    let update = match crate::auth::load()
+        .ok()
+        .and_then(|registry| registry.credentials.get(&name).cloned())
+    {
+        Some(spec) => credential_update_advice(&name, &spec),
+        None => "update it as described in `knit auth add --help`".to_string(),
+    };
+    Some(if denied {
+        format!(
+            "the selected credential `{name}` was used and access was denied; check that its token can read this repository, or {update}"
+        )
+    } else {
+        format!(
+            "this clone used the selected credential `{name}`; if the failure is an access denial, {update}"
+        )
+    })
+}
+
 pub(super) fn clone_export_repositories(
     target_root: &Path,
     repositories: &[RemoteExportRepository],
@@ -1028,11 +1354,17 @@ pub(super) fn clone_one_export_repository(
         }
         // Blame the right thing: a repo the sync remote knows is gone from its
         // forge fails for everyone, a failed public clone is not a credential
-        // problem, and only the genuinely ambiguous case earns the access hint.
+        // problem, a repository covered by the explicit selection names that
+        // credential (distinguishing an access denial from a transport
+        // failure), and only the genuinely ambiguous case earns the access
+        // hint.
+        let failure_text = format!("{error:#}");
         let error = if export_repo_forge_missing(repository) {
             anyhow::anyhow!(
                 "{error:#}; the sync remote marked this repository missing on its forge — it does not exist (or was deleted/renamed)"
             )
+        } else if let Some(hint) = selected_credential_failure_hint(remote_url, &failure_text) {
+            anyhow::anyhow!("{error:#}; {hint}")
         } else if repository.visibility.as_deref() == Some("public") {
             error
         } else {
@@ -1573,5 +1905,77 @@ mod tests {
         let text = format_repo_failures(&failures);
         assert!(text.contains("backend: Repository not found"));
         assert!(text.contains("frontend: permission denied"));
+    }
+
+    #[test]
+    fn prefer_https_probe_skips_covered_out_of_scope_and_local_repositories() {
+        let github_selection = vec![("work".to_string(), "github.com".to_string())];
+        // In scope and uncovered: the only shape the hosted probe may touch.
+        assert!(prefer_https_probes_repository(
+            &export_repo("cloud", "git@bitbucket.org:team/cloud.git"),
+            true,
+            &github_selection
+        ));
+        // Covered host: the selection's own exact rewrite applies instead.
+        assert!(!prefer_https_probes_repository(
+            &export_repo("api", "git@github.com:acme/api.git"),
+            true,
+            &github_selection
+        ));
+        // Out of scope: never probed for this clone.
+        assert!(!prefer_https_probes_repository(
+            &export_repo("cloud", "git@bitbucket.org:team/cloud.git"),
+            false,
+            &github_selection
+        ));
+        // Local remotes and missing URLs never reach the hosted probe.
+        assert!(!prefer_https_probes_repository(
+            &export_repo("local", "/repos/local.git"),
+            true,
+            &github_selection
+        ));
+        assert!(!prefer_https_probes_repository(
+            &export_repo("bare", ""),
+            true,
+            &github_selection
+        ));
+        // Without a selection every in-scope forge repository is probed,
+        // preserving the pre-selection behavior.
+        assert!(prefer_https_probes_repository(
+            &export_repo("api", "git@github.com:acme/api.git"),
+            true,
+            &[]
+        ));
+    }
+
+    #[test]
+    fn credential_update_advice_follows_token_storage_and_quotes_username() {
+        let env_backed = crate::auth::CredentialSpec {
+            provider: "github".to_string(),
+            host: "github.com".to_string(),
+            username: None,
+            token_env: Some("WORK_GITHUB_TOKEN".to_string()),
+        };
+        let advice = credential_update_advice("work", &env_backed);
+        assert_eq!(
+            advice,
+            "update its token in the `WORK_GITHUB_TOKEN` environment variable"
+        );
+        assert!(!advice.contains("knit auth add"));
+
+        let file_backed = crate::auth::CredentialSpec {
+            provider: "bitbucket".to_string(),
+            host: "bitbucket.org".to_string(),
+            username: Some("dev+work@example.com".to_string()),
+            token_env: None,
+        };
+        let advice = credential_update_advice("cloud", &file_backed);
+        assert!(
+            advice.contains(
+                "knit auth add cloud --provider bitbucket --host bitbucket.org --replace --username 'dev+work@example.com'"
+            ),
+            "{advice}"
+        );
+        assert!(advice.contains("prompts for the new token"));
     }
 }

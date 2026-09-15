@@ -66,6 +66,53 @@ An assignment limits where Knit uses a token. It does not reduce a classic token
 
 For read-only use, grant repository read permissions. For GitHub publish/land, grant Contents and Pull requests read/write plus Metadata read; collaborator management is a separate administrative permission. For Bitbucket, GitLab, and Forgejo, grant the corresponding repository and review permissions for the operations you use.
 
+## Cloning a private project before it exists locally
+
+`knit auth setup` and `knit auth use` need a local project to link repositories
+into, but `knit clone` creates the project only after Git has already fetched
+the repositories. When your sync remote token cannot export forge credentials
+(the remote answers its connected-forge lookup with 403), save a personal
+credential first and select it by name for that one clone:
+
+```sh
+knit auth add work-github --provider github
+knit clone team-project --remote hosted --credential work-github
+```
+
+`--credential` is repeatable and host-scoped: a project whose repositories
+live on several forges selects one credential per host.
+
+```sh
+knit auth add work-github --provider github
+knit auth add team-bitbucket --provider bitbucket
+knit clone team-project --remote hosted \
+  --credential work-github --credential team-bitbucket
+```
+
+What the selection does:
+
+- Credentials are validated before anything changes: unknown names, two
+  selected credentials for the same host, and credentials whose token is not
+  currently resolvable (unsaved token, unset environment reference) fail
+  before the export is fetched or the target directory is created.
+- The selection applies only to the repository URLs this clone actually
+  clones, matched by exact host and path, and only to Git: the sync remote's
+  API keeps using its own token. SSH remote URLs are rewritten to HTTPS for
+  that invocation, as with project assignments.
+- Hosts without a selected credential keep their existing behavior (SSH keys,
+  installed helpers, public access) and are reported as uncovered. A
+  `--repo`-scoped clone does not need credentials for repositories outside its
+  scope: cloning the GitHub set does not require a Bitbucket token.
+- When the selection covers every forge repository being cloned, the hosted
+  credential-helper lookup is skipped entirely.
+- If a selected credential's token is denied, the failed repository names the
+  credential and how to update it; there is no silent fallback to another
+  credential.
+- After a successful clone, each cloned repository is assigned to the selected
+  credential covering its host in your personal assignment store, exactly as
+  `knit auth use` would have written — the new workspace works with `knit
+  auth status` without a setup pass. Assignments and tokens are never synced.
+
 ## Rotation and removal
 
 ```sh
