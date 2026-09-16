@@ -439,6 +439,7 @@ fn scoped_all_failed_clone_records_scope_view_and_recovers() {
 fn guided_clone_credentials_pty_grouped_inferred_and_pull_recovery() {
     let root = std::env::temp_dir().join(format!("knit-clone-guided-pty-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
     let result = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -446,6 +447,9 @@ fn guided_clone_credentials_pty_grouped_inferred_and_pull_recovery() {
         ))
         .arg(env!("CARGO_BIN_EXE_knit"))
         .arg(&root)
+        // The fixture must never fall back to the test runner's cwd: `knit
+        // auth` commands activate the invoking cwd's project.
+        .current_dir(&root)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);

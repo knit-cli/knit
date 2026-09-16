@@ -841,7 +841,7 @@ pub fn project_context(cwd: &Path, explicit: Option<&str>) -> Result<(PathBuf, K
     optional_project_context(cwd, explicit)?.context("No active Knit project; pass --project <id>")
 }
 
-fn optional_project_context(
+pub(crate) fn optional_project_context(
     cwd: &Path,
     explicit: Option<&str>,
 ) -> Result<Option<(PathBuf, KnitProject)>> {
@@ -1199,14 +1199,36 @@ pub(crate) fn select_credential(
         None if context_root(cwd).is_some() => optional_project_context(cwd, None)?,
         None => None,
     };
+    select_credential_with_context(
+        registry,
+        context
+            .as_ref()
+            .map(|(root, project)| (root.as_path(), project)),
+        target,
+    )
+}
+
+/// The context tail of [`select_credential`] as a pure function, so callers
+/// holding an explicit workspace/project (installer passes, dynamic helpers
+/// with persisted context) select identically without touching process-global
+/// state: nonempty project bindings win over the host default, and a `None`
+/// context or a project without bindings falls through to the host default.
+pub(crate) fn select_credential_with_context(
+    registry: &AuthStore,
+    context: Option<(&Path, &KnitProject)>,
+    target: &(String, String),
+) -> Result<Option<String>> {
+    if registry.projects.values().all(BTreeMap::is_empty) {
+        return default_binding(registry, &target.0).map(|name| name.map(str::to_owned));
+    }
     if let Some((root, project)) = context {
-        let key = project_key(&root, &project.id)?;
+        let key = project_key(root, &project.id)?;
         if registry
             .projects
             .get(&key)
             .is_some_and(|bindings| !bindings.is_empty())
         {
-            return project_credential_name(registry, &root, &project, target);
+            return project_credential_name(registry, root, project, target);
         }
     }
     default_binding(registry, &target.0).map(|name| name.map(str::to_owned))

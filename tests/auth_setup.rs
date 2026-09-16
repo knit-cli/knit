@@ -518,6 +518,7 @@ fn grouped_setup_without_terminal_stays_scriptable_and_never_hangs() {
 fn grouped_setup_pty_two_forges_hidden_tokens_and_absent_group_skip() {
     let root = std::env::temp_dir().join(format!("knit-auth-groups-pty-{}", std::process::id()));
     let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
     let result = std::process::Command::new("python3")
         .arg(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -525,6 +526,9 @@ fn grouped_setup_pty_two_forges_hidden_tokens_and_absent_group_skip() {
         ))
         .arg(env!("CARGO_BIN_EXE_knit"))
         .arg(&root)
+        // The fixture must never fall back to the test runner's cwd: `knit
+        // auth` commands activate the invoking cwd's project.
+        .current_dir(&root)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&result.stdout);

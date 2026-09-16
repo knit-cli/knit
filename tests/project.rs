@@ -305,6 +305,86 @@ fn untouched_bundle_repo_can_be_recreated_on_a_corrected_unrelated_base() {
 }
 
 #[test]
+fn bundle_add_project_repo_id_honors_explicit_base_override() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+
+    let (_remote, scripts, collaborator) = init_remote_repo(&root, "scripts");
+    let requested = "MGX-52680-create-a-generic-script-to-create-or-update-sequence-tasks";
+    git(&collaborator, ["checkout", "-b", requested]);
+    append_line(&collaborator.join("app.txt"), "requested branch head");
+    git(&collaborator, ["add", "app.txt"]);
+    git(&collaborator, ["commit", "-m", "Requested branch head"]);
+    git(&collaborator, ["push", "origin", requested]);
+    let requested_sha = git(&collaborator, ["rev-parse", "HEAD"]).trim().to_string();
+
+    knit(
+        &workspace,
+        [
+            "project",
+            "add",
+            "scripts",
+            scripts.to_str().unwrap(),
+            "--base",
+            "main",
+            "--observe",
+        ],
+    );
+    let template_path = workspace.join(".knit/projects/demo.project.json");
+    let template_before = fs::read(&template_path).unwrap();
+
+    knit(
+        &workspace,
+        ["bundle", "mgx-52680-sequence-tasks", "--repo", "backend"],
+    );
+    let bundle_root = workspace.join(".knit/worktrees/mgx-52680-sequence-tasks");
+    let bundle_path = workspace.join(".knit/bundles/mgx-52680-sequence-tasks.bundle.json");
+    let bundle_before = fs::read(&bundle_path).unwrap();
+
+    // A nonexistent override fails without touching the bundle or the repo.
+    let failure = knit_fails(
+        &bundle_root,
+        ["bundle", "add", "scripts", "--base", "missing-branch"],
+    );
+    assert!(failure.contains("missing-branch"), "{failure}");
+    assert_eq!(fs::read(&bundle_path).unwrap(), bundle_before);
+    assert!(!bundle_root.join("scripts").exists());
+    assert!(git(
+        &scripts,
+        ["branch", "--list", "knit/mgx-52680-sequence-tasks"]
+    )
+    .trim()
+    .is_empty());
+
+    // The exact reported command: the explicit base wins over the configured
+    // project base.
+    let added = knit(
+        &bundle_root,
+        ["bundle", "add", "scripts", "--base", requested],
+    );
+    assert!(added.contains(&format!("origin/{requested}")), "{added}");
+
+    let bundle: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    let recorded = bundle["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["id"].as_str() == Some("scripts"))
+        .unwrap();
+    assert_eq!(recorded["baseBranch"].as_str(), Some(requested));
+    assert_eq!(recorded["baseSha"].as_str(), Some(requested_sha.as_str()));
+    assert_eq!(
+        git(&bundle_root.join("scripts"), ["rev-parse", "HEAD"]).trim(),
+        requested_sha
+    );
+
+    assert_eq!(fs::read(&template_path).unwrap(), template_before);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_bundle_starts_from_fresh_remote_base_without_moving_dirty_source_checkout() {
     let root = unique_temp_dir();
     let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
