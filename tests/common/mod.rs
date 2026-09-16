@@ -755,6 +755,9 @@ api_pr_json() {
   pr_repo="$1"
   number="$2"
   base="main"
+  if [ -f "$GH_FAKE_DIR/api-$pr_repo.base" ]; then
+    base="$(cat "$GH_FAKE_DIR/api-$pr_repo.base")"
+  fi
   head="knit/artifact-publish"
   if [ -f "$GH_FAKE_DIR/api-$pr_repo.head" ]; then
     head="$(cat "$GH_FAKE_DIR/api-$pr_repo.head")"
@@ -841,6 +844,7 @@ if [ "$1" = "api" ]; then
         if [ "$input" = "-" ]; then
           cat > "$GH_FAKE_DIR/api-$pr_repo.json"
           sed -n 's/.*"head":"\([^"]*\)".*/\1/p' "$GH_FAKE_DIR/api-$pr_repo.json" > "$GH_FAKE_DIR/api-$pr_repo.head"
+          sed -n 's/.*"base":"\([^"]*\)".*/\1/p' "$GH_FAKE_DIR/api-$pr_repo.json" > "$GH_FAKE_DIR/api-$pr_repo.base"
         else
           : > "$GH_FAKE_DIR/api-$pr_repo.json"
         fi

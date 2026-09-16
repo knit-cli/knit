@@ -1,12 +1,16 @@
 //! Repo selection for publish: which tracked repos are in publishing scope,
-//! provider filtering, and per-repo base branch overrides.
+//! provider filtering, and the destination each repo's review targets.
 
-use crate::model::{ChangeGroup, RepoEntry};
+use crate::commands::land::lanes::{
+    lane_destination, load_project_for_bundle, normalize_lane_name, normalize_target_branch,
+    resolve_lane, workspace_is_scoped, LaneDestination,
+};
+use crate::model::{ChangeGroup, ProjectLandingLane, RepoEntry};
 use crate::providers::{self};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::ActiveBundle;
 use anyhow::{bail, Result};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 /// Narrow resolved repo indexes to those hosted on `provider` (e.g. "github",
 /// "gitlab", "forgejo"/"codeberg", "bitbucket"). With no provider the indexes pass through
@@ -138,55 +142,99 @@ pub(super) fn resolve_publish_repo_indexes_for_bundle(
     Ok(indexes)
 }
 
-#[derive(Debug, Default)]
-pub(super) struct BaseOverrides {
-    default: Option<String>,
-    per_repo: BTreeMap<String, String>,
+/// Where a publish run sends each repo's review: the same destination flags
+/// `knit land` understands, defaulting to each repo's configured bundle base.
+#[derive(Debug)]
+pub(super) enum PublishDestination {
+    /// No flags: every selected repo publishes against its configured bundle
+    /// base branch (`repo.baseBranch`).
+    ConfiguredBases,
+    /// `--target BRANCH`: one literal branch for every selected repo.
+    TargetBranch(String),
+    /// `--lane NAME`: per-repo branches from the project's
+    /// `landing.lanes.<name>`, resolved and validated exactly as `knit land`
+    /// resolves it.
+    Lane {
+        name: String,
+        lane: ProjectLandingLane,
+    },
 }
 
-impl BaseOverrides {
-    pub(super) fn parse(values: &[String]) -> Result<Self> {
-        let mut overrides = Self::default();
-        for value in values {
-            let value = value.trim();
-            if value.is_empty() {
-                bail!("--base cannot be empty.");
-            }
-            if let Some((repo_id, branch)) = value.split_once('=') {
-                let repo_id = repo_id.trim();
-                let branch = branch.trim();
-                if repo_id.is_empty() || branch.is_empty() {
-                    bail!("Use --base REPO=BRANCH with both sides present.");
-                }
-                overrides
-                    .per_repo
-                    .insert(crate::ids::slugify(repo_id), branch.to_string());
-            } else if overrides.default.replace(value.to_string()).is_some() {
-                bail!("Pass only one default --base value, or use repeated --base REPO=BRANCH overrides.");
-            }
+impl PublishDestination {
+    /// Resolve one repo's destination branch. `Ok(None)` means the lane
+    /// deliberately excludes this repo (a `null` entry), so publishing skips
+    /// it; everything else is an error surfaced before any push or API write.
+    pub(super) fn branch_for(&self, repo: &RepoEntry) -> Result<Option<String>> {
+        match self {
+            PublishDestination::ConfiguredBases => Ok(Some(repo.base_branch.clone())),
+            PublishDestination::TargetBranch(branch) => Ok(Some(branch.clone())),
+            PublishDestination::Lane { name, lane } => match lane_destination(lane, &repo.id) {
+                LaneDestination::Branch(branch) => Ok(Some(branch.to_string())),
+                LaneDestination::Absent => Ok(None),
+                LaneDestination::Unmapped => bail!(
+                    "Publish lane `{name}` has no branch for repository `{}`. Add landing.lanes.{name}.branches.{} or defaultBranch. If `{}` has no {name} environment at all, declare it absent with `\"{}\": null`.",
+                    repo.id,
+                    repo.id,
+                    repo.id,
+                    repo.id
+                ),
+            },
         }
-        Ok(overrides)
     }
 
-    pub(super) fn branch_for(
-        &self,
-        repo: &RepoEntry,
-        existing: Option<&crate::model::PublicationEntry>,
-    ) -> String {
-        self.per_repo
-            .get(&repo.id)
-            .or(self.default.as_ref())
-            .cloned()
-            .or_else(|| existing.map(|publication| publication.base_branch.clone()))
-            .unwrap_or_else(|| repo.base_branch.clone())
-    }
-
-    pub(super) fn validate_tracked_repos(&self, bundle: &ChangeGroup) -> Result<()> {
-        for repo_id in self.per_repo.keys() {
-            if !bundle.repos.iter().any(|repo| &repo.id == repo_id) {
-                bail!("--base references unknown repo `{repo_id}`.");
-            }
+    /// The lane name, when this destination is a lane.
+    pub(super) fn lane_name(&self) -> Option<&str> {
+        match self {
+            PublishDestination::Lane { name, .. } => Some(name),
+            _ => None,
         }
-        Ok(())
+    }
+}
+
+/// Turn the `--target`/`--lane` flags into a destination for a
+/// workspace-backed publish run. Mutually exclusive flags, unknown lanes, and
+/// conflicting lane configurations are refused here, before anything moves.
+pub(super) fn resolve_publish_destination(
+    active: &ActiveBundle,
+    target: Option<&str>,
+    lane: Option<&str>,
+) -> Result<PublishDestination> {
+    let target = normalize_target_branch(target)?;
+    let lane = normalize_lane_name(lane)?;
+    match (target, lane) {
+        (Some(_), Some(_)) => bail!("Pass only one of --target or --lane."),
+        (Some(branch), None) => Ok(PublishDestination::TargetBranch(branch)),
+        (None, Some(name)) => {
+            let project = load_project_for_bundle(active)?;
+            let landing = project
+                .as_ref()
+                .and_then(|project| project.landing.as_ref());
+            let scoped = workspace_is_scoped(active);
+            let lane = resolve_lane(project.as_ref(), landing, Some(&name), scoped)?
+                .expect("resolve_lane returns a lane when a name is given");
+            Ok(PublishDestination::Lane {
+                name,
+                lane: lane.clone(),
+            })
+        }
+        (None, None) => Ok(PublishDestination::ConfiguredBases),
+    }
+}
+
+/// Turn `--target` into a destination for an artifact publish run, which has
+/// no workspace and therefore no project metadata to resolve a lane from.
+pub(super) fn resolve_publish_destination_for_artifact(
+    target: Option<&str>,
+    lane: Option<&str>,
+) -> Result<PublishDestination> {
+    let target = normalize_target_branch(target)?;
+    let lane = normalize_lane_name(lane)?;
+    match (target, lane) {
+        (Some(_), Some(_)) => bail!("Pass only one of --target or --lane."),
+        (Some(branch), None) => Ok(PublishDestination::TargetBranch(branch)),
+        (None, Some(_)) => bail!(
+            "Artifact publish cannot resolve --lane: it reads a bundle artifact, not a project's landing.lanes. Pass --target BRANCH instead."
+        ),
+        (None, None) => Ok(PublishDestination::ConfiguredBases),
     }
 }

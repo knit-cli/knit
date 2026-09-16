@@ -4024,7 +4024,7 @@ fn a_cross_repo_trigger_survives_branch_target_selection() {
             "create",
             "--github",
             "--no-sync",
-            "--base",
+            "--target",
             "release",
         ],
         &fake_bin,

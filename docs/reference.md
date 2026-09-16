@@ -112,7 +112,7 @@ knit run --list
 knit check run <project-command> [--repo <repo>]... [--all]
 knit check record <name> --pass|--fail [--detail <text>]
 knit check status
-knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--base <branch>|--base <repo=branch>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--target <branch>|--lane <name>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--from-artifact <path>] [--out <path>] [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
@@ -654,8 +654,8 @@ Fan-out limits and retries are tunable through the environment: `KNIT_GIT_JOBS` 
 knit publish create
 knit publish create --draft
 knit publish create backend
-knit publish create --base release
-knit publish create --base backend=stable --base frontend=main
+knit publish create --target release
+knit publish create --lane staging
 knit publish create --no-sync
 knit publish create --no-remote
 knit publish sync
@@ -664,17 +664,19 @@ knit publish status
 
 `knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg, or Bitbucket) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
 
-`knit publish create` is a best-effort two-phase operation and the whole review path after `knit commit`; it does its own branch push, so no separate `knit push` is needed. Repos are published at most `KNIT_FORGE_JOBS` (default 4) at a time, forge calls that fail because the host was momentarily unavailable (5xx, a rate limit honoring `Retry-After`, a dropped connection) are retried up to four times with 1s/2s/4s backoff, and calls the host answered (bad credentials, 404, 422) fail at once. A repo whose publish fails does not stop the others: every repo is reported, the command exits non-zero listing the failures, and re-running creates only what is missing — a repo whose review object already exists is adopted rather than duplicated. It pushes every selected tracked feature branch, creates missing review objects (PRs/MRs) or reuses an existing one for the same feature/base branch, stores publishing metadata in the bundle's `publications`, then rewrites the managed Knit block in every selected review body with the complete cross-repo list. The base defaults to each repo's bundle `baseBranch`; pass `--base release` to use the same base for every selected repo, or repeat `--base repo=branch` for per-repo bases. That target is recorded with the publication. A later native `knit land --target <branch>` can deliberately replace those recorded review bases as part of its landing contract. Body sync is on by default; `--sync` is accepted for explicitness, and `--no-sync` skips that second phase. If body sync fails after review objects were created, run `knit publish sync` after fixing auth or network issues.
+`knit publish create` pushes the selected feature branches, creates or adopts their review objects, records publication metadata, and updates the managed cross-repo links. Publishing runs at most `KNIT_FORGE_JOBS` (default 4) repositories at a time. Transient forge failures are retried; a repository's failure does not stop the others, and the command reports failures with a nonzero exit status.
 
-For a named lane, select it through Knit itself. The generated plan records `lane`, immutable `targetBranches`, and whether the lane is `terminal`; apply retargets each open review object to its mapped branch, refreshes readiness, merges, and runs that lane's deployments. An intermediate lane like `staging` leaves the bundle open afterwards:
+Choose the PR destination with the same flags used for landing:
 
-```sh
-knit publish create
-knit land --lane staging
-knit land --lane staging apply
-```
+- No destination flag: each repository's recorded bundle `baseBranch`.
+- `--target release`: the branch `release` in every selected repository.
+- `--lane staging`: the project's `landing.lanes.staging` mapping, including per-repo branches, a default or wildcard, and `null` exclusions.
 
-Creating reviews against staging up front with `knit publish create --base staging` remains supported, but it is an optimization rather than the landing contract.
+`--target` and `--lane` are mutually exclusive. Invalid or missing lane mappings fail before any branch push or PR change. Publishing leaves the bundle's starting base unchanged. An existing open PR is retargeted when its destination differs; publishing again without a destination selects the bundle base again. If a landing plan already exists, regenerate and inspect it with `knit land plan --force` after retargeting. `--base` is no longer a publishing option.
+
+Bare `knit land` follows the recorded PR targets. An explicit `knit land --target` or `knit land --lane` chooses a different landing destination. For an intermediate lane, landing merges feature branches into the mapped branches and keeps the bundle and its reviews open; a terminal lane merges the reviews and closes the bundle. Inspect the generated plan before applying.
+
+`--lane` requires a project-backed workspace and is unavailable with `--from-artifact`; artifact publishing accepts `--target`. Body sync is on by default (`--no-sync` skips it). If body sync fails after reviews were created, use `knit publish sync` to retry the links without choosing PR destinations again.
 
 When a bundle continues after its recorded reviews were merged or closed, pass `--renew` to start a fresh review round without replacing the bundle. Knit verifies that each recorded review is terminal, refuses open or unverifiable reviews, and refuses renewal when the feature branch still points at the recorded review head. The new review replaces the current per-repo publication projection; the terminal review remains unchanged on its host. Open renewed publications make a previously landed bundle effectively open again. Because an existing landing plan may predate the new repo set, regenerate it with `knit land plan --force` and inspect it before applying.
 

@@ -1198,10 +1198,15 @@ pub enum PublishCommand {
         /// Skip pushing feature branches. Branches must already exist on the remote.
         #[arg(long)]
         no_push: bool,
-        /// Set the review target branch. Landing keeps it unless `knit land --target` overrides it.
-        /// Use once for all repos or repeat as REPO=BRANCH.
-        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
-        bases: Vec<String>,
+        /// Publish every selected repo's review against this one target branch.
+        /// Default without a destination flag: each repo's recorded bundle base branch.
+        #[arg(long, value_name = "BRANCH", conflicts_with = "lane")]
+        target: Option<String>,
+        /// Resolve each repo's review base from this project landing lane
+        /// (`landing.lanes.<name>`), including per-repo branches, a default or
+        /// wildcard, and `null` exclusions. Requires a project-backed workspace.
+        #[arg(long, value_name = "LANE", conflicts_with_all = ["target", "from_artifact"])]
+        lane: Option<String>,
         /// Create review objects for every tracked repo instead of only repos with recorded work.
         #[arg(long)]
         all: bool,
