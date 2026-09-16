@@ -68,7 +68,9 @@ pub fn track_repo_selectors(
     };
     let mut plans = Vec::new();
     for selector in selectors {
-        if let Some(plan) = resolve_project_selector(&active, selector, in_place, base_mode)? {
+        if let Some(plan) =
+            resolve_project_selector(&active, selector, base_override, in_place, base_mode)?
+        {
             plans.push(plan);
         } else {
             plans.push(resolve_repo_plan(
@@ -108,7 +110,9 @@ pub fn track_project_repos(
         let handles: Vec<_> = repos
             .iter()
             .cloned()
-            .map(|repo| scope.spawn(move || resolve_project_repo_plan(&repo, in_place, base_mode)))
+            .map(|repo| {
+                scope.spawn(move || resolve_project_repo_plan(&repo, None, in_place, base_mode))
+            })
             .collect();
         handles
             .into_iter()
@@ -256,6 +260,7 @@ fn resolve_repo_plan(
 fn resolve_project_selector(
     active: &crate::store::ActiveBundle,
     selector: &str,
+    base_override: Option<&str>,
     in_place: bool,
     base_mode: BundleBaseMode,
 ) -> Result<Option<RepoPlan>> {
@@ -273,11 +278,17 @@ fn resolve_project_selector(
     let Some(repo) = project.repos.iter().find(|repo| repo.id == selector) else {
         return Ok(None);
     };
-    Ok(Some(resolve_project_repo_plan(repo, in_place, base_mode)?))
+    Ok(Some(resolve_project_repo_plan(
+        repo,
+        base_override,
+        in_place,
+        base_mode,
+    )?))
 }
 
 fn resolve_project_repo_plan(
     repo: &ProjectRepoEntry,
+    base_override: Option<&str>,
     in_place: bool,
     base_mode: BundleBaseMode,
 ) -> Result<RepoPlan> {
@@ -287,8 +298,11 @@ fn resolve_project_repo_plan(
         repo.checkout_mode
     };
     let repo_root = git_root(Path::new(&repo.path))?;
-    let snapshot = snapshot_base(&repo_root, &repo.base_branch, base_mode)
-        .with_context(|| format!("{}: failed to snapshot configured base", repo.id))?;
+    // An explicit `--base` overrides the recorded base for this addition
+    // only; the project template keeps its configured base.
+    let base_branch = base_override.unwrap_or(&repo.base_branch).to_string();
+    let snapshot = snapshot_base(&repo_root, &base_branch, base_mode)
+        .with_context(|| format!("{}: failed to snapshot base `{base_branch}`", repo.id))?;
     println!(
         "{}: base {} {}",
         out::repo(&repo.id),
@@ -299,7 +313,7 @@ fn resolve_project_repo_plan(
         desired_id: repo.id.clone(),
         path: repo_root.to_string_lossy().to_string(),
         remote: repo.remote.clone(),
-        base_branch: repo.base_branch.clone(),
+        base_branch,
         base_sha: snapshot.sha,
         checkout_mode,
     })

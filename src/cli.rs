@@ -671,7 +671,7 @@ pub enum BundleCommand {
         /// Paths to local git repositories or project repo ids.
         #[arg(required = true)]
         repos: Vec<String>,
-        /// Override the inferred base branch for raw repo paths.
+        /// Override the inferred base branch for raw repo paths and project repo ids.
         #[arg(long)]
         base: Option<String>,
         /// Use each original repo checkout directly instead of creating a Knit worktree.
