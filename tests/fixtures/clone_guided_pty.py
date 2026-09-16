@@ -398,8 +398,12 @@ try:
                'KNIT_HOME': str(conv5 / 'home'),
                'GIT_CONFIG_GLOBAL': str(root / 'empty.gitconfig'),
                'GIT_CONFIG_NOSYSTEM': '1'}
+    # cwd stays inside the fixture: `auth add` activates plain-Git
+    # integration for the invoking cwd's project, and an inherited test-runner
+    # cwd would configure the real workspace with synthetic tokens.
     subprocess.run([binary, 'auth', 'add', 'gh-bad', '--provider', 'github',
                     '--token-stdin'], input=b'REJECTED-TOKEN\n', env=add_env,
+                   cwd=str(conv5),
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     repos5 = [('solo', 'https://github.com/org/solo.git', 'private')]
     (remote_dir / 'export.json').write_text(export_body(
@@ -461,6 +465,7 @@ try:
                 'GIT_CONFIG_NOSYSTEM': '1'}
     subprocess.run([binary, 'auth', 'add', 'gh-env', '--provider', 'github',
                     '--token-env', 'GHOST_ENV'], env=add_env6,
+                   cwd=str(conv6),
                    check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     repos6 = [('solo', 'https://github.com/org/solo.git', 'private')]
     (remote_dir / 'export.json').write_text(export_body(

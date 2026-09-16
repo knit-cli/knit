@@ -423,6 +423,9 @@ fn wizard_pty_rejects_invalid_selection_and_hides_saved_token() {
         ))
         .arg(env!("CARGO_BIN_EXE_knit"))
         .arg(&root)
+        // The fixture must never fall back to the test runner's cwd: `knit
+        // auth` commands activate the invoking cwd's project.
+        .current_dir(&root)
         .output()
         .unwrap();
     let _ = fs::remove_dir_all(root);
@@ -464,6 +467,7 @@ fn failed_rotation_must_preserve_previously_saved_token() {
             "--token-stdin",
             "--replace",
         ])
+        .current_dir(&root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -500,6 +504,7 @@ fn credential_source_switches_preserve_state_when_secret_store_cannot_be_read() 
     let invoke = |args: &[&str], token: Option<&str>| {
         let mut child = Command::new(env!("CARGO_BIN_EXE_knit"))
             .args(args)
+            .current_dir(&root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())

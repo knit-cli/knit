@@ -34,6 +34,7 @@ fn fixture() -> std::path::PathBuf {
 fn helper(root: &Path, operation: &str, request: &str) -> Output {
     run_with_input(
         Command::new(env!("CARGO_BIN_EXE_knit"))
+            .current_dir(root)
             .env("KNIT_HOME", root)
             .env("KNIT_TEST_PROJECT_TOKEN", "scoped-test-secret")
             .args([
@@ -204,6 +205,7 @@ fn bitbucket_helper_uses_git_api_token_username_or_repository_token_username() {
         })).unwrap()).unwrap();
         let output = run_with_input(
             Command::new(env!("CARGO_BIN_EXE_knit"))
+                .current_dir(&root)
                 .env("KNIT_HOME", &root)
                 .env("KNIT_TEST_PROJECT_TOKEN", "test-token")
                 .args([
