@@ -87,6 +87,10 @@ fn global_defaults_wizard() -> Result<()> {
         println!("  Enter when done");
         let choice = prompt("Forge (1-4, or Enter to finish): ")?;
         if choice.is_empty() {
+            // Activating inside a project: plain Git picks up the saved
+            // tokens here, without a separate `knit auth status` run.
+            refresh_plain_git_helper_for_cwd()
+                .context("Tokens were saved, but the plain-Git helper could not be refreshed")?;
             println!("Done. Tokens are saved in your personal Knit store; nothing was synced.");
             return Ok(());
         }
@@ -291,6 +295,10 @@ fn setup_with_prompt(
         }
     }
     show_setup_mapping(root, project, ids)?;
+    // The wizard saved credential state above; a helper-install failure must
+    // not roll that back, but it must not look like success either.
+    refresh_plain_git_helper(root, project)
+        .context("Credential choices were saved, but the plain-Git helper could not be set up")?;
     println!("Done.");
     Ok(())
 }
@@ -383,6 +391,9 @@ pub fn run(command: AuthCommand) -> Result<()> {
             store.scoped_credentials.remove(&name);
             auth::save(&store)?;
             auth::remove_token(&name)?;
+            refresh_plain_git_helper_for_cwd().context(
+                "The credential was removed, but the plain-Git helper could not be refreshed",
+            )?;
             println!("Removed credential `{name}` from this machine.");
             Ok(())
         }
@@ -405,6 +416,12 @@ pub fn run(command: AuthCommand) -> Result<()> {
             }
             let explicit = store.projects.contains_key(&key);
             auth::save(&store)?;
+            // With no credential resolving anymore, generated plain-Git entries are
+            // removed and the checkouts return to inherited Git behavior. The saved
+            // clearing stays in place even if the uninstall reports trouble.
+            refresh_plain_git_helper(&root, &project).context(
+        "Credential assignments were cleared, but the plain-Git helper could not be refreshed",
+    )?;
             println!(
                 "Cleared assignments for {}. {}",
                 project.id,
@@ -420,9 +437,126 @@ pub fn run(command: AuthCommand) -> Result<()> {
             credential,
             host,
             path,
+            resolve,
             operation,
-        } => crate::auth_git::credential_helper(&credential, &host, &path, operation),
+            workspace,
+            project,
+        } => {
+            let context = match (workspace, project) {
+                (None, None) => None,
+                (Some(workspace), Some(project)) => Some((workspace, project)),
+                _ => bail!("--workspace and --project must be passed together"),
+            };
+            if !resolve && context.is_some() {
+                bail!("--workspace and --project apply only to the dynamic --resolve helper");
+            }
+            if resolve {
+                crate::auth_git::resolve_helper(operation, context)
+            } else {
+                let (credential, host, path) = match (credential, host, path) {
+                    (Some(credential), Some(host), Some(path)) => (credential, host, path),
+                    _ => bail!(
+                        "fixed-selection helper mode requires --credential, --host, and --path"
+                    ),
+                };
+                crate::auth_git::credential_helper(&credential, &host, &path, operation)
+            }
+        }
     }
+}
+
+/// Refresh the plain-Git credential helper for one project's source checkouts
+/// plus its materialized bundle worktrees in this workspace (never another
+/// project's). `active` counts checkouts carrying Knit policy, `cleared` only
+/// ones whose generated entries were just removed; installation errors are
+/// collected into one error noting saved credentials are unaffected.
+pub(crate) fn refresh_plain_git_helper(
+    root: &Path,
+    project: &KnitProject,
+) -> Result<(usize, usize)> {
+    let mut checkouts: Vec<(String, std::path::PathBuf)> = Vec::new();
+    for repo in &project.repos {
+        let path = Path::new(&repo.path);
+        checkouts.push((
+            repo.id.clone(),
+            if path.is_absolute() {
+                path.to_path_buf()
+            } else {
+                root.join(path)
+            },
+        ));
+    }
+    let bundles_dir = root.join(".knit/bundles");
+    if let Ok(entries) = std::fs::read_dir(&bundles_dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+                continue;
+            }
+            let Ok(bundle) = crate::store::read_json::<crate::model::ChangeGroup>(&path) else {
+                continue;
+            };
+            if bundle.project_id.as_deref() != Some(project.id.as_str()) {
+                continue;
+            }
+            for repo in &bundle.repos {
+                let Some(worktree) = &repo.worktree_path else {
+                    continue;
+                };
+                let path = Path::new(worktree);
+                checkouts.push((
+                    format!("{}/{}", bundle.id, repo.id),
+                    if path.is_absolute() {
+                        path.to_path_buf()
+                    } else {
+                        root.join(path)
+                    },
+                ));
+            }
+        }
+    }
+    checkouts.sort_by(|a, b| a.1.cmp(&b.1));
+    checkouts.dedup_by(|a, b| a.1 == b.1);
+    let mut active = 0;
+    let mut cleared = 0;
+    let mut failures: Vec<(String, anyhow::Error)> = Vec::new();
+    for (name, path) in &checkouts {
+        if !path.is_dir() {
+            continue;
+        }
+        match crate::auth_git::install_for_project(path, root, project) {
+            Ok(crate::auth_git::InstallOutcome::Active { .. }) => active += 1,
+            Ok(crate::auth_git::InstallOutcome::Cleared { changed: true }) => cleared += 1,
+            Ok(crate::auth_git::InstallOutcome::Cleared { changed: false }) => {}
+            Err(error) => failures.push((name.clone(), error)),
+        }
+    }
+    if failures.is_empty() {
+        return Ok((active, cleared));
+    }
+    let detail = failures
+        .iter()
+        .map(|(repo, error)| format!("  {repo}: {error:#}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    bail!(
+        "plain-Git credential helper setup failed for {} checkout(s):\n{detail}\nSaved credentials are unaffected; run `knit auth status` in this project to repair the plain-Git integration.",
+        failures.len()
+    );
+}
+
+/// Refresh the plain-Git helper for the project context the process already
+/// resolves from `cwd`, when there is one. Used by credential mutations that
+/// do not carry an explicit project (`auth add`, `auth default`, `auth remove`,
+/// the global wizard's done path).
+fn refresh_plain_git_helper_for_cwd() -> Result<()> {
+    let Ok(cwd) = std::env::current_dir() else {
+        return Ok(());
+    };
+    if let Ok((root, project)) = auth::project_context(&cwd, None) {
+        refresh_plain_git_helper(&root, &project)?;
+    }
+    Ok(())
 }
 
 fn default_host(provider: &str) -> &str {
@@ -509,6 +643,8 @@ fn add(name: &str, spec: CredentialSpec, token_stdin: bool, replace: bool) -> Re
     // adding further tokens never displaces the chosen default.
     let becomes_default = !replace && auth::stage_default_if_absent(&mut store, &host, name);
     auth::save_credential(&store, name, token.as_deref())?;
+    refresh_plain_git_helper_for_cwd()
+        .context("The credential was saved, but the plain-Git helper could not be refreshed")?;
     println!("Saved `{name}` in your personal Knit credential store{}. Repository access has not been checked.{}",
         if is_env { " as an environment reference" } else { " (private file, not encrypted)" },
         if becomes_default { format!(" It is the default credential for {host}.") } else { String::new() });
@@ -531,6 +667,8 @@ fn set_default(name: &str) -> Result<()> {
     // An explicit global choice overrides project-only scoping.
     store.scoped_credentials.remove(name);
     auth::save(&store)?;
+    refresh_plain_git_helper_for_cwd()
+        .context("The default was recorded, but the plain-Git helper could not be refreshed")?;
     println!("Default credential for {host} is now `{name}`; repository assignments still win where made.");
     Ok(())
 }
@@ -589,6 +727,8 @@ fn assign_in(root: &Path, project: &KnitProject, ids: &[String], name: &str) -> 
         bindings.insert(repo.id.clone(), name.into());
     }
     auth::save(&store)?;
+    refresh_plain_git_helper(root, project)
+        .context("The assignment was saved, but the plain-Git helper could not be refreshed")?;
     println!("Assigned `{name}` to {} in {}. Run `knit auth status --project {} --check` to check Git read access.",
         repos.iter().map(|r| r.id.as_str()).collect::<Vec<_>>().join(", "), project.id, project.id);
     Ok(())
@@ -1176,6 +1316,8 @@ pub(crate) fn guided_group_setup(
     if !bound_any {
         println!("Every group is already linked; nothing to set up.");
     }
+    refresh_plain_git_helper(root, project)
+        .context("Credentials were linked, but the plain-Git helper could not be refreshed")?;
     Ok(())
 }
 
@@ -1756,6 +1898,19 @@ fn status_project_with(
         }
         if !explicit && groups.is_empty() {
             println!("Run `knit auth setup` to choose credentials for this project.");
+        }
+    }
+    // Existing installs activate plain-Git credential integration here: the
+    // refresh is noninteractive and uses only saved credentials, so an
+    // upgrade never asks for a token again. A failed installation must fail
+    // the status report instead of letting it claim success.
+    let (active, cleared) = refresh_plain_git_helper(root, project)?;
+    if !json_output {
+        if active > 0 {
+            println!("Git authentication configured for {active} checkouts.");
+        }
+        if cleared > 0 {
+            println!("Git authentication removed from {cleared} checkouts.");
         }
     }
     if check && failed {

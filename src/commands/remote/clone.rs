@@ -593,6 +593,17 @@ pub(super) fn clone_fetched_export(
         .collect();
     record_ungrouped_ambient_access(&target_root, &project, &cloned);
 
+    // Plain Git in the fresh checkouts resolves the saved credentials from
+    // here on — no manual `knit auth status` detour before the first fetch
+    // or push. A setup failure never undoes the clone; it is reported with
+    // the recovery path instead.
+    if let Err(error) = crate::commands::auth::refresh_plain_git_helper(&target_root, &project) {
+        crate::human!(
+            "{} {error:#}",
+            out::warn("plain-Git credential setup failed:")
+        );
+    }
+
     // Bundles localize against repos with real checkouts only: the project
     // now keeps entries for in-scope repos whose clone failed (they are the
     // recovery contract), but a bundle touching one still cannot be restored
