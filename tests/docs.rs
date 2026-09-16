@@ -27,6 +27,7 @@ fn authoritative_guides_do_not_teach_removed_spellings() {
         ("docs/reference.md", reference),
         ("src/commands/init.rs", agents_template),
     ] {
+        assert!(!text.contains("knit publish create --base"), "{name}");
         assert!(!text.contains("knit fetch --all"), "{name}");
         assert!(!text.contains("knit fetch --bundles"), "{name}");
         assert!(!text.contains("\nknit prune"), "{name}");

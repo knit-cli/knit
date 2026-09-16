@@ -425,7 +425,7 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
 }
 
 #[test]
-fn pr_create_can_override_base_branch() {
+fn pr_create_targets_a_branch_and_a_default_rerun_retargets_back() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
     let workspace = root.join("workspace");
@@ -441,9 +441,6 @@ fn pr_create_can_override_base_branch() {
     let fake_bin = root.join("fake-bin");
     write_fake_gh(&fake_bin, &fake_gh_dir);
 
-    let create_help = knit(&workspace, ["publish", "create", "--help"]);
-    assert!(create_help.contains("knit land"), "{create_help}");
-
     let create = knit_with_fake_gh(
         &workspace,
         [
@@ -451,13 +448,14 @@ fn pr_create_can_override_base_branch() {
             "create",
             "--github",
             "--no-sync",
-            "--base",
+            "--target",
             "release",
         ],
         &fake_bin,
         &fake_gh_dir,
     );
     assert!(create.contains("backend"));
+    assert!(create.contains("created"));
     assert_eq!(
         fs::read_to_string(fake_gh_dir.join("create-backend.base"))
             .unwrap()
@@ -473,20 +471,512 @@ fn pr_create_can_override_base_branch() {
         bundle["publications"][0]["baseBranch"].as_str(),
         Some("release")
     );
+    // The bundle's own recorded base is untouched by the destination choice.
+    assert_eq!(bundle["repos"][0]["baseBranch"].as_str(), Some("main"));
 
     let land_plan = knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
     assert!(land_plan.contains("backend -> release"), "{land_plan}");
 
-    let land_status = knit_with_fake_gh(&workspace, ["land", "status"], &fake_bin, &fake_gh_dir);
-    assert!(land_status.contains("backend -> release"), "{land_status}");
+    // A rerun with no destination flag asks for the bundle base again, so the
+    // open review is retargeted back instead of left on `release`.
+    let rerun = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+        &[("GH_FAKE_DRAFT", "1")],
+    );
+    assert!(rerun.contains("retargeted"), "{rerun}");
+    assert!(rerun.contains("knit land plan --force"), "{rerun}");
+    assert!(rerun.contains("release -> main"), "{rerun}");
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("retarget-order.txt")).unwrap(),
+        "backend main\n"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "main"
+    );
 
-    let rerun = knit_with_fake_gh(
+    let bundle: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/release-target.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["publications"][0]["baseBranch"].as_str(),
+        Some("main")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_without_destination_flags_uses_the_bundle_base_branch() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    // An explicitly configured project base is what the bundle records, and
+    // the default publish destination follows it — not the remote's `main`.
+    git(&backend, ["branch", "release", "main"]);
+    git(&backend, ["push", "origin", "release"]);
+    knit(&workspace, ["init", "explicit-base"]);
+    knit(
+        &workspace,
+        [
+            "project",
+            "add",
+            "backend",
+            backend.to_str().unwrap(),
+            "--base",
+            "release",
+        ],
+    );
+    knit(&workspace, ["bundle", "explicit base"]);
+    let backend_feature = workspace.join(".knit/worktrees/explicit-base/backend");
+    append_line(&backend_feature.join("app.txt"), "default base change");
+    knit(&workspace, ["commit", "--all", "-m", "Default base change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let create = knit_with_fake_gh(
         &workspace,
         ["publish", "create", "--github", "--no-sync"],
         &fake_bin,
         &fake_gh_dir,
     );
-    assert!(rerun.contains("exists"));
+    assert!(create.contains("created"), "{create}");
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "release"
+    );
+
+    let bundle = read_workspace_bundle(&workspace, "explicit-base");
+    assert_eq!(bundle["repos"][0]["baseBranch"].as_str(), Some("release"));
+    assert_eq!(
+        bundle["publications"][0]["baseBranch"].as_str(),
+        Some("release")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A project workspace with backend/frontend/docs repos in a bundle with
+/// recorded work in all three, ready for lane publishing.
+fn lane_bundle_ready(
+    root: &std::path::Path,
+    lanes: Value,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(root, "frontend");
+    let (_docs_remote, docs, _docs_collaborator) = init_remote_repo(root, "docs");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "docs", docs.to_str().unwrap()],
+    );
+
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github", "lanes": lanes });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "lane routing"]);
+    for repo_id in ["backend", "frontend", "docs"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/lane-routing")
+                .join(repo_id)
+                .join("app.txt"),
+            "lane change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Lane change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+fn read_workspace_bundle(workspace: &std::path::Path, slug: &str) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(workspace.join(format!(".knit/bundles/{slug}.bundle.json"))).unwrap(),
+    )
+    .unwrap()
+}
+
+#[test]
+fn pr_create_lane_routes_per_repo_default_and_null_entries() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = lane_bundle_ready(
+        &root,
+        json!({
+            "staging": {
+                "defaultBranch": "staging",
+                "branches": { "backend": "staging-backend", "docs": null }
+            }
+        }),
+    );
+
+    // Every repo gets an open review first, so the lane run has to leave the
+    // absent repo's existing review and body untouched.
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    for repo in ["backend", "frontend", "docs"] {
+        assert!(fake_gh_dir.join(format!("create-{repo}.base")).exists());
+    }
+
+    let lane_run = knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        lane_run.contains("not in lane `staging`: docs"),
+        "{lane_run}"
+    );
+    let mut retargets: Vec<String> = fs::read_to_string(fake_gh_dir.join("retarget-order.txt"))
+        .unwrap()
+        .lines()
+        .map(str::to_string)
+        .collect();
+    retargets.sort();
+    assert_eq!(
+        retargets,
+        vec![
+            "backend staging-backend".to_string(),
+            "frontend staging".to_string(),
+        ]
+    );
+    // Body sync covers exactly what the lane published: the absent repo's
+    // body is not rewritten.
+    assert!(fake_gh_dir.join("edit-backend.md").exists());
+    assert!(fake_gh_dir.join("edit-frontend.md").exists());
+    assert!(!fake_gh_dir.join("edit-docs.md").exists());
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-attempts-docs"))
+            .unwrap()
+            .lines()
+            .count(),
+        1
+    );
+
+    let bundle = read_workspace_bundle(&workspace, "lane-routing");
+    let bases: Vec<&str> = bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|publication| {
+            let base = publication["baseBranch"].as_str().unwrap();
+            let repo = publication["repoId"].as_str().unwrap();
+            assert!(base.contains("staging") || repo == "docs");
+            base
+        })
+        .collect();
+    assert_eq!(bases.len(), 3);
+    let docs_base = bundle["publications"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|publication| publication["repoId"] == "docs")
+        .unwrap()["baseBranch"]
+        .as_str()
+        .unwrap();
+    assert_eq!(docs_base, "main");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_lane_validation_fails_before_any_push_or_review_write() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = lane_bundle_ready(
+        &root,
+        json!({
+            "staging": { "branches": { "backend": "staging" } },
+            "conflicted": {
+                "defaultBranch": "staging",
+                "branches": { "*": null }
+            }
+        }),
+    );
+
+    // A selected repo the lane never maps is an error, and it must fire
+    // before the worker pool starts: nothing is pushed, nothing created.
+    let unmapped = knit_fails_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--lane",
+            "staging",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        unmapped.contains("has no branch for repository `frontend`"),
+        "{unmapped}"
+    );
+    assert!(unmapped.contains("declare it absent"), "{unmapped}");
+    assert!(!fake_gh_dir.join("create-attempted-backend").exists());
+    assert!(!fake_gh_dir.join("create-attempted-frontend").exists());
+    assert!(!git_success(
+        &root.join("backend.git"),
+        ["rev-parse", "refs/heads/knit/lane-routing"],
+    ));
+
+    let unknown = knit_fails_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--lane",
+            "nope",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(unknown.contains("Unknown landing lane `nope`"), "{unknown}");
+
+    let conflicted = knit_fails_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--lane",
+            "conflicted",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        conflicted.contains(
+            "declares defaultBranch `staging` and a null branches.*, which contradict each other"
+        ),
+        "{conflicted}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn publish_create_rejects_base_flag_and_conflicting_destination_flags() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "flag guard"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+
+    let base = knit_fails(&workspace, ["publish", "create", "--base", "release"]);
+    assert!(base.contains("unexpected argument"), "{base}");
+    assert!(base.contains("--base"), "{base}");
+
+    let both = knit_fails(
+        &workspace,
+        [
+            "publish", "create", "--target", "release", "--lane", "staging",
+        ],
+    );
+    assert!(both.contains("cannot be used with"), "{both}");
+
+    let artifact_lane = knit_fails(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--from-artifact",
+            "bundle.json",
+            "--lane",
+            "staging",
+        ],
+    );
+    assert!(
+        artifact_lane.contains("cannot be used with"),
+        "{artifact_lane}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn renew_with_a_changed_target_keeps_the_renewal_contract() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "renew target"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/renew-target/backend");
+    append_line(&feature.join("app.txt"), "first review");
+    knit(&workspace, ["commit", "--all", "-m", "First review"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    // An open review is never replaced — and never quietly retargeted either.
+    let open = knit_fails_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--renew",
+            "--target",
+            "release",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(open.contains("is still open"), "{open}");
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+    assert!(!fake_gh_dir.join("next-backend.number").exists());
+
+    fs::write(fake_gh_dir.join("merged-backend"), "").unwrap();
+    fs::write(fake_gh_dir.join("next-backend.number"), "404").unwrap();
+    append_line(&feature.join("app.txt"), "second review");
+    knit(&workspace, ["commit", "--all", "-m", "Second review"]);
+
+    let renewed = knit_with_fake_gh(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--github",
+            "--no-sync",
+            "--renew",
+            "--target",
+            "release",
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(renewed.contains("created"), "{renewed}");
+    assert!(renewed.contains("#404"), "{renewed}");
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("create-backend.base"))
+            .unwrap()
+            .trim(),
+        "release"
+    );
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+
+    let bundle = read_workspace_bundle(&workspace, "renew-target");
+    assert_eq!(
+        bundle["publications"][0]["url"].as_str(),
+        Some("https://github.com/acme/backend/pull/404")
+    );
+    assert_eq!(
+        bundle["publications"][0]["baseBranch"].as_str(),
+        Some("release")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_pr_create_accepts_a_target_branch() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["bundle", "artifact target"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let backend_feature = workspace.join(".knit/worktrees/artifact-target/backend");
+    append_line(&backend_feature.join("app.txt"), "artifact PR change");
+    knit(&workspace, ["commit", "--all", "-m", "Artifact PR change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+
+    let artifact = workspace.join(".knit/bundles/artifact-target.bundle.json");
+    let mut artifact_payload: Value =
+        serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    artifact_payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    fs::write(
+        &artifact,
+        serde_json::to_string_pretty(&artifact_payload).unwrap(),
+    )
+    .unwrap();
+
+    let out = root.join("artifact-target.out.bundle.json");
+    let create = knit_with_fake_gh(
+        &root,
+        vec![
+            "publish".to_string(),
+            "create".to_string(),
+            "--github".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+            "--no-push".to_string(),
+            "--no-sync".to_string(),
+            "--target".to_string(),
+            "release".to_string(),
+        ],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(create.contains("created"), "{create}");
+
+    let payload: Value =
+        serde_json::from_str(&fs::read_to_string(fake_gh_dir.join("api-backend.json")).unwrap())
+            .unwrap();
+    assert_eq!(payload["base"].as_str(), Some("release"));
+
+    let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(
+        published["publications"][0]["baseBranch"].as_str(),
+        Some("release")
+    );
 
     fs::remove_dir_all(root).unwrap();
 }

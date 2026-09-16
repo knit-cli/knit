@@ -16,6 +16,7 @@ mod artifact;
 mod check;
 mod display;
 mod execute;
+pub(crate) mod lanes;
 mod plan;
 mod process;
 mod rollback;
@@ -26,6 +27,7 @@ mod validate;
 pub use artifact::apply_land_from_artifact;
 pub use check::check_landing;
 pub(crate) use check::{assess_landing_readiness, print_readiness_row};
+pub(crate) use lanes::{normalize_lane_name, normalize_target_branch};
 pub(crate) use process::DEFAULT_COMMAND_TIMEOUT_SECONDS;
 pub use rollback::rollback_land_run;
 
@@ -308,28 +310,6 @@ fn plan_destination_label(plan: &LandPlan) -> String {
         (None, Some(branch)) => format!("branch `{branch}`"),
         (None, None) => "the recorded review bases".to_string(),
     }
-}
-
-fn normalize_target_branch(target_branch: Option<&str>) -> Result<Option<String>> {
-    let Some(target_branch) = target_branch else {
-        return Ok(None);
-    };
-    let target_branch = target_branch.trim();
-    if target_branch.is_empty() {
-        bail!("--target must name a non-empty branch");
-    }
-    Ok(Some(target_branch.to_string()))
-}
-
-pub(super) fn normalize_lane_name(lane_name: Option<&str>) -> Result<Option<String>> {
-    let Some(lane_name) = lane_name else {
-        return Ok(None);
-    };
-    let lane_name = lane_name.trim();
-    if lane_name.is_empty() {
-        bail!("--lane must name a non-empty project landing lane");
-    }
-    Ok(Some(lane_name.to_string()))
 }
 
 fn ensure_requested_selection_matches_plan(

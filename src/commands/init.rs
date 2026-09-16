@@ -741,16 +741,17 @@ knit --bundle feature-a sync push --bundles
 knit --bundle feature-a sync pull --history
 ```
 
-Publish review objects (PRs/MRs) against their intended base branch. `create`
-pushes each feature branch itself, so the review path is commit then publish —
+Publish review objects (PRs/MRs) into each repository’s recorded bundle base
+by default. Use `--target` for one destination branch or `--lane` for a project
+mapping. `create` pushes each feature branch itself, so the review path is commit then publish —
 no separate `knit push` step. It auto-detects each repo's host; pass `--github`
 (or `--provider <id>`) to limit to one host. `knit request` is an alias for
 `knit publish`:
 
 ```sh
 knit publish create
-knit publish create --base release
-knit publish create --base backend=stable --base frontend=main
+knit publish create --target release
+knit publish create --lane staging
 knit publish create --github
 knit publish status
 ```

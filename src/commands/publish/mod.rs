@@ -24,8 +24,9 @@ use remote::{
 };
 pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
-    filter_indexes_by_provider, resolve_publish_repo_indexes,
-    resolve_publish_repo_indexes_for_bundle, BaseOverrides,
+    filter_indexes_by_provider, resolve_publish_destination,
+    resolve_publish_destination_for_artifact, resolve_publish_repo_indexes,
+    resolve_publish_repo_indexes_for_bundle, PublishDestination,
 };
 use std::path::Path;
 use sync::{sync_publications_for_indexes, sync_publications_for_indexes_from_artifact};
@@ -37,7 +38,8 @@ pub fn create_publications(
     all: bool,
     draft: bool,
     renew: bool,
-    bases: &[String],
+    target: Option<&str>,
+    lane: Option<&str>,
     sync: bool,
     set_upstream: bool,
     remote: &[String],
@@ -51,25 +53,15 @@ pub fn create_publications(
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
-    let base_overrides = BaseOverrides::parse(bases)?;
-    base_overrides.validate_tracked_repos(&active.bundle)?;
+    let destination = resolve_publish_destination(&active, target, lane)?;
     let bundle_snapshot = active.bundle.clone();
     let mut failures = Vec::new();
     let mut bundle_changed = false;
 
-    let jobs: Vec<PublishJob> = indexes
-        .iter()
-        .map(|&index| {
-            let repo = active.bundle.repos[index].clone();
-            let base_branch =
-                base_overrides.branch_for(&repo, publication_for_repo(&active.bundle, &repo.id));
-            PublishJob {
-                repo_index: index,
-                repo,
-                base_branch,
-            }
-        })
-        .collect();
+    let jobs = resolve_publish_jobs(&active.bundle.repos, &indexes, &destination)?;
+    // Body sync follows what this run actually publishes: a repo the lane
+    // excluded keeps its existing review and body untouched.
+    let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
 
     let total = jobs.len();
     let limit = crate::parallel::forge_jobs()?;
@@ -153,7 +145,19 @@ pub fn create_publications(
 
     if bundle_changed {
         save_active_bundle(&active)?;
-        if renew {
+        let targets_changed = active.bundle.publications.iter().any(|publication| {
+            publication_for_repo(&bundle_snapshot, &publication.repo_id)
+                .is_some_and(|previous| previous.base_branch != publication.base_branch)
+        });
+        if targets_changed
+            && active
+                .root
+                .join(".knit/land-plans")
+                .join(format!("{}.land.json", active.bundle.id))
+                .exists()
+        {
+            println!("{}", out::warn("PR targets changed. Regenerate and inspect the existing landing plan with `knit land plan --force` before applying it."));
+        } else if renew {
             println!(
                 "{}",
                 out::warn(
@@ -200,7 +204,8 @@ pub fn create_publications_from_artifact(
     all: bool,
     draft: bool,
     renew: bool,
-    bases: &[String],
+    target: Option<&str>,
+    lane: Option<&str>,
     sync: bool,
     push: bool,
     provider: Option<&str>,
@@ -217,24 +222,13 @@ pub fn create_publications_from_artifact(
 
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
     let indexes = filter_indexes_by_provider(&bundle.repos, indexes, provider)?;
-    let base_overrides = BaseOverrides::parse(bases)?;
-    base_overrides.validate_tracked_repos(&bundle)?;
+    let destination = resolve_publish_destination_for_artifact(target, lane)?;
     let bundle_snapshot = bundle.clone();
     let mut failures = Vec::new();
 
-    let jobs: Vec<PublishJob> = indexes
-        .iter()
-        .map(|&index| {
-            let repo = bundle.repos[index].clone();
-            let base_branch =
-                base_overrides.branch_for(&repo, publication_for_repo(&bundle, &repo.id));
-            PublishJob {
-                repo_index: index,
-                repo,
-                base_branch,
-            }
-        })
-        .collect();
+    let jobs = resolve_publish_jobs(&bundle.repos, &indexes, &destination)?;
+    // Same rule as the worktree path: sync covers only what this run publishes.
+    let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
 
     let total = jobs.len();
     let limit = crate::parallel::forge_jobs()?;
@@ -355,6 +349,44 @@ pub fn sync_publications_from_artifact(
     }
     write_bundle_artifact_output(&bundle, out_path)?;
     Ok(())
+}
+
+/// Build the per-repo publish jobs for the selected indexes against the
+/// resolved destination. Repos the lane declares absent are dropped here with
+/// a note, and any repo the lane fails to map is an error — both decided
+/// before any push or review-object write happens.
+fn resolve_publish_jobs(
+    repos: &[crate::model::RepoEntry],
+    indexes: &[usize],
+    destination: &PublishDestination,
+) -> Result<Vec<PublishJob>> {
+    let mut jobs = Vec::new();
+    let mut excluded = Vec::new();
+    for &index in indexes {
+        let repo = repos[index].clone();
+        match destination.branch_for(&repo)? {
+            Some(base_branch) => jobs.push(PublishJob {
+                repo_index: index,
+                repo,
+                base_branch,
+            }),
+            None => excluded.push(repo.id.clone()),
+        }
+    }
+    if let Some(name) = destination.lane_name() {
+        for repo_id in &excluded {
+            println!(
+                "{} {} {}",
+                out::muted(format!("not in lane `{name}`:")),
+                out::repo(repo_id),
+                out::muted("skipped, declared absent from the lane")
+            );
+        }
+        if jobs.is_empty() {
+            bail!("Landing lane `{name}` carries none of the selected repositories.");
+        }
+    }
+    Ok(jobs)
 }
 
 /// Header for a multi-repo publish. The concurrency limit is named only when
