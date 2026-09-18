@@ -78,6 +78,8 @@ For Bitbucket, the recorded token type determines Git authentication: `atlassian
 
 When access is missing, interactive clone guides you through declared groups or infers a host from a failed Git operation. New regular tokens become host defaults. Existing project-only tokens are not automatically reused for another project. Noninteractive clones never prompt and explain how to finish setup.
 
+When you paste a replacement Bitbucket token through `knit auth`, Knit asks for its token type again and updates its account metadata; keeping the existing token makes no changes.
+
 If a credential is rejected, recovery saves a **new project-only credential for the affected repositories**, leaving the old secret, environment reference, and default untouched. Failed repositories are retried once. Use `knit pull --bundles` to reconcile missing repositories in an existing workspace.
 
 An interrupted clone that has checkouts but no configured workspace can resume with the same `knit clone` command and destination. Knit adopts only real checkout roots whose repository IDs and origins match, preserving branches and dirty work. Unrelated files, foreign checkouts, and symlinked scaffolding are refused. Finished bundles remain imported history; they are not automatically selected as active work.

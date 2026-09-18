@@ -493,7 +493,7 @@ fn saved_authorization(credential: &crate::auth::ResolvedCredential) -> Result<S
             Ok(basic())
         }
         Some("atlassian_api_token") => bail!(
-            "Credential `{}` is recorded as an Atlassian API token but has no valid account email; run `knit auth setup` to repair the credential",
+            "Credential `{}` is recorded as an Atlassian API token but has no valid account email; run `knit auth` to update its token type and account email",
             credential.name
         ),
         // Unclassified legacy credentials keep the username heuristic: any

@@ -118,6 +118,16 @@ fn global_defaults_wizard() -> Result<()> {
                     println!("Kept the current token.");
                     continue;
                 }
+                // A replacement can be a different Bitbucket token kind.
+                // Classify the new secret before saving it, rather than
+                // retaining the previous token's authentication scheme.
+                let bitbucket_identity = if provider == &"bitbucket" {
+                    let kind = ask_bitbucket_token_type(&mut prompt)?;
+                    let username = bitbucket_username_for_token_type(&kind, &mut prompt)?;
+                    Some((kind, username))
+                } else {
+                    None
+                };
                 // A deliberate update rotates the default token in place:
                 // same name, same default, new secret. A pasted replacement
                 // always becomes a local secret, so an environment reference
@@ -126,6 +136,10 @@ fn global_defaults_wizard() -> Result<()> {
                 let mut store = auth::load()?;
                 if let Some(spec) = store.credentials.get_mut(&name) {
                     spec.token_env = None;
+                    if let Some((kind, username)) = bitbucket_identity {
+                        spec.token_type = Some(kind);
+                        spec.username = username;
+                    }
                 }
                 store.scoped_credentials.remove(&name);
                 auth::save_credential(&store, &name, Some(token))?;
