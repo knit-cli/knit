@@ -1808,6 +1808,12 @@ fn handle_fake_remote_push_request(
                 format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
             )
         }
+        // Stage `project-shape-missing` to play a project that genuinely does
+        // not exist yet: PATCH answers 404, so the client's upsert falls
+        // through to POST-creating it — the genuine-new-project path.
+        ("PATCH", ["api", "v1", "projects", _]) if dir.join("project-shape-missing").exists() => {
+            (404, "{\"errors\":{\"detail\":\"Not Found\"}}".to_string())
+        }
         // Stage `project-shape-forbidden` to play a project the caller can
         // read and push bundles into but not reshape (a collaborator, not
         // the owner) — PATCH refuses, GET still resolves the record.

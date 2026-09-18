@@ -30,14 +30,20 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let local_project = load_project_if_present(&root, &project_id)?;
-    let remote_project = super::push::upsert_project_for_history(
+    let (remote_project, shape_push) = super::push::upsert_project_for_history(
         &root,
         remote,
         &token,
         &project_id,
         local_project.as_ref(),
     )?;
-    if let Some(project) = local_project.as_ref() {
+    // Repository records are the shared project shape: only a caller whose
+    // project upsert succeeded may push them. A collaborator (PATCH refused,
+    // project fetched read-only) still syncs history — the writable plane —
+    // without touching the membership, mirroring the bundle push paths.
+    if let (Some(project), super::push::ProjectShapePush::Pushed) =
+        (local_project.as_ref(), shape_push)
+    {
         super::push::push_repositories_for_history(
             remote,
             &token,
