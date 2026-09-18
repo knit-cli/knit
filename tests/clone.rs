@@ -883,10 +883,7 @@ fn clone_with_unknown_view_fails_before_cloning_anything() {
         &[],
     );
     assert!(!success);
-    assert!(
-        stderr.contains("no saved view named `nope`"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("no view named `nope`"), "stderr: {stderr}");
     assert!(
         stderr.contains("Available views: backend"),
         "stderr: {stderr}"
@@ -946,7 +943,7 @@ fn remote_views_json_lists_the_users_views_outside_any_workspace() {
     assert_eq!(
         document["views"],
         serde_json::json!([
-            {"name": "backend", "base": "default", "include": [], "exclude": ["frontend"]}
+            {"name": "backend", "source": "personal", "base": "default", "include": [], "exclude": ["frontend"]}
         ])
     );
 

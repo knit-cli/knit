@@ -48,13 +48,27 @@ use serde::Deserialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
 
-#[derive(Debug, Deserialize)]
+/// The GET `/projects/:id/view` response body: the user's personal document
+/// plus the project's admin-managed shared templates. An older server sends
+/// no `templates` at all; the field defaults to empty so such servers keep
+/// working unchanged.
+#[derive(Debug, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteViews {
     #[serde(default)]
     default_view: Option<String>,
     #[serde(default)]
     views: BTreeMap<String, ProjectView>,
+    #[serde(default)]
+    templates: BTreeMap<String, ProjectView>,
+}
+
+impl RemoteViews {
+    /// Resolve a view name the way consumers should: the personal view, else
+    /// the shared template of the same name.
+    fn effective_view(&self, name: &str) -> Option<&ProjectView> {
+        self.views.get(name).or_else(|| self.templates.get(name))
+    }
 }
 
 // Shared HTTP/response DTOs. Kept in the module root so the sibling submodules
@@ -142,6 +156,11 @@ fn decode_history_events(raw: &[Value], project_id: &str) -> Vec<HistoryEvent> {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteExportProject {
+    /// The server's immutable project id (a UUID). Slugs are ambiguous across
+    /// owners, so follow-up calls keyed by project — like the views endpoint —
+    /// should use this when present.
+    #[serde(default)]
+    id: Option<String>,
     slug: String,
     /// Present in exports of organization-owned projects; carries the org slug
     /// used as the `owner` half of an `owner/slug` clone reference.
@@ -244,8 +263,27 @@ struct RemoteBundleDetail {
 
 #[cfg(test)]
 mod tests {
-    use super::decode_history_events;
+    use super::{decode_history_events, RemoteViews};
     use serde_json::json;
+
+    #[test]
+    fn remote_views_decode_tolerates_a_server_without_templates() {
+        let older: RemoteViews =
+            serde_json::from_value(json!({"defaultView": "backend", "views": {}})).unwrap();
+        assert!(older.templates.is_empty());
+
+        let newer: RemoteViews = serde_json::from_value(json!({
+            "defaultView": "backend",
+            "views": {"backend": {"exclude": ["frontend"]}},
+            "templates": {"all-frontend": {"base": "none", "include": ["frontend"]}},
+        }))
+        .unwrap();
+        assert_eq!(newer.views.len(), 1);
+        assert_eq!(newer.templates.len(), 1);
+        assert!(newer.templates["all-frontend"]
+            .include
+            .contains(&"frontend".to_string()));
+    }
 
     #[test]
     fn decode_history_events_fills_missing_project_id_and_skips_garbage() {

@@ -496,6 +496,17 @@ fn push_project_to_one_remote(
     Ok(())
 }
 
+/// The `PUT /projects/:id/view` body for a local views artifact. The upload
+/// is the user's personal document only: shared admin-managed templates are
+/// cached beside it in the artifact but must never ride along — the server
+/// owns them, and re-uploading them would clobber admin edits.
+pub(super) fn views_upload_payload(views: &crate::model::KnitProjectViews) -> Value {
+    json!({
+        "defaultView": views.default_view,
+        "views": views.views,
+    })
+}
+
 /// Upload the local saved views for a project to the remote, if any exist.
 pub(super) fn upload_views(
     remote: &KnitRemote,
@@ -507,10 +518,7 @@ pub(super) fn upload_views(
     if views.views.is_empty() && views.default_view.is_none() {
         return Ok(());
     }
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         token,
@@ -528,10 +536,7 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let views = crate::store::load_views(&root, &project_id)?;
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         &token,
@@ -1684,6 +1689,39 @@ mod tests {
     use super::{apply_artifact_force_fields, lease_mismatch_message, repo_identity};
     use crate::commands::push::PushForce;
     use serde_json::json;
+
+    #[test]
+    fn views_upload_payload_carries_the_personal_document_only() {
+        let mut views =
+            crate::model::KnitProjectViews::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        views.default_view = Some("backend".to_string());
+        views.views.insert(
+            "backend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::Default,
+                include: vec![],
+                exclude: vec!["frontend".to_string()],
+            },
+        );
+        views.templates.insert(
+            "all-frontend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::None,
+                include: vec!["frontend".to_string()],
+                exclude: vec![],
+            },
+        );
+        let payload = super::views_upload_payload(&views);
+        assert_eq!(
+            payload,
+            json!({
+                "defaultView": "backend",
+                "views": {"backend": {"exclude": ["frontend"]}},
+            })
+        );
+        // The shared template cache must never ride along in the PUT body.
+        assert!(payload.get("templates").is_none());
+    }
 
     fn base_payload() -> serde_json::Value {
         json!({"kind": "bundle", "payload": {}})

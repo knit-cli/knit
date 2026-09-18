@@ -250,11 +250,18 @@ pub(super) fn clone_fetched_export(
 ) -> Result<CloneDocument> {
     // Views are fetched before any repo is cloned: `--view` resolves against
     // them, and a whole-project clone restores them as before. A failure is
-    // fatal only when the scope depends on the answer.
+    // fatal only when the scope depends on the answer. The fetch keys by the
+    // server's immutable project id when the export carries one: slugs are
+    // ambiguous across owners.
     let project_id = export_project_id(&export);
+    let views_fetch_id = export
+        .project
+        .id
+        .clone()
+        .unwrap_or_else(|| project_id.clone());
     let mut views_unavailable: Option<String> = None;
     let remote_views = match token.as_deref() {
-        Some(token) => match super::pull::fetch_remote_views(&remote, token, &project_id) {
+        Some(token) => match super::pull::fetch_remote_views(&remote, token, &views_fetch_id) {
             Ok(views) => Some(views),
             Err(error) if scope.view.is_some() => {
                 return Err(error.context("failed to fetch your saved views for `--view`"))
@@ -330,12 +337,13 @@ pub(super) fn clone_fetched_export(
         resolved_scope.as_ref(),
     )?;
 
-    // The views artifact — including the `--repo` scope view — is saved
-    // locally before any repository is fetched and before the grouped
-    // prompt runs: a clone that fails entirely (every repo private, or a
-    // canceled prompt) must leave the scope recorded, or the recovery pull
-    // cannot resolve the workspace's scope and skips its retries. Pushing
-    // the scope view to the remote still waits for a successful clone.
+    // The views artifact — personal views plus the shared template cache,
+    // and the `--repo` scope view — is saved locally before any repository is
+    // fetched and before the grouped prompt runs: a clone that fails entirely
+    // (every repo private, or a canceled prompt) must leave the scope
+    // recorded, or the recovery pull cannot resolve the workspace's scope and
+    // skips its retries. Pushing the scope view to the remote still waits for
+    // a successful clone.
     let mut views = match remote_views {
         Some(remote_views) => super::pull::views_from_remote(&project_id, remote_views),
         None => KnitProjectViews::new(project_id.clone(), now_iso()),
@@ -348,7 +356,7 @@ pub(super) fn clone_fetched_export(
         views.updated_at = now_iso();
         push_views = true;
     }
-    if !views.views.is_empty() || views.default_view.is_some() {
+    if !views.views.is_empty() || !views.templates.is_empty() || views.default_view.is_some() {
         crate::store::save_views(&target_root, &views)?;
     }
 
@@ -665,6 +673,13 @@ pub(super) fn clone_fetched_export(
     if !views.views.is_empty() || views.default_view.is_some() {
         crate::human!("{} {} view(s)", out::heading("Views:"), views.views.len());
     }
+    if !views.templates.is_empty() {
+        crate::human!(
+            "{} {} shared template(s)",
+            out::heading("Views:"),
+            views.templates.len()
+        );
+    }
     // The scope view has to outlive the next `knit sync pull --views`, which
     // replaces local views with the remote's, so push it right away — but
     // only when the remote's document was actually read: uploading otherwise
@@ -845,10 +860,19 @@ fn resolve_clone_scope(
     if let Some(view_name) = scope.view {
         let view_name = slugify(view_name);
         let views = remote_views.context("no saved views were returned by the remote")?;
-        let Some(view) = views.views.get(&view_name).cloned() else {
-            let available: Vec<&str> = views.views.keys().map(String::as_str).collect();
+        // `--view` may name a personal view or a shared admin-managed
+        // template; a personal view of the same name wins.
+        let Some(view) = views.effective_view(&view_name).cloned() else {
+            let available: Vec<&str> = views
+                .views
+                .keys()
+                .chain(views.templates.keys())
+                .map(String::as_str)
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect();
             bail!(
-                "You have no saved view named `{view_name}` for project `{}` on the remote. {}",
+                "You have no view named `{view_name}` for project `{}` on the remote. {}",
                 export.project.slug,
                 if available.is_empty() {
                     "Clone the whole project, or pass `--repo <id>` to pick repos directly."

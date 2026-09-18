@@ -301,6 +301,14 @@ knit view freeze legacy                                   # pin a delta view as 
 
 `--base none` rejects `--exclude` (there is no seed set to remove from), and `knit view exclude` refuses absolute views — use `knit view unset` to drop repos from them.
 
+#### Shared view templates
+
+Next to personal views, a project can carry **shared view templates**: common shapes an admin publishes once for everyone (through the hosted web UI — the CLI has no template-editing commands). Templates use the exact `ProjectView` shape personal views do. Every member sees them wherever a personal view works: `knit bundle --view <name>`, the saved default, `knit bundle apply-view`, `knit view show <name> --repos`, and `knit clone --view <name>`.
+
+Resolution overlays the two maps: **a personal view always wins over a template of the same name**. `knit view save backend ...` therefore creates your own editable override when a template `backend` exists, and `knit view rm backend` removes only the personal override (the template shows through again). `knit view list` marks template entries `(shared template)`; `knit view show` prints the whole artifact with templates under their own `templates` key. Template-only names are admin-managed: `knit view rm` and `knit view freeze` refuse them, while `knit view save <new> --from <template>` copies one into a personal view — the supported way to branch off. Editing a template-only view with `knit view include`/`exclude`/`unset` first creates the personal override (seeded from the template) and says so.
+
+Templates are a local read-only cache inside `.knit/views/<project-id>.views.json`, next to — never merged into — the personal `views` map. `knit sync pull --views` (and `knit clone`) replace the cache wholesale, so admin updates become visible on the next refresh; a refresh never touches personal views or the personal default. Sync push stays personal-only: `knit sync push --views` and the upload beside `knit project push` send the personal document (`defaultView` + `views`) and never upload templates.
+
 `knit bundle "title"` applies the default view (if set); `--view <name>` selects another. `--repo`/`--all-repos` ignore views and select an explicit set. Ad-hoc `--include <repo>` / `--exclude <repo>` adjust the resolved set in any mode, so `knit bundle "x" --view backend --include docs` and `knit bundle "y" --all-repos --exclude sej` both work.
 
 A live bundle can be reshaped at any time, with the worktree consequences:
@@ -312,11 +320,11 @@ knit bundle remove frontend --delete-branch    # also delete the local feature b
 knit bundle apply-view backend       # reshape the bundle to match a saved view
 ```
 
-`knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Views sync to the remote as the user's own config with `knit sync push --views` / `knit sync pull --views`, are uploaded alongside `knit project push`, and are restored by `knit clone`.
+`knit bundle remove` refuses to discard uncommitted or unpushed work unless `--force`; pass `--keep-worktree` to remove only the tracking entry and leave the worktree on disk. Personal views sync to the remote as the user's own config with `knit sync push --views` / `knit sync pull --views` (the push carries the personal document only — shared templates are never uploaded), are uploaded alongside `knit project push`, and are restored by `knit clone` together with the shared template cache.
 
 #### Scoped clones
 
-A view can also decide what a machine clones in the first place. `knit clone owner/project --view backend` fetches your saved views before touching git (so it needs a remote token), clones only the repos that view resolves to, and records the view as the workspace's **scope** (`scopeView` in `.knit/config.json`). `knit clone owner/project --repo api,worker` does the same from an explicit list, saving it as the absolute view `scope`. With a token, that view is pushed to the remote right away so a later `knit sync pull --views` keeps it — but only after your remote views were read, so the upload can never replace them; without a token the clone says the view exists only locally until `knit sync push --views`. A remote view already named `scope` is reused when it has the same repos and refused otherwise, so two `--repo` clones cannot silently rescope each other. `knit remote views owner/project` lists your views for a project before you clone it; a teammate without saved views uses `--repo`.
+A view can also decide what a machine clones in the first place. `knit clone owner/project --view backend` fetches your views and the project's shared templates before touching git (so it needs a remote token), clones only the repos that view resolves to, and records the view as the workspace's **scope** (`scopeView` in `.knit/config.json`) — the view may be a personal view or a shared template. `knit clone owner/project --repo api,worker` does the same from an explicit list, saving it as the absolute view `scope`. With a token, that view is pushed to the remote right away so a later `knit sync pull --views` keeps it — but only after your remote views were read, so the upload can never replace them; without a token the clone says the view exists only locally until `knit sync push --views`. A remote view already named `scope` is reused when it has the same repos and refused otherwise, so two `--repo` clones cannot silently rescope each other. `knit remote views owner/project` lists the usable views for a project before you clone it — personal ones plus shared templates, each tagged with its source; a teammate without saved views can still use a shared template or `--repo`. An `owner/project` reference is pinned to the server's immutable project id before the views call, so same-named projects under different owners cannot cross.
 
 A scoped workspace stays compatible with the whole project. Bundle artifacts, history and views are identical to a full clone's; only the local project's repo list is shorter, and the parts of Knit that would otherwise assume every repo is present respect the scope instead:
 
@@ -334,7 +342,7 @@ knit pull                           # clones docs, adds it to the local project
 knit bundle "docs work" --view scope --include docs
 ```
 
-The scope view is ordinary per-user view data: renaming or deleting it leaves the workspace scoped with nothing addable until it is restored (`knit sync pull --views`) or recreated with `knit view save`.
+The scope view is ordinary view data — personal, or a shared template: renaming or deleting a personal scope view leaves the workspace scoped with nothing addable until it is restored (`knit sync pull --views`) or recreated with `knit view save`. A template-scoped workspace is extended by forking the template into a personal override (`knit view include <scope> <repo>` does this automatically), so a later admin change to the template never silently resizes the scope.
 
 Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 

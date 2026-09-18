@@ -44,28 +44,35 @@ pub fn pull_views_from_remote(name: Option<&str>, remote_name: &str) -> Result<(
     let project_id = resolve_project_id(&root, &config, name)?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
-    let count = pull_views_into(&root, remote, &token, &project_id)?;
+    let (personal, templates) = pull_views_into(&root, remote, &token, &project_id)?;
     println!(
-        "{} {} {}",
+        "{} {} {}{}",
         out::movement("pulled views"),
         out::repo(&project_id),
-        out::muted(format!("{count} view(s)"))
+        out::muted(format!("{personal} view(s)")),
+        out::muted(if templates > 0 {
+            format!(", {templates} shared template(s)")
+        } else {
+            String::new()
+        })
     );
     Ok(())
 }
 
 /// Fetch a project's saved views from the remote and write the local artifact at
-/// `root`, returning the number of views written. Reused by `knit clone`.
+/// `root`, returning the number of personal views and shared templates
+/// written. Reused by `knit clone`.
 pub(super) fn pull_views_into(
     root: &Path,
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
-) -> Result<usize> {
+) -> Result<(usize, usize)> {
     let remote_views = fetch_remote_views(remote, token, project_id)?;
     let views = views_from_remote(project_id, remote_views);
+    let counts = (views.views.len(), views.templates.len());
     crate::store::save_views(root, &views)?;
-    Ok(views.views.len())
+    Ok(counts)
 }
 
 /// Fetch the current user's saved views for a project without touching the
@@ -84,11 +91,15 @@ pub(super) fn fetch_remote_views(
     )
 }
 
-/// The local views artifact a remote views response becomes.
+/// The local views artifact a remote views response becomes. Personal views
+/// and the shared template cache are carried side by side; the personal
+/// `defaultView` is only ever sourced from the personal document, so admin
+/// template changes never move a user's default.
 pub(super) fn views_from_remote(project_id: &str, remote_views: RemoteViews) -> KnitProjectViews {
     let mut views = KnitProjectViews::new(project_id.to_string(), now_iso());
     views.default_view = remote_views.default_view;
     views.views = remote_views.views;
+    views.templates = remote_views.templates;
     views.updated_at = now_iso();
     views
 }
@@ -996,9 +1007,11 @@ pub(super) fn workspace_scope(
         return Ok(None);
     };
     // Views are keyed by the local (slugified) project id, which is not
-    // always the id the remote membership carries.
+    // always the id the remote membership carries. The scope view itself may
+    // be a personal view or — for a `clone --view <template>` workspace — a
+    // shared template, so resolution uses the effective overlay.
     let views = crate::store::load_views(root, local_project_id)?;
-    let Some(view) = views.views.get(&view_name) else {
+    let Some(view) = views.effective_view(&view_name) else {
         println!(
             "{} scope view {} is not saved locally; no project repos will be added until it is restored (`knit sync pull --views`) or recreated (`knit view save {} --base none --include <repo>...`).",
             out::warn("warning:"),
