@@ -571,8 +571,8 @@ fn reconcile_project_repositories(
         }
         if !prompt.is_empty() {
             println!(
-                "{} {} repo(s) need a forge token (no working access); setting that up now:",
-                out::heading("Private repositories:"),
+                "{} {} repo(s) failed with the current authentication; reviewing setup:",
+                out::heading("Git authentication:"),
                 prompt.len()
             );
             let failing: Vec<(String, String)> = prompt

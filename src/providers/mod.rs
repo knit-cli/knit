@@ -899,6 +899,7 @@ mod tests {
             provider: provider.into(),
             host: host.into(),
             username: String::new(),
+            token_type: None,
             token: token.into(),
         }
     }

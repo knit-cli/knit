@@ -471,6 +471,38 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
+/// REST authorization for a saved Bitbucket credential, decided by its
+/// recorded token kind: an Atlassian API token authenticates as Basic with
+/// the account email, a Bitbucket repository/project/workspace access token
+/// rides the Bearer scheme. The recorded email is validated with the same
+/// shape the interactive setup accepts. An unclassified legacy credential
+/// keeps the recorded-username heuristic the Git helper also preserves, so
+/// one credential authenticates consistently everywhere.
+fn saved_authorization(credential: &crate::auth::ResolvedCredential) -> Result<String> {
+    let basic = || {
+        format!(
+            "Basic {}",
+            base64_encode(&format!("{}:{}", credential.username, credential.token))
+        )
+    };
+    match credential.token_type.as_deref() {
+        Some("access_token") => Ok(format!("Bearer {}", credential.token)),
+        Some("atlassian_api_token")
+            if crate::auth::is_bitbucket_account_email(&credential.username) =>
+        {
+            Ok(basic())
+        }
+        Some("atlassian_api_token") => bail!(
+            "Credential `{}` is recorded as an Atlassian API token but has no valid account email; run `knit auth setup` to repair the credential",
+            credential.name
+        ),
+        // Unclassified legacy credentials keep the username heuristic: any
+        // nonempty username meant Basic, anything else Bearer.
+        _ if !credential.username.is_empty() => Ok(basic()),
+        _ => Ok(format!("Bearer {}", credential.token)),
+    }
+}
+
 fn api_output(
     target: &PrTarget,
     method: &str,
@@ -479,11 +511,7 @@ fn api_output(
 ) -> Result<String> {
     let credential = super::target_credential(target, "bitbucket")?;
     let auth = match &credential {
-        Some(value) if !value.username.is_empty() => format!(
-            "Basic {}",
-            base64_encode(&format!("{}:{}", value.username, value.token))
-        ),
-        Some(value) => format!("Bearer {}", value.token),
+        Some(value) => saved_authorization(value)?,
         None => auth_header()?,
     };
     let base = match &credential {
@@ -632,6 +660,65 @@ mod tests {
         assert_eq!(
             base64_encode("user@example.test:token"),
             "dXNlckBleGFtcGxlLnRlc3Q6dG9rZW4="
+        );
+    }
+
+    #[test]
+    fn saved_authorization_follows_the_recorded_token_kind() {
+        let resolved = |token_type: Option<&str>, username: &str| crate::auth::ResolvedCredential {
+            name: "synthetic-bb".into(),
+            provider: "bitbucket".into(),
+            host: "bitbucket.org".into(),
+            username: username.into(),
+            token_type: token_type.map(str::to_owned),
+            token: "synthetic-secret".into(),
+        };
+        // Atlassian API tokens use Basic email:token...
+        assert_eq!(
+            saved_authorization(&resolved(Some("atlassian_api_token"), "dev@example.org")).unwrap(),
+            format!(
+                "Basic {}",
+                base64_encode("dev@example.org:synthetic-secret")
+            )
+        );
+        // ...and never silently switch schemes when the email is missing or
+        // not an email address at all: the credential fails actionably.
+        let missing = saved_authorization(&resolved(Some("atlassian_api_token"), "")).unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("no valid account email"),
+            "{missing:#}"
+        );
+        let not_email =
+            saved_authorization(&resolved(Some("atlassian_api_token"), "git-handle")).unwrap_err();
+        assert!(
+            format!("{not_email:#}").contains("no valid account email"),
+            "{not_email:#}"
+        );
+        // Access tokens ride Bearer regardless of a recorded email.
+        assert_eq!(
+            saved_authorization(&resolved(Some("access_token"), "dev@example.org")).unwrap(),
+            "Bearer synthetic-secret"
+        );
+        assert_eq!(
+            saved_authorization(&resolved(Some("access_token"), "")).unwrap(),
+            "Bearer synthetic-secret"
+        );
+        // Unclassified legacy credentials keep the username heuristic — any
+        // nonempty username, email-shaped or not, still means Basic.
+        assert_eq!(
+            saved_authorization(&resolved(None, "dev@example.org")).unwrap(),
+            format!(
+                "Basic {}",
+                base64_encode("dev@example.org:synthetic-secret")
+            )
+        );
+        assert_eq!(
+            saved_authorization(&resolved(None, "git-handle")).unwrap(),
+            format!("Basic {}", base64_encode("git-handle:synthetic-secret"))
+        );
+        assert_eq!(
+            saved_authorization(&resolved(None, "")).unwrap(),
+            "Bearer synthetic-secret"
         );
     }
 

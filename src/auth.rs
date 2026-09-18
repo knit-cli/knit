@@ -289,6 +289,10 @@ pub struct ResolvedCredential {
     pub provider: String,
     pub host: String,
     pub username: String,
+    /// The credential's classified token kind, when the owner recorded one.
+    /// Authentication schemes that differ per token kind (Bitbucket's two)
+    /// follow this; an unclassified credential keeps its legacy heuristic.
+    pub token_type: Option<String>,
     pub token: String,
 }
 
@@ -305,10 +309,18 @@ impl ResolvedCredential {
         if self.provider == "github" {
             "x-access-token".into()
         } else if self.provider == "bitbucket" {
-            if self.username.is_empty() {
-                "x-token-auth".into()
-            } else {
-                "x-bitbucket-api-token-auth".into()
+            match self.token_type.as_deref() {
+                // A classified token decides the scheme directly, even when
+                // the recorded username disagrees: an Atlassian API token
+                // authenticates as x-bitbucket-api-token-auth, a
+                // repository/project/workspace access token as x-token-auth.
+                Some("atlassian_api_token") => "x-bitbucket-api-token-auth".into(),
+                Some("access_token") => "x-token-auth".into(),
+                // Unclassified (legacy) credentials keep the recorded
+                // username heuristic: any nonempty username selects the
+                // API-token scheme, an empty one the access-token scheme.
+                _ if self.username.is_empty() => "x-token-auth".into(),
+                _ => "x-bitbucket-api-token-auth".into(),
             }
         } else if !self.username.is_empty() {
             self.username.clone()
@@ -316,6 +328,13 @@ impl ResolvedCredential {
             "oauth2".into()
         }
     }
+}
+
+/// Whether a recorded Bitbucket username is usable as the Atlassian account
+/// email: exactly the shape the interactive prompt accepts. Shared by
+/// interactive setup and REST authentication; Git uses the token kind alone.
+pub(crate) fn is_bitbucket_account_email(value: &str) -> bool {
+    value.contains('@') && !value.contains(char::is_whitespace)
 }
 
 fn personal_path(name: &str) -> Result<PathBuf> {
@@ -824,6 +843,7 @@ pub fn credential(name: &str) -> Result<ResolvedCredential> {
         provider: spec.provider.clone(),
         host: spec.host.to_ascii_lowercase(),
         username: spec.username.clone().unwrap_or_default(),
+        token_type: spec.token_type.clone(),
         token,
     })
 }
@@ -2059,6 +2079,67 @@ mod tests {
     }
 
     #[test]
+    fn bitbucket_git_username_follows_the_recorded_token_type() {
+        let credential =
+            |provider: &str, token_type: Option<&str>, username: Option<&str>| ResolvedCredential {
+                name: "synthetic".into(),
+                provider: provider.into(),
+                host: "exampleforge.test".into(),
+                username: username.unwrap_or_default().into(),
+                token_type: token_type.map(str::to_owned),
+                token: "synthetic-secret".into(),
+            };
+        // Known kinds decide the scheme even when the recorded username
+        // disagrees or is missing.
+        assert_eq!(
+            credential("bitbucket", Some("atlassian_api_token"), None).git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential(
+                "bitbucket",
+                Some("atlassian_api_token"),
+                Some("dev@example.org")
+            )
+            .git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", Some("access_token"), Some("dev@example.org")).git_username(),
+            "x-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", Some("access_token"), None).git_username(),
+            "x-token-auth"
+        );
+        // Old legacy credentials without a classification keep the recorded
+        // username heuristic.
+        assert_eq!(
+            credential("bitbucket", None, Some("dev@example.org")).git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", None, None).git_username(),
+            "x-token-auth"
+        );
+        // Other providers never consult the token kind.
+        assert_eq!(
+            credential("github", Some("classic_pat"), None).git_username(),
+            "x-access-token"
+        );
+        assert_eq!(
+            credential(
+                "gitlab",
+                Some("personal_access_token"),
+                Some("dev@example.org")
+            )
+            .git_username(),
+            "dev@example.org"
+        );
+        assert_eq!(credential("gitlab", None, None).git_username(), "oauth2");
+    }
+
+    #[test]
     fn token_type_metadata_is_validated_against_the_provider() {
         let mut spec = CredentialSpec {
             provider: "bitbucket".into(),
@@ -2345,7 +2426,9 @@ mod tests {
                 provider: "bitbucket".into(),
                 host: "bitbucket.org".into(),
                 username: Some("dev@example.org".into()),
-                token_type: None,
+                // A known kind decides the Git username even though the
+                // recorded email disagrees with it.
+                token_type: Some("access_token".into()),
                 token_env: None,
             },
         );
@@ -2365,7 +2448,8 @@ mod tests {
             .unwrap()
             .expect("bitbucket default must resolve from the workspace root");
         assert_eq!(resolved.name, "bb-def");
-        assert_eq!(resolved.git_username(), "x-bitbucket-api-token-auth");
+        assert_eq!(resolved.token_type.as_deref(), Some("access_token"));
+        assert_eq!(resolved.git_username(), "x-token-auth");
 
         // A second remote with the same repository path on an unassigned
         // custom host keeps the explicit target ambiguous, never guessed.

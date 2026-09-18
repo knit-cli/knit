@@ -537,3 +537,29 @@ fn grouped_setup_pty_two_forges_hidden_tokens_and_absent_group_skip() {
     assert!(result.status.success(), "{stdout}\n{stderr}");
     assert!(stdout.contains("PASS"), "{stdout}");
 }
+
+// The fixture drives a real PTY (Unix pty/termios); other auth tests stay cross-platform.
+#[cfg(unix)]
+#[test]
+fn setup_bitbucket_metadata_repair_pty_existing_checkout() {
+    let root = std::env::temp_dir().join(format!("knit-auth-bb-repair-pty-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&root);
+    fs::create_dir_all(&root).unwrap();
+    let result = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/tests/fixtures/auth_bitbucket_repair_pty.py"
+        ))
+        .arg(env!("CARGO_BIN_EXE_knit"))
+        .arg(&root)
+        // The fixture must never fall back to the test runner's cwd: `knit
+        // auth` commands activate the invoking cwd's project.
+        .current_dir(&root)
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&result.stdout);
+    let stderr = String::from_utf8_lossy(&result.stderr);
+    let _ = fs::remove_dir_all(&root);
+    assert!(result.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("PASS"), "{stdout}");
+}

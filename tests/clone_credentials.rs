@@ -738,7 +738,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
     assert!(!ok, "a rejected credential must fail the clone: {stdout}");
     let output = format!("{stdout}{stderr}");
     assert!(
-        output.contains("the selected credential `work` was used and access was denied"),
+        output.contains("the saved credential `work` failed authentication"),
         "{output}"
     );
     assert!(
@@ -898,7 +898,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         None,
     );
     assert!(!ok && err.contains("unavailable locally"), "{out}{err}");
-    assert!(!err.contains("was used and access was denied"), "{err}");
+    assert!(!err.contains("failed authentication"), "{err}");
     assert_eq!(
         git_calls(&root).len(),
         before,

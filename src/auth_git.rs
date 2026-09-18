@@ -1039,6 +1039,7 @@ mod tests {
             provider: "github".into(),
             host: "github.com".into(),
             username: "".into(),
+            token_type: None,
             token: "scoped-test-secret".into(),
         };
         assert_eq!(

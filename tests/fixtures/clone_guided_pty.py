@@ -267,7 +267,7 @@ try:
     (remote_dir / 'export.json').write_text(export_body(repos2))
 
     def inferred_script(expect, answer):
-        expect('Private repositories: 1 repo(s) need a forge token')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
         expect('Group github.com: github.com (github @ github.com)')
         answer('Token for github.com (github.com — hidden): ', 'CONV2-SEC', hidden=True)
         expect('`github.com` is now the default credential for github.com.')
@@ -315,7 +315,7 @@ try:
         ])))
 
     def pull_script(expect, answer):
-        expect('Private repositories: 1 repo(s) need a forge token')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
         expect('Group fresh-grp: New team (gitlab @ gitlab.com)')
         answer('Token for gitlab.com (fresh-grp — hidden): ', 'CONV3-FRESH', hidden=True)
         expect('`gitlab.com-fresh-grp` is now the default credential for gitlab.com.')
@@ -419,9 +419,8 @@ try:
         expect('Host default `gh-bad` covers github.com — using it for group `gh` without repository links.')
         # The forge rejects it; the repair offers a replacement that never
         # touches the shared default's own token.
-        expect('Private repositories: 1 repo(s) need a forge token')
-        expect('Credential `gh-bad`')
-        expect('was used and access was denied for solo.')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
+        expect('Git authentication failed while credential `gh-bad` was selected for solo.')
         # The forge starts accepting the replacement token: unblock it before
         # answering the prompt.
         (root / 'forge-rejects').unlink()
@@ -479,8 +478,8 @@ try:
         expect('Host default `gh-env` covers github.com — using it for group `gh` without repository links.')
         # The unset environment reference fails the clone and is classified
         # auth-shaped; the repair path never touches the env reference.
-        expect('Private repositories: 1 repo(s) need a forge token')
-        expect('Credential `gh-env`')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
+        expect('Git authentication failed while credential `gh-env` was selected for solo.')
         answer('Replacement token for github.com (saved as a new local credential for solo; '
                '`gh-env` keeps its token — hidden): ',
                'DIRECT-TOKEN', hidden=True)
