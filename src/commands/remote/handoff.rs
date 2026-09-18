@@ -1,5 +1,5 @@
 //! Transport adapter for handoff. Keep remote credentials and export internals here.
-use super::{client, clone, helpers, RemoteProjectExport};
+use super::{client, clone, helpers, RemoteExportRepository, RemoteProjectExport};
 use crate::model::{ChangeGroup, KnitProject, KnitRemote, LedgerRelation};
 use crate::store::{self, ActiveBundle};
 use anyhow::{bail, Context, Result};
@@ -44,11 +44,8 @@ impl HandoffExport {
         } else if allow_unpublished {
             let mut bundle = ChangeGroup::new(slug.into(), slug.into(), crate::time::now_iso());
             bundle.project_id = Some(export.project.slug.clone());
-            for record in &export.repositories {
-                bundle.repos.push(serde_json::from_value(serde_json::json!({
-                    "id": clone::export_repo_local_id(record), "path": "", "remote": record.remote_url,
-                    "baseBranch": record.default_branch.as_deref().unwrap_or("main")
-                }))?);
+            for repo in unpublished_bundle_repos(&export) {
+                bundle.repos.push(serde_json::from_value(repo)?);
             }
             (bundle, String::new(), String::new())
         } else {
@@ -225,6 +222,12 @@ pub(super) fn ensure_bundle_repositories(
     export: &RemoteProjectExport,
     bundle: &ChangeGroup,
 ) -> Result<Vec<String>> {
+    // The exported records carry the forge-owned default branch; every repo
+    // cloned and persisted here must instead record the project membership's
+    // configured base, or the fresh entry's forge default would flow on into
+    // `localize_bundle` and silently rebase the workspace. A local entry that
+    // already exists (a missing-checkout retry) keeps its configured base.
+    let records = membership_enriched_records(export);
     let mut cloned = Vec::new();
     for repo in &bundle.repos {
         if project
@@ -234,8 +237,7 @@ pub(super) fn ensure_bundle_repositories(
         {
             continue;
         }
-        let record = export
-            .repositories
+        let record = records
             .iter()
             .find(|r| clone::export_repo_local_id(r) == repo.id)
             .with_context(|| {
@@ -245,7 +247,12 @@ pub(super) fn ensure_bundle_repositories(
                 )
             })?;
         let (_, path) = clone::clone_one_export_repository(root, record)?;
-        let entry = clone::project_repo_entry_from_export(record, &path);
+        let mut entry = clone::project_repo_entry_from_export(record, &path);
+        if let Some(existing) = project.repos.iter().find(|r| r.id == repo.id) {
+            if !existing.base_branch.trim().is_empty() {
+                entry.base_branch = existing.base_branch.clone();
+            }
+        }
         project.repos.retain(|r| r.id != repo.id);
         project.repos.push(entry);
         store::write_json(&store::project_path(root, &project.id), project)?;
@@ -253,6 +260,32 @@ pub(super) fn ensure_bundle_repositories(
     }
     crate::commands::view::extend_scope_view(root, &project.id, &cloned)?;
     Ok(cloned)
+}
+
+fn membership_enriched_records(export: &RemoteProjectExport) -> Vec<RemoteExportRepository> {
+    let mut records = export.repositories.clone();
+    clone::apply_membership_base_branches(&mut records, export.knit_project.as_ref());
+    records
+}
+
+/// Repo records for an unpublished handoff bundle. The project membership's
+/// configured base branches win over the records' forge-owned defaults — the
+/// bundle must land on the branch the project integrates into, not the forge's
+/// default (forge `main` vs configured `release`). Records no membership entry
+/// claims keep the forge default, with `main` the last resort for the cleared
+/// legacy values.
+fn unpublished_bundle_repos(export: &RemoteProjectExport) -> Vec<serde_json::Value> {
+    membership_enriched_records(export)
+        .iter()
+        .map(|record| {
+            serde_json::json!({
+                "id": clone::export_repo_local_id(record),
+                "path": "",
+                "remote": record.remote_url,
+                "baseBranch": record.default_branch.as_deref().unwrap_or("main"),
+            })
+        })
+        .collect()
 }
 
 pub(crate) fn prefer_https_url(remote: &str, hosts: &BTreeSet<String>) -> Option<String> {
@@ -315,6 +348,166 @@ pub(crate) fn same_repository_url(left: &str, right: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_dir(tag: &str) -> std::path::PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!(
+            "knit-handoff-test-{tag}-{}-{n}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn git_in(source: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed");
+    }
+
+    fn current_branch(path: &Path) -> String {
+        let output = Command::new("git")
+            .args(["branch", "--show-current"])
+            .current_dir(path)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git branch --show-current failed");
+        String::from_utf8_lossy(&output.stdout).trim().to_string()
+    }
+
+    #[test]
+    fn ensure_bundle_repositories_persists_the_membership_base() {
+        let root = temp_dir("ensure-base");
+        let source = root.join("source");
+        std::fs::create_dir_all(&source).unwrap();
+        git_in(&source, &["init", "-q", "-b", "main"]);
+        git_in(&source, &["config", "user.email", "test@example.com"]);
+        git_in(&source, &["config", "user.name", "Test"]);
+        git_in(&source, &["commit", "--allow-empty", "-q", "-m", "init"]);
+        git_in(&source, &["checkout", "-q", "-b", "release"]);
+        git_in(
+            &source,
+            &["commit", "--allow-empty", "-q", "-m", "release base"],
+        );
+        git_in(&source, &["checkout", "-q", "main"]);
+
+        let export: RemoteProjectExport = serde_json::from_value(serde_json::json!({
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "remote": source.to_string_lossy(), "baseBranch": "release"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "defaultBranch": "main",
+                 "remoteUrl": source.to_string_lossy(), "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }))
+        .unwrap();
+
+        let workspace = root.join("workspace");
+        std::fs::create_dir_all(workspace.join(".knit/projects")).unwrap();
+        let mut project = KnitProject::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        let mut bundle = ChangeGroup::new(
+            "feature-a".into(),
+            "Feature A".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        bundle.repos.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "backend", "path": "", "remote": source.to_string_lossy(), "baseBranch": "main"
+            }))
+            .unwrap(),
+        );
+
+        let cloned =
+            ensure_bundle_repositories(&workspace, &mut project, &export, &bundle).unwrap();
+        assert_eq!(cloned, vec!["backend".to_string()]);
+        assert_eq!(
+            project
+                .repos
+                .iter()
+                .find(|r| r.id == "backend")
+                .unwrap()
+                .base_branch,
+            "release"
+        );
+        let persisted: KnitProject = serde_json::from_str(
+            &std::fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(persisted.repos[0].base_branch, "release");
+        assert_eq!(current_branch(&workspace.join("backend")), "release");
+
+        std::fs::remove_dir_all(workspace.join("backend")).unwrap();
+        for entry in &mut project.repos {
+            if entry.id == "backend" {
+                entry.base_branch = "develop".to_string();
+            }
+        }
+        let recloned =
+            ensure_bundle_repositories(&workspace, &mut project, &export, &bundle).unwrap();
+        assert_eq!(recloned, vec!["backend".to_string()]);
+        assert_eq!(
+            project
+                .repos
+                .iter()
+                .find(|r| r.id == "backend")
+                .unwrap()
+                .base_branch,
+            "develop"
+        );
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn unpublished_synthesis_prefers_membership_bases_over_forge_defaults() {
+        let export: RemoteProjectExport = serde_json::from_value(serde_json::json!({
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "baseBranch": "release"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "defaultBranch": "main",
+                 "remoteUrl": "https://github.com/acme/backend.git", "metadata": {}},
+                {"localId": "docs", "name": "docs", "defaultBranch": "trunk",
+                 "remoteUrl": "https://github.com/acme/docs.git", "metadata": {}},
+                {"localId": "tools", "name": "tools", "defaultBranch": null,
+                 "remoteUrl": "https://github.com/acme/tools.git", "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }))
+        .unwrap();
+
+        let repos = unpublished_bundle_repos(&export);
+        assert_eq!(repos[0]["baseBranch"], "release");
+        assert_eq!(repos[0]["remote"], "https://github.com/acme/backend.git");
+        assert_eq!(repos[1]["baseBranch"], "trunk");
+        assert_eq!(repos[2]["baseBranch"], "main");
+    }
+
     #[test]
     fn https_rewrite_is_exact_host_and_path_scoped() {
         let hosts = BTreeSet::from(["github.com".into()]);

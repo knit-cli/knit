@@ -2704,6 +2704,59 @@ fn pull_reconcile_applies_adds_and_removals_together() {
 }
 
 #[test]
+fn pull_reconcile_adds_record_the_membership_base_over_the_forge_default() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    let newrepo = root.join("newrepo");
+    init_repo(&newrepo, "newrepo");
+    git(&newrepo, ["checkout", "-b", "release"]);
+    fs::write(newrepo.join("release.txt"), "release\n").unwrap();
+    git(&newrepo, ["add", "release.txt"]);
+    git(&newrepo, ["commit", "-m", "Release base"]);
+    git(&newrepo, ["checkout", "main"]);
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "release"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "defaultBranch": "main", "visibility": "public", "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(
+        output.contains("syncing membership from remote (+1 / -0)"),
+        "{output}"
+    );
+
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    let newrepo_entry = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["id"] == "newrepo")
+        .unwrap();
+    assert_eq!(newrepo_entry["baseBranch"], "release");
+    assert_eq!(
+        git(&workspace.join("newrepo"), ["branch", "--show-current"]).trim(),
+        "release"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_reconcile_prunes_removed_repos_from_saved_views() {
     let root = unique_temp_dir();
     let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
