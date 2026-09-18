@@ -217,6 +217,34 @@ pub struct AuthStore {
     /// missing credential is pruned at validation so the set cannot rot.
     #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
     pub scoped_credentials: BTreeSet<String>,
+    /// Canonical remote target ("host/path", `.git` stripped, host
+    /// lowercase — the same shape as recorded ambient allowances) → the
+    /// preference that ordinary Git fall back to NATIVE credentials
+    /// (ambient Git helpers, or the SSH transport for bitbucket.org) for
+    /// that target when the recorded host default's HTTPS authentication is
+    /// rejected. The credential names only which default the preference
+    /// belongs to — reads re-verify it against the live selection, so the
+    /// preference dies with a changed default or an explicit override. It
+    /// is never used to authenticate anything itself, and never holds a
+    /// secret.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub(crate) git_fallbacks: BTreeMap<String, GitFallback>,
+}
+
+/// The transport an ordinary-Git fallback should retry over.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub(crate) enum GitFallbackTransport {
+    Ambient,
+    Ssh,
+}
+
+/// One recorded Git fallback: the host-default credential ordinary Git may
+/// retry with, and over which transport.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct GitFallback {
+    pub(crate) credential: String,
+    pub(crate) transport: GitFallbackTransport,
 }
 
 /// Where a host default came from: an explicit `knit auth default` choice,
@@ -289,6 +317,10 @@ pub struct ResolvedCredential {
     pub provider: String,
     pub host: String,
     pub username: String,
+    /// The credential's classified token kind, when the owner recorded one.
+    /// Authentication schemes that differ per token kind (Bitbucket's two)
+    /// follow this; an unclassified credential keeps its legacy heuristic.
+    pub token_type: Option<String>,
     pub token: String,
 }
 
@@ -305,10 +337,18 @@ impl ResolvedCredential {
         if self.provider == "github" {
             "x-access-token".into()
         } else if self.provider == "bitbucket" {
-            if self.username.is_empty() {
-                "x-token-auth".into()
-            } else {
-                "x-bitbucket-api-token-auth".into()
+            match self.token_type.as_deref() {
+                // A classified token decides the scheme directly, even when
+                // the recorded username disagrees: an Atlassian API token
+                // authenticates as x-bitbucket-api-token-auth, a
+                // repository/project/workspace access token as x-token-auth.
+                Some("atlassian_api_token") => "x-bitbucket-api-token-auth".into(),
+                Some("access_token") => "x-token-auth".into(),
+                // Unclassified (legacy) credentials keep the recorded
+                // username heuristic: any nonempty username selects the
+                // API-token scheme, an empty one the access-token scheme.
+                _ if self.username.is_empty() => "x-token-auth".into(),
+                _ => "x-bitbucket-api-token-auth".into(),
             }
         } else if !self.username.is_empty() {
             self.username.clone()
@@ -316,6 +356,13 @@ impl ResolvedCredential {
             "oauth2".into()
         }
     }
+}
+
+/// Whether a recorded Bitbucket username is usable as the Atlassian account
+/// email: exactly the shape the interactive prompt accepts. Shared by
+/// interactive setup and REST authentication; Git uses the token kind alone.
+pub(crate) fn is_bitbucket_account_email(value: &str) -> bool {
+    value.contains('@') && !value.contains(char::is_whitespace)
 }
 
 fn personal_path(name: &str) -> Result<PathBuf> {
@@ -383,6 +430,249 @@ pub(crate) fn ambient_allows(
 
 static EMPTY_MAP: BTreeMap<String, String> = BTreeMap::new();
 
+// ---------------------------------------------------------------------------
+// Bitbucket host-default Git fallback preferences. These record that
+// ordinary Git should BYPASS a rejected host default and fall back to its
+// native routes — ambient Git credential helpers, or SSH on bitbucket.org —
+// never that the default's own token be retried. The stored credential name
+// only binds the preference to one default for invalidation: every read
+// re-verifies eligibility against the live selection, so a changed default
+// or an explicit assignment voids it, and nothing here holds or logs a
+// token.
+// ---------------------------------------------------------------------------
+
+/// The canonical store key for a Git fallback entry: the normalized
+/// host/path target (`.git` stripped, host lowercase) — the same shape as
+/// recorded ambient allowances.
+fn fallback_key(target: &(String, String)) -> String {
+    format!("{}/{}", target.0, target.1)
+}
+
+/// Repository ids whose remote is exactly `target`: materialized membership
+/// first, pending membership only when nothing materialized matches.
+fn target_repo_ids(
+    project: &KnitProject,
+    target: &(String, String),
+    pending: &BTreeMap<String, String>,
+) -> Vec<String> {
+    let mut matches: Vec<String> = project
+        .repos
+        .iter()
+        .filter(|repo| {
+            repo.remote
+                .as_deref()
+                .and_then(|remote| remote_target(remote).ok())
+                .as_ref()
+                == Some(target)
+        })
+        .map(|repo| repo.id.clone())
+        .collect();
+    if matches.is_empty() {
+        matches.extend(
+            pending
+                .iter()
+                .filter(|(_, remote)| remote_target(remote).ok().as_ref() == Some(target))
+                .map(|(id, _)| id.clone()),
+        );
+    }
+    matches
+}
+
+/// Whether an explicit per-repository assignment covers exactly this target
+/// in the given project. An explicit assignment disables the host-default
+/// fallback for that target — whatever credential it names, including the
+/// default itself (a clone `--credential` selection also lands here, as a
+/// persisted binding).
+fn explicit_binding_for(
+    registry: &AuthStore,
+    root: &Path,
+    project: &KnitProject,
+    target: &(String, String),
+) -> Result<bool> {
+    let key = project_key(root, &project.id)?;
+    let empty = BTreeMap::new();
+    let bindings = registry.projects.get(&key).unwrap_or(&empty);
+    let matches = target_repo_ids(
+        project,
+        target,
+        &load_known_pending_repos(root, &project.id),
+    );
+    Ok(matches.iter().any(|id| bindings.contains_key(id)))
+}
+
+/// The eligibility core shared by [`bitbucket_host_default`] and
+/// [`git_fallback_with_context`]: under `context`, the effective selection
+/// for `target` ([`select_credential_with_context`], so ambiguity and
+/// strict-gate errors propagate instead of being flattened) must be exactly
+/// the target host's validated default, no explicit per-repository
+/// assignment may cover the target (even one naming that same default), and
+/// that default's provider must be Bitbucket.
+fn bitbucket_default_eligibility(
+    registry: &AuthStore,
+    context: Option<(&Path, &KnitProject)>,
+    target: &(String, String),
+) -> Result<Option<String>> {
+    if let Some((root, project)) = context {
+        if explicit_binding_for(registry, root, project, target)? {
+            return Ok(None);
+        }
+    }
+    let default = default_binding(registry, &target.0)?;
+    let selected = select_credential_with_context(registry, context, target)?;
+    match (selected.as_deref(), default) {
+        (Some(name), Some(default)) if name == default => {
+            let bitbucket = registry
+                .credentials
+                .get(name)
+                .is_some_and(|spec| spec.provider == "bitbucket");
+            Ok(bitbucket.then(|| name.to_owned()))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The Bitbucket host default whose HTTPS rejection may send ordinary Git
+/// to its native routes for `remote`. Returns the selected credential name
+/// only when the effective selection for the target — resolved with the
+/// same context as [`select_credential`], the active clone root included —
+/// is that host's exact default with a Bitbucket provider, and no explicit
+/// per-repository assignment (project binding or persisted clone
+/// `--credential` selection) covers the target, even when the assignment
+/// names the same default.
+pub(crate) fn bitbucket_host_default(cwd: &Path, remote: &str) -> Result<Option<String>> {
+    if is_local_remote(remote) {
+        return Ok(None);
+    }
+    let target = remote_target(remote)?;
+    let registry = load()?;
+    let context = credential_context(&registry, cwd)?;
+    bitbucket_default_eligibility(
+        &registry,
+        context
+            .as_ref()
+            .map(|(root, project)| (root.as_path(), project)),
+        &target,
+    )
+}
+
+/// The recorded Git fallback preference for `target`, evaluated against an
+/// explicit `(workspace, project)` context — the installer's shape, which
+/// may differ from the process cwd — with a caller-owned registry (no
+/// reload). Answers `Some` only when the stored entry's credential is still
+/// the exact default the effective selection resolves to under `context`
+/// (Bitbucket provider, no explicit assignment covering the target), and an
+/// SSH transport is served only for bitbucket.org. Stale or shadowed
+/// entries answer `None`; a preference never overrides the live selection.
+pub(crate) fn git_fallback_with_context(
+    registry: &AuthStore,
+    context: Option<(&Path, &KnitProject)>,
+    target: &(String, String),
+) -> Result<Option<GitFallback>> {
+    let Some(entry) = registry.git_fallbacks.get(&fallback_key(target)) else {
+        return Ok(None);
+    };
+    let Some(name) = bitbucket_default_eligibility(registry, context, target)? else {
+        return Ok(None);
+    };
+    if entry.credential != name {
+        return Ok(None);
+    }
+    if entry.transport == GitFallbackTransport::Ssh && target.0 != "bitbucket.org" {
+        return Ok(None);
+    }
+    Ok(Some(GitFallback {
+        credential: name,
+        transport: entry.transport,
+    }))
+}
+
+/// The recorded Git fallback preference for `remote`, resolved from the
+/// process context: loads the registry and the same context
+/// [`select_credential`] would use (active clone root included), then
+/// delegates to [`git_fallback_with_context`].
+pub(crate) fn git_fallback(cwd: &Path, remote: &str) -> Result<Option<GitFallback>> {
+    if is_local_remote(remote) {
+        return Ok(None);
+    }
+    let target = remote_target(remote)?;
+    let registry = load()?;
+    let context = credential_context(&registry, cwd)?;
+    git_fallback_with_context(
+        &registry,
+        context
+            .as_ref()
+            .map(|(root, project)| (root.as_path(), project)),
+        &target,
+    )
+}
+
+/// Record the preference that ordinary Git fall back to its native routes
+/// — ambient Git credential helpers, or SSH on bitbucket.org — for
+/// `remote` when `credential` (the Bitbucket host default) has its HTTPS
+/// authentication rejected. The stored name only binds the preference to
+/// that default for invalidation. Runs under the auth lock and rechecks
+/// eligibility on reload — the credential must still be the effectively
+/// selected Bitbucket host default with no explicit assignment for the
+/// target — then stores the entry under the exact canonical host/path.
+/// Tokens, defaults, projects, and every other stored entry are preserved.
+pub(crate) fn record_git_fallback(
+    cwd: &Path,
+    remote: &str,
+    credential: &str,
+    transport: GitFallbackTransport,
+) -> Result<()> {
+    if is_local_remote(remote) {
+        bail!("A Git fallback requires a forge remote");
+    }
+    let target = remote_target(remote)?;
+    if transport == GitFallbackTransport::Ssh && target.0 != "bitbucket.org" {
+        bail!(
+            "An SSH Git fallback is supported only for bitbucket.org, not {}",
+            target.0
+        );
+    }
+    let _lock = lock()?;
+    let registry = load()?;
+    let context = credential_context(&registry, cwd)?;
+    let selected = bitbucket_default_eligibility(
+        &registry,
+        context
+            .as_ref()
+            .map(|(root, project)| (root.as_path(), project)),
+        &target,
+    )?;
+    if selected.as_deref() != Some(credential) {
+        bail!(
+            "Credential `{credential}` is not the selected Bitbucket host default for this repository"
+        );
+    }
+    let mut store = registry;
+    store.git_fallbacks.insert(
+        fallback_key(&target),
+        GitFallback {
+            credential: credential.to_owned(),
+            transport,
+        },
+    );
+    save(&store)
+}
+
+/// Remove any recorded Git fallback preference for `remote`'s exact
+/// canonical target (for example, when even the native routes stop
+/// working).
+pub(crate) fn clear_git_fallback(_cwd: &Path, remote: &str) -> Result<()> {
+    if is_local_remote(remote) {
+        return Ok(());
+    }
+    let target = remote_target(remote)?;
+    let _lock = lock()?;
+    let mut store = load()?;
+    if store.git_fallbacks.remove(&fallback_key(&target)).is_some() {
+        save(&store)?;
+    }
+    Ok(())
+}
+
 fn load_file<T: serde::de::DeserializeOwned + Default>(path: &Path) -> Result<T> {
     match fs::read(path) {
         Ok(bytes) => serde_json::from_slice(&bytes)
@@ -424,6 +714,27 @@ fn validate_store(value: &mut AuthStore) -> Result<()> {
         .collect();
     for name in stale {
         value.scoped_credentials.remove(&name);
+    }
+    // Git fallback entries are hygiene metadata for the Git retry path:
+    // reads re-verify every entry against the live default, so entries that
+    // cannot be served — a missing credential, a non-Bitbucket provider, a
+    // host that does not match the entry's key, or SSH off bitbucket.org —
+    // are pruned here instead of failing operations or bypassing anything.
+    let stale_fallbacks: Vec<String> = value
+        .git_fallbacks
+        .iter()
+        .filter(|(key, entry)| {
+            let host = key.split('/').next().unwrap_or_default();
+            let servable = value
+                .credentials
+                .get(&entry.credential)
+                .is_some_and(|spec| spec.provider == "bitbucket" && spec.host == host);
+            !servable || (entry.transport == GitFallbackTransport::Ssh && host != "bitbucket.org")
+        })
+        .map(|(key, _)| key.clone())
+        .collect();
+    for key in stale_fallbacks {
+        value.git_fallbacks.remove(&key);
     }
     // Persisted defaults are load-bearing personal state, validated exactly
     // like bindings: an entry naming a missing credential, or a credential on
@@ -824,6 +1135,7 @@ pub fn credential(name: &str) -> Result<ResolvedCredential> {
         provider: spec.provider.clone(),
         host: spec.host.to_ascii_lowercase(),
         username: spec.username.clone().unwrap_or_default(),
+        token_type: spec.token_type.clone(),
         token,
     })
 }
@@ -1178,7 +1490,27 @@ pub(crate) fn select_credential(
     if registry.projects.values().all(BTreeMap::is_empty) {
         return default_binding(registry, &target.0).map(|name| name.map(str::to_owned));
     }
-    let context = match clone_credential_root() {
+    let context = credential_context(registry, cwd)?;
+    select_credential_with_context(
+        registry,
+        context
+            .as_ref()
+            .map(|(root, project)| (root.as_path(), project)),
+        target,
+    )
+}
+
+/// The project context credential selection resolves in: the active clone
+/// root's project while a clone is in flight (ignoring outer `--project`
+/// and bundle context), else the context of `cwd` itself when it sits in a
+/// workspace. Factored out of [`select_credential`] so derived queries —
+/// like Bitbucket host-default fallback eligibility — resolve the exact
+/// same context instead of diverging.
+fn credential_context(registry: &AuthStore, cwd: &Path) -> Result<Option<(PathBuf, KnitProject)>> {
+    if registry.projects.values().all(BTreeMap::is_empty) {
+        return Ok(None);
+    }
+    match clone_credential_root() {
         Some(root) => {
             // The clone's active project ignores outer --project and bundle context.
             let project = store::load_config(&root)?
@@ -1194,18 +1526,11 @@ pub(crate) fn select_credential(
                 })
                 .transpose()?
                 .flatten();
-            project.map(|project| (root, project))
+            Ok(project.map(|project| (root, project)))
         }
-        None if context_root(cwd).is_some() => optional_project_context(cwd, None)?,
-        None => None,
-    };
-    select_credential_with_context(
-        registry,
-        context
-            .as_ref()
-            .map(|(root, project)| (root.as_path(), project)),
-        target,
-    )
+        None if context_root(cwd).is_some() => optional_project_context(cwd, None),
+        None => Ok(None),
+    }
 }
 
 /// The context tail of [`select_credential`] as a pure function, so callers
@@ -2059,6 +2384,67 @@ mod tests {
     }
 
     #[test]
+    fn bitbucket_git_username_follows_the_recorded_token_type() {
+        let credential =
+            |provider: &str, token_type: Option<&str>, username: Option<&str>| ResolvedCredential {
+                name: "synthetic".into(),
+                provider: provider.into(),
+                host: "exampleforge.test".into(),
+                username: username.unwrap_or_default().into(),
+                token_type: token_type.map(str::to_owned),
+                token: "synthetic-secret".into(),
+            };
+        // Known kinds decide the scheme even when the recorded username
+        // disagrees or is missing.
+        assert_eq!(
+            credential("bitbucket", Some("atlassian_api_token"), None).git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential(
+                "bitbucket",
+                Some("atlassian_api_token"),
+                Some("dev@example.org")
+            )
+            .git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", Some("access_token"), Some("dev@example.org")).git_username(),
+            "x-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", Some("access_token"), None).git_username(),
+            "x-token-auth"
+        );
+        // Old legacy credentials without a classification keep the recorded
+        // username heuristic.
+        assert_eq!(
+            credential("bitbucket", None, Some("dev@example.org")).git_username(),
+            "x-bitbucket-api-token-auth"
+        );
+        assert_eq!(
+            credential("bitbucket", None, None).git_username(),
+            "x-token-auth"
+        );
+        // Other providers never consult the token kind.
+        assert_eq!(
+            credential("github", Some("classic_pat"), None).git_username(),
+            "x-access-token"
+        );
+        assert_eq!(
+            credential(
+                "gitlab",
+                Some("personal_access_token"),
+                Some("dev@example.org")
+            )
+            .git_username(),
+            "dev@example.org"
+        );
+        assert_eq!(credential("gitlab", None, None).git_username(), "oauth2");
+    }
+
+    #[test]
     fn token_type_metadata_is_validated_against_the_provider() {
         let mut spec = CredentialSpec {
             provider: "bitbucket".into(),
@@ -2345,7 +2731,9 @@ mod tests {
                 provider: "bitbucket".into(),
                 host: "bitbucket.org".into(),
                 username: Some("dev@example.org".into()),
-                token_type: None,
+                // A known kind decides the Git username even though the
+                // recorded email disagrees with it.
+                token_type: Some("access_token".into()),
                 token_env: None,
             },
         );
@@ -2365,7 +2753,8 @@ mod tests {
             .unwrap()
             .expect("bitbucket default must resolve from the workspace root");
         assert_eq!(resolved.name, "bb-def");
-        assert_eq!(resolved.git_username(), "x-bitbucket-api-token-auth");
+        assert_eq!(resolved.token_type.as_deref(), Some("access_token"));
+        assert_eq!(resolved.git_username(), "x-token-auth");
 
         // A second remote with the same repository path on an unassigned
         // custom host keeps the explicit target ambiguous, never guessed.
@@ -2467,6 +2856,408 @@ mod tests {
             .current_dir(&workspace)
             .env("KNIT_RESOLVE_REPO_ROOT", &workspace)
             .env("KNIT_RESOLVE_REPO_OUTSIDE", &outside)
+            .env("KNIT_HOME", temporary.join("home"))
+            .env_remove("KNIT_BUNDLE")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "stdout:\n{}\nstderr:\n{}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr)
+        );
+        fs::remove_dir_all(temporary).unwrap();
+    }
+
+    #[test]
+    fn git_fallback_entries_validate_and_serialize() {
+        let spec = |provider: &str, host: &str| CredentialSpec {
+            provider: provider.into(),
+            host: host.into(),
+            username: None,
+            token_type: None,
+            token_env: None,
+        };
+        let mut store = AuthStore::default();
+        store
+            .credentials
+            .insert("bb".into(), spec("bitbucket", "bitbucket.org"));
+        store.credentials.insert(
+            "bb-self".into(),
+            spec("bitbucket", "bitbucket.example.test"),
+        );
+        store
+            .credentials
+            .insert("gh".into(), spec("github", "github.com"));
+        let entry = |credential: &str, transport: GitFallbackTransport| GitFallback {
+            credential: credential.into(),
+            transport,
+        };
+        // Servable entries: ambient wherever Bitbucket is the host default,
+        // SSH only on bitbucket.org.
+        store.git_fallbacks.insert(
+            "bitbucket.org/team/app".into(),
+            entry("bb", GitFallbackTransport::Ssh),
+        );
+        store.git_fallbacks.insert(
+            "bitbucket.example.test/team/amb".into(),
+            entry("bb-self", GitFallbackTransport::Ambient),
+        );
+        // Unservable entries are pruned at validation: a missing
+        // credential, a foreign provider, a host that does not match the
+        // entry's key, and SSH off bitbucket.org.
+        store.git_fallbacks.insert(
+            "bitbucket.org/team/gone".into(),
+            entry("ghost", GitFallbackTransport::Ambient),
+        );
+        store.git_fallbacks.insert(
+            "github.com/org/repo".into(),
+            entry("gh", GitFallbackTransport::Ambient),
+        );
+        store.git_fallbacks.insert(
+            "bitbucket.org/team/wrong".into(),
+            entry("gh", GitFallbackTransport::Ambient),
+        );
+        store.git_fallbacks.insert(
+            "bitbucket.example.test/team/ssh".into(),
+            entry("bb-self", GitFallbackTransport::Ssh),
+        );
+        validate_store(&mut store).unwrap();
+        assert_eq!(
+            store.git_fallbacks.keys().collect::<Vec<_>>(),
+            vec!["bitbucket.example.test/team/amb", "bitbucket.org/team/app"]
+        );
+        // Serialization shape: camelCase map name, lowercase transports,
+        // absent when empty, and a faithful round trip.
+        let json = serde_json::to_value(&store).unwrap();
+        assert_eq!(
+            json["gitFallbacks"]["bitbucket.org/team/app"],
+            serde_json::json!({"credential": "bb", "transport": "ssh"})
+        );
+        let back: AuthStore = serde_json::from_value(json).unwrap();
+        assert_eq!(back.git_fallbacks, store.git_fallbacks);
+        assert!(serde_json::to_value(AuthStore::default())
+            .unwrap()
+            .get("gitFallbacks")
+            .is_none());
+        // Entries are metadata only: default resolution is untouched.
+        assert_eq!(store.default_for_host("bitbucket.org").unwrap().0, "bb");
+        assert_eq!(
+            default_binding(&store, "bitbucket.org").unwrap(),
+            Some("bb")
+        );
+        assert_eq!(default_binding(&store, "github.com").unwrap(), Some("gh"));
+    }
+
+    #[test]
+    fn git_fallback_with_context_honors_explicit_installer_context() {
+        // The installer's shape: an explicit (workspace, project) context
+        // resolved from a process cwd that is not itself a workspace. A
+        // same-name explicit override inside that context voids the
+        // preference; without the override the entry serves — no cwd
+        // workspace is consulted at all.
+        let temporary = std::env::temp_dir().join(format!("knit-bb-fb-ctx-{}", std::process::id()));
+        let root = temporary.join("installer-workspace");
+        fs::create_dir_all(root.join(".knit/projects")).unwrap();
+        fs::write(
+            root.join(".knit/projects/inst.project.json"),
+            serde_json::json!({
+                "schemaVersion": "1", "kind": "KnitProject", "id": "inst",
+                "createdAt": "", "updatedAt": "",
+                "repos": [{"id": "svc", "path": "svc",
+                           "remote": "https://bitbucket.org/team/svc.git", "baseBranch": "main"}]
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let project: KnitProject = serde_json::from_slice(
+            &fs::read(root.join(".knit/projects/inst.project.json")).unwrap(),
+        )
+        .unwrap();
+
+        let mut registry = AuthStore::default();
+        registry.credentials.insert(
+            "bb".into(),
+            CredentialSpec {
+                provider: "bitbucket".into(),
+                host: "bitbucket.org".into(),
+                username: None,
+                token_type: None,
+                token_env: None,
+            },
+        );
+        registry
+            .defaults
+            .insert("bitbucket.org".into(), "bb".into());
+        let target = remote_target("https://bitbucket.org/team/svc.git").unwrap();
+        registry.git_fallbacks.insert(
+            fallback_key(&target),
+            GitFallback {
+                credential: "bb".into(),
+                transport: GitFallbackTransport::Ambient,
+            },
+        );
+        let context = Some((root.as_path(), &project));
+        assert_eq!(
+            git_fallback_with_context(&registry, context, &target).unwrap(),
+            Some(GitFallback {
+                credential: "bb".into(),
+                transport: GitFallbackTransport::Ambient,
+            })
+        );
+        // An explicit assignment in the passed context — even one naming
+        // the very same default — voids the preference.
+        let key = project_key(&root, "inst").unwrap();
+        registry
+            .projects
+            .insert(key, BTreeMap::from([("svc".to_string(), "bb".to_string())]));
+        assert_eq!(
+            git_fallback_with_context(&registry, context, &target).unwrap(),
+            None,
+            "a same-name explicit override in the explicit context must void the entry"
+        );
+        fs::remove_dir_all(temporary).unwrap();
+    }
+
+    /// Child body for the Bitbucket fallback selection rules; runs with an
+    /// isolated KNIT_HOME and a cwd inside the outer workspace.
+    #[test]
+    fn bitbucket_fallback_selection_child() {
+        let (Some(outer), Some(clone_root)) = (
+            std::env::var("KNIT_FALLBACK_ROOT").ok().map(PathBuf::from),
+            std::env::var("KNIT_FALLBACK_CLONE").ok().map(PathBuf::from),
+        ) else {
+            return;
+        };
+        let spec = |provider: &str, host: &str| CredentialSpec {
+            provider: provider.into(),
+            host: host.into(),
+            username: None,
+            token_type: None,
+            token_env: None,
+        };
+        let mut store = AuthStore::default();
+        store
+            .credentials
+            .insert("bb-def".into(), spec("bitbucket", "bitbucket.org"));
+        store
+            .credentials
+            .insert("bb-two".into(), spec("bitbucket", "bitbucket.org"));
+        store
+            .credentials
+            .insert("gh-def".into(), spec("github", "github.com"));
+        store.credentials.insert(
+            "bb-self".into(),
+            spec("bitbucket", "bitbucket.example.test"),
+        );
+        save_credential(&store, "bb-def", Some("synthetic-bb")).unwrap();
+        let mut store = load().unwrap();
+        store
+            .defaults
+            .insert("bitbucket.org".into(), "bb-def".into());
+        store.defaults.insert("github.com".into(), "gh-def".into());
+        store
+            .defaults
+            .insert("bitbucket.example.test".into(), "bb-self".into());
+        save(&store).unwrap();
+
+        let o = "https://bitbucket.org/team/o.git";
+        // The exact host default qualifies when its provider is Bitbucket.
+        assert_eq!(
+            bitbucket_host_default(&outer, o).unwrap().as_deref(),
+            Some("bb-def")
+        );
+        // Foreign provider (a GitHub default) and a foreign host (no
+        // default at all) never qualify.
+        assert_eq!(
+            bitbucket_host_default(&outer, "https://github.com/org/web.git").unwrap(),
+            None
+        );
+        assert_eq!(
+            bitbucket_host_default(&outer, "https://gitlab.com/team/x.git").unwrap(),
+            None
+        );
+        // A custom-host Bitbucket default qualifies for ambient fallbacks
+        // only; SSH is a bitbucket.org-only affordance.
+        let custom = "https://bitbucket.example.test/team/x.git";
+        assert_eq!(
+            bitbucket_host_default(&outer, custom).unwrap().as_deref(),
+            Some("bb-self")
+        );
+        assert!(record_git_fallback(&outer, custom, "bb-self", GitFallbackTransport::Ssh).is_err());
+        record_git_fallback(&outer, custom, "bb-self", GitFallbackTransport::Ambient).unwrap();
+        assert_eq!(
+            git_fallback(&outer, custom).unwrap(),
+            Some(GitFallback {
+                credential: "bb-self".into(),
+                transport: GitFallbackTransport::Ambient,
+            })
+        );
+        // Recording rejects a name that is not the selected default.
+        assert!(record_git_fallback(&outer, o, "bb-two", GitFallbackTransport::Ambient).is_err());
+
+        // Fallback entries are invisible to ordinary credential resolution:
+        // the API resolve path never consults the preferences.
+        assert_eq!(
+            resolve(&outer, Some(o))
+                .unwrap()
+                .map(|credential| credential.name),
+            Some("bb-def".to_string())
+        );
+        record_git_fallback(&outer, o, "bb-def", GitFallbackTransport::Ambient).unwrap();
+        assert_eq!(
+            resolve(&outer, Some(o))
+                .unwrap()
+                .map(|credential| credential.name),
+            Some("bb-def".to_string())
+        );
+        assert_eq!(
+            git_fallback(&outer, o).unwrap().unwrap().transport,
+            GitFallbackTransport::Ambient
+        );
+        record_git_fallback(
+            &outer,
+            "https://bitbucket.org/team/ssh.git",
+            "bb-def",
+            GitFallbackTransport::Ssh,
+        )
+        .unwrap();
+        assert_eq!(
+            git_fallback(&outer, "https://bitbucket.org/team/ssh.git")
+                .unwrap()
+                .unwrap()
+                .transport,
+            GitFallbackTransport::Ssh
+        );
+
+        // A changed host default shadows the stored entry.
+        let mut store = load().unwrap();
+        store
+            .defaults
+            .insert("bitbucket.org".into(), "bb-two".into());
+        save(&store).unwrap();
+        assert_eq!(git_fallback(&outer, o).unwrap(), None);
+        let mut store = load().unwrap();
+        store
+            .defaults
+            .insert("bitbucket.org".into(), "bb-def".into());
+        save(&store).unwrap();
+        assert!(git_fallback(&outer, o).unwrap().is_some());
+
+        // An explicit per-repository assignment blocks eligibility and
+        // reads — even when it names the very same default.
+        let key = project_key(&outer, "outerproj").unwrap();
+        let bind = |repo: &str, name: Option<&str>| {
+            let mut store = load().unwrap();
+            match name {
+                Some(name) => {
+                    store
+                        .projects
+                        .entry(key.clone())
+                        .or_default()
+                        .insert(repo.to_string(), name.to_string());
+                }
+                None => {
+                    if let Some(bindings) = store.projects.get_mut(&key) {
+                        bindings.remove(repo);
+                    }
+                }
+            }
+            save(&store).unwrap();
+        };
+        bind("o-bb", Some("bb-def"));
+        assert_eq!(
+            bitbucket_host_default(&outer, o).unwrap(),
+            None,
+            "a same-name explicit override must block the fallback"
+        );
+        assert_eq!(git_fallback(&outer, o).unwrap(), None);
+        bind("o-bb", None);
+        assert_eq!(
+            bitbucket_host_default(&outer, o).unwrap().as_deref(),
+            Some("bb-def")
+        );
+
+        // Clone context: while a clone root is active, an outer binding for
+        // the shared remote is ignored — the clone's own project decides.
+        let shared = "https://bitbucket.org/team/shared.git";
+        bind("shared", Some("bb-def"));
+        assert_eq!(bitbucket_host_default(&outer, shared).unwrap(), None);
+        {
+            let _guard = activate_clone_root(clone_root);
+            assert_eq!(
+                bitbucket_host_default(&outer, shared).unwrap().as_deref(),
+                Some("bb-def"),
+                "the clone root context must win over the outer binding"
+            );
+        }
+        assert_eq!(bitbucket_host_default(&outer, shared).unwrap(), None);
+
+        // Clearing removes exactly the canonical entry.
+        clear_git_fallback(&outer, o).unwrap();
+        assert_eq!(git_fallback(&outer, o).unwrap(), None);
+        assert!(git_fallback(&outer, "https://bitbucket.org/team/ssh.git")
+            .unwrap()
+            .is_some());
+    }
+
+    #[test]
+    fn bitbucket_fallback_selection_and_clone_context() {
+        let temporary =
+            std::env::temp_dir().join(format!("knit-bb-fallback-{}", std::process::id()));
+        let outer = temporary.join("outer");
+        let clone_root = temporary.join("clonetarget");
+        for (root, project_id, repos) in [
+            (
+                &outer,
+                "outerproj",
+                vec![
+                    ("o-bb", "https://bitbucket.org/team/o.git"),
+                    ("shared", "https://bitbucket.org/team/shared.git"),
+                ],
+            ),
+            (
+                &clone_root,
+                "cloneproj",
+                vec![
+                    ("c-bb", "https://bitbucket.org/team/c.git"),
+                    ("s-c", "https://bitbucket.org/team/shared.git"),
+                ],
+            ),
+        ] {
+            fs::create_dir_all(root.join(".knit/projects")).unwrap();
+            fs::write(
+                root.join(".knit/config.json"),
+                format!(r#"{{"schemaVersion":"0.1","activeProject":"{project_id}"}}"#),
+            )
+            .unwrap();
+            let repos_json: Vec<_> = repos
+                .iter()
+                .map(|(id, remote)| {
+                    serde_json::json!({
+                        "id": id, "path": id, "remote": remote, "baseBranch": "main"
+                    })
+                })
+                .collect();
+            fs::write(
+                root.join(format!(".knit/projects/{project_id}.project.json")),
+                serde_json::json!({
+                    "schemaVersion": "1", "kind": "KnitProject", "id": project_id,
+                    "createdAt": "", "updatedAt": "", "repos": repos_json
+                })
+                .to_string(),
+            )
+            .unwrap();
+        }
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "auth::tests::bitbucket_fallback_selection_child",
+                "--nocapture",
+            ])
+            .current_dir(&outer)
+            .env("KNIT_FALLBACK_ROOT", &outer)
+            .env("KNIT_FALLBACK_CLONE", &clone_root)
             .env("KNIT_HOME", temporary.join("home"))
             .env_remove("KNIT_BUNDLE")
             .output()

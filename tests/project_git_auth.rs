@@ -196,12 +196,30 @@ fn helper_ignored_metadata_still_counts_toward_request_limit() {
 #[test]
 fn bitbucket_helper_uses_git_api_token_username_or_repository_token_username() {
     let root = fixture();
-    for (username, expected) in [
-        (Some("person@example.test"), "x-bitbucket-api-token-auth"),
-        (None, "x-token-auth"),
+    for (username, token_type, expected) in [
+        // Old legacy credentials without a classification keep the recorded
+        // username heuristic.
+        (
+            Some("person@example.test"),
+            None,
+            "x-bitbucket-api-token-auth",
+        ),
+        (None, None, "x-token-auth"),
+        // A recorded token kind decides the scheme even when the recorded
+        // username disagrees with it or is missing.
+        (
+            Some("person@example.test"),
+            Some("access_token"),
+            "x-token-auth",
+        ),
+        (
+            None,
+            Some("atlassian_api_token"),
+            "x-bitbucket-api-token-auth",
+        ),
     ] {
         fs::write(root.join("forge-auth.json"), serde_json::to_vec(&json!({
-            "credentials": {"work": {"provider":"bitbucket", "host":"bitbucket.org", "username": username, "tokenEnv":"KNIT_TEST_PROJECT_TOKEN"}}
+            "credentials": {"work": {"provider":"bitbucket", "host":"bitbucket.org", "username": username, "tokenType": token_type, "tokenEnv":"KNIT_TEST_PROJECT_TOKEN"}}
         })).unwrap()).unwrap();
         let output = run_with_input(
             Command::new(env!("CARGO_BIN_EXE_knit"))

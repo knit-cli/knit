@@ -360,9 +360,20 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = collect_args(args);
+    git_output_inner(cwd, collect_args(args), true)
+}
+
+fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Result<String> {
     let mut command = Command::new("git");
-    let credentials = crate::auth_git::configure(cwd, &args, &mut command)?;
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_inner(cwd, args, false);
+            }
+            return Err(error);
+        }
+    };
     let output = command
         .args(&args)
         .current_dir(cwd)
@@ -383,6 +394,9 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_inner(cwd, args, false);
+    }
     bail!(
         "git {} failed in {}: {}",
         crate::auth_git::redact(&credentials, &display_args(&args)),
@@ -409,11 +423,26 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    use std::io::Read;
+    git_output_timeout_inner(cwd, collect_args(args), timeout, true)
+}
 
-    let args = collect_args(args);
+fn git_output_timeout_inner(
+    cwd: &Path,
+    args: Vec<OsString>,
+    timeout: std::time::Duration,
+    allow_recovery: bool,
+) -> Result<String> {
+    use std::io::Read;
     let mut command = Command::new("git");
-    let credentials = crate::auth_git::configure(cwd, &args, &mut command)?;
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_timeout_inner(cwd, args, timeout, false);
+            }
+            return Err(error);
+        }
+    };
     let mut child = command
         .args(&args)
         .current_dir(cwd)
@@ -483,6 +512,9 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_timeout_inner(cwd, args, timeout, false);
+    }
     bail!(
         "git {} failed in {}: {}",
         crate::auth_git::redact(&credentials, &display_args(&args)),
@@ -499,12 +531,28 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = collect_args(args);
+    git_output_env_inner(cwd, collect_args(args), envs, true)
+}
+
+fn git_output_env_inner(
+    cwd: &Path,
+    args: Vec<OsString>,
+    envs: &[(&str, &str)],
+    allow_recovery: bool,
+) -> Result<String> {
     let mut command = Command::new("git");
     for (key, value) in envs {
         command.env(key, value);
     }
-    let credentials = crate::auth_git::configure(cwd, &args, &mut command)?;
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_env_inner(cwd, args, envs, false);
+            }
+            return Err(error);
+        }
+    };
     command.args(&args).current_dir(cwd);
     let output = command
         .output()
@@ -524,6 +572,9 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_env_inner(cwd, args, envs, false);
+    }
     bail!(
         "git {} failed in {}: {}",
         crate::auth_git::redact(&credentials, &display_args(&args)),

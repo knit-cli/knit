@@ -118,6 +118,16 @@ fn global_defaults_wizard() -> Result<()> {
                     println!("Kept the current token.");
                     continue;
                 }
+                // A replacement can be a different Bitbucket token kind.
+                // Classify the new secret before saving it, rather than
+                // retaining the previous token's authentication scheme.
+                let bitbucket_identity = if provider == &"bitbucket" {
+                    let kind = ask_bitbucket_token_type(&mut prompt)?;
+                    let username = bitbucket_username_for_token_type(&kind, &mut prompt)?;
+                    Some((kind, username))
+                } else {
+                    None
+                };
                 // A deliberate update rotates the default token in place:
                 // same name, same default, new secret. A pasted replacement
                 // always becomes a local secret, so an environment reference
@@ -126,6 +136,10 @@ fn global_defaults_wizard() -> Result<()> {
                 let mut store = auth::load()?;
                 if let Some(spec) = store.credentials.get_mut(&name) {
                     spec.token_env = None;
+                    if let Some((kind, username)) = bitbucket_identity {
+                        spec.token_type = Some(kind);
+                        spec.username = username;
+                    }
                 }
                 store.scoped_credentials.remove(&name);
                 auth::save_credential(&store, &name, Some(token))?;
@@ -905,7 +919,7 @@ fn bitbucket_username_for_token_type(
     if token_type == "atlassian_api_token" {
         loop {
             let email = ask("Atlassian account email for this API token: ")?;
-            if email.contains('@') && !email.contains(char::is_whitespace) {
+            if auth::is_bitbucket_account_email(&email) {
                 return Ok(Some(email));
             }
             println!("An Atlassian API token needs the account email address.");
@@ -952,7 +966,7 @@ fn ensure_bitbucket_token_type(
     let kind = if spec
         .username
         .as_deref()
-        .is_some_and(|email| email.contains('@'))
+        .is_some_and(auth::is_bitbucket_account_email)
     {
         println!(
             "`{name}` has an account email recorded; treating it as an \
@@ -998,15 +1012,17 @@ fn save_credential_username(name: &str, username: Option<&str>) -> Result<()> {
 
 /// Reconcile a Bitbucket credential's account email with its classified
 /// token kind: an Atlassian API token authenticates as the account email; a
-/// repository/project/workspace access token must not carry one.
+/// repository/project/workspace access token must not carry one. A recorded
+/// username that is not a valid email address never satisfies the API-token
+/// kind — the owner is asked for the real one.
 fn reconcile_bitbucket_username(
     name: &str,
     token_type: &str,
-    has_username: bool,
+    username: Option<&str>,
     ask: &mut impl FnMut(&str) -> Result<String>,
 ) -> Result<()> {
     if token_type == "atlassian_api_token" {
-        if has_username {
+        if username.is_some_and(auth::is_bitbucket_account_email) {
             return Ok(());
         }
         let Some(email) = bitbucket_username_for_token_type(token_type, ask)? else {
@@ -1014,7 +1030,7 @@ fn reconcile_bitbucket_username(
         };
         save_credential_username(name, Some(&email))?;
         println!("Recorded the account email for `{name}`.");
-    } else if token_type == "access_token" && has_username {
+    } else if token_type == "access_token" && username.is_some() {
         let confirmed = ask(
             "This credential is recorded with an account email, but a repository/project/workspace access token must not use one. Clear the email? [y/N]: ",
         )?;
@@ -1135,8 +1151,11 @@ pub(crate) fn guided_group_setup(
             if let Some(name) = shared {
                 if let Some(spec) = store.credentials.get(&name).cloned() {
                     println!(
-                        "Credential `{name}` was used and access was denied for {}.",
+                        "Git authentication failed while credential `{name}` was selected for {}.",
                         failing.join(", ")
+                    );
+                    println!(
+                        "Saved credentials override ordinary Git credential helpers and SSH for those repositories, so this failure does not establish that repository access is missing."
                     );
                     let token = read_token(&format!(
                         "Replacement token for {} (saved as a new local credential for {}; `{name}` keeps its token — hidden): ",
@@ -1145,7 +1164,7 @@ pub(crate) fn guided_group_setup(
                     ))?;
                     let token = token.trim();
                     if !token.is_empty() {
-                        let new_spec = CredentialSpec {
+                        let mut new_spec = CredentialSpec {
                             provider: spec.provider.clone(),
                             host: spec.host.to_ascii_lowercase(),
                             username: spec.username.clone(),
@@ -1154,21 +1173,21 @@ pub(crate) fn guided_group_setup(
                             // environment reference.
                             token_env: None,
                         };
+                        if spec.provider == "bitbucket" {
+                            // A replacement Bitbucket token is classified
+                            // afresh: the old classification was just
+                            // rejected, and a fresh token may be a different
+                            // kind than the one it replaces.
+                            let kind = ask_bitbucket_token_type(ask)?;
+                            new_spec.token_type = Some(kind.clone());
+                            new_spec.username = bitbucket_username_for_token_type(&kind, ask)?;
+                        }
                         let new_name = unique_credential_name(&format!(
                             "{}-{}",
                             sanitize_credential_name(&spec.host),
                             sanitize_credential_name(&group.id)
                         ))?;
                         save_new_credential_scoped(&new_name, &new_spec, token, true)?;
-                        if spec.provider == "bitbucket" {
-                            let kind = ensure_bitbucket_token_type(&new_name, &new_spec, ask)?;
-                            reconcile_bitbucket_username(
-                                &new_name,
-                                &kind,
-                                new_spec.username.is_some(),
-                                ask,
-                            )?;
-                        }
                         assign_in(root, project, &failing, &new_name)?;
                         bound_any = true;
                     }
@@ -1272,7 +1291,7 @@ pub(crate) fn guided_group_setup(
         if let Some(spec) = store.credentials.get(&name) {
             if group.provider == "bitbucket" {
                 let kind = ensure_bitbucket_token_type(&name, spec, ask)?;
-                reconcile_bitbucket_username(&name, &kind, spec.username.is_some(), ask)?;
+                reconcile_bitbucket_username(&name, &kind, spec.username.as_deref(), ask)?;
             }
         }
         // When the resolved credential is the host's default — inherited, or
@@ -1314,7 +1333,13 @@ pub(crate) fn guided_group_setup(
         bound_any = true;
     }
     if !bound_any {
-        println!("Every group is already linked; nothing to set up.");
+        // A repair run that changed nothing must say so truthfully: the
+        // groups were not "already linked" — the offers were declined.
+        if repair.is_empty() {
+            println!("Every group is already linked; nothing to set up.");
+        } else {
+            println!("No credential changes were made.");
+        }
     }
     refresh_plain_git_helper(root, project)
         .context("Credentials were linked, but the plain-Git helper could not be refreshed")?;
@@ -2026,6 +2051,28 @@ mod tests {
         (stdout, stderr, result.status.success())
     }
 
+    /// A two-repository Bitbucket project for the guided-repair scenarios:
+    /// `bb` sits in the declared group (the failing repository), `bb2` is an
+    /// ungrouped repository that must keep its binding through the repair.
+    fn bitbucket_repair_project(root: &std::path::Path) -> KnitProject {
+        let path = root.join(".knit/projects/tools.project.json");
+        let project = json!({
+            "schemaVersion":"0.1", "kind":"KnitProject", "id":"tools",
+            "createdAt":"2026-01-01T00:00:00Z", "updatedAt":"2026-01-01T00:00:00Z",
+            "repos":[
+                {"id":"bb","path":"bb","remote":"https://bitbucket.org/team/backend.git","baseBranch":"main"},
+                {"id":"bb2","path":"bb2","remote":"https://bitbucket.org/team/worker.git","baseBranch":"main"}
+            ],
+            "auth": {"groups": [{
+                "id": "bb-cloud", "name": "Bitbucket API", "provider": "bitbucket",
+                "host": "bitbucket.org", "repos": ["bb"],
+                "tokenTypes": ["atlassian_api_token"]
+            }]}
+        });
+        std::fs::write(&path, serde_json::to_vec(&project).unwrap()).unwrap();
+        serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap()
+    }
+
     /// The child body for every grouped scenario; dispatched by
     /// KNIT_GROUP_SETUP_MODE so each runs with an isolated KNIT_HOME.
     #[test]
@@ -2229,7 +2276,8 @@ mod tests {
                 println!("<<GROUP-STATUS-JSON-END>>");
             }
             // Already-classified Bitbucket credentials still get their email
-            // repaired: an API token missing it is asked for, an access
+            // repaired: an API token missing it (or carrying a username that
+            // is not a valid email) is asked for the real one, an access
             // token carrying a stale one offers to clear it.
             "classified" => {
                 let mut store = auth::load().unwrap();
@@ -2253,16 +2301,28 @@ mod tests {
                         token_env: Some("KNIT_WIZARD_TOKEN".into()),
                     },
                 );
+                store.credentials.insert(
+                    "bad-email".into(),
+                    CredentialSpec {
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: Some("git-handle-not-email".into()),
+                        token_type: Some("atlassian_api_token".into()),
+                        token_env: Some("KNIT_WIZARD_TOKEN".into()),
+                    },
+                );
                 auth::save(&store).unwrap();
-                for name in ["api-tok", "acc-tok"] {
+                for name in ["api-tok", "acc-tok", "bad-email"] {
                     let spec = &store.credentials[name];
-                    let mut ask = scripted(if name == "api-tok" {
-                        &["dev@example.com"]
-                    } else {
-                        &["y"]
+                    let mut ask = scripted(match name {
+                        "api-tok" => &["dev@example.com"],
+                        "acc-tok" => &["y"],
+                        // First answer is rejected (no @), so the validator
+                        // loop asks again for a real address.
+                        _ => &["still-not-an-email", "fixed@example.org"],
                     });
                     let kind = ensure_bitbucket_token_type(name, spec, &mut ask).unwrap();
-                    reconcile_bitbucket_username(name, &kind, spec.username.is_some(), &mut ask)
+                    reconcile_bitbucket_username(name, &kind, spec.username.as_deref(), &mut ask)
                         .unwrap();
                 }
                 let store = auth::load().unwrap();
@@ -2271,6 +2331,10 @@ mod tests {
                     Some("dev@example.com")
                 );
                 assert_eq!(store.credentials["acc-tok"].username, None);
+                assert_eq!(
+                    store.credentials["bad-email"].username.as_deref(),
+                    Some("fixed@example.org")
+                );
             }
             // Status fails clearly on invalid group declarations instead of
             // rendering coverage over a collapsed map.
@@ -2469,6 +2533,7 @@ mod tests {
                         provider: "bitbucket".into(),
                         host: "bitbucket.org".into(),
                         username: bb.username.clone().unwrap(),
+                        token_type: bb.token_type.clone(),
                         token: String::new(),
                     }
                     .git_username(),
@@ -2482,7 +2547,8 @@ mod tests {
             }
             // Replacing an environment-backed credential's rejected token
             // creates a new local credential: no environment reference, the
-            // kind preserved, and the Atlassian email reconciled.
+            // kind chosen afresh (the old classification was rejected with
+            // the token), and the Atlassian email validated.
             "env-repair" => {
                 // Narrow the project to the one Bitbucket group so the
                 // scripted run exercises the repair path directly.
@@ -2521,7 +2587,7 @@ mod tests {
                     &root,
                     &project,
                     &repair,
-                    &mut scripted(&["dev@example.org"]),
+                    &mut scripted(&["atlassian_api_token", "dev@example.org"]),
                     &mut |_prompt| Ok("replacement-secret".to_string()),
                 )
                 .unwrap();
@@ -2536,10 +2602,139 @@ mod tests {
                 assert_eq!(new_spec.token_type.as_deref(), Some("atlassian_api_token"));
                 assert_eq!(new_spec.username.as_deref(), Some("dev@example.org"));
                 assert_eq!(
+                    auth::credential(&new_name).unwrap().token,
+                    "replacement-secret"
+                );
+                assert_eq!(
                     store.credentials["bb-env"].token_env.as_deref(),
                     Some("KNIT_WIZARD_TOKEN"),
                     "the env-backed credential keeps its reference"
                 );
+                assert_eq!(
+                    store.credentials["bb-env"].token_type.as_deref(),
+                    Some("atlassian_api_token"),
+                    "the env-backed credential keeps its classification"
+                );
+            }
+            // A rejected Bitbucket credential's replacement token is
+            // classified afresh instead of inheriting the rejected
+            // credential's metadata.
+            "repair-replace" => {
+                let project = bitbucket_repair_project(&root);
+                let mut store = auth::load().unwrap();
+                store.credentials.insert(
+                    "bb-mis".into(),
+                    CredentialSpec {
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: Some("dev@example.org".into()),
+                        token_type: Some("atlassian_api_token".into()),
+                        token_env: None,
+                    },
+                );
+                auth::save_credential(&store, "bb-mis", Some("original-secret")).unwrap();
+                let mut store = auth::load().unwrap();
+                store
+                    .defaults
+                    .insert("bitbucket.org".into(), "bb-mis".into());
+                store.projects.insert(
+                    key.clone(),
+                    BTreeMap::from([
+                        ("bb".to_string(), "bb-mis".to_string()),
+                        ("bb2".to_string(), "bb-mis".to_string()),
+                    ]),
+                );
+                auth::save(&store).unwrap();
+                guided_group_setup(
+                    &root,
+                    &project,
+                    &BTreeSet::from(["bb".to_string()]),
+                    &mut scripted(&["access_token"]),
+                    &mut |_prompt| Ok("replacement-secret".to_string()),
+                )
+                .unwrap();
+                let store = auth::load().unwrap();
+                let new_name = store.projects[&key]["bb"].clone();
+                assert_ne!(new_name, "bb-mis");
+                let spec = &store.credentials[&new_name];
+                assert_eq!(
+                    spec.token_type.as_deref(),
+                    Some("access_token"),
+                    "replacement kind must be chosen afresh, not inherited"
+                );
+                assert_eq!(spec.username, None);
+                assert_eq!(spec.token_env, None);
+                assert_eq!(
+                    auth::credential(&new_name).unwrap().token,
+                    "replacement-secret"
+                );
+                assert_eq!(auth::credential("bb-mis").unwrap().token, "original-secret");
+                assert_eq!(
+                    store.credentials["bb-mis"].token_type.as_deref(),
+                    Some("atlassian_api_token")
+                );
+                assert_eq!(
+                    store.defaults.get("bitbucket.org").map(String::as_str),
+                    Some("bb-mis")
+                );
+                assert_eq!(store.projects[&key]["bb2"], "bb-mis");
+            }
+            // Leaving the replacement prompt empty changes nothing: the
+            // original keeps its classification, token, default, and both
+            // repository bindings, and the run reports that no credential
+            // changes were made.
+            "repair-decline" => {
+                let project = bitbucket_repair_project(&root);
+                let mut store = auth::load().unwrap();
+                store.credentials.insert(
+                    "bb-mis".into(),
+                    CredentialSpec {
+                        provider: "bitbucket".into(),
+                        host: "bitbucket.org".into(),
+                        username: Some("dev@example.org".into()),
+                        token_type: Some("atlassian_api_token".into()),
+                        token_env: None,
+                    },
+                );
+                auth::save_credential(&store, "bb-mis", Some("original-secret")).unwrap();
+                let mut store = auth::load().unwrap();
+                store
+                    .defaults
+                    .insert("bitbucket.org".into(), "bb-mis".into());
+                store.projects.insert(
+                    key.clone(),
+                    BTreeMap::from([
+                        ("bb".to_string(), "bb-mis".to_string()),
+                        ("bb2".to_string(), "bb-mis".to_string()),
+                    ]),
+                );
+                auth::save(&store).unwrap();
+                guided_group_setup(
+                    &root,
+                    &project,
+                    &BTreeSet::from(["bb".to_string()]),
+                    &mut scripted(&[]),
+                    &mut |_prompt| Ok(String::new()),
+                )
+                .unwrap();
+                let store = auth::load().unwrap();
+                assert_eq!(
+                    store.credentials.len(),
+                    1,
+                    "no new credential may be created by a declined repair"
+                );
+                let original = &store.credentials["bb-mis"];
+                assert_eq!(original.token_type.as_deref(), Some("atlassian_api_token"));
+                assert_eq!(original.username.as_deref(), Some("dev@example.org"));
+                assert_eq!(original.token_env, None);
+                assert_eq!(auth::credential("bb-mis").unwrap().token, "original-secret");
+                assert!(store.scoped_credentials.is_empty());
+                assert_eq!(
+                    store.defaults.get("bitbucket.org").map(String::as_str),
+                    Some("bb-mis")
+                );
+                assert_eq!(store.projects[&key]["bb"], "bb-mis");
+                assert_eq!(store.projects[&key]["bb2"], "bb-mis");
             }
             other => panic!("unknown mode {other}"),
         }
@@ -2723,12 +2918,67 @@ mod tests {
         let (stdout, stderr, ok) = run_grouped_child("env-repair", false);
         assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
         assert!(
-            stdout.contains("was used and access was denied for bb."),
+            stdout.contains(
+                "Git authentication failed while credential `bb-env` was selected for bb."
+            ),
             "{stdout}"
         );
         assert!(
-            stdout.contains("Recorded the account email for `bitbucket.org-bb-cloud`."),
+            stdout.contains("Which kind of Bitbucket token is it? (name/number): "),
+            "the replacement token's kind must be chosen afresh:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn guided_bitbucket_replacement_token_is_classified_anew() {
+        let (stdout, stderr, ok) = run_grouped_child("repair-replace", false);
+        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains(
+                "Git authentication failed while credential `bb-mis` was selected for bb."
+            ),
             "{stdout}"
         );
+        assert!(
+            stdout.contains("Saved credentials override ordinary Git credential helpers and SSH"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("does not establish that repository access is missing"),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("Which kind of Bitbucket token is it? (name/number): "),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains("Recorded `bitbucket.org-bb-cloud` as a `atlassian_api_token` token"),
+            "the rejected classification must not be inherited:\n{stdout}"
+        );
+    }
+
+    #[test]
+    fn guided_bitbucket_declined_repair_changes_nothing() {
+        let (stdout, stderr, ok) = run_grouped_child("repair-decline", false);
+        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
+        assert!(
+            stdout.contains(
+                "Git authentication failed while credential `bb-mis` was selected for bb."
+            ),
+            "{stdout}"
+        );
+        assert!(
+            stdout.contains("No credential changes were made."),
+            "{stdout}"
+        );
+        assert!(
+            !stdout.contains("Every group is already linked"),
+            "a declined repair is not an already-linked setup:\n{stdout}"
+        );
+        // Neither the reused nor the replacement secret ever reaches the
+        // transcript; the token prompts stay hidden in real runs and the
+        // mocks never echo values.
+        assert!(!stdout.contains("original-secret"), "{stdout}");
+        assert!(!stdout.contains("replacement-secret"), "{stdout}");
     }
 }

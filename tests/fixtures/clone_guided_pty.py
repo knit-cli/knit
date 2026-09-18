@@ -267,7 +267,7 @@ try:
     (remote_dir / 'export.json').write_text(export_body(repos2))
 
     def inferred_script(expect, answer):
-        expect('Private repositories: 1 repo(s) need a forge token')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
         expect('Group github.com: github.com (github @ github.com)')
         answer('Token for github.com (github.com — hidden): ', 'CONV2-SEC', hidden=True)
         expect('`github.com` is now the default credential for github.com.')
@@ -315,7 +315,7 @@ try:
         ])))
 
     def pull_script(expect, answer):
-        expect('Private repositories: 1 repo(s) need a forge token')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
         expect('Group fresh-grp: New team (gitlab @ gitlab.com)')
         answer('Token for gitlab.com (fresh-grp — hidden): ', 'CONV3-FRESH', hidden=True)
         expect('`gitlab.com-fresh-grp` is now the default credential for gitlab.com.')
@@ -419,9 +419,8 @@ try:
         expect('Host default `gh-bad` covers github.com — using it for group `gh` without repository links.')
         # The forge rejects it; the repair offers a replacement that never
         # touches the shared default's own token.
-        expect('Private repositories: 1 repo(s) need a forge token')
-        expect('Credential `gh-bad`')
-        expect('was used and access was denied for solo.')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
+        expect('Git authentication failed while credential `gh-bad` was selected for solo.')
         # The forge starts accepting the replacement token: unblock it before
         # answering the prompt.
         (root / 'forge-rejects').unlink()
@@ -479,8 +478,8 @@ try:
         expect('Host default `gh-env` covers github.com — using it for group `gh` without repository links.')
         # The unset environment reference fails the clone and is classified
         # auth-shaped; the repair path never touches the env reference.
-        expect('Private repositories: 1 repo(s) need a forge token')
-        expect('Credential `gh-env`')
+        expect('Git authentication: 1 repo(s) failed with the current authentication')
+        expect('Git authentication failed while credential `gh-env` was selected for solo.')
         answer('Replacement token for github.com (saved as a new local credential for solo; '
                '`gh-env` keeps its token — hidden): ',
                'DIRECT-TOKEN', hidden=True)
@@ -641,6 +640,47 @@ try:
     assert registry(conv7 / 'home')['defaults']['github.com'] == 'github.com-2'
     assert secrets(conv7 / 'home')['github.com-2'] == 'GH-CHOSEN'
     print('bare auth: environment replacement and ambiguous legacy default: PASS', flush=True)
+
+    # Replacing a Bitbucket default classifies the NEW token, in either
+    # direction. Its name/default and all repository bindings stay intact.
+    before_bb = registry(conv7 / 'home')
+    for kind, email, token in [
+            ('atlassian_api_token', 'dev@example.invalid', 'BB-API-ROTATED'),
+            ('access_token', None, 'BB-ACCESS-ROTATED')]:
+        def replace_bitbucket_default(expect, answer):
+            answer('Forge (1-4, or Enter to finish): ', '3')
+            answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
+            answer('New token for bitbucket.org (hidden): ', token, hidden=True)
+            answer('Which kind of Bitbucket token is it? (name/number): ', kind)
+            if email:
+                answer('Atlassian account email for this API token: ', email)
+            expect('Updated the token on `bitbucket.org`; it stays the default for bitbucket.org.')
+            answer('Forge (1-4, or Enter to finish): ', '')
+
+        conversation(conv7 / 'plain', conv7 / 'home', ['auth'], replace_bitbucket_default)
+        after_bb = registry(conv7 / 'home')
+        spec = after_bb['credentials']['bitbucket.org']
+        assert spec['tokenType'] == kind
+        assert spec.get('username') == email
+        assert secrets(conv7 / 'home')['bitbucket.org'] == token
+        assert after_bb['defaults'] == before_bb['defaults']
+        assert after_bb.get('projects') == before_bb.get('projects')
+        assert set(after_bb['credentials']) == set(before_bb['credentials'])
+
+    before_decline = (conv7 / 'home' / 'forge-auth.json').read_bytes()
+    secrets_decline = secrets(conv7 / 'home')
+
+    def decline_bitbucket_replacement(expect, answer):
+        answer('Forge (1-4, or Enter to finish): ', '3')
+        answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
+        answer('New token for bitbucket.org (hidden): ', '', hidden=True)
+        expect('Kept the current token.')
+        answer('Forge (1-4, or Enter to finish): ', '')
+
+    conversation(conv7 / 'plain', conv7 / 'home', ['auth'], decline_bitbucket_replacement)
+    assert (conv7 / 'home' / 'forge-auth.json').read_bytes() == before_decline
+    assert secrets(conv7 / 'home') == secrets_decline
+    print('bare auth: Bitbucket replacement reclassifies; empty input preserves token: PASS', flush=True)
 
     server.shutdown()
     print('clone_guided_pty: all conversations PASS')

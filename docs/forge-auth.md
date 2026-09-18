@@ -70,7 +70,15 @@ Supported token kinds:
 
 An ordinary clone uses saved defaults automatically. With complete local credential coverage, Knit skips the hosted credential-helper lookup. An ordinary ledger-only remote token does not need access to hosted forge credentials.
 
+Credential coverage means a saved credential resolves; it does not verify access. Knit initially sends a selected credential over HTTPS, including when the original URL uses SSH. If a Bitbucket host default fails authentication during clone or a read-access probe, Knit checks ordinary Git authentication automatically, then tries the same repository over SSH on bitbucket.org when HTTPS authentication is unavailable. A working route is remembered in personal configuration and retained when checkout helpers are refreshed; the saved token and host default stay unchanged. Explicit repository assignments and `--credential` selections remain authoritative and do not fall back. Network errors and missing refs do not trigger credential recovery.
+
+After updating Knit, recover repositories missing from an existing project checkout with `knit pull --bundles`. Working ordinary Git authentication is reused automatically; no new token, per-repository setup, or fresh project clone is needed for this recovery.
+
+For Bitbucket, the recorded token type determines Git authentication: `atlassian_api_token` uses `x-bitbucket-api-token-auth`, while `access_token` uses `x-token-auth`. The account email is needed for API-token REST calls, not to select the Git username. Older credentials without a recorded type retain their previous username-based behavior until classified. A credential with a known token type drives authentication automatically everywhere it is selected — the host default serves every repository on that host in every project, with no per-repository setup. See Atlassian's [API token](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/) and [access token](https://support.atlassian.com/bitbucket-cloud/docs/using-access-tokens/) documentation.
+
 When access is missing, interactive clone guides you through declared groups or infers a host from a failed Git operation. New regular tokens become host defaults. Existing project-only tokens are not automatically reused for another project. Noninteractive clones never prompt and explain how to finish setup.
+
+When you paste a replacement Bitbucket token through `knit auth`, Knit asks for its token type again and updates its account metadata; keeping the existing token makes no changes.
 
 If a credential is rejected, recovery saves a **new project-only credential for the affected repositories**, leaving the old secret, environment reference, and default untouched. Failed repositories are retried once. Use `knit pull --bundles` to reconcile missing repositories in an existing workspace.
 

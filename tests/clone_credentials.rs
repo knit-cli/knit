@@ -267,6 +267,17 @@ fn export_with_repos(repos: &[(&str, &str, &str)]) -> String {
     .to_string()
 }
 
+/// Like [`export_with_repos`], with the hosted project slug and display name
+/// replaced: for regressions that change only the hosted identity — never
+/// the repositories — between two clones.
+fn export_with_slug(slug: &str, repos: &[(&str, &str, &str)]) -> String {
+    let mut export: Value =
+        serde_json::from_str(&export_with_repos(repos)).expect("base export is valid JSON");
+    export["data"]["project"]["slug"] = json!(slug);
+    export["data"]["project"]["name"] = json!(format!("{slug} display name"));
+    export.to_string()
+}
+
 // ---------------------------------------------------------------------------
 // Fake git: captures every network invocation (clone / ls-remote) under
 // `<root>/git-call-N/`, invokes the real hidden auth helper exactly as Git
@@ -738,7 +749,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
     assert!(!ok, "a rejected credential must fail the clone: {stdout}");
     let output = format!("{stdout}{stderr}");
     assert!(
-        output.contains("the selected credential `work` was used and access was denied"),
+        output.contains("the saved credential `work` failed authentication"),
         "{output}"
     );
     assert!(
@@ -898,7 +909,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         None,
     );
     assert!(!ok && err.contains("unavailable locally"), "{out}{err}");
-    assert!(!err.contains("was used and access was denied"), "{err}");
+    assert!(!err.contains("failed authentication"), "{err}");
     assert_eq!(
         git_calls(&root).len(),
         before,
@@ -2014,4 +2025,254 @@ fn ordinary_ledger_token_skips_optional_export_but_environment_denials_remain_vi
             fs::remove_dir_all(root).unwrap();
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// 7. Regression, hosted rename shape: a full mixed GitHub/Bitbucket project
+//    clone already succeeded with saved host defaults on both forges BEFORE
+//    the hosted project was renamed. Only the hosted slug, its display name,
+//    and the destination path change — the repositories are untouched — so
+//    both clones must stay fully covered by the same saved defaults (the
+//    logged helper-skipped branch), with no --credential, no per-repository
+//    bindings, and no guided setup; each forge's Git invocations keep
+//    vending exactly their own default's identity, and the personal auth
+//    registry comes out byte-for-byte unchanged. This is a regression guard
+//    over that coverage path, not a claim about any particular fix.
+// ---------------------------------------------------------------------------
+#[cfg(unix)]
+#[test]
+fn saved_bitbucket_default_authenticates_mixed_clone_across_hosted_rename() {
+    let root = unique_temp_dir();
+    let (home, git_config) = isolated_home(&root);
+    let env = home_env(&home, &git_config);
+
+    // Saved host defaults on both forges, seeded before any project exists:
+    // ordinary unclassified credentials whose tokens never change.
+    const BB_SECRET: &str = "bb-host-default-secret";
+    const GH_SECRET: &str = "gh-host-default-secret";
+    for (name, provider, host, secret) in [
+        ("bb", "bitbucket", "bitbucket.org", BB_SECRET),
+        ("gh", "github", "github.com", GH_SECRET),
+    ] {
+        let (stdout, stderr, ok) = knit_run(
+            &root,
+            &["auth", "add", name, "--provider", provider, "--token-stdin"],
+            &env,
+            Some(&format!("{secret}\n")),
+        );
+        assert!(ok, "{stdout}{stderr}");
+        assert!(
+            stdout.contains(&format!("It is the default credential for {host}.")),
+            "{stdout}"
+        );
+    }
+
+    let gh_source = root.join("gh-source");
+    init_repo(&gh_source, "web");
+    let bb_source = root.join("bb-source");
+    init_repo(&bb_source, "svc");
+
+    let fake_dir = root.join("fake-remote");
+    let repos: &[(&str, &str, &str)] = &[
+        ("web", "https://github.com/org/web.git", "private"),
+        ("svc", "https://bitbucket.org/team/svc.git", "private"),
+    ];
+    let base_url = spawn_recording_remote(&fake_dir, export_with_slug("demo", repos));
+    let fake_bin = write_fake_git(
+        &root,
+        &[
+            (
+                "https://github.com/org/web.git",
+                gh_source.to_str().unwrap(),
+                "auth",
+            ),
+            (
+                "https://bitbucket.org/team/svc.git",
+                bb_source.to_str().unwrap(),
+                "auth",
+            ),
+        ],
+    );
+
+    fn clone_mixed(
+        cwd: &Path,
+        home: &Path,
+        git_config: &Path,
+        path_env: &str,
+        base_url: &str,
+        slug: &str,
+        target: &Path,
+    ) -> (String, String, bool) {
+        let reference = format!("acme/{slug}");
+        knit_run(
+            cwd,
+            &[
+                "clone",
+                &reference,
+                target.to_str().unwrap(),
+                "--remote",
+                "hosted",
+                "--url",
+                base_url,
+                "--token",
+                "test-ledger-token",
+                "--no-worktree",
+            ],
+            &[
+                ("PATH", path_env),
+                ("KNIT_HOME", home.to_str().unwrap()),
+                ("GIT_CONFIG_GLOBAL", git_config.to_str().unwrap()),
+            ],
+            None,
+        )
+    }
+
+    // The username/password lines the hidden helpers must vend for each
+    // forge's own default — never each other's token.
+    let bb_vend = [
+        "username=x-token-auth".to_string(),
+        format!("password={BB_SECRET}"),
+    ];
+    let gh_vend = [
+        "username=x-access-token".to_string(),
+        format!("password={GH_SECRET}"),
+    ];
+    let vend_lines = |call: &Path| -> Vec<String> {
+        call_file(call, "helper-out")
+            .lines()
+            .filter(|line| line.starts_with("username=") || line.starts_with("password="))
+            .map(str::to_string)
+            .collect()
+    };
+    // Every authenticated invocation of one clone: each forge's calls carry
+    // exactly that forge's default identity — selected by the host in the
+    // invocation's own arguments — and never the other forge's token.
+    let assert_identities = |calls: &[PathBuf]| {
+        let mut saw_bitbucket = false;
+        let mut saw_github = false;
+        for call in calls {
+            if call_file(call, "mode") != "auth" {
+                continue;
+            }
+            let args = call_file(call, "args");
+            let vend = vend_lines(call);
+            let (expected, foreign, host) = if args.contains("https://bitbucket.org/") {
+                saw_bitbucket = true;
+                (&bb_vend, GH_SECRET, "Bitbucket")
+            } else if args.contains("https://github.com/") {
+                saw_github = true;
+                (&gh_vend, BB_SECRET, "GitHub")
+            } else {
+                panic!("unexpected authenticated target: {args}");
+            };
+            assert_eq!(vend, *expected, "{host} call {}", call.display());
+            assert!(
+                !vend.iter().any(|line| line.contains(foreign)),
+                "cross-host token use in {}",
+                call.display()
+            );
+        }
+        assert!(saw_bitbucket, "the Bitbucket repository must authenticate");
+        assert!(saw_github, "the GitHub repository must authenticate");
+    };
+
+    // Clone one: the pre-rename state that already worked. Both forges are
+    // covered by their saved defaults, so the hosted credential-helper
+    // install is skipped and says so.
+    let before = root.join("before-rename");
+    let (stdout, stderr, ok) = clone_mixed(
+        &root,
+        &home,
+        &git_config,
+        &fake_path_env(&fake_bin),
+        &base_url,
+        "demo",
+        &before,
+    );
+    assert!(ok, "clone before rename failed: {stdout}{stderr}");
+    let output = format!("{stdout}{stderr}");
+    assert!(output.contains("Imported: 2 repo(s)"), "{output}");
+    assert!(
+        output.contains("skipped; local credentials cover every forge repository"),
+        "the logged helper-skipped branch must fire: {output}"
+    );
+    assert!(
+        !output.contains("Setting up project credentials"),
+        "a default-covered clone must not run guided setup: {output}"
+    );
+    assert!(before.join("web/.git").exists());
+    assert!(before.join("svc/.git").exists());
+    let first_calls = git_calls(&root);
+    assert_identities(&first_calls);
+    let call_count = first_calls.len();
+
+    // The personal registry after the working clone: two credentials, two
+    // host defaults, and no per-repository bindings for either repository.
+    let registry = read_json_cargo(&home.join("forge-auth.json"));
+    assert_eq!(registry["credentials"]["bb"]["host"], "bitbucket.org");
+    assert_eq!(registry["credentials"]["gh"]["host"], "github.com");
+    assert_eq!(
+        registry["defaults"],
+        json!({"bitbucket.org": "bb", "github.com": "gh"})
+    );
+    assert!(
+        registry["projects"]
+            .as_object()
+            .is_none_or(|p| p.is_empty()),
+        "no repository bindings may appear: {}",
+        registry["projects"]
+    );
+    assert_eq!(
+        read_json_cargo(&home.join("forge-secrets.json")),
+        json!({"bb": BB_SECRET, "gh": GH_SECRET})
+    );
+
+    // The hosted rename: only the project slug and display name change; the
+    // repositories (ids and forge URLs) are exactly what they were.
+    fs::write(
+        fake_dir.join("export.json"),
+        export_with_slug("demo-renamed", repos),
+    )
+    .unwrap();
+
+    // Clone two: same personal store, new hosted slug, new destination path.
+    let after = root.join("after-rename");
+    let (stdout, stderr, ok) = clone_mixed(
+        &root,
+        &home,
+        &git_config,
+        &fake_path_env(&fake_bin),
+        &base_url,
+        "demo-renamed",
+        &after,
+    );
+    assert!(ok, "clone after rename failed: {stdout}{stderr}");
+    let output = format!("{stdout}{stderr}");
+    assert!(output.contains("Imported: 2 repo(s)"), "{output}");
+    assert!(
+        output.contains("skipped; local credentials cover every forge repository"),
+        "the rename must not lose the logged helper-skipped coverage: {output}"
+    );
+    assert!(
+        !output.contains("Setting up project credentials"),
+        "the rename must not turn a covered clone into per-repo setup: {output}"
+    );
+    assert!(after.join("web/.git").exists());
+    assert!(after.join("svc/.git").exists());
+    let second_calls = &git_calls(&root)[call_count..];
+    assert_identities(second_calls);
+
+    // The rename changed nothing in the personal auth registry: same
+    // credentials, same defaults, still no repository bindings.
+    assert_eq!(
+        read_json_cargo(&home.join("forge-auth.json")),
+        registry,
+        "the hosted rename must not touch the personal auth registry"
+    );
+    assert_eq!(
+        read_json_cargo(&home.join("forge-secrets.json")),
+        json!({"bb": BB_SECRET, "gh": GH_SECRET})
+    );
+
+    fs::remove_dir_all(root).unwrap();
 }

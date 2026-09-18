@@ -556,8 +556,8 @@ pub(super) fn clone_fetched_export(
             .collect();
         if !failing.is_empty() {
             crate::human!(
-                "{} {} repo(s) need a forge token (no working access); setting that up now:",
-                out::heading("Private repositories:"),
+                "{} {} repo(s) failed with the current authentication; reviewing setup:",
+                out::heading("Git authentication:"),
                 failing.len()
             );
             crate::commands::auth::repair_credentials(&target_root, &bootstrap.project, &failing)
@@ -1832,10 +1832,10 @@ pub(super) fn is_auth_shaped_failure(failure: &str) -> bool {
 
 /// When the active clone selection covers this exact repository, the failure
 /// names that credential so the user knows which token was in play. Only an
-/// authentication-shaped failure says access was denied; a transport error
-/// (DNS, timeout, TLS) must not be reported as a token rejection. The update
-/// advice follows the credential's own token storage, or points at the help
-/// text instead of inventing a command.
+/// authentication-shaped failure reports a failed saved credential; a
+/// transport error (DNS, timeout, TLS) must not be reported as a token
+/// rejection. The update advice follows the credential's own token storage,
+/// or points at the help text instead of inventing a command.
 fn selected_credential_failure_hint(
     root: &Path,
     remote_url: &str,
@@ -1853,7 +1853,7 @@ fn selected_credential_failure_hint(
     }
     Some(if denied {
         format!(
-            "the selected credential `{name}` was used and access was denied; check that its token can read this repository, or {update}"
+            "the saved credential `{name}` failed authentication; it overrides ordinary Git helpers and SSH transport, so check its token type and username configuration before replacing the token: {update}"
         )
     } else {
         format!(
