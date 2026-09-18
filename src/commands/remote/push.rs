@@ -1026,6 +1026,12 @@ pub(super) fn publishable_project(
     Ok(Some(merged))
 }
 
+/// The explicit `knit project push` upsert. Reshaping a hosted project is an
+/// owner/admin action on the remote, so a 403 is the permission problem it
+/// is: reported clearly, never silently skipped (the caller asked for the
+/// shared shape to move) and never answered by POST-creating a personal
+/// duplicate of a project someone else owns. Only a 404 — the project does
+/// not exist — falls through to creation.
 fn upsert_project(
     root: &Path,
     remote: &KnitRemote,
@@ -1037,10 +1043,12 @@ fn upsert_project(
     let payload = project_payload(project_id, project.as_ref());
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
-    if response.status == 404 {
-        decode_response(request(remote, token, "POST", "/projects", Some(&payload))?)
-    } else {
-        decode_response(response)
+    match response.status {
+        404 => decode_response(request(remote, token, "POST", "/projects", Some(&payload))?),
+        403 => bail!(
+            "the sync remote refused to update project `{project_id}` (HTTP 403): `knit project push` requires project owner/admin permission and a token with project:write scope. Use `knit sync push` to upload bundle work and history with a writable project token."
+        ),
+        _ => decode_response(response),
     }
 }
 
@@ -1048,7 +1056,7 @@ fn upsert_project(
 /// or only address the project. Only the owner reshapes a project; a
 /// collaborator pushing a bundle must not fail on that, and must never
 /// POST-create a personal duplicate of a project someone else owns.
-enum ProjectShapePush {
+pub(super) enum ProjectShapePush {
     Pushed,
     ReadOnly,
 }
@@ -1083,9 +1091,8 @@ pub(super) fn upsert_project_for_history(
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
-) -> Result<RemoteProject> {
-    let (pushed, _shape) = upsert_or_fetch_project(root, remote, token, project_id, project)?;
-    Ok(pushed)
+) -> Result<(RemoteProject, ProjectShapePush)> {
+    upsert_or_fetch_project(root, remote, token, project_id, project)
 }
 
 /// A repository record as the sync remote lists it. `local_id` is the id the

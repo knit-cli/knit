@@ -1295,6 +1295,240 @@ fn sync_push_bundles_as_collaborator_skips_project_shape() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A collaborator's `knit sync push --history` must reach the writable plane
+/// (history events) without reshaping the shared project: the PATCH refusal
+/// falls back to a read-only fetch, and repository records — part of the
+/// project shape — stay untouched.
+#[test]
+fn sync_push_history_as_collaborator_pushes_events_without_reshaping_the_project() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "collaborator-token")];
+
+    // The remote refuses the project-shape upsert: this caller reaches the
+    // project as a collaborator, not its owner.
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    // Creating a bundle records local history events for the push to carry.
+    knit(&workspace, ["bundle", "alpha work", "--repo", "backend"]);
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    assert!(output.contains("pushed history"), "{output}");
+
+    // History events landed on the writable plane...
+    let pushes = fs::read_to_string(fake_dir.join("history-pushes.jsonl"))
+        .expect("the collaborator's history events must be pushed");
+    assert!(
+        pushes.contains("alpha-work"),
+        "pushed events must mention the bundle: {pushes}"
+    );
+    // ...while the refused shape upsert never degraded into reshaping the
+    // shared membership or creating a personal duplicate.
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "collaborator history push must not push repository records"
+    );
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "collaborator history push must not POST-create a duplicate project"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `knit project push` deliberately changes the shared project shape, so a
+/// collaborator's refusal must fail loudly with the permission problem —
+/// never report success with the shape silently skipped — and must not leave
+/// any remote mutation behind (no duplicate project, no repository records,
+/// no prune).
+#[test]
+fn project_push_as_collaborator_fails_with_a_permission_error_and_no_mutations() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "collaborator-token")];
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    let output = knit_fails_with_env(&workspace, ["project", "push"], &env);
+    assert!(
+        output.contains("HTTP 403"),
+        "the refusal must be named for what it is: {output}"
+    );
+    assert!(
+        output.contains("knit project push") && output.contains("knit sync push"),
+        "the error must point at the owner remedy and the unaffected member path: {output}"
+    );
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "a 403 must never fall through to POST-creating a duplicate project"
+    );
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "a refused project push must not push repository records"
+    );
+    assert!(
+        !fake_dir.join("deleted-repositories.txt").exists(),
+        "a refused project push must not prune remote repositories"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The 403 refusal must not poison the genuine new-project path: a project
+/// that truly does not exist (PATCH 404) is still POST-created by its
+/// rightful first pusher, repository records included.
+#[test]
+fn project_push_creates_a_genuinely_missing_project() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "owner-token")];
+    fs::write(fake_dir.join("project-shape-missing"), "").unwrap();
+
+    let output = knit_with_env(&workspace, ["project", "push"], &env);
+    assert!(output.contains("pushed"), "{output}");
+    assert!(
+        fake_dir.join("project-created.txt").exists(),
+        "a 404 must still take the genuine create-the-missing-project path"
+    );
+    assert!(
+        fake_dir.join("repositories-pushed.txt").exists(),
+        "the first pusher of a new project also publishes its repository records"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The member end-to-end flow for a renamed-but-retained project: clone
+/// `example-org/example-project` (hosted display name Renamed Project, technical slug and exported
+/// knitProject.id example-project), then push bundles and history as a writable org
+/// member who may not reshape the project. Everything must sync onto the
+/// existing hosted project — no personal duplicate, no membership rewrite.
+#[test]
+fn cloned_member_workspace_pushes_bundles_and_history_without_duplicates() {
+    let root = unique_temp_dir();
+    let (remote, _backend, _collaborator) = init_remote_repo(&root, "backend");
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {
+                "slug": "example-project",
+                "name": "Renamed Project",
+                "organization": {"slug": "example-org"},
+            },
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "example-project",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "remote": remote.to_str().unwrap(), "baseBranch": "main"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": remote.to_str().unwrap(), "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    // The hosted project exists; this clone's token belongs to a writable
+    // org member who may push bundles and history but not reshape the project.
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    let target = root.join("member-workspace");
+    let env = [("KNIT_REMOTE_TOKEN", "member-token")];
+    let output = knit_with_env(
+        &root,
+        [
+            "clone",
+            "example-org/example-project",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+        ],
+        &env,
+    );
+    assert!(output.contains("cloned"), "{output}");
+    // The local project id is the exported knitProject.id — the technical
+    // slug existing clones already use, not the hosted display name.
+    assert!(
+        target
+            .join(".knit/projects/example-project.project.json")
+            .exists(),
+        "clone must keep the example-project project id"
+    );
+    configure_git_user(&target.join("backend"));
+
+    knit(&target, ["bundle", "member work", "--repo", "backend"]);
+    append_line(
+        &target.join(".knit/worktrees/member-work/backend/app.txt"),
+        "member change",
+    );
+    knit(&target, ["commit", "--all", "-m", "Member change"]);
+
+    let output = knit_with_env(&target, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("bundle artifact(s)"), "{output}");
+    let states = fs::read_to_string(fake_dir.join("artifact-member-work.states"))
+        .expect("the member's bundle artifact must be pushed");
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+
+    let output = knit_with_env(&target, ["sync", "push", "--history"], &env);
+    assert!(output.contains("pushed history"), "{output}");
+    assert!(
+        fake_dir.join("history-pushes.jsonl").exists(),
+        "the member's history events must be pushed"
+    );
+
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "the member's pushes must never POST-create a personal duplicate of the hosted project"
+    );
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "the member's pushes must not rewrite the hosted membership"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     let root = unique_temp_dir();
