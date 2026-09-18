@@ -51,6 +51,18 @@ pub fn configure(
     for target in targets {
         let urls = remote_urls(cwd, &target, operation == "push");
         for remote in urls {
+            if let Some(fallback) = auth::git_fallback(cwd, &remote)? {
+                let ssh = fallback.transport == auth::GitFallbackTransport::Ssh;
+                crate::git_fallback::configure_native(cwd, command, ssh);
+                if ssh {
+                    if let Some(url) = crate::git_fallback::ssh_url(&remote) {
+                        command
+                            .arg("-c")
+                            .arg(format!("url.{url}.insteadOf={remote}"));
+                    }
+                }
+                continue;
+            }
             let Some(credential) = auth::resolve(cwd, Some(&remote))? else {
                 continue;
             };
@@ -485,6 +497,7 @@ fn install_with_context(
     let git_dir = absolute_git_dir(checkout)?;
     let registry = auth::load()?;
     let mut rewrites: Vec<(String, String)> = Vec::new();
+    let mut targets: Vec<String> = Vec::new();
     for remote in all_remotes(checkout) {
         // Raw configured URLs: `git remote get-url` would apply the very
         // include this installer writes, so a second activation would read
@@ -504,8 +517,23 @@ fn install_with_context(
             // Metadata only: no secret is read during installation, and no
             // process-global project override is set — explicit context goes
             // through the pure selection function.
-            let selected =
-                auth::select_credential_with_context(&registry, context, &(host.clone(), path));
+            let target = (host.clone(), path);
+            let selected = auth::select_credential_with_context(&registry, context, &target);
+            // Verified ordinary Git access belongs only to a host default.
+            // Explicit repository assignments still install the strict helper.
+            if let Some(fallback) = auth::git_fallback_with_context(&registry, context, &target)
+                .ok()
+                .flatten()
+            {
+                if fallback.transport == auth::GitFallbackTransport::Ssh {
+                    if let Some(ssh) = crate::git_fallback::ssh_url(&url) {
+                        if ssh != url {
+                            rewrites.push((ssh, url));
+                        }
+                    }
+                }
+                continue;
+            }
             // Every taken-over URL is pinned to its exact HTTPS target. A
             // refused selection must not keep SSH either: the SSH agent
             // would silently bypass the fail-closed helper. A URL with no
@@ -515,6 +543,7 @@ fn install_with_context(
             }
             if let Ok((exact_host, exact_path)) = exact_target(&url) {
                 let https_url = format!("https://{exact_host}/{exact_path}");
+                targets.push(https_url.clone());
                 if !rewrites
                     .iter()
                     .any(|(target, original)| target == &https_url && original == &url)
@@ -527,11 +556,10 @@ fn install_with_context(
     rewrites.sort();
     // One credential section per exact HTTPS repository URL represented by
     // the taken-over remotes — derived from the rewrites, never the host.
-    let mut targets: Vec<String> = rewrites.iter().map(|(target, _)| target.clone()).collect();
     targets.sort();
     targets.dedup();
     let include_path = git_dir.join(CREDENTIAL_INCLUDE);
-    if targets.is_empty() {
+    if targets.is_empty() && rewrites.is_empty() {
         if !include_path.exists() {
             config_remove_include(checkout, &git_dir);
             return Ok(InstallOutcome::Cleared { changed: false });
@@ -774,7 +802,7 @@ fn raw_git(cwd: &Path, args: &[&str]) -> Option<String> {
         .then(|| String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
-fn remote_urls(cwd: &Path, target: &str, push: bool) -> Vec<String> {
+pub(crate) fn remote_urls(cwd: &Path, target: &str, push: bool) -> Vec<String> {
     let args = if push {
         vec!["remote", "get-url", "--push", "--all", target]
     } else {
@@ -871,7 +899,10 @@ fn expand_remote_groups(cwd: &Path, names: Vec<String>, single_fetch: bool) -> R
 
 /// Extract the remote operand without confusing option values or refspecs for
 /// repository names. All network forms used by Knit pass explicit operands.
-fn network_targets(cwd: &Path, args: &[OsString]) -> Result<Option<(String, Vec<String>)>> {
+pub(crate) fn network_targets(
+    cwd: &Path,
+    args: &[OsString],
+) -> Result<Option<(String, Vec<String>)>> {
     let args = args
         .iter()
         .map(|arg| arg.to_string_lossy().into_owned())

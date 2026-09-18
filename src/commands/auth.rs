@@ -258,27 +258,10 @@ fn setup_with_prompt(
                 }
             }
         }
-        // A Bitbucket group additionally offers `m`: repair the metadata of
-        // the saved credential these repositories actually use. After an
-        // ordinary-Git recovery the checkout already exists, so no failed
-        // clone retry can reach the guided repair menu — this is the
-        // deliberate way in.
-        let bitbucket = group.provider == "bitbucket";
-        let (menu, invalid) = if bitbucket {
-            (
-                // The standard question stays verbatim at the end so
-                // scripted conversations that match it keep working.
-                "`m` repairs the saved Bitbucket token's kind/email for the selected repositories. Use the default token (Enter), `t` for a project-only token, or `s` to skip: ",
-                "Choose Enter, t, m, or s.",
-            )
-        } else {
-            (
-                "Use the default token (Enter), `t` for a project-only token, or `s` to skip: ",
-                "Choose Enter, t, or s.",
-            )
-        };
         loop {
-            let answer = ask(menu)?;
+            let answer = ask(
+                "Use the default token (Enter), `t` for a project-only token, or `s` to skip: ",
+            )?;
             match answer.trim() {
                 "" => {
                     if default.is_none() {
@@ -302,86 +285,9 @@ fn setup_with_prompt(
                         println!("`{name}` is used for {} in this project only; the default token for {host} is untouched.", repos.join(", "));
                     }
                 }
-                // Re-classify the token that already serves the selected
-                // repositories: same secret, corrected kind/account email,
-                // saved as a scoped copy. Each repository's serving
-                // credential comes from the normal project resolver — a
-                // deliberate override is repaired as itself, never swapped
-                // for the host default — and several credentials inside one
-                // group are partitioned and repaired independently. No
-                // token is ever requested in this path.
-                "m" | "M" if bitbucket => {
-                    let store = auth::load()?;
-                    let mut remotes: BTreeMap<String, String> = project
-                        .repos
-                        .iter()
-                        .filter_map(|repo| {
-                            repo.remote
-                                .as_ref()
-                                .map(|remote| (repo.id.clone(), remote.clone()))
-                        })
-                        .collect();
-                    for (id, remote) in &pending {
-                        remotes.entry(id.clone()).or_insert(remote.clone());
-                    }
-                    let mut partitions: BTreeMap<String, Vec<String>> = BTreeMap::new();
-                    let mut unresolved: Vec<String> = Vec::new();
-                    for repo in &repos {
-                        let resolved = remotes
-                            .get(repo)
-                            .and_then(|remote| auth::remote_target(remote).ok())
-                            .and_then(|target| {
-                                auth::project_credential_name(&store, root, project, &target)
-                                    .ok()
-                                    .flatten()
-                            });
-                        match resolved {
-                            Some(name) => partitions.entry(name).or_default().push(repo.clone()),
-                            None => unresolved.push(repo.clone()),
-                        }
-                    }
-                    if !unresolved.is_empty() {
-                        println!(
-                            "No saved credential resolves for {}: choose `t` for a project-only token, or add one with `knit auth` first.",
-                            unresolved.join(", ")
-                        );
-                    }
-                    let offered = !partitions.is_empty();
-                    let mut repaired = false;
-                    for (name, subset) in partitions {
-                        let Some(spec) = store.credentials.get(&name).cloned() else {
-                            println!(
-                                "Credential `{name}` is no longer saved; choose `t` to paste a project-only token."
-                            );
-                            continue;
-                        };
-                        if spec.provider != "bitbucket" {
-                            println!(
-                                "Credential `{name}` on {host} is not a Bitbucket credential; nothing to repair here."
-                            );
-                            continue;
-                        }
-                        println!(
-                            "Repairing the saved credential `{name}` for {}.",
-                            subset.join(", ")
-                        );
-                        repaired |= repair_bitbucket_metadata(
-                            root, project, &subset, &name, &spec, &group, ask,
-                        )?;
-                    }
-                    if repaired {
-                        break;
-                    }
-                    if offered {
-                        println!(
-                            "No metadata was changed; the saved credentials keep their tokens."
-                        );
-                    }
-                    continue;
-                }
                 "s" | "S" => (),
                 _ => {
-                    println!("{invalid}");
+                    println!("Choose Enter, t, or s.");
                     continue;
                 }
             }
@@ -1122,60 +1028,6 @@ fn reconcile_bitbucket_username(
     Ok(())
 }
 
-/// Offer repairing a rejected Bitbucket credential's metadata instead of
-/// replacing its token. A denial can come from the recorded token kind —
-/// it alone decides the Git username scheme, with the account email as the
-/// Atlassian REST identity — rather than from the secret itself, so the same
-/// token with corrected metadata is worth trying before a new one is pasted.
-/// The shared original is never mutated: the corrected metadata plus the
-/// same token are saved as a new credential scoped to the affected
-/// repositories, keeping the original's token, token source, default
-/// status, and other assignments intact. `Ok(false)` means the offer was
-/// declined and the caller proceeds to the replacement prompt; a token that
-/// cannot be resolved locally is an error reported to the caller.
-fn repair_bitbucket_metadata(
-    root: &Path,
-    project: &KnitProject,
-    failing: &[String],
-    name: &str,
-    spec: &CredentialSpec,
-    group: &ProjectAuthGroup,
-    ask: &mut impl FnMut(&str) -> Result<String>,
-) -> Result<bool> {
-    let answer = ask(
-        "Reuse the same token with a corrected token kind/account email for these repositories? [y/N]: ",
-    )?;
-    if !matches!(answer.trim(), "y" | "Y" | "yes") {
-        return Ok(false);
-    }
-    let kind = ask_bitbucket_token_type(ask)?;
-    let username = bitbucket_username_for_token_type(&kind, ask)?;
-    let resolved = auth::credential(name).with_context(|| {
-        format!("Cannot reuse the token saved for `{name}`; paste a replacement instead")
-    })?;
-    let new_spec = CredentialSpec {
-        provider: spec.provider.clone(),
-        host: spec.host.to_ascii_lowercase(),
-        username,
-        token_type: Some(kind),
-        // The reused token is saved as a local secret; the original keeps
-        // its own token source untouched.
-        token_env: None,
-    };
-    let new_name = unique_credential_name(&format!(
-        "{}-{}",
-        sanitize_credential_name(&spec.host),
-        sanitize_credential_name(&group.id)
-    ))?;
-    save_new_credential_scoped(&new_name, &new_spec, &resolved.token, true)?;
-    println!(
-        "`{name}` keeps its token, default, and other assignments; `{new_name}` serves {} with the corrected metadata.",
-        failing.join(", ")
-    );
-    assign_in(root, project, failing, &new_name)?;
-    Ok(true)
-}
-
 /// Clone and pull reuse defaults and existing assignments. Rejected access
 /// creates a project-scoped replacement; shared tokens are never rotated.
 pub(crate) fn guided_group_setup(
@@ -1291,17 +1143,6 @@ pub(crate) fn guided_group_setup(
                     println!(
                         "Saved credentials override ordinary Git credential helpers and SSH for those repositories, so this failure does not establish that repository access is missing."
                     );
-                    // A Bitbucket denial may be pure metadata: offer reusing
-                    // the same token with a corrected kind/email (saved as a
-                    // scoped copy) before demanding a replacement token.
-                    if spec.provider == "bitbucket"
-                        && repair_bitbucket_metadata(
-                            root, project, &failing, &name, &spec, group, ask,
-                        )?
-                    {
-                        bound_any = true;
-                        continue;
-                    }
                     let token = read_token(&format!(
                         "Replacement token for {} (saved as a new local credential for {}; `{name}` keeps its token — hidden): ",
                         spec.host,
@@ -2732,7 +2573,7 @@ mod tests {
                     &root,
                     &project,
                     &repair,
-                    &mut scripted(&["n", "atlassian_api_token", "dev@example.org"]),
+                    &mut scripted(&["atlassian_api_token", "dev@example.org"]),
                     &mut |_prompt| Ok("replacement-secret".to_string()),
                 )
                 .unwrap();
@@ -2761,73 +2602,9 @@ mod tests {
                     "the env-backed credential keeps its classification"
                 );
             }
-            // A rejected Bitbucket credential is first offered reuse with
-            // corrected metadata: the same token, a re-classified kind, and
-            // no email for an access token — saved as a scoped copy while
-            // the shared original keeps its token, default, and other
-            // repository bindings untouched.
-            "repair-reuse" => {
-                let project = bitbucket_repair_project(&root);
-                let mut store = auth::load().unwrap();
-                store.credentials.insert(
-                    "bb-mis".into(),
-                    CredentialSpec {
-                        provider: "bitbucket".into(),
-                        host: "bitbucket.org".into(),
-                        username: Some("dev@example.org".into()),
-                        token_type: Some("atlassian_api_token".into()),
-                        token_env: None,
-                    },
-                );
-                auth::save_credential(&store, "bb-mis", Some("original-secret")).unwrap();
-                let mut store = auth::load().unwrap();
-                store
-                    .defaults
-                    .insert("bitbucket.org".into(), "bb-mis".into());
-                store.projects.insert(
-                    key.clone(),
-                    BTreeMap::from([
-                        ("bb".to_string(), "bb-mis".to_string()),
-                        ("bb2".to_string(), "bb-mis".to_string()),
-                    ]),
-                );
-                auth::save(&store).unwrap();
-                guided_group_setup(
-                    &root,
-                    &project,
-                    &BTreeSet::from(["bb".to_string()]),
-                    &mut scripted(&["y", "access_token"]),
-                    &mut |_| panic!("metadata repair must not demand a replacement token"),
-                )
-                .unwrap();
-                let store = auth::load().unwrap();
-                let new_name = store.projects[&key]["bb"].clone();
-                assert_ne!(new_name, "bb-mis", "failing repo must be rebound");
-                let spec = &store.credentials[&new_name];
-                assert_eq!(spec.token_type.as_deref(), Some("access_token"));
-                assert_eq!(spec.username, None);
-                assert_eq!(spec.token_env, None);
-                assert!(store.scoped_credentials.contains(&new_name));
-                assert!(!store.scoped_credentials.contains("bb-mis"));
-                assert_eq!(
-                    auth::credential(&new_name).unwrap().token,
-                    "original-secret",
-                    "the corrected copy reuses the original token"
-                );
-                let original = &store.credentials["bb-mis"];
-                assert_eq!(original.token_type.as_deref(), Some("atlassian_api_token"));
-                assert_eq!(original.username.as_deref(), Some("dev@example.org"));
-                assert_eq!(auth::credential("bb-mis").unwrap().token, "original-secret");
-                assert_eq!(
-                    store.defaults.get("bitbucket.org").map(String::as_str),
-                    Some("bb-mis"),
-                    "the shared original keeps the host default"
-                );
-                assert_eq!(store.projects[&key]["bb2"], "bb-mis");
-            }
-            // Declining reuse falls through to the replacement prompt, and
-            // the replacement's Bitbucket kind is chosen afresh instead of
-            // inheriting the rejected credential's classification.
+            // A rejected Bitbucket credential's replacement token is
+            // classified afresh instead of inheriting the rejected
+            // credential's metadata.
             "repair-replace" => {
                 let project = bitbucket_repair_project(&root);
                 let mut store = auth::load().unwrap();
@@ -2858,7 +2635,7 @@ mod tests {
                     &root,
                     &project,
                     &BTreeSet::from(["bb".to_string()]),
-                    &mut scripted(&["n", "access_token"]),
+                    &mut scripted(&["access_token"]),
                     &mut |_prompt| Ok("replacement-secret".to_string()),
                 )
                 .unwrap();
@@ -2888,10 +2665,10 @@ mod tests {
                 );
                 assert_eq!(store.projects[&key]["bb2"], "bb-mis");
             }
-            // Declining the reuse offer and leaving the replacement prompt
-            // empty changes nothing: the original keeps its classification,
-            // token, default, and both repository bindings, and the run
-            // reports that no credential changes were made.
+            // Leaving the replacement prompt empty changes nothing: the
+            // original keeps its classification, token, default, and both
+            // repository bindings, and the run reports that no credential
+            // changes were made.
             "repair-decline" => {
                 let project = bitbucket_repair_project(&root);
                 let mut store = auth::load().unwrap();
@@ -2922,7 +2699,7 @@ mod tests {
                     &root,
                     &project,
                     &BTreeSet::from(["bb".to_string()]),
-                    &mut scripted(&["n"]),
+                    &mut scripted(&[]),
                     &mut |_prompt| Ok(String::new()),
                 )
                 .unwrap();
@@ -3139,8 +2916,8 @@ mod tests {
     }
 
     #[test]
-    fn guided_bitbucket_repair_reuses_token_with_corrected_metadata() {
-        let (stdout, stderr, ok) = run_grouped_child("repair-reuse", false);
+    fn guided_bitbucket_replacement_token_is_classified_anew() {
+        let (stdout, stderr, ok) = run_grouped_child("repair-replace", false);
         assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
         assert!(
             stdout.contains(
@@ -3156,22 +2933,6 @@ mod tests {
             stdout.contains("does not establish that repository access is missing"),
             "{stdout}"
         );
-        assert!(
-            stdout.contains(
-                "Reuse the same token with a corrected token kind/account email for these repositories?"
-            ),
-            "{stdout}"
-        );
-        assert!(
-            stdout.contains("`bb-mis` keeps its token, default, and other assignments"),
-            "{stdout}"
-        );
-    }
-
-    #[test]
-    fn guided_bitbucket_replacement_token_is_classified_anew() {
-        let (stdout, stderr, ok) = run_grouped_child("repair-replace", false);
-        assert!(ok, "stdout:\n{stdout}\nstderr:\n{stderr}");
         assert!(
             stdout.contains("Which kind of Bitbucket token is it? (name/number): "),
             "{stdout}"

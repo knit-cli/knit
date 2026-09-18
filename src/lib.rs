@@ -5,6 +5,7 @@ pub mod checkout;
 pub mod cli;
 pub mod commands;
 pub mod git;
+mod git_fallback;
 pub mod history;
 pub mod ids;
 pub mod model;
