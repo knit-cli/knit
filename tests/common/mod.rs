@@ -1808,6 +1808,12 @@ fn handle_fake_remote_push_request(
                 format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
             )
         }
+        // Stage `project-shape-missing` to play a project that genuinely does
+        // not exist yet: PATCH answers 404, so the client's upsert falls
+        // through to POST-creating it — the genuine-new-project path.
+        ("PATCH", ["api", "v1", "projects", _]) if dir.join("project-shape-missing").exists() => {
+            (404, "{\"errors\":{\"detail\":\"Not Found\"}}".to_string())
+        }
         // Stage `project-shape-forbidden` to play a project the caller can
         // read and push bundles into but not reshape (a collaborator, not
         // the owner) — PATCH refuses, GET still resolves the record.
@@ -2112,6 +2118,12 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             (200, export)
         }
         ("GET", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/view") => {
+            // Record which project id the views document was requested for,
+            // so tests can assert owner-qualified resolution.
+            let mut log = fs::read_to_string(dir.join("view-gets.txt")).unwrap_or_default();
+            log.push_str(path);
+            log.push('\n');
+            fs::write(dir.join("view-gets.txt"), log).unwrap();
             // Tests stage `<dir>/views.json` to serve a user's saved views.
             let views = fs::read_to_string(dir.join("views.json"))
                 .unwrap_or_else(|_| "{\"data\":{\"views\":{}}}".to_string());
@@ -2175,6 +2187,16 @@ pub fn recorded_views_puts(dir: &Path) -> Vec<serde_json::Value> {
         .lines()
         .filter(|line| !line.trim().is_empty())
         .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+/// The `/view` GET paths `spawn_fake_remote_api` served, one per line, so
+/// tests can assert which project id the views document was requested for.
+pub fn recorded_view_gets(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("view-gets.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.to_string())
         .collect()
 }
 

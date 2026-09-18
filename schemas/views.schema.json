@@ -12,21 +12,35 @@
     "defaultView": { "type": "string" },
     "views": {
       "type": "object",
-      "additionalProperties": {
-        "type": "object",
-        "properties": {
-          "include": {
-            "type": "array",
-            "items": { "type": "string" }
-          },
-          "exclude": {
-            "type": "array",
-            "items": { "type": "string" }
-          }
-        },
-        "additionalProperties": false
-      }
+      "additionalProperties": { "$ref": "#/$defs/projectView" }
+    },
+    "templates": {
+      "type": "object",
+      "description": "Admin-managed shared view templates cached from the sync remote. A read-only cache replaced wholesale by `knit sync pull --views`; never uploaded with the personal document.",
+      "additionalProperties": { "$ref": "#/$defs/projectView" }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "projectView": {
+      "type": "object",
+      "properties": {
+        "base": {
+          "type": "string",
+          "enum": ["default", "none"],
+          "description": "Seeding mode: `default` seeds from the project's includeByDefault set, `none` seeds empty so include is the complete shape. Omitted when `default`.",
+          "default": "default"
+        },
+        "include": {
+          "type": "array",
+          "items": { "type": "string" }
+        },
+        "exclude": {
+          "type": "array",
+          "items": { "type": "string" }
+        }
+      },
+      "additionalProperties": false
+    }
+  }
 }

@@ -416,6 +416,8 @@ fn ensure_repos_cloned(root: &Path, selected: &[ProjectRepoEntry]) -> Result<()>
 /// Resolve which named view to apply: an explicit `--view` name (which must
 /// exist), otherwise the user's saved default view, otherwise none. Returns
 /// the view together with its name so warnings can point at the right view.
+/// Resolution uses the effective overlay: the user's personal views over the
+/// project's admin-managed shared templates, personal winning by name.
 pub(crate) fn resolve_active_view(
     root: &Path,
     project_id: &str,
@@ -425,9 +427,9 @@ pub(crate) fn resolve_active_view(
     match view_name {
         Some(name) => {
             let name = slugify(name);
-            let view = views.views.get(&name).cloned().with_context(|| {
+            let view = views.effective_view(&name).cloned().with_context(|| {
                 format!(
-                    "Project {} has no saved view named {}. Create it with `knit view save {name}`.",
+                    "Project {} has no view named {} (saved or shared). Create it with `knit view save {name}`, or refresh shared templates with `knit sync pull --views`.",
                     out::repo(project_id),
                     out::repo(&name)
                 )
@@ -437,8 +439,7 @@ pub(crate) fn resolve_active_view(
         // A dangling default is ignored rather than blocking `bundle start`.
         None => Ok(views.default_view.as_ref().and_then(|name| {
             views
-                .views
-                .get(name)
+                .effective_view(name)
                 .cloned()
                 .map(|view| (name.clone(), view))
         })),
@@ -680,7 +681,7 @@ knit bundle "feature b" --repo backend
 
 Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead. Without a title, `knit bundle --cd [<repo>]` enters the resolved existing bundle the same way; a missing or unmaterialized worktree is an error pointing at `knit bundle worktree`, never a silently created branch.
 
-Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
+Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Project admins can also publish shared view templates everyone can use; personal views live under `.knit/views/<project>.views.json` and win over a template of the same name:
 
 ```sh
 knit view save backend --exclude frontend,docs
@@ -821,8 +822,8 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
-- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
-- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit sync push --views`/`knit sync pull --views` sync them to the sync remotes.
+- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles. Admin-managed shared templates are usable everywhere a saved view is (`--view`, defaults, `apply-view`, `clone --view`); saving a personal view with a template's name overrides it for you.
+- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views (`list`/`show` also surface shared templates; `rm` refuses template-only names — copy them with `knit view save <new> --from <template>` instead). `knit sync push --views`/`knit sync pull --views` sync the personal document to the sync remotes; a pull also refreshes the shared template cache.
 - `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.

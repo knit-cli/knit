@@ -496,6 +496,17 @@ fn push_project_to_one_remote(
     Ok(())
 }
 
+/// The `PUT /projects/:id/view` body for a local views artifact. The upload
+/// is the user's personal document only: shared admin-managed templates are
+/// cached beside it in the artifact but must never ride along — the server
+/// owns them, and re-uploading them would clobber admin edits.
+pub(super) fn views_upload_payload(views: &crate::model::KnitProjectViews) -> Value {
+    json!({
+        "defaultView": views.default_view,
+        "views": views.views,
+    })
+}
+
 /// Upload the local saved views for a project to the remote, if any exist.
 pub(super) fn upload_views(
     remote: &KnitRemote,
@@ -507,10 +518,7 @@ pub(super) fn upload_views(
     if views.views.is_empty() && views.default_view.is_none() {
         return Ok(());
     }
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         token,
@@ -528,10 +536,7 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let views = crate::store::load_views(&root, &project_id)?;
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         &token,
@@ -1026,6 +1031,12 @@ pub(super) fn publishable_project(
     Ok(Some(merged))
 }
 
+/// The explicit `knit project push` upsert. Reshaping a hosted project is an
+/// owner/admin action on the remote, so a 403 is the permission problem it
+/// is: reported clearly, never silently skipped (the caller asked for the
+/// shared shape to move) and never answered by POST-creating a personal
+/// duplicate of a project someone else owns. Only a 404 — the project does
+/// not exist — falls through to creation.
 fn upsert_project(
     root: &Path,
     remote: &KnitRemote,
@@ -1037,10 +1048,12 @@ fn upsert_project(
     let payload = project_payload(project_id, project.as_ref());
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
-    if response.status == 404 {
-        decode_response(request(remote, token, "POST", "/projects", Some(&payload))?)
-    } else {
-        decode_response(response)
+    match response.status {
+        404 => decode_response(request(remote, token, "POST", "/projects", Some(&payload))?),
+        403 => bail!(
+            "the sync remote refused to update project `{project_id}` (HTTP 403): `knit project push` requires project owner/admin permission and a token with project:write scope. Use `knit sync push` to upload bundle work and history with a writable project token."
+        ),
+        _ => decode_response(response),
     }
 }
 
@@ -1048,7 +1061,7 @@ fn upsert_project(
 /// or only address the project. Only the owner reshapes a project; a
 /// collaborator pushing a bundle must not fail on that, and must never
 /// POST-create a personal duplicate of a project someone else owns.
-enum ProjectShapePush {
+pub(super) enum ProjectShapePush {
     Pushed,
     ReadOnly,
 }
@@ -1083,9 +1096,8 @@ pub(super) fn upsert_project_for_history(
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
-) -> Result<RemoteProject> {
-    let (pushed, _shape) = upsert_or_fetch_project(root, remote, token, project_id, project)?;
-    Ok(pushed)
+) -> Result<(RemoteProject, ProjectShapePush)> {
+    upsert_or_fetch_project(root, remote, token, project_id, project)
 }
 
 /// A repository record as the sync remote lists it. `local_id` is the id the
@@ -1677,6 +1689,39 @@ mod tests {
     use super::{apply_artifact_force_fields, lease_mismatch_message, repo_identity};
     use crate::commands::push::PushForce;
     use serde_json::json;
+
+    #[test]
+    fn views_upload_payload_carries_the_personal_document_only() {
+        let mut views =
+            crate::model::KnitProjectViews::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        views.default_view = Some("backend".to_string());
+        views.views.insert(
+            "backend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::Default,
+                include: vec![],
+                exclude: vec!["frontend".to_string()],
+            },
+        );
+        views.templates.insert(
+            "all-frontend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::None,
+                include: vec!["frontend".to_string()],
+                exclude: vec![],
+            },
+        );
+        let payload = super::views_upload_payload(&views);
+        assert_eq!(
+            payload,
+            json!({
+                "defaultView": "backend",
+                "views": {"backend": {"exclude": ["frontend"]}},
+            })
+        );
+        // The shared template cache must never ride along in the PUT body.
+        assert!(payload.get("templates").is_none());
+    }
 
     fn base_payload() -> serde_json::Value {
         json!({"kind": "bundle", "payload": {}})

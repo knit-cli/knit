@@ -1,18 +1,25 @@
-//! `knit remote views` — list the current user's saved views for a remote
-//! project before cloning it, so a driver (like ivaldi) can offer
-//! `knit clone --view <name>` as a choice. Works outside any workspace using
-//! the same remote/token resolution as `knit clone`.
+//! `knit remote views` — list the views usable for `knit clone --view <name>`
+//! on a remote project before cloning it, so a driver (like ivaldi) can offer
+//! the names as choices. Works outside any workspace using the same
+//! remote/token resolution as `knit clone`.
+//!
+//! The listing is the **effective** view set: the user's personal views plus
+//! the project's admin-managed shared templates, with a personal view winning
+//! over a same-named template. Each entry carries its `source` so drivers can
+//! label template entries as shared.
 
-use super::client::request_json;
+use super::client::{fetch_project_export, request_json};
 use super::clone::{parse_clone_reference, resolve_remote_for_clone_classified};
 use super::{print_json_error_envelope, RemoteErrorKind, RemoteViews};
-use crate::model::{ProjectView, ViewBase};
+use crate::model::{ProjectView, ViewBase, ViewSource};
 use crate::output as out;
 use anyhow::{Context, Result};
 use serde::Serialize;
 
 /// Machine-readable `knit remote views --json` document. The shape is a
 /// contract with external drivers (ivaldi); change it only deliberately.
+/// `views` holds the effective set (personal overlaid on shared templates);
+/// the additive per-entry `source` field distinguishes the two.
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct RemoteViewsDocument {
@@ -27,6 +34,9 @@ struct RemoteViewsDocument {
 #[serde(rename_all = "camelCase")]
 struct RemoteViewsEntry {
     name: String,
+    /// `personal` is the caller's own saved view; `template` is an
+    /// admin-managed shared template.
+    source: &'static str,
     /// `default` seeds from the project's default repo set, `none` means the
     /// include list is the complete shape.
     base: &'static str,
@@ -76,27 +86,62 @@ fn fetch_remote_views_document(
             "No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN, or run `knit remote token <name> <token>`.",
         )
         .map_err(|error| (RemoteErrorKind::NoToken, error))?;
-    let (_owner, slug) = super::client::split_project_identifier(&reference.project_identifier);
+    let (owner, slug) = super::client::split_project_identifier(&reference.project_identifier);
+    // The views endpoint resolves a bare slug without an owner namespace, so
+    // an `owner/slug` reference must first be pinned to the immutable project
+    // id: the export endpoint is the one that honors `owner`, and slugs are
+    // ambiguous across owners.
+    let views_project_id = match owner {
+        Some(owner) => {
+            let export = fetch_project_export(&remote, Some(&token), &format!("{owner}/{slug}"))
+                .map_err(|error| (RemoteErrorKind::Http, error))?;
+            export.project.id.unwrap_or_else(|| slug.clone())
+        }
+        None => slug.clone(),
+    };
     let views: RemoteViews = request_json(
         &remote,
         &token,
         "GET",
-        &format!("/projects/{slug}/view"),
+        &format!("/projects/{views_project_id}/view"),
         None,
     )
     .map_err(|error| (RemoteErrorKind::Http, error))?;
+    let default_view = views.default_view.clone();
+    let effective = effective_entries(views);
     Ok(RemoteViewsDocument {
         remote: remote_name,
         url: remote.url,
         project: slug,
-        default_view: views.default_view,
-        views: views.views.into_iter().map(views_entry).collect(),
+        default_view,
+        views: effective,
     })
 }
 
-fn views_entry((name, view): (String, ProjectView)) -> RemoteViewsEntry {
+/// The effective entries of a remote views response: personal views plus
+/// templates not shadowed by a personal view of the same name, in name order.
+fn effective_entries(views: RemoteViews) -> Vec<RemoteViewsEntry> {
+    let mut entries: Vec<RemoteViewsEntry> = views
+        .views
+        .into_iter()
+        .map(|(name, view)| views_entry(name, view, ViewSource::Personal))
+        .collect();
+    let shadowed: Vec<String> = entries.iter().map(|entry| entry.name.clone()).collect();
+    entries.extend(
+        views
+            .templates
+            .into_iter()
+            .filter(|(name, _)| !shadowed.contains(name))
+            .map(|(name, view)| views_entry(name, view, ViewSource::Template)),
+    );
+    entries.sort_by(|left, right| left.name.cmp(&right.name));
+    entries
+}
+
+fn views_entry(name: String, view: ProjectView, source: ViewSource) -> RemoteViewsEntry {
     RemoteViewsEntry {
         name,
+        source: source.as_str(),
         base: match view.base {
             ViewBase::Default => "default",
             ViewBase::None => "none",
@@ -127,6 +172,9 @@ fn print_views_table(document: &RemoteViewsDocument) {
             " "
         };
         let mut delta = Vec::new();
+        if view.source == "template" {
+            delta.push("shared template".to_string());
+        }
         if view.base == "none" {
             delta.push("absolute".to_string());
         }
@@ -173,7 +221,10 @@ mod tests {
             url: "https://api.example.test".to_string(),
             project: "demo".to_string(),
             default_view: Some("backend".to_string()),
-            views: views.into_iter().map(views_entry).collect(),
+            views: views
+                .into_iter()
+                .map(|(name, view)| views_entry(name, view, ViewSource::Personal))
+                .collect(),
         };
         assert_eq!(
             serde_json::to_value(&document).unwrap(),
@@ -183,10 +234,68 @@ mod tests {
                 "project": "demo",
                 "defaultView": "backend",
                 "views": [
-                    {"name": "backend", "base": "default", "include": [], "exclude": ["frontend"]},
-                    {"name": "legacy", "base": "none", "include": ["api"], "exclude": []},
+                    {"name": "backend", "source": "personal", "base": "default", "include": [], "exclude": ["frontend"]},
+                    {"name": "legacy", "source": "personal", "base": "none", "include": ["api"], "exclude": []},
                 ],
             })
         );
+    }
+
+    #[test]
+    fn effective_entries_overlay_personal_over_templates_in_name_order() {
+        let mut personal = BTreeMap::new();
+        personal.insert(
+            "shared".to_string(),
+            ProjectView {
+                base: ViewBase::Default,
+                include: vec!["worker".to_string()],
+                exclude: vec![],
+            },
+        );
+        personal.insert(
+            "mine".to_string(),
+            ProjectView {
+                base: ViewBase::Default,
+                include: vec![],
+                exclude: vec!["docs".to_string()],
+            },
+        );
+        let mut templates = BTreeMap::new();
+        templates.insert(
+            "alpha".to_string(),
+            ProjectView {
+                base: ViewBase::None,
+                include: vec!["api".to_string()],
+                exclude: vec![],
+            },
+        );
+        templates.insert(
+            // Shadowed by the personal view of the same name.
+            "shared".to_string(),
+            ProjectView {
+                base: ViewBase::None,
+                include: vec!["api".to_string()],
+                exclude: vec![],
+            },
+        );
+        let entries = effective_entries(RemoteViews {
+            default_view: None,
+            views: personal,
+            templates,
+        });
+        let names: Vec<(&str, &str)> = entries
+            .iter()
+            .map(|entry| (entry.name.as_str(), entry.source))
+            .collect();
+        assert_eq!(
+            names,
+            vec![
+                ("alpha", "template"),
+                ("mine", "personal"),
+                ("shared", "personal"),
+            ]
+        );
+        // The shadowed template yields the personal shape.
+        assert_eq!(entries[2].include, vec!["worker".to_string()]);
     }
 }
