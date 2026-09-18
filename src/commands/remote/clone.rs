@@ -5,7 +5,7 @@
 use super::client::{
     configured_sync_remote_names, fast_forward_feature_checkouts, fetch_project_export,
     localize_bundle, normalize_base_url, prepare_feature_branches, resolve_export_bundle_payload,
-    token_from_env,
+    token_from_env, PrepareBranchesError,
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
@@ -58,6 +58,13 @@ pub(super) struct CloneDocument {
     bundles: CloneDocumentBundles,
     active_bundle: Option<String>,
     worktrees_materialized: bool,
+    /// Non-fatal problems the completed clone carries, each with its
+    /// recovery path; omitted when there are none. Currently one kind:
+    /// `bundleBranchMissing` — the auto-selected open bundle was imported
+    /// but not activated because its origin no longer has the listed
+    /// feature branches.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    warnings: Vec<CloneWarning>,
 }
 
 #[derive(Debug, Serialize)]
@@ -97,6 +104,29 @@ struct CloneDocumentBundles {
 pub(super) struct DroppedBundle {
     pub(super) id: String,
     pub(super) missing_repos: Vec<String>,
+}
+
+/// A non-fatal problem the clone completed despite, printed for humans as a
+/// warning and reported to `--json` drivers through `CloneDocument::warnings`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloneWarning {
+    /// Machine-readable kind drivers switch on: `bundleBranchMissing`.
+    kind: &'static str,
+    /// The explanation with its recovery path, as printed for humans.
+    message: String,
+    /// The bundle that was imported but not activated.
+    bundle_id: String,
+    /// The feature branches per repo that no longer exist on their origins.
+    missing_branches: Vec<CloneMissingBranch>,
+}
+
+/// One repo/branch pair behind a [`CloneWarning`].
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct CloneMissingBranch {
+    repo_id: String,
+    branch: String,
 }
 
 /// Name of the absolute view `knit clone --repo` saves so a hand-picked
@@ -644,7 +674,77 @@ pub(super) fn clone_fetched_export(
         &export.decoded_history_events(&project.id),
     )?;
 
-    let selected_bundle_id = select_active_bundle(&bundles, &out_of_scope_bundles, active_bundle)?;
+    let mut selected_bundle_id =
+        select_active_bundle(&bundles, &out_of_scope_bundles, active_bundle)?;
+    // Materialize before the final config is written, so a bundle that
+    // cannot be activated is never recorded as the workspace's active
+    // selection. With no `--active-bundle`, a bundle whose feature branch
+    // its origin genuinely no longer has completes the clone with a warning
+    // instead of failing it: the imported artifact stays on disk for
+    // recovery and history, no replacement branches or worktrees are
+    // invented, and nothing is activated. An explicit `--active-bundle`
+    // asking for such a bundle is a real error naming the recovery path.
+    // Every other failure — authentication, network, unexpected git state —
+    // still fails the clone.
+    let mut worktrees_materialized = false;
+    let mut activation_warning: Option<CloneWarning> = None;
+    if materialize {
+        if let Some(bundle_id) = selected_bundle_id.clone() {
+            match import_bundle_worktrees(&target_root, &bundle_id) {
+                Ok(()) => worktrees_materialized = true,
+                Err(PrepareBranchesError::MissingRemoteBranches(missing)) => {
+                    let detail = missing
+                        .iter()
+                        .map(|entry| entry.summary())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    let artifact = bundle_path(&target_root, &bundle_id);
+                    // `knit bundle pull` (not `bundle worktree`): it strictly
+                    // fetches and prepares the recorded branches, while
+                    // `bundle worktree` would silently fork a replacement
+                    // branch from the base when the fetch still fails.
+                    // Pulling goes through the sync remote, so an anonymous
+                    // clone says which token it will need.
+                    let token_note = if token.is_some() {
+                        String::new()
+                    } else {
+                        format!(
+                            " Pulling needs a sync remote token: set KNIT_REMOTE_TOKEN or run `knit remote token {remote_name} <token>`."
+                        )
+                    };
+                    let kept_and_recover = format!(
+                        "the clone otherwise succeeded and the bundle artifact was kept at {}. Restore the branch on its origin (for example push it from a workspace that still has it), then run `knit bundle pull {bundle_id}` inside {}.{token_note}",
+                        artifact.display(),
+                        target_root.display()
+                    );
+                    if active_bundle.is_some() {
+                        bail!(
+                            "Bundle `{bundle_id}` cannot be activated: {detail}. The branch(es) were deleted on their origin or never pushed; {kept_and_recover}"
+                        );
+                    }
+                    selected_bundle_id = None;
+                    activation_warning = Some(CloneWarning {
+                        kind: "bundleBranchMissing",
+                        message: format!(
+                            "bundle `{bundle_id}` was imported but not activated: {detail}. The branch(es) were deleted on their origin or never pushed; no worktrees were created and no bundle is active. The bundle artifact was kept at {} for recovery and history. Restore the branch on its origin, then run `knit bundle pull {bundle_id}` inside {}.{token_note}",
+                            artifact.display(),
+                            target_root.display()
+                        ),
+                        bundle_id,
+                        missing_branches: missing
+                            .iter()
+                            .map(|entry| CloneMissingBranch {
+                                repo_id: entry.repo_id.clone(),
+                                branch: entry.branch.clone(),
+                            })
+                            .collect(),
+                    });
+                }
+                Err(other) => return Err(other.into()),
+            }
+        }
+    }
+
     let mut remotes = BTreeMap::new();
     remotes.insert(
         remote_name.clone(),
@@ -705,14 +805,6 @@ pub(super) fn clone_fetched_export(
         }
     }
 
-    let mut worktrees_materialized = false;
-    if materialize {
-        if let Some(bundle_id) = selected_bundle_id.as_deref() {
-            materialize_imported_bundle(&target_root, bundle_id)?;
-            worktrees_materialized = true;
-        }
-    }
-
     crate::human!(
         "{} {} {}",
         out::movement("cloned"),
@@ -751,6 +843,9 @@ pub(super) fn clone_fetched_export(
             out::repo(&dropped.id),
             dropped.missing_repos.join(", ")
         );
+    }
+    if let Some(warning) = &activation_warning {
+        crate::human!("{} {}", out::warn("Bundle not activated:"), warning.message);
     }
     if let Some(scope) = resolved_scope.as_ref() {
         crate::human!(
@@ -797,6 +892,7 @@ pub(super) fn clone_fetched_export(
         },
         selected_bundle_id,
         worktrees_materialized,
+        activation_warning.into_iter().collect(),
     ))
 }
 
@@ -1167,6 +1263,7 @@ fn clone_document(
     scope: CloneScopeOutcome,
     active_bundle: Option<String>,
     worktrees_materialized: bool,
+    warnings: Vec<CloneWarning>,
 ) -> CloneDocument {
     let out_of_scope: BTreeSet<&str> = scope
         .repos_out_of_scope
@@ -1239,6 +1336,7 @@ fn clone_document(
         },
         active_bundle,
         worktrees_materialized,
+        warnings,
     }
 }
 
@@ -2094,15 +2192,31 @@ fn select_active_bundle(
 }
 
 pub(super) fn materialize_imported_bundle(root: &Path, bundle_id: &str) -> Result<()> {
+    import_bundle_worktrees(root, bundle_id)?;
+    Ok(())
+}
+
+/// The work of [`materialize_imported_bundle`], with a feature-branch
+/// failure classified so the clone path can decide whether a bundle whose
+/// origin no longer carries its branch is fatal. Callers that propagate the
+/// error unchanged (bundle pull, handoff) go through
+/// [`materialize_imported_bundle`], where the typed error converts to the
+/// same anyhow message a plain `?` used to produce.
+fn import_bundle_worktrees(
+    root: &Path,
+    bundle_id: &str,
+) -> std::result::Result<(), PrepareBranchesError> {
     let bundle_path = bundle_path(root, bundle_id);
-    let bundle: ChangeGroup = read_json(&bundle_path)?;
+    let bundle: ChangeGroup = read_json(&bundle_path).map_err(PrepareBranchesError::Other)?;
     prepare_feature_branches(&bundle)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), bundle_path, bundle);
-    materialize_repos(&mut active, None)?;
-    fast_forward_feature_checkouts(&mut active)?;
-    let bundle_agents = write_bundle_worktree_agents_md(&active)?;
+    materialize_repos(&mut active, None).map_err(PrepareBranchesError::Other)?;
+    fast_forward_feature_checkouts(&mut active).map_err(PrepareBranchesError::Other)?;
+    let bundle_agents =
+        write_bundle_worktree_agents_md(&active).map_err(PrepareBranchesError::Other)?;
     print_bundle_worktree_agents_summary(bundle_agents.as_deref());
-    crate::store::save_active_bundle(&active)
+    crate::store::save_active_bundle(&active).map_err(PrepareBranchesError::Other)?;
+    Ok(())
 }
 
 pub(super) fn export_repo_local_id(repository: &RemoteExportRepository) -> String {
@@ -2444,6 +2558,7 @@ mod tests {
             },
             active_bundle: Some("feature-a".to_string()),
             worktrees_materialized: true,
+            warnings: Vec::new(),
         };
 
         let value = serde_json::to_value(&document).unwrap();
@@ -2470,6 +2585,41 @@ mod tests {
                 "worktreesMaterialized": true,
             })
         );
+        assert!(
+            !value.as_object().unwrap().contains_key("warnings"),
+            "an empty warning list must be omitted"
+        );
+
+        // A bundle whose feature branch its origin no longer has is reported
+        // as a warning instead of an active selection.
+        let document = CloneDocument {
+            active_bundle: None,
+            worktrees_materialized: false,
+            warnings: vec![CloneWarning {
+                kind: "bundleBranchMissing",
+                message: "bundle `feature-a` was imported but not activated".to_string(),
+                bundle_id: "feature-a".to_string(),
+                missing_branches: vec![CloneMissingBranch {
+                    repo_id: "backend".to_string(),
+                    branch: "knit/example-feature".to_string(),
+                }],
+            }],
+            ..document
+        };
+        let value = serde_json::to_value(&document).unwrap();
+        assert_eq!(
+            value["warnings"],
+            serde_json::json!([{
+                "kind": "bundleBranchMissing",
+                "message": "bundle `feature-a` was imported but not activated",
+                "bundleId": "feature-a",
+                "missingBranches": [
+                    {"repoId": "backend", "branch": "knit/example-feature"}
+                ],
+            }])
+        );
+        assert_eq!(value["activeBundle"], serde_json::Value::Null);
+        assert_eq!(value["worktreesMaterialized"], false);
     }
 
     #[test]
