@@ -1032,8 +1032,14 @@ fn partition_export_repositories(
     export: &RemoteProjectExport,
     scope: Option<&ResolvedCloneScope>,
 ) -> (Vec<RemoteExportRepository>, Vec<String>, Vec<String>) {
+    let membership = export
+        .knit_project
+        .as_ref()
+        .filter(|project| !project.repos.is_empty());
     let Some(scope) = scope else {
-        return (export.repositories.clone(), Vec::new(), Vec::new());
+        let mut all = export.repositories.clone();
+        apply_membership_base_branches(&mut all, membership);
+        return (all, Vec::new(), Vec::new());
     };
     let mut selected = Vec::new();
     let mut left_out = Vec::new();
@@ -1047,6 +1053,7 @@ fn partition_export_repositories(
             left_out.push(local_id);
         }
     }
+    apply_membership_base_branches(&mut selected, membership);
     // Scope ids the membership knows but the export carries no record for:
     // the caller reports them as failures rather than losing them.
     let unavailable = scope
@@ -1056,6 +1063,43 @@ fn partition_export_repositories(
         .cloned()
         .collect();
     (selected, left_out, unavailable)
+}
+
+/// Overlay the project membership's configured base branches onto exported
+/// repository records. A record's `defaultBranch` is the forge's own default
+/// branch — the server owns that fact — while `knitProject.repos[].baseBranch`
+/// is the authoritative branch this project integrates work into; conflating
+/// them silently rebases a project onto the forge default (forge `main` vs
+/// configured `release`). Records no membership entry claims keep the
+/// forge-owned default untouched.
+pub(super) fn apply_membership_base_branches(
+    repositories: &mut [RemoteExportRepository],
+    membership: Option<&KnitProject>,
+) {
+    let Some(membership) = membership else {
+        return;
+    };
+    for repository in repositories.iter_mut() {
+        let local_id = export_repo_local_id(repository);
+        let base = membership
+            .repos
+            .iter()
+            .find(|entry| entry.id == local_id)
+            .or_else(|| {
+                let remote_url = repository.remote_url.as_deref();
+                membership.repos.iter().find(|entry| {
+                    entry
+                        .remote
+                        .as_deref()
+                        .is_some_and(|remote| Some(remote) == remote_url)
+                })
+            })
+            .map(|entry| entry.base_branch.clone())
+            .filter(|base| !base.trim().is_empty());
+        if let Some(base) = base {
+            repository.default_branch = Some(base);
+        }
+    }
 }
 
 /// The workspace state written into the clone target before any repository is
@@ -2061,6 +2105,7 @@ pub(super) fn project_repo_entry_from_export(
             .default_branch
             .clone()
             .filter(|branch| !branch.trim().is_empty())
+            .or_else(|| detected_default_branch(repo_path))
             .unwrap_or_else(|| "main".to_string()),
         // Remote metadata is advisory; anything other than an explicit
         // `inPlace` falls back to the worktree default.
@@ -2070,6 +2115,27 @@ pub(super) fn project_repo_entry_from_export(
         },
         include_by_default: metadata_bool(&repository.metadata, "includeByDefault").unwrap_or(true),
     }
+}
+
+/// The default branch a checkout actually carries, for records whose
+/// server-side default was cleared and that no project membership base covers:
+/// the remote's own `origin/HEAD`, else whatever branch the clone left checked
+/// out. Never invents a branch name the forge did not report.
+fn detected_default_branch(repo_path: &Path) -> Option<String> {
+    if !is_git_worktree(repo_path) {
+        return None;
+    }
+    if let Ok(head) = git_output(
+        repo_path,
+        ["symbolic-ref", "--short", "refs/remotes/origin/HEAD"],
+    ) {
+        let trimmed = head.trim();
+        let branch = trimmed.strip_prefix("origin/").unwrap_or(trimmed);
+        if !branch.is_empty() {
+            return Some(branch.to_string());
+        }
+    }
+    current_branch(repo_path).ok().flatten()
 }
 
 /// Localize every exportable bundle onto the local project, dropping any bundle
@@ -2384,6 +2450,85 @@ mod tests {
             "failure should name the repo or the clone step: {}",
             failed[0].1
         );
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn membership_base_branches_overlay_forge_defaults() {
+        let mut membership = KnitProject::new("demo".to_string(), now_iso());
+        membership.repos.push(ProjectRepoEntry {
+            id: "backend".to_string(),
+            path: String::new(),
+            remote: None,
+            base_branch: "release".to_string(),
+            checkout_mode: CheckoutMode::Worktree,
+            include_by_default: true,
+        });
+        membership.repos.push(ProjectRepoEntry {
+            id: "renamed".to_string(),
+            path: String::new(),
+            remote: Some("https://github.com/acme/frontend.git".to_string()),
+            base_branch: String::new(),
+            checkout_mode: CheckoutMode::Worktree,
+            include_by_default: true,
+        });
+
+        let mut by_id = export_repo("backend", "https://github.com/acme/backend.git");
+        by_id.default_branch = Some("main".to_string());
+        let mut by_url = export_repo("frontend", "https://github.com/acme/frontend.git");
+        by_url.default_branch = Some("main".to_string());
+        let mut unknown = export_repo("docs", "https://github.com/acme/docs.git");
+        unknown.default_branch = Some("trunk".to_string());
+
+        let mut repositories = vec![by_id, by_url, unknown];
+        apply_membership_base_branches(&mut repositories, Some(&membership));
+
+        assert_eq!(repositories[0].default_branch.as_deref(), Some("release"));
+        assert_eq!(repositories[1].default_branch.as_deref(), Some("main"));
+        assert_eq!(repositories[2].default_branch.as_deref(), Some("trunk"));
+
+        apply_membership_base_branches(&mut repositories, None);
+        assert_eq!(repositories[0].default_branch.as_deref(), Some("release"));
+    }
+
+    #[test]
+    fn project_entry_detects_the_real_default_branch_when_the_record_has_none() {
+        let root = temp_dir("detected-default");
+        let source = root.join("source");
+        init_source_repo(&source);
+        let status = Command::new("git")
+            .args(["branch", "-m", "master"])
+            .current_dir(&source)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git branch -m master failed");
+        let target = root.join("workspace");
+        fs::create_dir_all(&target).unwrap();
+        assert!(Command::new("git")
+            .arg("clone")
+            .arg(&source)
+            .arg(target.join("app"))
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let checkout = target.join("app");
+
+        assert_eq!(
+            detected_default_branch(&checkout).as_deref(),
+            Some("master")
+        );
+        assert_eq!(detected_default_branch(&root.join("no-such-path")), None);
+
+        let mut record = export_repo("app", &source.to_string_lossy());
+        record.default_branch = None;
+        let entry = project_repo_entry_from_export(&record, &checkout);
+        assert_eq!(entry.base_branch, "master");
+
+        record.default_branch = Some("release".to_string());
+        let entry = project_repo_entry_from_export(&record, &checkout);
+        assert_eq!(entry.base_branch, "release");
 
         fs::remove_dir_all(root).unwrap();
     }

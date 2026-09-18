@@ -1568,7 +1568,6 @@ fn repository_payload(repo: &ProjectRepoEntry) -> Value {
         "owner": identity.owner,
         "name": identity.name,
         "full_name": identity.full_name,
-        "default_branch": repo.base_branch,
         "remote_url": repo.remote,
         "metadata": {
             "localId": repo.id,
@@ -1721,6 +1720,30 @@ mod tests {
         );
         // The shared template cache must never ride along in the PUT body.
         assert!(payload.get("templates").is_none());
+    }
+
+    #[test]
+    fn repository_payload_omits_default_branch_while_project_payload_keeps_base() {
+        let entry = crate::model::ProjectRepoEntry {
+            id: "backend".to_string(),
+            path: "../backend".to_string(),
+            remote: Some("https://github.com/acme/backend.git".to_string()),
+            base_branch: "release".to_string(),
+            checkout_mode: crate::model::CheckoutMode::Worktree,
+            include_by_default: true,
+        };
+        let repository = super::repository_payload(&entry);
+        assert!(repository.get("default_branch").is_none());
+        assert_eq!(repository["metadata"]["localId"], json!("backend"));
+
+        let mut project =
+            crate::model::KnitProject::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        project.repos.push(entry);
+        let pushed = super::project_payload("demo", Some(&project));
+        assert_eq!(
+            pushed["metadata"]["knitProject"]["repos"][0]["baseBranch"],
+            json!("release")
+        );
     }
 
     fn base_payload() -> serde_json::Value {

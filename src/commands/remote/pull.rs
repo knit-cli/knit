@@ -9,8 +9,8 @@ use super::client::{
     resolve_sync_remote_name, resolve_token, with_first_available_remote,
 };
 use super::clone::{
-    clone_export_repositories, export_repo_forge_missing, export_repo_local_id,
-    materialize_imported_bundle, project_repo_entry_from_export,
+    apply_membership_base_branches, clone_export_repositories, export_repo_forge_missing,
+    export_repo_local_id, materialize_imported_bundle, project_repo_entry_from_export,
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
@@ -327,9 +327,18 @@ fn reconcile_project_repositories(
     let existing: BTreeSet<String> = project.repos.iter().map(|repo| repo.id.clone()).collect();
     // Without authoritative membership, recovery uses local identity and
     // configuration, never possibly stale inventory with the same local id.
+    // With it, the membership's configured base branches overlay the
+    // inventory's forge-owned defaults before anything is planned or persisted:
+    // additions, retries, and recovery entries must record the project's base
+    // (forge `main` vs configured `release`), and a retry must never refresh an
+    // explicit local base down to the forge default.
     let local_records: Vec<_>;
+    let enriched_records: Vec<_>;
     let inventory = if authoritative {
-        &export.repositories
+        let mut records = export.repositories.clone();
+        apply_membership_base_branches(&mut records, export.knit_project.as_ref());
+        enriched_records = records;
+        &enriched_records
     } else {
         local_records = project.repos.iter().map(repository_from_entry).collect();
         &local_records

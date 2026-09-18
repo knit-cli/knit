@@ -1288,3 +1288,118 @@ fn clone_fails_when_the_bundle_branch_fetch_fails_for_an_unrelated_reason() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn clone_checks_out_and_records_the_membership_base_over_the_forge_default() {
+    let root = unique_temp_dir();
+    let source = root.join("backend-source");
+    init_repo(&source, "backend");
+    git(&source, ["checkout", "-b", "release"]);
+    fs::write(source.join("release.txt"), "release\n").unwrap();
+    git(&source, ["add", "release.txt"]);
+    git(&source, ["commit", "-m", "Release base"]);
+    git(&source, ["checkout", "main"]);
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "remote": source.to_string_lossy(), "baseBranch": "release"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "defaultBranch": "main",
+                 "remoteUrl": source.to_string_lossy(), "visibility": "public", "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+
+    assert!(success, "clone failed: {stdout}\n{stderr}");
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(target.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"][0]["baseBranch"], "release");
+    assert_eq!(
+        git(&target.join("backend"), ["branch", "--show-current"]).trim(),
+        "release"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_detects_the_real_default_branch_when_the_record_has_none() {
+    let root = unique_temp_dir();
+    let source = root.join("app-source");
+    init_repo(&source, "app");
+    git(&source, ["branch", "-m", "master"]);
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {"localId": "app", "name": "app", "defaultBranch": null,
+                 "remoteUrl": source.to_string_lossy(), "visibility": "public", "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }
+    });
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = root.join("workspace");
+
+    let (stdout, stderr, success) = knit_split_output(
+        &root,
+        &[
+            "clone",
+            "acme/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--no-worktree",
+            "--json",
+        ],
+        &[],
+    );
+
+    assert!(success, "clone failed: {stdout}\n{stderr}");
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(target.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(project["repos"][0]["baseBranch"], "master");
+    assert_eq!(
+        git(&target.join("app"), ["branch", "--show-current"]).trim(),
+        "master"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
