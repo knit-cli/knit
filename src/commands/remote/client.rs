@@ -4,7 +4,10 @@
 
 use super::{HttpResponse, RemoteBundleDetail, RemoteExportBundle, RemoteProjectExport};
 use crate::checkout::is_in_place;
-use crate::git::{branch_exists, current_branch, git_output, is_ancestor, ref_exists, rev_parse};
+use crate::git::{
+    branch_exists, current_branch, git_output, git_output_with_env, is_ancestor, ref_exists,
+    rev_parse,
+};
 use crate::ids::slugify;
 use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, RepoEntry};
 use crate::store::{
@@ -317,7 +320,70 @@ pub(super) fn localize_bundle(
     Ok(bundle)
 }
 
+#[derive(Debug)]
+pub(super) struct MissingRemoteBranch {
+    pub(super) repo_id: String,
+    pub(super) branch: String,
+    detail: String,
+}
+
+impl MissingRemoteBranch {
+    pub(super) fn summary(&self) -> String {
+        format!("{}: origin has no branch {}", self.repo_id, self.branch)
+    }
+}
+
+#[derive(Debug)]
+pub(super) struct MissingRemoteBranches(pub(super) Vec<MissingRemoteBranch>);
+
+impl std::fmt::Display for MissingRemoteBranches {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let details = self
+            .0
+            .iter()
+            .map(|entry| {
+                format!(
+                    "{}: failed to fetch origin/{}: {}",
+                    entry.repo_id, entry.branch, entry.detail
+                )
+            })
+            .collect::<Vec<_>>();
+        write!(f, "{}", details.join("; "))
+    }
+}
+
+impl std::error::Error for MissingRemoteBranches {}
+
+// Confirm the exact Git diagnostic against the remote before allowing clone to recover.
+fn origin_lacks_branch(repo_path: &Path, branch: &str, fetch_error: &str) -> bool {
+    let wrapper = format!(
+        "git fetch origin {branch} failed in {}: ",
+        repo_path.display()
+    );
+    let Some(stderr_text) = fetch_error.strip_prefix(&wrapper) else {
+        return false;
+    };
+    let fatal = format!("fatal: couldn't find remote ref {branch}");
+    if !stderr_text.lines().any(|line| line.trim() == fatal) {
+        return false;
+    }
+    match git_output_with_env(
+        repo_path,
+        [
+            "ls-remote".to_string(),
+            "origin".to_string(),
+            format!("refs/heads/{branch}"),
+        ],
+        &[("LC_ALL", "C")],
+    ) {
+        Ok(refs) => refs.trim().is_empty(),
+        Err(_) => false,
+    }
+}
+
 pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
+    // Fetch every repo before creating local branches: a skipped bundle stays unmaterialized.
+    let mut missing = Vec::new();
     for repo in &bundle.repos {
         let Some(branch) = repo.feature_branch.as_deref() else {
             continue;
@@ -328,8 +394,19 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
         }
 
         // Authentication comes from the installed Git credential helpers.
-        if let Err(error) = git_output(&repo_path, ["fetch", "origin", branch]) {
-            let error = if super::clone::is_auth_shaped_failure(&format!("{error:#}")) {
+        if let Err(error) =
+            git_output_with_env(&repo_path, ["fetch", "origin", branch], &[("LC_ALL", "C")])
+        {
+            let detail = format!("{error:#}");
+            if origin_lacks_branch(&repo_path, branch, &detail) {
+                missing.push(MissingRemoteBranch {
+                    repo_id: repo.id.clone(),
+                    branch: branch.to_string(),
+                    detail,
+                });
+                continue;
+            }
+            let error = if super::clone::is_auth_shaped_failure(&detail) {
                 anyhow::anyhow!("{error:#}; {}", super::credentials::NO_ACCESS_HINT)
             } else {
                 error
@@ -340,6 +417,20 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
         if !ref_exists(&repo_path, &remote_ref) {
             bail!("{}: fetched branch {remote_ref} was not found.", repo.id);
         }
+    }
+    if !missing.is_empty() {
+        return Err(MissingRemoteBranches(missing).into());
+    }
+
+    for repo in &bundle.repos {
+        let Some(branch) = repo.feature_branch.as_deref() else {
+            continue;
+        };
+        let repo_path = PathBuf::from(&repo.path);
+        if git_output(&repo_path, ["remote", "get-url", "origin"]).is_err() {
+            continue;
+        }
+        let remote_ref = format!("origin/{branch}");
         if !branch_exists(&repo_path, branch) {
             git_output(
                 &repo_path,
@@ -597,7 +688,71 @@ fn api_base_url(url: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::split_project_identifier;
+    use super::*;
+    use std::fs;
+    use std::process::Command;
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    fn temp_dir(tag: &str) -> PathBuf {
+        static COUNTER: AtomicU32 = AtomicU32::new(0);
+        let n = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let dir =
+            std::env::temp_dir().join(format!("knit-client-test-{tag}-{}-{n}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn run_git(cwd: &Path, args: &[&str]) {
+        let status = Command::new("git")
+            .args(args)
+            .current_dir(cwd)
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?} failed in {}", cwd.display());
+    }
+
+    fn clone_repo(source: &Path, target: &Path, bare: bool) {
+        let output = Command::new("git")
+            .args(["clone", "-q"])
+            .args(bare.then_some("--bare"))
+            .arg(source)
+            .arg(target)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn init_source_repo(path: &Path) {
+        fs::create_dir_all(path).unwrap();
+        run_git(path, &["init", "-q", "-b", "main"]);
+        run_git(path, &["config", "user.email", "test@example.com"]);
+        run_git(path, &["config", "user.name", "Test"]);
+        run_git(path, &["commit", "--allow-empty", "-q", "-m", "init"]);
+    }
+
+    fn repo_entry(id: &str, path: &Path, branch: &str) -> RepoEntry {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "path": path,
+            "baseBranch": "main",
+            "featureBranch": branch,
+        }))
+        .unwrap()
+    }
+
+    fn bundle_with(repo: RepoEntry) -> ChangeGroup {
+        let mut bundle = ChangeGroup::new(
+            "feature".into(),
+            "Feature".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        bundle.repos.push(repo);
+        bundle
+    }
 
     #[test]
     fn splits_owner_and_slug() {
@@ -635,5 +790,102 @@ mod tests {
             split_project_identifier("marc/"),
             (None, "marc".to_string())
         );
+    }
+
+    #[test]
+    fn missing_remote_branch_is_classified_without_partial_local_branches() {
+        let root = temp_dir("missing-remote");
+        let seed = root.join("seed");
+        init_source_repo(&seed);
+        let origin = root.join("origin.git");
+        clone_repo(&seed, &origin, true);
+        run_git(&origin, &["branch", "knit/kept", "main"]);
+        let kept = root.join("kept");
+        let gone = root.join("gone");
+        clone_repo(&origin, &kept, false);
+        clone_repo(&origin, &gone, false);
+
+        let mut bundle = bundle_with(repo_entry("kept-repo", &kept, "knit/kept"));
+        bundle
+            .repos
+            .push(repo_entry("gone-repo", &gone, "knit/gone"));
+
+        let error = prepare_feature_branches(&bundle).unwrap_err();
+        let missing = error
+            .downcast_ref::<MissingRemoteBranches>()
+            .map(|missing| missing.0.as_slice())
+            .expect("a genuinely absent branch classifies as missing");
+        assert_eq!(missing.len(), 1);
+        assert_eq!(missing[0].repo_id, "gone-repo");
+        assert_eq!(missing[0].branch, "knit/gone");
+        assert_eq!(
+            missing[0].summary(),
+            "gone-repo: origin has no branch knit/gone"
+        );
+        let message = format!("{error:#}");
+        assert!(
+            message.contains("couldn't find remote ref knit/gone"),
+            "{message}"
+        );
+        assert!(!branch_exists(&kept, "knit/kept"));
+        assert!(!branch_exists(&gone, "knit/gone"));
+
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn missing_ref_phrase_in_a_checkout_path_never_swallows_an_auth_failure() {
+        let root = temp_dir("phrase-auth");
+        let seed = root.join("seed");
+        init_source_repo(&seed);
+        run_git(&seed, &["branch", "knit/example-feature"]);
+        let origin = root.join("origin.git");
+        clone_repo(&seed, &origin, true);
+        let checkout = root.join("couldn't find remote ref");
+        clone_repo(&origin, &checkout, false);
+
+        let script = root.join("fake-uploadpack.sh");
+        fs::write(
+            &script,
+            "#!/bin/sh\necho 'fatal: Authentication failed for the repository' >&2\nexit 1\n",
+        )
+        .unwrap();
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mut permissions = fs::metadata(&script).unwrap().permissions();
+            permissions.set_mode(0o755);
+            fs::set_permissions(&script, permissions).unwrap();
+        }
+        run_git(
+            &checkout,
+            &[
+                "config",
+                "remote.origin.uploadpack",
+                script.to_str().unwrap(),
+            ],
+        );
+
+        let error = prepare_feature_branches(&bundle_with(repo_entry(
+            "app",
+            &checkout,
+            "knit/example-feature",
+        )))
+        .unwrap_err();
+        assert!(
+            error
+                .downcast_ref::<MissingRemoteBranches>()
+                .map(|missing| missing.0.as_slice())
+                .is_none(),
+            "an authentication failure must not classify as a missing branch"
+        );
+        let message = format!("{error:#}");
+        assert!(message.contains("Authentication failed"), "{message}");
+        assert!(
+            message.contains(super::super::credentials::NO_ACCESS_HINT),
+            "the auth-shaped failure keeps its access hint: {message}"
+        );
+
+        fs::remove_dir_all(root).unwrap();
     }
 }

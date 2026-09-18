@@ -1101,3 +1101,190 @@ fn clone_with_repo_scope_without_a_token_keeps_the_view_local_and_says_so() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+fn feature_remote(root: &Path) -> (String, std::path::PathBuf) {
+    let seed = root.join("app-seed");
+    init_repo(&seed, "app");
+    let origin = root.join("app.git");
+    git(
+        root,
+        [
+            "clone",
+            "--bare",
+            seed.to_str().unwrap(),
+            origin.to_str().unwrap(),
+        ],
+    );
+    let mut bundle = bundle_payload("example-feature", &["app"]);
+    bundle["repos"][0]["featureBranch"] = "knit/example-feature".into();
+    let export = serde_json::json!({"data": {
+        "project": {"slug": "demo"},
+        "repositories": [{"localId": "app", "name": "app", "defaultBranch": "main",
+            "remoteUrl": origin.to_string_lossy(), "metadata": {}}],
+        "bundles": [{"id": "rb-1", "slug": "example-feature", "lifecycleState": "open",
+            "currentArtifact": {"artifactHash": "hash-a", "payload": bundle}}],
+        "historyEvents": []
+    }});
+    (spawn_fake_remote_with_body(export.to_string()), origin)
+}
+
+fn clone_feature(root: &Path, url: &str, extra: &[&str]) -> (serde_json::Value, String, bool) {
+    let target = root.join("workspace");
+    let mut args = vec![
+        "clone",
+        "acme/demo",
+        target.to_str().unwrap(),
+        "--remote",
+        "hosted",
+        "--url",
+        url,
+        "--json",
+    ];
+    args.extend_from_slice(extra);
+    let (stdout, stderr, success) = knit_split_output(root, &args, &[]);
+    let document = serde_json::from_str(&stdout)
+        .unwrap_or_else(|error| panic!("invalid JSON ({error}): {stdout}\n{stderr}"));
+    (document, stderr, success)
+}
+
+fn active_selection(root: &Path) -> serde_json::Value {
+    let config: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(root.join("workspace/.knit/config.json")).unwrap(),
+    )
+    .unwrap();
+    config["activeBundle"].clone()
+}
+
+#[test]
+fn clone_completes_with_a_warning_when_the_bundle_branch_is_missing_from_origin() {
+    let root = unique_temp_dir();
+    let (url, origin) = feature_remote(&root);
+    let (document, stderr, success) = clone_feature(&root, &url, &[]);
+    assert!(success, "{document}\n{stderr}");
+    assert!(document["activeBundle"].is_null());
+    assert_eq!(document["worktreesMaterialized"], false);
+    assert_eq!(document["warnings"].as_array().unwrap().len(), 1);
+    let warning = &document["warnings"][0];
+    assert_eq!(warning["kind"], "bundleBranchMissing");
+    assert_eq!(warning["bundleId"], "example-feature");
+    assert_eq!(
+        warning["missingBranches"],
+        serde_json::json!([
+            {"repoId": "app", "branch": "knit/example-feature"}
+        ])
+    );
+    assert!(warning["message"]
+        .as_str()
+        .unwrap()
+        .contains("knit bundle pull example-feature"));
+    assert!(stderr.contains("Bundle not activated"), "{stderr}");
+    assert!(
+        stderr.contains("Pulling needs a sync remote token"),
+        "{stderr}"
+    );
+    assert!(active_selection(&root).is_null());
+    let workspace = root.join("workspace");
+    assert!(workspace
+        .join(".knit/bundles/example-feature.bundle.json")
+        .exists());
+    assert!(!workspace.join(".knit/worktrees/example-feature").exists());
+    assert!(git(
+        &workspace.join("app"),
+        ["branch", "--list", "knit/example-feature"]
+    )
+    .is_empty());
+
+    // Exercise the advertised recovery without cloning the project again.
+    let seed = root.join("app-seed");
+    git(&seed, ["branch", "knit/example-feature"]);
+    git(
+        &seed,
+        ["push", origin.to_str().unwrap(), "knit/example-feature"],
+    );
+    let (stdout, stderr, success) = knit_split_output(
+        &workspace,
+        &["bundle", "pull", "example-feature", "--json"],
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(success, "{stdout}\n{stderr}");
+    let worktree = workspace.join(".knit/worktrees/example-feature/app");
+    assert_eq!(
+        git(&worktree, ["branch", "--show-current"]).trim(),
+        "knit/example-feature"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_materializes_the_bundle_when_its_branch_exists_on_origin() {
+    let root = unique_temp_dir();
+    let (url, origin) = feature_remote(&root);
+    git(&origin, ["branch", "knit/example-feature", "main"]);
+    let (document, stderr, success) = clone_feature(&root, &url, &[]);
+    assert!(success, "{document}\n{stderr}");
+    assert_eq!(document["activeBundle"], "example-feature");
+    assert_eq!(active_selection(&root), "example-feature");
+    assert_eq!(document["worktreesMaterialized"], true);
+    assert!(document.get("warnings").is_none());
+    let worktree = root.join("workspace/.knit/worktrees/example-feature/app");
+    assert_eq!(
+        git(&worktree, ["branch", "--show-current"]).trim(),
+        "knit/example-feature"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_with_explicit_active_bundle_and_missing_branch_fails_with_recovery() {
+    let root = unique_temp_dir();
+    let (url, _) = feature_remote(&root);
+    let (document, stderr, success) =
+        clone_feature(&root, &url, &["--active-bundle", "example-feature"]);
+    assert!(!success, "{document}\n{stderr}");
+    assert_eq!(document["error"]["kind"], "other");
+    let message = document["error"]["message"].as_str().unwrap();
+    for expected in [
+        "cannot be activated",
+        "origin has no branch knit/example-feature",
+        "knit bundle pull example-feature",
+    ] {
+        assert!(message.contains(expected), "{message}");
+    }
+    assert!(active_selection(&root).is_null());
+    assert!(root
+        .join("workspace/.knit/bundles/example-feature.bundle.json")
+        .exists());
+    assert!(!root
+        .join("workspace/.knit/worktrees/example-feature")
+        .exists());
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn clone_fails_when_the_bundle_branch_fetch_fails_for_an_unrelated_reason() {
+    let root = unique_temp_dir();
+    let (url, origin) = feature_remote(&root);
+    // Adopt a checkout whose origin disappeared after cloning.
+    git(
+        &root,
+        [
+            "clone",
+            origin.to_str().unwrap(),
+            root.join("workspace/app").to_str().unwrap(),
+        ],
+    );
+    fs::remove_dir_all(origin).unwrap();
+    let (document, stderr, success) = clone_feature(&root, &url, &[]);
+    assert!(!success, "{document}\n{stderr}");
+    assert_eq!(document["error"]["kind"], "other");
+    let message = document["error"]["message"].as_str().unwrap();
+    assert!(
+        message.contains("failed to fetch origin/knit/example-feature"),
+        "{message}"
+    );
+    assert!(
+        message.contains("Could not read from remote repository"),
+        "{message}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
