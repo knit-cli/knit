@@ -11,6 +11,100 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Read a bundle's effective node sequence, including unmigrated legacy groups.
+/// Native node order is authoritative; missing groups are inserted by date.
+pub fn bundle_history_nodes(bundle: &ChangeGroup) -> Vec<BundleNode> {
+    let mut nodes = bundle.nodes.clone();
+    for group in &bundle.commit_groups {
+        if nodes.iter().any(|node| {
+            node.id == group.id
+                || (matches!(node.node_type.as_str(), "commit.group" | "revert.group")
+                    && node.commit_group_id.as_deref() == Some(group.id.as_str()))
+        }) {
+            continue;
+        }
+        let position = nodes
+            .iter()
+            .position(|node| {
+                crate::selectors::is_loggable_node(node)
+                    && match (
+                        chrono::DateTime::parse_from_rfc3339(&node.created_at),
+                        chrono::DateTime::parse_from_rfc3339(&group.created_at),
+                    ) {
+                        (Ok(node_time), Ok(group_time)) => node_time > group_time,
+                        _ => node.created_at > group.created_at,
+                    }
+            })
+            .unwrap_or(nodes.len());
+        nodes.insert(
+            position,
+            BundleNode::commit_group(
+                group.id.clone(),
+                group.created_at.clone(),
+                group.message.clone(),
+                group.commits.clone(),
+                Vec::new(),
+            ),
+        );
+    }
+    nodes
+}
+
+/// Derive a local snapshot using only portable recorded detail, without Git or writes.
+pub fn bundle_history_snapshot(bundle: &ChangeGroup) -> Vec<HistoryEvent> {
+    let mut snapshot = bundle.clone();
+    snapshot.nodes = bundle_history_nodes(bundle);
+    let mut lookup = CommitLookup::new(Path::new(""));
+    lookup.allow_git = false;
+    let project_id = bundle.project_id.as_deref().unwrap_or("");
+    let mut events = events_for_bundle(project_id, &snapshot, &mut lookup, None);
+    let represented = events
+        .iter()
+        .filter_map(|event| event.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    // Some loggable nodes (handoffs and unpinned checkpoints, for example)
+    // have no commit/lifecycle event projection. They remain inspectable.
+    for node in &snapshot.nodes {
+        if represented.contains(&node.id) || !crate::selectors::is_loggable_node(node) {
+            continue;
+        }
+        let repo_ids = node.repo_ids.clone().unwrap_or_default();
+        let targets = if repo_ids.is_empty() {
+            vec![None]
+        } else {
+            repo_ids.iter().map(|id| Some(id.as_str())).collect()
+        };
+        for repo_id in targets {
+            let id = history_event_id(&[
+                project_id,
+                &bundle.id,
+                repo_id.unwrap_or(""),
+                &node.id,
+                &node.node_type,
+                &node.node_type,
+                "",
+            ]);
+            events.push(history_event(
+                project_id,
+                bundle,
+                repo_id.and_then(|id| bundle.repos.iter().find(|repo| repo.id == id)),
+                id,
+                &node.node_type,
+                repo_id,
+                None,
+                None,
+                &node.id,
+                &node.node_type,
+                node.commit_group_id.as_deref(),
+                node.title.as_deref(),
+                node.message.as_deref().or(node.title.as_deref()),
+                &node.created_at,
+            ));
+        }
+    }
+    events
+}
+
 pub fn record_bundle_history(root: &Path, bundle: &ChangeGroup) -> Result<usize> {
     let Some(project_id) = history_project_id(root, bundle)? else {
         return Ok(0);
@@ -252,6 +346,7 @@ fn history_project_id(root: &Path, bundle: &ChangeGroup) -> Result<Option<String
 /// `commitDetails` answer first; anything older falls back to the repo's
 /// checkout, batched and cached so a sweep costs at most one git call per repo.
 struct CommitLookup {
+    allow_git: bool,
     root: PathBuf,
     checkouts: BTreeMap<String, Option<PathBuf>>,
     details: BTreeMap<(String, String), Option<CommitDetail>>,
@@ -260,6 +355,7 @@ struct CommitLookup {
 impl CommitLookup {
     fn new(root: &Path) -> Self {
         Self {
+            allow_git: true,
             root: root.to_path_buf(),
             checkouts: BTreeMap::new(),
             details: BTreeMap::new(),
@@ -291,6 +387,9 @@ impl CommitLookup {
     }
 
     fn prefetch(&mut self, repo: Option<&RepoEntry>, shas: &BTreeSet<String>) {
+        if !self.allow_git {
+            return;
+        }
         let Some(repo) = repo else {
             return;
         };

@@ -106,6 +106,8 @@ pub fn start_bundle(
     write_json(&bundle_path, &bundle)?;
 
     let setup_result = (|| -> Result<()> {
+        // Empty project bundles have no tracking step to save their creation
+        // event. Record it here, after repo selection has succeeded.
         if let Some(project_id) = &project_id {
             let selected = select_project_repos(
                 &root, project_id, repo_ids, all_repos, view, include, exclude,
@@ -120,6 +122,8 @@ pub fn start_bundle(
                     base_mode,
                 )?;
                 save_active_bundle(&active)?;
+            } else {
+                crate::history::record_bundle_history(&root, &bundle)?;
             }
         }
 
@@ -859,7 +863,9 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit check run <name>` records a project command verdict against the current bundle heads; `knit check status` reports whether the latest verdicts remain fresh.
-- `knit history list` shows project-wide recorded commit history; `knit related <repo-id>/path` joins Git file history back to Knit bundles and commit groups.
+- `knit log` inspects the current bundle; `knit log --all` queries locally recorded project history without selecting a bundle. Combine `--repo`, `--view`, `--kind`, `--since`, and `--grep`; use `--json` for scripts. Inspection is offline and does not refresh the ledger.
+- `knit log --all --repo api --repo web --repo-match all` finds recorded groups involving both repos. `--group bundle` matches whole bundles; `--full-context` includes companion repo details in matching entries.
+- `knit history list` remains the compatible flat event listing; `knit history refresh` explicitly records missing events from local bundles. `knit related <repo-id>/path` joins Git file history back to Knit bundles and commit groups.
 - `knit config set advice false` disables sparse `Next:` advice.
 - `knit config set auto-tag true` makes a successful `knit land apply` record a cross-repo known-good tag automatically.
 - `knit config set sync-remotes hosted` makes push-sync upload bundle artifacts to your configured sync remote.

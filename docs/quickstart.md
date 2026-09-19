@@ -114,6 +114,18 @@ kg_20260610_907b25  Add my feature across backend and frontend
   frontend   af3a6bb
 ```
 
+Inspect recorded work across the project locally with the same command:
+
+```sh
+knit log --all --repo backend --oneline -n 20
+knit log --all --view backend --since="2 weeks ago"
+```
+
+The second command uses a saved view named `backend`. History queries work
+offline and do not refresh or synchronize the ledger. See
+[local history queries](history-queries.md) for repository sets, grouping,
+message search, and JSON output.
+
 ## 7. Ship it
 
 From here the path depends on whether your repos have a code host.
