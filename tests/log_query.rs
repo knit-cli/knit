@@ -28,9 +28,15 @@ fn setup_history_workspace(root: &Path) -> PathBuf {
             "shared update",
         );
     }
-    knit(
+    // Project history uses Git author dates (second precision), not command order.
+    // Keep these commits distinct even when both commands finish in one second.
+    knit_with_env(
         &workspace,
         ["commit", "--all", "-m", "Shared history subject"],
+        &[
+            ("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"),
+            ("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"),
+        ],
     );
     knit(
         &workspace,
@@ -40,7 +46,7 @@ fn setup_history_workspace(root: &Path) -> PathBuf {
         &workspace.join(".knit/worktrees/frontend-followup/frontend/app.txt"),
         "followup",
     );
-    knit(
+    knit_with_env(
         &workspace,
         [
             "--bundle",
@@ -49,6 +55,10 @@ fn setup_history_workspace(root: &Path) -> PathBuf {
             "--all",
             "-m",
             "Frontend followup subject",
+        ],
+        &[
+            ("GIT_AUTHOR_DATE", "2026-01-01T00:00:01Z"),
+            ("GIT_COMMITTER_DATE", "2026-01-01T00:00:01Z"),
         ],
     );
     workspace
