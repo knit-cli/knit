@@ -2,16 +2,17 @@
 //! related query is about; [`related`] joins git file history with Knit
 //! history events and renders the cross-repo context.
 
+pub(crate) mod query;
 mod related;
 mod target;
 
 use crate::history::{
     format_history_event, load_history_events, rebuild_project_history, refresh_project_history,
 };
-use crate::ids::slugify;
+use crate::history_query::{query_project_history, HistoryGrouping, HistoryQuery};
 use crate::model::KnitProject;
 use crate::output as out;
-use crate::store::{find_knit_root, load_config, project_path, read_json};
+use crate::store::{project_path, read_json};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
@@ -29,35 +30,28 @@ pub fn show_history(
     bundle: Option<&str>,
     kinds: &[String],
 ) -> Result<()> {
-    let (root, project_id) = resolve_project(project)?;
-    let appended = refresh_project_history(&root, &project_id)?;
-    if appended > 0 {
-        println!(
-            "{} {} new event(s)",
-            out::heading("History refreshed:"),
-            appended
-        );
-    }
-
-    let mut events = load_history_events(&root, &project_id)?;
-    events.retain(|event| {
-        repo.is_none_or(|repo| event.repo_id.as_deref() == Some(repo))
-            && bundle.is_none_or(|bundle| event.bundle_id.as_deref() == Some(bundle))
-            && (kinds.is_empty() || kinds.iter().any(|kind| kind == &event.kind))
-    });
-    events.sort_by(|a, b| {
-        let a_time = a.occurred_at.as_deref().unwrap_or(&a.recorded_at);
-        let b_time = b.occurred_at.as_deref().unwrap_or(&b.recorded_at);
-        a_time.cmp(b_time).then(a.event_id.cmp(&b.event_id))
-    });
+    let (root, project_id) = query::resolve_query_project(project)?;
+    let query = HistoryQuery {
+        bundle_id: bundle.map(ToString::to_string),
+        repos: repo.map(|repo| vec![repo.to_string()]),
+        kinds: kinds.to_vec(),
+        grouping: HistoryGrouping::Event,
+        reverse: true,
+        limit: Some(limit),
+        ..HistoryQuery::default()
+    };
+    let entries = query_project_history(&root, &project_id, &query)?;
+    let events = entries
+        .into_iter()
+        .flat_map(|entry| entry.events)
+        .collect::<Vec<_>>();
 
     if events.is_empty() {
         println!("{}", out::muted("No history events recorded yet."));
         return Ok(());
     }
 
-    let start = events.len().saturating_sub(limit);
-    for event in events.into_iter().skip(start) {
+    for event in events {
         println!("{}", format_history_event(&event));
     }
     Ok(())
@@ -194,12 +188,5 @@ fn load_project(root: &Path, project_id: &str) -> Result<KnitProject> {
 }
 
 fn resolve_project(project: Option<&str>) -> Result<(std::path::PathBuf, String)> {
-    let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
-    let config = load_config(&root)?;
-    let project_id = project
-        .map(slugify)
-        .or(config.active_project)
-        .context("No active project selected. Pass --project or run `knit init <name>`.")?;
-    Ok((root, project_id))
+    query::resolve_query_project(project)
 }

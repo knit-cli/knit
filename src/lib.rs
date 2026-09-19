@@ -7,6 +7,7 @@ pub mod commands;
 pub mod git;
 mod git_fallback;
 pub mod history;
+pub mod history_query;
 pub mod ids;
 pub mod model;
 pub mod output;
@@ -27,7 +28,7 @@ use commands::PushForce;
 
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    LogArgs, ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
     SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
 };
 
@@ -831,17 +832,25 @@ pub fn run(cli: Cli) -> Result<()> {
             remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
-        Commands::Log {
-            limit,
-            shorthand_limit,
-        } => commands::show_log(limit, shorthand_limit.as_deref()),
+        Commands::Log { args } => commands::show_log(&args, bundle_context.as_deref()),
         Commands::Revert {
             target,
             plan: _,
             apply,
         } => commands::revert_target(&target, apply),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
-        Commands::Show { target } => commands::show_target(&target),
+        Commands::Show {
+            target,
+            all,
+            project,
+            json,
+        } => commands::show_target(
+            &target,
+            all,
+            project.as_deref(),
+            json,
+            bundle_context.as_deref(),
+        ),
         Commands::Config { command } => match command {
             ConfigCommand::Show { global } => commands::show_config(global),
             ConfigCommand::Set { key, value, global } => {

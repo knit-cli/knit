@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -29,6 +29,99 @@ pub enum GitCredentialOperation {
     Get,
     Store,
     Erase,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum HistoryRepoMatchArg {
+    #[default]
+    Any,
+    All,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum HistoryGroupArg {
+    Event,
+    #[default]
+    Commit,
+    Bundle,
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct LogArgs {
+    /// Inspect every locally recorded bundle in the selected project.
+    #[arg(long)]
+    pub all: bool,
+    /// Project id for --all. Defaults to the worktree bundle's project, then the workspace default.
+    #[arg(long, requires = "all")]
+    pub project: Option<String>,
+    /// Match history involving these repo ids. Repeat for multiple repos.
+    #[arg(short = 'r', long = "repo", value_name = "REPO")]
+    pub repos: Vec<String>,
+    /// Use a locally saved personal view or shared template as a repo filter.
+    #[arg(long, value_name = "NAME")]
+    pub view: Option<String>,
+    /// Match any selected repo, or require all selected repos in one history group.
+    #[arg(long = "repo-match", value_enum, default_value_t)]
+    pub repo_match: HistoryRepoMatchArg,
+    /// Group matching history by event, commit/node, or bundle.
+    #[arg(long, value_enum, default_value_t)]
+    pub group: HistoryGroupArg,
+    /// Limit to an event kind. Repeat for multiple kinds.
+    #[arg(long = "kind", value_name = "KIND")]
+    pub kinds: Vec<String>,
+    /// Show entries at or after this ISO date or relative date (plain dates mean midnight UTC).
+    #[arg(long, alias = "after", value_name = "DATE")]
+    pub since: Option<String>,
+    /// Show entries at or before this ISO date or relative date (plain dates mean midnight UTC).
+    #[arg(long, alias = "before", value_name = "DATE")]
+    pub until: Option<String>,
+    /// Match an entry message. Repeat to add patterns.
+    #[arg(long, value_name = "PATTERN")]
+    pub grep: Vec<String>,
+    /// Require every --grep pattern instead of any one pattern.
+    #[arg(long, requires = "grep")]
+    pub all_match: bool,
+    /// Match --grep patterns without regard to case.
+    #[arg(short = 'i', long = "regexp-ignore-case")]
+    pub ignore_case: bool,
+    /// Treat --grep patterns as literal strings.
+    #[arg(short = 'F', long = "fixed-strings")]
+    pub fixed_strings: bool,
+    /// Use extended regular expressions for --grep (default: Git basic syntax).
+    #[arg(
+        short = 'E',
+        long = "extended-regexp",
+        conflicts_with = "fixed_strings"
+    )]
+    pub extended_regexp: bool,
+    /// Print one line per history entry.
+    #[arg(long, conflicts_with = "json")]
+    pub oneline: bool,
+    /// Print a standalone JSON array of history entries.
+    #[arg(long, conflicts_with = "oneline")]
+    pub json: bool,
+    /// Reverse the selected, limited page.
+    #[arg(long)]
+    pub reverse: bool,
+    /// Skip this many matching entries before applying the count limit.
+    #[arg(long, default_value_t = 0)]
+    pub skip: usize,
+    /// Show at most COUNT entries.
+    #[arg(
+        short = 'n',
+        long = "max-count",
+        visible_alias = "limit",
+        value_name = "COUNT",
+        num_args = 0..=1,
+        default_missing_value = "10"
+    )]
+    pub limit: Option<usize>,
+    /// Keep other repos' event details in a matching multi-repo group.
+    #[arg(long = "full-context")]
+    pub full_context: bool,
+    /// Git-style shorthand for the latest N entries, for example `knit log -2`.
+    #[arg(value_name = "-COUNT", allow_negative_numbers = true)]
+    pub shorthand_limit: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -505,12 +598,8 @@ pub enum Commands {
     },
     /// Show bundle ledger entries.
     Log {
-        /// Show only the latest N log entries. With no value, defaults to 10.
-        #[arg(short = 'n', long = "limit", value_name = "COUNT", num_args = 0..=1, default_missing_value = "10")]
-        limit: Option<usize>,
-        /// Git-style shorthand for the latest N entries, for example `knit log -2`.
-        #[arg(value_name = "-COUNT", allow_hyphen_values = true)]
-        shorthand_limit: Option<String>,
+        #[command(flatten)]
+        args: LogArgs,
     },
     /// Revert a bundle log entry across its affected repos.
     Revert {
@@ -539,6 +628,15 @@ pub enum Commands {
     Show {
         /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
         target: String,
+        /// Resolve the selector across all locally recorded bundles in a project.
+        #[arg(long)]
+        all: bool,
+        /// Project id for --all.
+        #[arg(long, requires = "all")]
+        project: Option<String>,
+        /// Print the selected history entry as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Manage Knit workspace config.
     Config {
