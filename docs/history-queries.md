@@ -140,3 +140,26 @@ knit sync pull --history             # download recorded history from a sync rem
 
 `knit history list` remains available as a flat event listing for compatibility.
 It uses the same indexed query engine and does not implicitly refresh history.
+
+## Hosted history
+
+The project's History page offers the same repository-set selection: choose
+multiple repositories, match any or all, or select a saved view. Personal views
+override shared templates with the same name. Combining a view with explicit
+repositories takes their intersection; an empty intersection has no matches.
+
+In the Bundles reading, "all repositories" means they participated somewhere
+in the same bundle. In the Events reading, they must participate in the same
+recorded group. Companion context keeps other visible repositories in matching
+entries; turning it off narrows the displayed details. Search, date bounds,
+and existing entry filters remain available.
+
+The hosted date controls include the entire selected UTC day. CLI date-only
+bounds represent midnight UTC; use an explicit timestamp for a precise cutoff.
+
+Hosted filtering runs against the server's existing history database before
+pagination. Repository visibility still applies to every matching entry and
+companion event. The local SQLite cache is not uploaded: local inspection uses
+the locally preserved ledger, while the hosted page uses synchronized history.
+Run `knit sync push --history` or `knit sync pull --history` explicitly to move
+records between them.
