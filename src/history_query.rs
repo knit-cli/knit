@@ -2,6 +2,7 @@
 use crate::model::{ChangeGroup, HistoryEvent};
 use anyhow::{bail, Context, Result};
 use chrono::{DateTime, SecondsFormat, Utc};
+pub mod expression;
 mod grep;
 use rusqlite::{params, params_from_iter, types::Value, Connection, OptionalExtension};
 use serde::Serialize;
@@ -27,6 +28,7 @@ pub enum RepoMatch {
 }
 #[derive(Clone, Debug, Default)]
 pub struct HistoryQuery {
+    pub expression: Option<expression::Expression>,
     pub bundle_id: Option<String>,
     pub repos: Option<Vec<String>>,
     pub repo_match: RepoMatch,
@@ -327,6 +329,32 @@ fn query_sql(
     q: &HistoryQuery,
     node_chronology: bool,
 ) -> Result<(String, Vec<Value>)> {
+    let flags = rusqlite::functions::FunctionFlags::SQLITE_UTF8
+        | rusqlite::functions::FunctionFlags::SQLITE_DETERMINISTIC;
+    db.create_scalar_function("history_contains", 2, flags, |ctx| {
+        let payload: String = ctx.get(0)?;
+        let needle: String = ctx.get(1)?;
+        let event: HistoryEvent = serde_json::from_str(&payload)
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        Ok([
+            event.bundle_id,
+            event.bundle_title,
+            event.repo_id,
+            event.branch,
+            event.commit,
+            event.message,
+        ]
+        .iter()
+        .flatten()
+        .any(|s| s.to_lowercase().contains(&needle)))
+    })?;
+    db.create_scalar_function("history_activity", 1, flags, |ctx| {
+        let payload: String = ctx.get(0)?;
+        let event: HistoryEvent = serde_json::from_str(&payload)
+            .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
+        normalized(event.occurred_at.as_deref().unwrap_or(&event.recorded_at))
+            .map_err(|e| rusqlite::Error::UserFunctionError(e.into()))
+    })?;
     let mut values: Vec<Value> = Vec::new();
     let mut bind = |v: Value| {
         values.push(v);
@@ -412,6 +440,9 @@ fn query_sql(
             "({})",
             grep_clauses.join(if q.all_match { " AND " } else { " OR " })
         ));
+    }
+    if let Some(expression) = &q.expression {
+        filters.push(format!("({})", expression.sql(key, &mut bind)?));
     }
     let limit = bind(
         q.limit
@@ -535,6 +566,135 @@ mod tests {
     fn count(f: &Fixture) -> usize {
         f.query(&HistoryQuery::default()).len()
     }
+    #[test]
+    fn empty_text_matches_unscoped_events_without_searchable_fields() {
+        let f = Fixture::new();
+        let mut row = a();
+        row.bundle_id = None;
+        row.bundle_title = None;
+        row.repo_id = None;
+        row.branch = None;
+        row.commit = None;
+        row.message = None;
+        f.write(&[row]);
+        for (input, expected) in [(r#""""#, 1), (r#"NOT """#, 0)] {
+            assert_eq!(
+                f.query(&HistoryQuery {
+                    expression: expression::parse(input).unwrap(),
+                    ..Default::default()
+                })
+                .len(),
+                expected
+            );
+        }
+    }
+    #[test]
+    fn shared_boolean_fixtures_compile_and_execute() {
+        let fixtures: serde_json::Value =
+            serde_json::from_str(include_str!("../docs/history-query-v1.json")).unwrap();
+        let f = Fixture::new();
+        let mut events = Vec::new();
+        for unit in fixtures["units"].as_array().unwrap() {
+            for (n, row) in unit["events"].as_array().unwrap().iter().enumerate() {
+                let id = unit["id"].as_str().unwrap();
+                let mut e = event(
+                    &format!("{id}-{n}"),
+                    id,
+                    row["repo"].as_str().unwrap(),
+                    row["at"].as_str().unwrap(),
+                );
+                e.bundle_id = Some(unit["bundle"].as_str().unwrap().into());
+                e.bundle_title = Some(unit["title"].as_str().unwrap().into());
+                e.message = Some(row["message"].as_str().unwrap().into());
+                e.branch = Some(row["branch"].as_str().unwrap().into());
+                e.commit = Some(row["sha"].as_str().unwrap().into());
+                events.push(e);
+            }
+        }
+        f.write(&events);
+        assert_eq!(
+            f.query(&HistoryQuery {
+                expression: expression::parse(&"api ".repeat(256)).unwrap(),
+                ..Default::default()
+            })
+            .len(),
+            2
+        );
+        let parse = |input: &str| -> Result<Option<expression::Expression>> {
+            let mut e = expression::parse(input)?;
+            if let Some(e) = &mut e {
+                e.resolve_views(&mut |name| {
+                    let repos = fixtures["views"].get(name).context("unknown view")?;
+                    Ok(repos
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .map(|v| v.as_str().unwrap().into())
+                        .collect())
+                })?;
+            }
+            Ok(e)
+        };
+        for case in fixtures["cases"].as_array().unwrap() {
+            let input = case["query"].as_str().unwrap();
+            for full_context in [false, true] {
+                let q = HistoryQuery {
+                    expression: parse(input).unwrap(),
+                    full_context,
+                    ..Default::default()
+                };
+                let mut actual: Vec<_> = f.query(&q).into_iter().map(|e| e.id).collect();
+                actual.sort();
+                let expected: Vec<_> = case["matches"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|v| v.as_str().unwrap())
+                    .collect();
+                assert_eq!(actual, expected, "{input}");
+                let mut limited = q;
+                limited.limit = Some(1);
+                assert_eq!(f.query(&limited).len(), expected.len().min(1));
+            }
+        }
+        for field in ["invalid", "invalidViews"] {
+            for input in fixtures[field].as_array().unwrap() {
+                assert!(parse(input.as_str().unwrap()).is_err(), "{input}");
+            }
+        }
+        for (query, count) in [("repo:api AND repo:web", 0), ("until:2026-09-01", 1)] {
+            assert_eq!(
+                f.query(&HistoryQuery {
+                    expression: parse(query).unwrap(),
+                    grouping: HistoryGrouping::Event,
+                    ..Default::default()
+                })
+                .len(),
+                count
+            );
+        }
+        assert_eq!(
+            f.query(&HistoryQuery {
+                expression: parse("repo:api AND repo:web").unwrap(),
+                grouping: HistoryGrouping::Bundle,
+                ..Default::default()
+            })
+            .len(),
+            1
+        );
+        // Expression and legacy grep/repo/date constraints intersect independently.
+        assert_eq!(
+            f.query(&HistoryQuery {
+                expression: parse("repo:api").unwrap(),
+                grep: vec!["^Update".into()],
+                repos: Some(vec!["web".into()]),
+                ..Default::default()
+            })
+            .len(),
+            1
+        );
+    }
+
     #[test]
     fn cold_warm_append_and_no_canonical_writes() {
         let f = Fixture::new();
@@ -891,6 +1051,7 @@ mod tests {
         ] {
             for repo_match in [RepoMatch::Any, RepoMatch::All] {
                 let q = HistoryQuery {
+                    expression: expression::parse("(repo:api OR repo:web) AND update").unwrap(),
                     grouping,
                     repo_match,
                     repos: Some(if matches!(grouping, HistoryGrouping::Event) {
@@ -1210,6 +1371,30 @@ mod tests {
         assert_eq!(
             serde_json::to_value(&latest[0].events[0]).unwrap(),
             serde_json::to_value(original).unwrap()
+        );
+        let dated_expression = query_bundle_history(
+            &f.0,
+            &bundle,
+            &HistoryQuery {
+                expression: expression::parse("until:2020-01-01").unwrap(),
+                ..query.clone()
+            },
+        )
+        .unwrap();
+        assert_eq!(dated_expression.len(), 1);
+        assert_eq!(dated_expression[0].id, "node-observed");
+        assert_eq!(
+            query_bundle_history(
+                &f.0,
+                &bundle,
+                &HistoryQuery {
+                    expression: expression::parse("since:2026-01-01").unwrap(),
+                    ..query.clone()
+                }
+            )
+            .unwrap()[0]
+                .id,
+            "node-commit"
         );
         let previous = query_bundle_history(
             &f.0,

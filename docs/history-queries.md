@@ -143,19 +143,21 @@ It uses the same indexed query engine and does not implicitly refresh history.
 
 ## Hosted history
 
-The project's History page offers the same repository-set selection: choose
-multiple repositories, match any or all, or select a saved view. Personal views
-override shared templates with the same name. Combining a view with explicit
-repositories takes their intersection; an empty intersection has no matches.
+The project's History page accepts the same Boolean expressions as `--query`.
+Use `repo:api OR repo:web` for either repository, or `repo:api AND repo:web` for
+both. In the Bundles reading, these predicates select whole bundles; in the
+Events reading, they select recorded commit groups. Boolean selection keeps all
+visible companion events in matching entries.
 
-In the Bundles reading, "all repositories" means they participated somewhere
-in the same bundle. In the Events reading, they must participate in the same
-recorded group. Companion context keeps other visible repositories in matching
-entries; turning it off narrows the displayed details. Search, date bounds,
-and existing entry filters remain available.
+A `view:` predicate matches any current member of that effective saved view.
+Personal views override shared templates with the same name. For example,
+`repo:api AND view:backend` requires API participation and participation from a
+view member, which can be a different event in the same unit. The legacy CLI
+`--repo` and `--view` flags retain their repository-set intersection semantics.
 
-The hosted date controls include the entire selected UTC day. CLI date-only
-bounds represent midnight UTC; use an explicit timestamp for a precise cutoff.
+Expression date bounds include the entire selected UTC day in both the page and
+CLI. Legacy CLI `--since`/`--until` date-only bounds represent midnight UTC; use
+an explicit timestamp for a precise cutoff with those flags.
 
 Hosted filtering runs against the server's existing history database before
 pagination. Repository visibility still applies to every matching entry and
@@ -163,3 +165,47 @@ companion event. The local SQLite cache is not uploaded: local inspection uses
 the locally preserved ledger, while the hosted page uses synchronized history.
 Run `knit sync push --history` or `knit sync pull --history` explicitly to move
 records between them.
+
+## Boolean expressions
+
+Use `--query` on `knit log` (including `--all`) or `knit history list`:
+
+```sh
+knit log --all --query '(repo:api OR view:backend) AND NOT "retry timeout"'
+knit log --query 'repo:api repo:web since:2026-09-01 until:2026-09-30'
+knit history list --query 'bundle:release-a AND "Fix login"'
+```
+
+`NOT` binds more tightly than `AND`, which binds more tightly than `OR`.
+Adjacent terms mean `AND`; parentheses override precedence. Operators and field
+names are case-insensitive. Double quotes use JSON string escapes and make
+operator words literal (`"AND"`). Quote values containing colons. Only double
+quotes have syntax inside the expression; shell quoting is separate.
+
+Bare text searches literal, case-insensitive substrings of bundle ID/title,
+repo ID, branch, commit SHA, and message. `%`, `_`, and regex characters are
+literal. `repo:`, `bundle:`, and `view:` values are exact, case-sensitive IDs.
+Views use current project membership, with personal views overriding shared
+templates. All referenced views must exist, even inside an OR branch that
+already matches; an empty view matches nothing.
+
+Each leaf matches the whole selected grouping unit. Thus `repo:api AND repo:web`
+can match two different events in one commit or bundle. `NOT` excludes matching
+units. Boolean selection keeps companion events. Legacy CLI `--repo`/`--view`
+filters narrow displayed details; `--full-context` restores companions without
+changing qualification. Expression predicates combine with all legacy filters
+using AND; `--grep` keeps its independent Git pattern rules.
+
+Expression `since:` and `until:` require valid `YYYY-MM-DD` dates and compare the
+unit's latest event activity in UTC: each event uses `occurredAt`, falling back
+to `recordedAt` when absent. Both calendar days are inclusive. These use original
+event activity even when current-bundle log ordering uses
+ledger node dates. Legacy `--since`/`--until` retain their existing semantics.
+Reversed date conjunctions match nothing. Qualification happens before skip and
+limit; the disposable SQLite index never replaces the canonical JSONL ledger.
+
+Queries are limited to 4096 UTF-8 bytes, 256 tokens, and 32 nested parentheses or
+NOT operators. Invalid syntax reports a byte position. `match:` is replaced by
+AND/OR. `context:` is not a predicate: Boolean selection keeps companions.
+For legacy CLI `--repo`/`--view` detail narrowing, use `--full-context` to include
+companions.

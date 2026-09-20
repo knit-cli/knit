@@ -123,6 +123,23 @@ fn observed_commits_are_named_and_timed_by_the_commit_itself() {
         "{observed}"
     );
 
+    let queried: Vec<Value> = serde_json::from_str(&knit(
+        &workspace,
+        [
+            "log",
+            "--query",
+            "repo:backend AND since:2026-03-04 until:2026-03-04",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(queried.len(), 1);
+    assert_eq!(queried[0]["message"], "Fix seat map rounding");
+    assert_eq!(
+        queried[0]["events"][0]["occurredAt"],
+        observed["occurredAt"]
+    );
+
     let listing = knit(&workspace, ["history", "list", "-n", "50"]);
     assert!(listing.contains("Fix seat map rounding"), "{listing}");
     // The kind string is a fallback, not a message.

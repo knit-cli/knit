@@ -18,6 +18,10 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
     if args.all && global_bundle.is_some() {
         bail!("Global --bundle selects one bundle and cannot be combined with `log --all`.");
     }
+    args.query
+        .as_deref()
+        .map(crate::history_query::expression::parse)
+        .transpose()?;
     let limit = resolve_limit(args.limit, args.shorthand_limit.as_deref())?;
 
     if args.all {
@@ -26,7 +30,12 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
         let view_repos = resolve_view(&root, &project_id, args.view.as_deref())?;
         let repos =
             crate::commands::history::query::intersect_repo_filters(&args.repos, view_repos);
-        let query = build_query(args, &root, repos, limit)?;
+        let mut query = build_query(args, &root, repos, limit)?;
+        query.expression = crate::commands::history::query::expression(
+            &root,
+            Some(&project_id),
+            args.query.as_deref(),
+        )?;
         let entries = query_project_history(&root, &project_id, &query)?;
         return print_entries(&entries, args, true);
     }
@@ -44,7 +53,12 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
         None => None,
     };
     let repos = crate::commands::history::query::intersect_repo_filters(&args.repos, view_repos);
-    let query = build_query(args, &active.root, repos, limit)?;
+    let mut query = build_query(args, &active.root, repos, limit)?;
+    query.expression = crate::commands::history::query::expression(
+        &active.root,
+        active.bundle.project_id.as_deref(),
+        args.query.as_deref(),
+    )?;
     let entries = query_bundle_history(&active.root, &active.bundle, &query)?;
     if !args.json {
         crate::commands::handoff::print_location(&active.bundle);
@@ -121,6 +135,7 @@ fn print_bundle_entries(
         && args.view.is_none()
         && args.kinds.is_empty()
         && args.grep.is_empty()
+        && args.query.is_none()
         && args.since.is_none()
         && args.until.is_none()
         && !args.full_context

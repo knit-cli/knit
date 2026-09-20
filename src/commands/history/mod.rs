@@ -29,9 +29,14 @@ pub fn show_history(
     repo: Option<&str>,
     bundle: Option<&str>,
     kinds: &[String],
+    expression: Option<&str>,
 ) -> Result<()> {
+    expression
+        .map(crate::history_query::expression::parse)
+        .transpose()?;
     let (root, project_id) = query::resolve_query_project(project)?;
     let query = HistoryQuery {
+        expression: query::expression(&root, Some(&project_id), expression)?,
         bundle_id: bundle.map(ToString::to_string),
         repos: repo.map(|repo| vec![repo.to_string()]),
         kinds: kinds.to_vec(),
