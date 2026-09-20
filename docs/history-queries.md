@@ -143,18 +143,21 @@ It uses the same indexed query engine and does not implicitly refresh history.
 
 ## Hosted history
 
-The project's History page offers the same repository-set selection: choose
-multiple repositories, match any or all, or select a saved view. Personal views
-override shared templates with the same name. Combining a view with explicit
-repositories takes their intersection; an empty intersection has no matches.
+The project's History page accepts the same Boolean expressions as `--query`.
+Use `repo:api OR repo:web` for either repository, or `repo:api AND repo:web` for
+both. In the Bundles reading, these predicates select whole bundles; in the
+Events reading, they select recorded commit groups. Boolean selection keeps all
+visible companion events in matching entries.
 
-In the Bundles reading, "all repositories" means they participated somewhere
-in the same bundle. In the Events reading, they must participate in the same
-recorded group. Boolean selection keeps all visible companion events in matching
-entries. Search, date bounds, and existing entry filters remain available.
+A `view:` predicate matches any current member of that effective saved view.
+Personal views override shared templates with the same name. For example,
+`repo:api AND view:backend` requires API participation and participation from a
+view member, which can be a different event in the same unit. The legacy CLI
+`--repo` and `--view` flags retain their repository-set intersection semantics.
 
-The hosted date controls include the entire selected UTC day. CLI date-only
-bounds represent midnight UTC; use an explicit timestamp for a precise cutoff.
+Expression date bounds include the entire selected UTC day in both the page and
+CLI. Legacy CLI `--since`/`--until` date-only bounds represent midnight UTC; use
+an explicit timestamp for a precise cutoff with those flags.
 
 Hosted filtering runs against the server's existing history database before
 pagination. Repository visibility still applies to every matching entry and
