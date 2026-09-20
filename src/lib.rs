@@ -796,8 +796,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::History { command } => match command {
             // `knit history --bundle x` reads as a filter, so the global bundle
             // flag stands in for the list filter when the subcommand omits it.
-            None => commands::show_history(None, 20, None, bundle_context.as_deref(), &[]),
+            None => commands::show_history(None, 20, None, bundle_context.as_deref(), &[], None),
             Some(HistoryCommand::List {
+                query,
                 limit,
                 repo,
                 bundle,
@@ -809,6 +810,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 repo.as_deref(),
                 bundle.or(bundle_context).as_deref(),
                 &kinds,
+                query.as_deref(),
             ),
             Some(HistoryCommand::Refresh { rebuild, project }) => {
                 commands::refresh_history(project.as_deref(), rebuild)

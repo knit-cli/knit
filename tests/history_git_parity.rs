@@ -138,3 +138,88 @@ fn failed_query_does_not_change_preserved_history() {
     assert_eq!(fs::read(&path).unwrap(), before);
     assert_eq!(knit_subjects(&workspace, &[]).len(), 5);
 }
+
+#[test]
+fn boolean_expression_cli_intersects_legacy_filters_and_validates_before_io() {
+    let (workspace, _) = histories();
+    assert_eq!(
+        knit_subjects(&workspace, &["--query", r#""Update api" AND NOT web"#]).len(),
+        1
+    );
+    assert_eq!(
+        knit_subjects(
+            &workspace,
+            &["--query", "[entry] OR web", "--grep", "^Cache"]
+        )
+        .len(),
+        1
+    );
+    assert_eq!(knit_subjects(&workspace, &["--query", "repo:API"]).len(), 0);
+    assert_eq!(
+        knit_subjects(
+            &workspace,
+            &["--query", "until:2026-01-02", "--max-count", "1"]
+        ),
+        vec!["Update web endpoint"]
+    );
+    let listed = knit(
+        &workspace,
+        ["history", "list", "--query", r#""Update api" AND NOT web"#],
+    );
+    assert!(listed.contains("Update api endpoint"), "{listed}");
+    assert!(!listed.contains("Update web endpoint"), "{listed}");
+    for args in [
+        vec!["log", "--all", "--query", "repo:api OR"],
+        vec!["history", "list", "--query", "repo:api OR"],
+    ] {
+        fs::write(
+            workspace.join(".knit/history/demo.history.jsonl"),
+            "broken JSON",
+        )
+        .unwrap();
+        assert!(knit_fails(&workspace, args).contains("expected a term"));
+    }
+}
+
+#[test]
+fn expression_views_use_exact_current_membership_and_personal_override() {
+    let (workspace, repo) = histories();
+    knit(
+        &workspace,
+        ["project", "add", "api", repo.to_str().unwrap()],
+    );
+    knit(&workspace, ["view", "save", "backend", "--include", "api"]);
+    let path = workspace.join(".knit/views/demo.views.json");
+    let mut views: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+    let mut personal = views["views"]["backend"].clone();
+    personal["base"] = json!("none");
+    personal["include"] = json!(["api", "removed"]);
+    personal["exclude"] = json!([]);
+    views["views"] = json!({"Backend": personal});
+    let mut template = personal.clone();
+    template["include"] = json!([]);
+    views["templates"] = json!({"Backend": template, "Empty": template});
+    fs::write(&path, serde_json::to_vec(&views).unwrap()).unwrap();
+    assert_eq!(
+        knit_subjects(&workspace, &["--query", "view:Backend"]).len(),
+        5
+    );
+    assert!(knit_subjects(&workspace, &["--query", "view:Empty"]).is_empty());
+    assert_eq!(
+        knit_subjects(&workspace, &["--query", "NOT view:Empty"]).len(),
+        5
+    );
+    for query in [
+        "view:backend",
+        "repo:api OR view:Missing",
+        "NOT (repo:api AND view:Missing)",
+    ] {
+        assert!(
+            knit_fails(&workspace, ["log", "--all", "--query", query]).contains("resolving view")
+        );
+    }
+    // A changed personal view takes effect immediately, without rewriting history.
+    views["views"]["Backend"]["exclude"] = json!(["api"]);
+    fs::write(&path, serde_json::to_vec(&views).unwrap()).unwrap();
+    assert!(knit_subjects(&workspace, &["--query", "view:Backend"]).is_empty());
+}

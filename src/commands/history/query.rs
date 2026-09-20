@@ -41,9 +41,17 @@ pub(crate) fn view_repo_ids(
     project: &KnitProject,
     name: &str,
 ) -> Result<Vec<String>> {
-    let name = slugify(name);
+    view_repo_ids_exact(root, project_id, project, &slugify(name))
+}
+
+fn view_repo_ids_exact(
+    root: &Path,
+    project_id: &str,
+    project: &KnitProject,
+    name: &str,
+) -> Result<Vec<String>> {
     let views = load_views(root, project_id)?;
-    let view = views.effective_view(&name).with_context(|| {
+    let view = views.effective_view(name).with_context(|| {
         format!(
             "Project `{project_id}` has no locally saved view or shared template named `{name}`."
         )
@@ -144,6 +152,26 @@ fn parse_date_at(value: &str, since: bool, now: DateTime<Utc>) -> Result<DateTim
     };
     let flag = if since { "--since" } else { "--until" };
     parsed.with_context(|| format!("Invalid {flag} date `{value}`. Use ISO 8601, YYYY-MM-DD (midnight UTC), now, today, yesterday, tomorrow, or `<number> seconds/minutes/hours/days/weeks/months/years ago`."))
+}
+
+/// Resolve every expression view, preserving exact identifier spelling.
+pub(crate) fn expression(
+    root: &Path,
+    project_id: Option<&str>,
+    input: Option<&str>,
+) -> Result<Option<crate::history_query::expression::Expression>> {
+    let mut expression = input
+        .map(crate::history_query::expression::parse)
+        .transpose()?
+        .flatten();
+    if let Some(expr) = &mut expression {
+        expr.resolve_views(&mut |name| {
+            let id = project_id.context("view: requires a project bundle")?;
+            let project = crate::commands::project::load_project_by_id(root, id)?;
+            view_repo_ids_exact(root, id, &project, name)
+        })?;
+    }
+    Ok(expression)
 }
 
 #[cfg(test)]

@@ -48,6 +48,9 @@ pub enum HistoryGroupArg {
 
 #[derive(Args, Clone, Debug, Default)]
 pub struct LogArgs {
+    /// Boolean history expression: NOT > AND > OR; adjacency means AND. Fields: repo, view, bundle, since, until.
+    #[arg(long, value_name = "EXPRESSION")]
+    pub query: Option<String>,
     /// Inspect every locally recorded bundle in the selected project.
     #[arg(long)]
     pub all: bool,
@@ -721,6 +724,9 @@ pub struct SyncTargetArgs {
 pub enum HistoryCommand {
     /// Show local project history.
     List {
+        /// Boolean expression (NOT > AND > OR); fields: repo, view, bundle, since, until.
+        #[arg(long, value_name = "EXPRESSION")]
+        query: Option<String>,
         /// Show only the latest N events.
         #[arg(short = 'n', long = "limit", default_value_t = 20)]
         limit: usize,
