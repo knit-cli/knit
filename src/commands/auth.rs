@@ -629,6 +629,7 @@ fn add(name: &str, spec: CredentialSpec, token_stdin: bool, replace: bool) -> Re
             token
         } else {
             require_terminal()?;
+            println!("{}", permission_help(&spec.provider));
             rpassword::prompt_password("Token (hidden): ").context("Could not read token")?
         };
         let token = token.trim();
@@ -1157,6 +1158,7 @@ pub(crate) fn guided_group_setup(
                     println!(
                         "Saved credentials override ordinary Git credential helpers and SSH for those repositories, so this failure does not establish that repository access is missing."
                     );
+                    println!("{}", permission_help(&spec.provider));
                     let token = read_token(&format!(
                         "Replacement token for {} (saved as a new local credential for {}; `{name}` keeps its token — hidden): ",
                         spec.host,
@@ -1578,10 +1580,10 @@ pub(crate) fn clone_group_setup(root: &Path, project: &KnitProject) -> Result<()
 
 fn permission_help(provider: &str) -> &'static str {
     match provider {
-        "github" => "Create a GitHub token with access to the repositories you will link. Choose fine-grained or classic according to the access you need; provider restrictions still apply. For publish/land: Contents and Pull requests read/write, Metadata read. Use a classic token if your access arrangement requires it. Administration is only needed for collaborator management.",
-        "bitbucket" => "Use a Bitbucket repository/project/workspace access token, or an Atlassian API token with Bitbucket repository and pull-request permissions. Reading needs read access; publish/land also need repository and pull-request write access. Create API tokens at https://id.atlassian.com/manage-profile/security/api-tokens .",
-        "gitlab" => "Create a GitLab token for these repositories. Publishing/landing needs API access and write_repository for HTTPS Git; read-only workflows need read_api and read_repository.",
-        _ => "Create a Forgejo token on this host for the selected repositories. Grant repository read access, plus repository write access for publish/land.",
+        "github" => "GitHub fine-grained PAT: select your repositories; Contents and Pull requests: Read + Write; Checks and Commit statuses: Read; Metadata: Read (automatic).\nOr use a classic PAT with repo. To change workflow files, add Workflows: Write (fine-grained) or workflow (classic).",
+        "bitbucket" => "Unscoped Atlassian API tokens don't work with Bitbucket.\nChoose 'Create API token with scopes' → Bitbucket → Repositories: Read + Write; Pull requests: Read + Write.",
+        "gitlab" => "GitLab personal access token: api (Git and merge requests).\nProject/group access token: api + write_repository; choose a role allowed to push and merge.",
+        _ => "Forgejo access token: write:repository (Git, pull requests, and checks).\nInclude the repositories you use; public-only tokens cannot access private repositories.",
     }
 }
 
