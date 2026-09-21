@@ -76,6 +76,20 @@ pub struct ProjectRuntime {
     pub database: Option<ProjectRuntimeDatabase>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ports: Option<ProjectRuntimePorts>,
+    /// Explicit endpoint bindings. Each one pins a consumer service's
+    /// environment key or build arg — a value holding a single
+    /// loopback-host endpoint (`localhost:<port>`, `127.0.0.1:<port>`,
+    /// `host.docker.internal:<port>`) — to a named target repo/service, so
+    /// the reference is rewired to that target's bundle-allocated port even
+    /// when duplicate source host ports make automatic wiring ambiguous.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bindings: Vec<RuntimeBinding>,
+    /// Seconds `knit run up` waits for stack startup before failing.
+    #[serde(
+        default = "default_startup_timeout_seconds",
+        skip_serializing_if = "is_default_startup_timeout_seconds"
+    )]
+    pub startup_timeout_seconds: u64,
     /// Path opened on the frontend port after `knit run status`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile_path: Option<String>,
@@ -92,9 +106,47 @@ impl Default for ProjectRuntime {
             mode: None,
             database: None,
             ports: None,
+            bindings: Vec::new(),
+            startup_timeout_seconds: default_startup_timeout_seconds(),
             profile_path: None,
         }
     }
+}
+
+/// One explicit endpoint binding: the consumer (`repo` + `service`) key
+/// that references a published endpoint, and the target endpoint it is
+/// pinned to. Exactly one of `environment`/`buildArg` must be set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeBinding {
+    /// Consumer repo id whose stack holds the referencing value.
+    pub repo: String,
+    /// Consumer compose service holding the referencing value.
+    pub service: String,
+    /// Environment key on the consumer service that holds the reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
+    /// Build arg on the consumer service that holds the reference
+    /// (serialized as `buildArg`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub build_arg: Option<String>,
+    /// The endpoint the reference is pinned to.
+    pub target: RuntimeEndpoint,
+}
+
+/// The target side of a [`RuntimeBinding`]: a repo's service and, when it
+/// publishes more than one host port, the container port identifying which
+/// one the binding means.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuntimeEndpoint {
+    pub repo: String,
+    pub service: String,
+    /// Container-side port disambiguator. Mandatory when the target
+    /// service publishes multiple host ports; otherwise inferred from the
+    /// single published port.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
 }
 
 fn default_runtime_kind() -> String {
@@ -103,6 +155,14 @@ fn default_runtime_kind() -> String {
 
 fn default_project_config_file() -> String {
     "knit.project.json".to_string()
+}
+
+fn default_startup_timeout_seconds() -> u64 {
+    120
+}
+
+fn is_default_startup_timeout_seconds(seconds: &u64) -> bool {
+    *seconds == default_startup_timeout_seconds()
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -134,6 +194,11 @@ pub struct ProjectRuntimeDatabase {
     /// database when it is unreachable (e.g. `docker compose up -d db`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub start_command: Option<Vec<String>>,
+    /// Transform stacks explicitly selected to attach to this shared database.
+    /// Empty requires matching database identity. Contract stacks that use
+    /// KNIT_DB_* must also belong to an explicit scope when one is configured.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub repos: Vec<String>,
 }
 
 fn default_database_host() -> String {
@@ -204,6 +269,7 @@ impl Default for ProjectRuntimeDatabase {
             service: None,
             container_port: None,
             start_command: None,
+            repos: Vec::new(),
         }
     }
 }

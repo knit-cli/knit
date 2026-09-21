@@ -199,9 +199,106 @@
               "minimum": 1,
               "maximum": 65535,
               "description": "Port the database listens on inside its container."
+            },
+            "repos": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1
+              },
+              "description": "Repositories whose stacks attach to this database configuration."
             }
           },
           "additionalProperties": false
+        },
+        "bindings": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "repo": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Consumer repo id whose stack holds the referencing value."
+              },
+              "service": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Consumer compose service holding the referencing value."
+              },
+              "environment": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Environment key on the consumer service that holds the reference. Exactly one of environment/buildArg."
+              },
+              "buildArg": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Build arg on the consumer service that holds the reference. Exactly one of environment/buildArg."
+              },
+              "target": {
+                "type": "object",
+                "properties": {
+                  "repo": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Repo id of the endpoint being bound to."
+                  },
+                  "service": {
+                    "type": "string",
+                    "minLength": 1,
+                    "description": "Compose service of the endpoint being bound to."
+                  },
+                  "port": {
+                    "type": "integer",
+                    "minimum": 1,
+                    "maximum": 65535,
+                    "description": "Container-side port disambiguator; mandatory when the target service publishes multiple host ports."
+                  }
+                },
+                "required": [
+                  "repo",
+                  "service"
+                ],
+                "additionalProperties": false
+              }
+            },
+            "required": [
+              "repo",
+              "service",
+              "target"
+            ],
+            "additionalProperties": false,
+            "oneOf": [
+              {
+                "required": [
+                  "environment"
+                ],
+                "not": {
+                  "required": [
+                    "buildArg"
+                  ]
+                }
+              },
+              {
+                "required": [
+                  "buildArg"
+                ],
+                "not": {
+                  "required": [
+                    "environment"
+                  ]
+                }
+              }
+            ]
+          },
+          "description": "Explicit endpoint bindings: consumer keys pinned to named target endpoints, rewired to the bundle-allocated ports even when duplicate source host ports make automatic wiring ambiguous."
+        },
+        "startupTimeoutSeconds": {
+          "type": "integer",
+          "minimum": 1,
+          "default": 120,
+          "description": "Seconds the runtime waits for stack startup before failing."
         },
         "ports": {
           "type": "object",

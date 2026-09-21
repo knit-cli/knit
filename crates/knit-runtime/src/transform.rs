@@ -29,6 +29,10 @@ use anyhow::{bail, Context, Result};
 use serde_json::{Map, Value};
 use std::path::{Path, PathBuf};
 
+/// Supported hosts for app-facing endpoint references. Keep the rewriter
+/// and reference collector on the same host list.
+const REFERENCE_HOSTS: [&str; 3] = ["localhost", "127.0.0.1", "host.docker.internal"];
+
 /// One published port of the transformed stack.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -61,7 +65,20 @@ pub type ComposeTransform = (Vec<ServicePort>, Vec<(u16, u16)>);
 /// host port to its bundle port. Returns the published ports and the
 /// `(old_host, new_host)` map so multi-stack runs can rewire references to
 /// THIS stack's ports inside sibling stacks.
+#[cfg(test)]
 pub fn transform_compose(
+    config: &mut Value,
+    repo_map: &[(PathBuf, PathBuf)],
+    allocate: PortAllocator<'_>,
+) -> Result<ComposeTransform> {
+    let result = prepare_compose(config, repo_map, allocate)?;
+    rewrite_extra_port_references(config, &result.1);
+    Ok(result)
+}
+
+/// Allocate published ports and remap paths without rewriting endpoint values.
+/// Multi-stack runs defer text rewrites until the complete registry is known.
+pub(crate) fn prepare_compose(
     config: &mut Value,
     repo_map: &[(PathBuf, PathBuf)],
     allocate: PortAllocator<'_>,
@@ -109,11 +126,6 @@ pub fn transform_compose(
         }
     }
 
-    // Second pass: rewrite textual references to remapped host ports in app
-    // configuration, now that the full port map is known (services commonly
-    // reference each other's published ports, e.g. CORS origins).
-    rewrite_service_port_references(services, &port_map);
-
     Ok((ports, port_map))
 }
 
@@ -144,13 +156,35 @@ pub fn strip_shared_database(
     host_port: u16,
     container_port: u16,
 ) -> bool {
+    rewrite_shared_database(config, service, host, host_port, container_port, true)
+}
+
+/// Rewrite database references after endpoint allocation without removing a service.
+pub(crate) fn rewrite_shared_database_references(
+    config: &mut Value,
+    service: &str,
+    host: &str,
+    host_port: u16,
+    container_port: u16,
+) {
+    rewrite_shared_database(config, service, host, host_port, container_port, false);
+}
+
+fn rewrite_shared_database(
+    config: &mut Value,
+    service: &str,
+    host: &str,
+    host_port: u16,
+    container_port: u16,
+    remove: bool,
+) -> bool {
     let Some(services) = config
         .get_mut("services")
         .and_then(|services| services.as_object_mut())
     else {
         return false;
     };
-    if services.remove(service).is_none() {
+    if remove && services.remove(service).is_none() {
         return false;
     }
 
@@ -480,19 +514,170 @@ fn transform_port(
 /// Rewrite `localhost:<old>`-style references to remapped host ports inside
 /// a string map (environment or build args). Heuristic by design: host ports
 /// shifted by the transform are otherwise invisible to app config.
+///
+/// The rewrite is one simultaneous pass over the original text: a port some
+/// earlier rule produced is never rescanned (no rewrite chains), and only
+/// complete `host:<full digit run>` tokens with a supported host match —
+/// never a hostname suffix like `api.localhost`, never a longer digit run
+/// like `localhost:80001` for old port `8000`.
 fn rewrite_port_references(values: &mut Map<String, Value>, port_map: &[(u16, u16)]) {
+    let remap: std::collections::BTreeMap<u16, u16> = port_map.iter().copied().collect();
     for value in values.values_mut() {
         let Some(text) = value.as_str() else {
             continue;
         };
-        let mut rewritten = text.to_string();
-        for (old, new) in port_map {
-            for host in ["localhost", "127.0.0.1", "host.docker.internal"] {
-                rewritten = rewritten.replace(&format!("{host}:{old}"), &format!("{host}:{new}"));
+        if let Some(rewritten) = rewrite_port_text(text, &remap) {
+            *value = Value::String(rewritten);
+        }
+    }
+}
+
+/// Rewrite every remapped port reference in one simultaneous pass, built
+/// strictly left-to-right from the original text. Returns `None` when
+/// nothing matches so untouched values keep their exact original form.
+/// Shared with the endpoint-binding rewriter so the automatic heuristic and
+/// explicit bindings can never disagree about what a reference is.
+pub(crate) fn rewrite_port_text(
+    text: &str,
+    remap: &std::collections::BTreeMap<u16, u16>,
+) -> Option<String> {
+    if remap.is_empty() {
+        return None;
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut copied = 0usize;
+    let mut changed = false;
+    for span in port_reference_spans(text) {
+        let Some(&new) = remap.get(&span.port) else {
+            continue;
+        };
+        out.push_str(&text[copied..span.digits_start]);
+        out.push_str(&new.to_string());
+        copied = span.digits_end;
+        changed = true;
+    }
+    if !changed {
+        return None;
+    }
+    out.push_str(&text[copied..]);
+    Some(out)
+}
+
+/// One supported-host port reference inside a string value. The span covers
+/// exactly the port's digit run, so a rewrite can replace the port alone and
+/// leave host, scheme, path, query, and userinfo untouched.
+#[derive(Debug, Clone)]
+pub(crate) struct PortReferenceSpan {
+    pub host: &'static str,
+    pub port: u16,
+    /// Byte offset of the first port digit.
+    pub digits_start: usize,
+    /// Byte offset one past the last port digit.
+    pub digits_end: usize,
+}
+
+/// Every supported-host `host:<digits>` reference in `text`, in text order.
+/// A supported host must be a complete token — the character before it, if
+/// any, is not alphanumeric and not one of `.`, `-`, `_` — and the port is
+/// the FULL digit run: `localhost:10001` references port 10001 (never
+/// 1000), and digit runs beyond the u16 range are not references at all.
+/// The reference collector, the automatic port rewriter, and the explicit
+/// endpoint-binding rewriter all share this scanner, so they can never
+/// disagree about what a reference is.
+pub(crate) fn port_reference_spans(text: &str) -> Vec<PortReferenceSpan> {
+    let mut spans = Vec::new();
+    for host in REFERENCE_HOSTS {
+        let marker = format!("{host}:");
+        for (index, _) in text.match_indices(&marker) {
+            // A supported host must be a complete token, not a suffix
+            // of a different hostname or address.
+            if text[..index]
+                .chars()
+                .next_back()
+                .is_some_and(|before| before.is_alphanumeric() || matches!(before, '.' | '-' | '_'))
+            {
+                continue;
+            }
+            let rest = &text[index + marker.len()..];
+            let digits: String = rest.chars().take_while(|c| c.is_ascii_digit()).collect();
+            if let Ok(port) = digits.parse::<u16>() {
+                spans.push(PortReferenceSpan {
+                    host,
+                    port,
+                    digits_start: index + marker.len(),
+                    digits_end: index + marker.len() + digits.len(),
+                });
             }
         }
-        if rewritten != text {
-            *value = Value::String(rewritten);
+    }
+    spans.sort_by_key(|span| span.digits_start);
+    spans
+}
+
+/// One `host:port` endpoint reference found in a service's environment or
+/// build args. Only the location, host, and port are captured — never the
+/// surrounding value — so diagnostics built from references cannot echo
+/// environment values (secrets included).
+#[derive(Debug, Clone)]
+pub(crate) struct PortReference {
+    pub service: String,
+    /// Where the reference lives: `"environment"` or `"build args"`.
+    pub field: &'static str,
+    pub key: String,
+    pub host: &'static str,
+    pub port: u16,
+}
+
+/// Collect every [`REFERENCE_HOSTS`]-hosted port reference from each
+/// service's environment values and build args. A port is only the full
+/// digit run following the host (`localhost:10001` refers to port 10001,
+/// not to 1000; ports outside the u16 range are ignored). Uses the exact
+/// scanner [`rewrite_port_references`] rewrites with, so collected
+/// references and rewritten references can never disagree; `knit run up`
+/// uses the result to reject references that cross-stack wiring cannot
+/// resolve.
+pub(crate) fn collect_port_references(config: &Value) -> Vec<PortReference> {
+    let mut references = Vec::new();
+    let Some(services) = config.get("services").and_then(Value::as_object) else {
+        return references;
+    };
+    for (service_name, service) in services {
+        let Some(service) = service.as_object() else {
+            continue;
+        };
+        if let Some(environment) = service.get("environment").and_then(Value::as_object) {
+            collect_port_references_into(environment, service_name, "environment", &mut references);
+        }
+        if let Some(args) = service
+            .get("build")
+            .and_then(Value::as_object)
+            .and_then(|build| build.get("args"))
+            .and_then(Value::as_object)
+        {
+            collect_port_references_into(args, service_name, "build args", &mut references);
+        }
+    }
+    references
+}
+
+fn collect_port_references_into(
+    values: &Map<String, Value>,
+    service: &str,
+    field: &'static str,
+    references: &mut Vec<PortReference>,
+) {
+    for (key, value) in values {
+        let Some(text) = value.as_str() else {
+            continue;
+        };
+        for span in port_reference_spans(text) {
+            references.push(PortReference {
+                service: service.to_string(),
+                field,
+                key: key.clone(),
+                host: span.host,
+                port: span.port,
+            });
         }
     }
 }
@@ -914,6 +1099,198 @@ mod tests {
         assert_eq!(
             relative_between(Path::new("/work"), Path::new("/work")).unwrap(),
             "."
+        );
+    }
+
+    #[test]
+    fn collect_port_references_reports_env_and_build_arg_hosts_only() {
+        let config = json!({
+            "services": {
+                "web": {
+                    "environment": {
+                        "API_URL": "http://localhost:8000/api",
+                        "DB_FROM_CONTAINERS": "postgres://host.docker.internal:5432/app",
+                        "LOOPBACK": "127.0.0.1:5173",
+                        "MULTI": "http://127.0.0.1:8000 and http://localhost:9000",
+                        "NO_HOST": "8000",
+                        "OTHER_HOST": "http://api.internal:8000",
+                        "OVERFLOW_DIGITS": "http://localhost:80001/x",
+                        "PREFIX_IN_RANGE": "http://localhost:10001/x",
+                        "COUNT": 7,
+                        "NULLISH": null
+                    },
+                    "build": {
+                        "args": {"API_ORIGIN": "http://127.0.0.1:8000"}
+                    }
+                },
+                "worker": {
+                    "environment": ["LEGACY=1"]
+                }
+            }
+        });
+
+        let references: Vec<(String, &'static str, String, &'static str, u16)> =
+            collect_port_references(&config)
+                .into_iter()
+                .map(|r| (r.service, r.field, r.key, r.host, r.port))
+                .collect();
+
+        // The full digit run is the port: `localhost:10001` is a reference
+        // to port 10001 (never to 1000), and `localhost:80001` is no u16
+        // port at all, so it is dropped rather than read as 8000.
+        // References are reported in text order.
+        assert_eq!(
+            references,
+            vec![
+                (
+                    "web".to_string(),
+                    "environment",
+                    "API_URL".to_string(),
+                    "localhost",
+                    8000
+                ),
+                (
+                    "web".to_string(),
+                    "environment",
+                    "DB_FROM_CONTAINERS".to_string(),
+                    "host.docker.internal",
+                    5432
+                ),
+                (
+                    "web".to_string(),
+                    "environment",
+                    "LOOPBACK".to_string(),
+                    "127.0.0.1",
+                    5173
+                ),
+                (
+                    "web".to_string(),
+                    "environment",
+                    "MULTI".to_string(),
+                    "127.0.0.1",
+                    8000
+                ),
+                (
+                    "web".to_string(),
+                    "environment",
+                    "MULTI".to_string(),
+                    "localhost",
+                    9000
+                ),
+                (
+                    "web".to_string(),
+                    "environment",
+                    "PREFIX_IN_RANGE".to_string(),
+                    "localhost",
+                    10001
+                ),
+                (
+                    "web".to_string(),
+                    "build args",
+                    "API_ORIGIN".to_string(),
+                    "127.0.0.1",
+                    8000
+                ),
+            ]
+        );
+    }
+
+    #[test]
+    fn collect_port_references_ignores_other_host_suffixes() {
+        for value in [
+            "http://api.localhost:8000",
+            "http://notlocalhost:8000",
+            "http://xhost.docker.internal:8000",
+            "http://1127.0.0.1:8000",
+            "http://dev-localhost:8000",
+            "http://dev_localhost:8000",
+        ] {
+            let config = json!({"services": {"web": {
+                "environment": {"API_URL": value},
+                "build": {"args": {"API_URL": value}}
+            }}});
+            assert!(collect_port_references(&config).is_empty(), "{value}");
+        }
+    }
+
+    #[test]
+    fn collect_port_references_handles_empty_shapes() {
+        assert!(collect_port_references(&json!({})).is_empty());
+        assert!(collect_port_references(&json!({"services": {}})).is_empty());
+        assert!(
+            collect_port_references(&json!({"services": {"web": {"image": "nginx"}}})).is_empty()
+        );
+        // No host marker at all: nothing collected.
+        assert!(collect_port_references(&json!({
+            "services": {"web": {"environment": {"URL": "http://api.internal:8000"}}}
+        }))
+        .is_empty());
+    }
+
+    #[test]
+    fn rewrite_port_references_is_simultaneous_and_exact_token() {
+        let remap =
+            |entries: &[(u16, u16)]| std::collections::BTreeMap::from_iter(entries.iter().copied());
+
+        // One pass only: 8000 -> 8010 is applied, and the produced 8010 is
+        // NOT rewritten again by the 8010 -> 8020 rule (no chains).
+        let chained = remap(&[(8000, 8010), (8010, 8020)]);
+        assert_eq!(
+            rewrite_port_text("http://localhost:8000/x", &chained).as_deref(),
+            Some("http://localhost:8010/x")
+        );
+        // Both occurrences of the same port rewrite together.
+        assert_eq!(
+            rewrite_port_text("a http://localhost:8000 b localhost:8000", &chained).as_deref(),
+            Some("a http://localhost:8010 b localhost:8010")
+        );
+
+        // A longer digit run is not the old port: `localhost:80001` never
+        // matches the 8000 rule.
+        assert_eq!(
+            rewrite_port_text("http://localhost:80001/x", &remap(&[(8000, 9000)])),
+            None
+        );
+
+        // Unsupported host prefixes are never rewritten, unlike the naive
+        // substring replace this scanner replaced.
+        assert_eq!(
+            rewrite_port_text("http://api.localhost:8000", &remap(&[(8000, 9000)])),
+            None
+        );
+        assert_eq!(
+            rewrite_port_text("http://notlocalhost:8000", &remap(&[(8000, 9000)])),
+            None
+        );
+        // But an ordinary supported reference in the same value rewrites.
+        assert_eq!(
+            rewrite_port_text(
+                "http://api.localhost:8000 http://127.0.0.1:8000",
+                &remap(&[(8000, 9000)])
+            )
+            .as_deref(),
+            Some("http://api.localhost:8000 http://127.0.0.1:9000")
+        );
+
+        // Only the port digits change: scheme, host, path, query, and
+        // userinfo survive untouched.
+        assert_eq!(
+            rewrite_port_text(
+                "postgres://user:secret@127.0.0.1:8000/app?sslmode=require",
+                &remap(&[(8000, 15432)])
+            )
+            .as_deref(),
+            Some("postgres://user:secret@127.0.0.1:15432/app?sslmode=require")
+        );
+
+        // Unrelated ports and empty maps leave the raw value alone.
+        assert_eq!(
+            rewrite_port_text("http://localhost:7000", &remap(&[(8000, 9000)])),
+            None
+        );
+        assert_eq!(
+            rewrite_port_text("http://localhost:8000", &remap(&[])),
+            None
         );
     }
 }

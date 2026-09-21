@@ -3,7 +3,9 @@
 //! wiring, host-port allocation across live runtimes, the `KNIT_*`
 //! environment contract, and database resolution.
 
+use crate::bindings::{self, BindingLocation, EndpointRegistry};
 use crate::config::{DatabaseMode, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::database::{self, SharedDatabaseAttachment};
 use crate::envfile;
 use crate::plan::StackPlan;
 use crate::state::{
@@ -35,6 +37,10 @@ enum Prepared {
         /// generated file. `None` when the local compose lacks the flag —
         /// values then stay inlined, as before.
         env_files: Option<BTreeMap<String, Vec<envfile::EnvFileRef>>>,
+        /// Endpoint references (`localhost:<port>` and friends) captured
+        /// from the resolved compose before port rewriting, so phase 2 can
+        /// tell authored references apart from values knit itself wrote.
+        references: Vec<transform::PortReference>,
     },
     Contract {
         profiles: Vec<String>,
@@ -64,12 +70,40 @@ pub(crate) fn run_up_stacks(
     runtime: &ProjectRuntime,
     plans: Vec<StackPlan>,
 ) -> Result<()> {
+    if runtime.startup_timeout_seconds == 0 {
+        bail!("runtime.startupTimeoutSeconds must be greater than zero");
+    }
+    if let Some(database) = &runtime.database {
+        for repo in &database.repos {
+            if !ctx.repos.iter().any(|known| &known.id == repo)
+                && !ctx.extra_checkouts.iter().any(|(known, _)| known == repo)
+            {
+                bail!("runtime.database.repos names unknown repository `{repo}`");
+            }
+        }
+    }
+    bindings::validate_bindings(&runtime.bindings)?;
+    for binding in &runtime.bindings {
+        for repo in [&binding.repo, &binding.target.repo] {
+            if !ctx.repos.iter().any(|known| &known.id == repo)
+                && !ctx.extra_checkouts.iter().any(|(known, _)| known == repo)
+            {
+                bail!("runtime.bindings names unknown repository `{repo}`");
+            }
+        }
+        if let Some(consumer) = plans.iter().find(|plan| plan.repo.id == binding.repo) {
+            if consumer.mode == RuntimeMode::Contract
+                || plans.iter().any(|plan| {
+                    plan.repo.id == binding.target.repo && plan.mode == RuntimeMode::Contract
+                })
+            {
+                bail!("runtime.bindings requires transform-mode stacks; binding from repo `{}` to `{}` includes a contract stack", binding.repo, binding.target.repo);
+            }
+        }
+    }
     let multi = plans.len() > 1;
     let running = running_compose_projects();
-    let previous_state = read_json::<RuntimeRunState>(
-        &runtime_run_dir(&ctx.root, &ctx.bundle_id).join("state.json"),
-    )
-    .ok();
+    let previous_state = load_allocations(&runtime_run_dir(&ctx.root, &ctx.bundle_id));
     // Other live bundles reserve their ports. This bundle's recorded ports
     // are handled separately as preferred allocations: when its compose
     // project is already running, Docker itself owns those listeners and a
@@ -95,8 +129,22 @@ pub(crate) fn run_up_stacks(
     let database_configured = runtime.database.is_some();
     let database_config = runtime.database.clone().unwrap_or_default();
     let mut shared_db_checked = false;
-    if let Some(contract) = plans.iter().find(|plan| plan.mode == RuntimeMode::Contract) {
-        if database_configured && database_config.mode == DatabaseMode::Shared {
+    for contract in plans
+        .iter()
+        .filter(|plan| plan.mode == RuntimeMode::Contract)
+    {
+        let uses_database = fs::read_to_string(&contract.compose)?.contains("${KNIT_DB_");
+        if uses_database
+            && !database_config.repos.is_empty()
+            && !database_config.repos.contains(&contract.repo.id)
+        {
+            bail!("Contract stack `{}` references KNIT_DB_* but is excluded by runtime.database.repos", contract.repo.id);
+        }
+        if uses_database
+            && database_configured
+            && database_config.mode == DatabaseMode::Shared
+            && !shared_db_checked
+        {
             ensure_shared_database_reachable(&database_config, &contract.checkout)?;
             shared_db_checked = true;
         }
@@ -104,6 +152,7 @@ pub(crate) fn run_up_stacks(
 
     // Phase 1: prepare every stack without starting docker.
     let mut ready: Vec<Ready> = Vec::new();
+    let mut original_configs: Vec<(String, Value)> = Vec::new();
     for plan in &plans {
         let reusable = previous_state
             .as_ref()
@@ -120,18 +169,32 @@ pub(crate) fn run_up_stacks(
                     transform::resolve_compose_config_no_env(&plan.compose, &source_dir)
                         .map(|unresolved| envfile::service_env_files(&unresolved))
                         .ok();
-                // Shared database: strip the db service BEFORE port
-                // reallocation, so references to the shared dev port are
-                // never rewritten away from it.
+                // Remove shared database services before allocating their ports.
+                // Keep authored database references until endpoint rewriting is
+                // finished so an unrelated source port cannot remap the shared DB.
                 let mut database: Option<StateDatabase> = None;
+                let attachment = database::shared_database_attachment(
+                    &plan.repo.id,
+                    &database_config,
+                    &database_config.repos,
+                    &config,
+                    multi,
+                );
                 if database_config.mode == DatabaseMode::Shared {
+                    if let SharedDatabaseAttachment::Keep(Some(reason)) = &attachment {
+                        println!("{} {reason}", out::heading("Database:"));
+                    }
+                }
+                if database_config.mode == DatabaseMode::Shared
+                    && attachment == SharedDatabaseAttachment::Attach
+                {
                     if let Some(service) = &database_config.service {
                         let container_port = database_config.container_port.unwrap_or(5432);
                         if transform::strip_shared_database(
                             &mut config,
                             service,
-                            &database_config.host,
-                            database_config.port,
+                            service,
+                            container_port,
                             container_port,
                         ) {
                             if !shared_db_checked {
@@ -146,6 +209,10 @@ pub(crate) fn run_up_stacks(
                         }
                     }
                 }
+                // Only remaining services can consume sibling endpoints. Capture
+                // references before port rewriting changes their authored ports.
+                let references = transform::collect_port_references(&config);
+                original_configs.push((plan.repo.id.clone(), config.clone()));
                 let mut preferred = reusable
                     .as_ref()
                     .map(|stack| stack.ports.clone())
@@ -175,7 +242,7 @@ pub(crate) fn run_up_stacks(
                         }
                     };
                 let (ports, port_map) =
-                    transform::transform_compose(&mut config, &repo_map, &mut allocate)?;
+                    transform::prepare_compose(&mut config, &repo_map, &mut allocate)?;
                 ready.push(Ready {
                     ports,
                     database,
@@ -183,6 +250,7 @@ pub(crate) fn run_up_stacks(
                         config,
                         port_map,
                         env_files,
+                        references,
                     },
                 });
             }
@@ -255,45 +323,134 @@ pub(crate) fn run_up_stacks(
         }
     }
 
-    // Phase 2: cross-stack wiring. References to a SIBLING stack's old
-    // published port are rewritten to its new bundle port, so stacks find
-    // each other's bundle instances instead of the dev ones. A stack's own
-    // ports were already rewritten in phase 1 and win; old ports that are
-    // ambiguous across siblings are left alone.
-    if multi {
-        let all_maps: Vec<Vec<(u16, u16)>> = ready
+    // Capture explicit dependencies before any textual port rewrite. Automatic
+    // own/sibling mappings are applied together exactly once to original values.
+    let captured = bindings::capture_binding_values(
+        &runtime.bindings,
+        &original_configs
             .iter()
-            .map(|entry| match &entry.prepared {
-                Prepared::Transform { port_map, .. } => port_map.clone(),
+            .map(|(repo, config)| (repo.clone(), config))
+            .collect::<Vec<_>>(),
+    )?;
+    let bound_locations: BTreeSet<BindingLocation> = captured.locations().cloned().collect();
+    {
+        // Per stack: (repo id, service, old host port, new host port) for
+        // every published port. Transform stacks only: contract stacks run
+        // as-is and never join cross-stack rewriting.
+        let all_wires: Vec<Vec<(String, String, u16, u16)>> = ready
+            .iter()
+            .zip(plans.iter())
+            .map(|(entry, plan)| match &entry.prepared {
+                Prepared::Transform { port_map, .. } => port_map
+                    .iter()
+                    .zip(entry.ports.iter())
+                    .map(|((old, new), port)| {
+                        (plan.repo.id.clone(), port.service.clone(), *old, *new)
+                    })
+                    .collect(),
                 Prepared::Contract { .. } => Vec::new(),
             })
             .collect();
+        let mut violations: Vec<String> = Vec::new();
         for (index, entry) in ready.iter_mut().enumerate() {
             let Prepared::Transform {
-                config, port_map, ..
+                config,
+                port_map,
+                references,
+                ..
             } = &mut entry.prepared
             else {
                 continue;
             };
             let own: BTreeSet<u16> = port_map.iter().map(|(old, _)| *old).collect();
-            let mut candidates: BTreeMap<u16, BTreeSet<u16>> = BTreeMap::new();
-            for (other_index, map) in all_maps.iter().enumerate() {
-                if other_index == index {
-                    continue;
-                }
-                for (old, new) in map {
-                    if !own.contains(old) {
-                        candidates.entry(*old).or_default().insert(*new);
-                    }
+            let mut siblings: Vec<(String, String, u16, u16)> = Vec::new();
+            for (other_index, wires) in all_wires.iter().enumerate() {
+                if other_index != index {
+                    siblings.extend(wires.iter().cloned());
                 }
             }
-            let cross: Vec<(u16, u16)> = candidates
-                .into_iter()
-                .filter_map(|(old, news)| {
-                    (news.len() == 1).then(|| (old, news.into_iter().next().unwrap()))
+            let unbound: Vec<_> = references
+                .iter()
+                .filter(|reference| {
+                    !bound_locations.contains(&BindingLocation {
+                        repo: plans[index].repo.id.clone(),
+                        service: reference.service.clone(),
+                        field: reference.field,
+                        key: reference.key.clone(),
+                    })
                 })
+                .cloned()
                 .collect();
+            let (mut cross, found) =
+                wire_cross_stack_ports(&plans[index].repo.id, &unbound, &own, &siblings);
+            cross.extend(port_map.iter().copied());
             transform::rewrite_extra_port_references(config, &cross);
+            violations.extend(found);
+        }
+        if !violations.is_empty() {
+            let mut message = String::from(
+                "Ambiguous cross-stack port references; no application stacks were started:\n",
+            );
+            for violation in &violations {
+                message.push_str(violation);
+                message.push('\n');
+            }
+            message.push_str(
+                "Declare the intended provider repo and service in runtime.bindings \
+                 for each consumer key. Knit then supplies the allocated port for \
+                 every bundle without changing Compose source ports.",
+            );
+            bail!("{message}");
+        }
+    }
+
+    if !captured.is_empty() {
+        let registry = EndpointRegistry::from_service_ports(
+            &plans
+                .iter()
+                .zip(&ready)
+                .map(|(plan, entry)| (plan.repo.id.clone(), entry.ports.as_slice()))
+                .collect::<Vec<_>>(),
+        );
+        let mut configs: Vec<_> = plans
+            .iter()
+            .zip(ready.iter_mut())
+            .filter_map(|(plan, entry)| match &mut entry.prepared {
+                Prepared::Transform { config, .. } => Some((plan.repo.id.clone(), config)),
+                Prepared::Contract { .. } => None,
+            })
+            .collect();
+        for binding in bindings::apply_binding_values(&captured, &registry, &mut configs)? {
+            println!(
+                "Binding: {}/{} {} {} -> {}/{} localhost:{}",
+                binding.location.repo,
+                binding.location.service,
+                binding.location.field,
+                binding.location.key,
+                binding.target_repo,
+                binding.target_service,
+                binding.port
+            );
+        }
+    }
+
+    for entry in &mut ready {
+        if entry
+            .database
+            .as_ref()
+            .is_some_and(|db| db.mode == DatabaseMode::Shared)
+        {
+            if let (Prepared::Transform { config, .. }, Some(service)) =
+                (&mut entry.prepared, &database_config.service)
+            {
+                transform::rewrite_shared_database_references(
+                    config,
+                    service,
+                    &database_config.host,
+                    database_config.port,
+                    database_config.container_port.unwrap_or(5432),
+                );
+            }
         }
     }
 
@@ -426,16 +583,24 @@ pub(crate) fn run_up_stacks(
         .iter()
         .flat_map(|stack| stack.ports.clone())
         .collect();
-    if let (Some(profile), Some(frontend)) =
-        (runtime.profile_path.as_deref(), frontend_port(&all_ports))
-    {
-        println!(
-            "{} http://localhost:{}{}",
-            out::heading("Open:"),
-            frontend,
-            profile
-        );
-    }
+
+    // Persist allocations before launching: retries reuse ports even when
+    // readiness fails. This file is not a successful-run record.
+    let first = &stack_states[0];
+    let mut state = RuntimeRunState {
+        bundle_id: ctx.bundle_id.clone(),
+        stack_repo: first.repo.clone(),
+        mode: first.mode,
+        ports: all_ports.clone(),
+        database: stack_states.iter().find_map(|stack| stack.database.clone()),
+        compose_file: first.compose_file.clone(),
+        profiles: first.profiles.clone(),
+        env: first.env.clone(),
+        profile_path: runtime.profile_path.clone(),
+        started_at: String::new(),
+        stacks: stack_states.clone(),
+    };
+    write_json(&run_dir.join("allocations.json"), &state)?;
 
     for (plan, stack) in plans.iter().zip(&stack_states) {
         let mut command = Command::new("docker");
@@ -464,6 +629,31 @@ pub(crate) fn run_up_stacks(
                 "docker compose exited with status {status}. Clean up partial containers with `knit run down`.{hint}"
             );
         }
+    }
+
+    for (plan, stack) in plans.iter().zip(&stack_states) {
+        let compose_file = ctx.root.join(&stack.compose_file);
+        let report =
+            crate::readiness::verify_stack_startup(&crate::readiness::StackStartupCheck {
+                repo: &plan.repo.id,
+                project_name: &plan.project_name,
+                compose_file: &compose_file,
+                profiles: &stack.profiles,
+                env: &stack.env,
+                checkout: &plan.checkout,
+                timeout_seconds: runtime.startup_timeout_seconds,
+            })?;
+        println!("Ready: {} — {}", plan.repo.id, report.summary());
+    }
+    if let (Some(profile), Some(frontend)) =
+        (runtime.profile_path.as_deref(), frontend_port(&all_ports))
+    {
+        println!(
+            "{} http://localhost:{}{}",
+            out::heading("Open:"),
+            frontend,
+            profile
+        );
     }
 
     // App code that hardcodes a source port fails silently against a dead
@@ -496,24 +686,69 @@ pub(crate) fn run_up_stacks(
         );
     }
 
-    // Recorded only after every stack starts so a failed `up` does not leave
-    // phantom run state.
-    let first = &stack_states[0];
-    let state = RuntimeRunState {
-        bundle_id: ctx.bundle_id.clone(),
-        stack_repo: first.repo.clone(),
-        mode: first.mode,
-        ports: all_ports,
-        database: stack_states.iter().find_map(|stack| stack.database.clone()),
-        compose_file: first.compose_file.clone(),
-        profiles: first.profiles.clone(),
-        env: first.env.clone(),
-        profile_path: runtime.profile_path.clone(),
-        started_at: crate::support::now_iso(),
-        stacks: stack_states,
-    };
+    state.started_at = crate::support::now_iso();
     write_json(&run_dir.join("state.json"), &state)?;
     Ok(())
+}
+
+/// Cross-stack wiring for one transform stack. Sibling wires whose old host
+/// port the stack does not publish itself (`own`) become rewrite candidates:
+/// exactly one distinct sibling allocation rewrites the stack's references;
+/// more than one is ambiguous and unrewritable, so every authored reference
+/// to such a port is reported — the wiring would otherwise silently leave it
+/// on the dead dev port. Returns the unambiguous `(old, new)` rewrite map
+/// and violation descriptions naming the referencing repo/service/key, the
+/// original port, and each candidate sibling destination. Never includes
+/// environment values.
+fn wire_cross_stack_ports(
+    repo: &str,
+    references: &[transform::PortReference],
+    own: &BTreeSet<u16>,
+    siblings: &[(String, String, u16, u16)],
+) -> (Vec<(u16, u16)>, Vec<String>) {
+    let mut candidates: BTreeMap<u16, BTreeSet<u16>> = BTreeMap::new();
+    let mut detail: BTreeMap<u16, BTreeSet<(String, String, u16)>> = BTreeMap::new();
+    for (sibling_repo, service, old, new) in siblings {
+        if own.contains(old) {
+            continue;
+        }
+        candidates.entry(*old).or_default().insert(*new);
+        detail
+            .entry(*old)
+            .or_default()
+            .insert((sibling_repo.clone(), service.clone(), *new));
+    }
+    let cross: Vec<(u16, u16)> = candidates
+        .iter()
+        .filter(|(_, news)| news.len() == 1)
+        .map(|(old, news)| (*old, *news.iter().next().unwrap()))
+        .collect();
+    let mut violations = Vec::new();
+    for reference in references {
+        if candidates
+            .get(&reference.port)
+            .is_none_or(|news| news.len() <= 1)
+        {
+            continue;
+        }
+        let mut lines = String::new();
+        for (sibling_repo, service, new) in &detail[&reference.port] {
+            lines.push_str(&format!(
+                "\n  - repo `{sibling_repo}` service `{service}` -> localhost:{new}"
+            ));
+        }
+        violations.push(format!(
+            "- repo `{repo}` service `{}` {} key `{}` references `{}:{}`, but {} candidate destinations publish source host port {}:{lines}",
+            reference.service,
+            reference.field,
+            reference.key,
+            reference.host,
+            reference.port,
+            candidates[&reference.port].len(),
+            reference.port,
+        ));
+    }
+    (cross, violations)
 }
 
 /// Build the `KNIT_*` environment contract for a runtime: bundle identity,
@@ -771,6 +1006,12 @@ fn allocate_service_ports_with(
     }
 }
 
+fn load_allocations(run_dir: &Path) -> Option<RuntimeRunState> {
+    read_json(&run_dir.join("allocations.json"))
+        .or_else(|_| read_json(&run_dir.join("state.json")))
+        .ok()
+}
+
 fn load_used_ports(
     root: &Path,
     current_bundle_id: &str,
@@ -788,11 +1029,7 @@ fn load_used_ports(
         if bundle_id == current_bundle_id {
             continue;
         }
-        let state_path = entry.path().join("state.json");
-        if !state_path.exists() {
-            continue;
-        }
-        let Ok(state) = read_json::<RuntimeRunState>(&state_path) else {
+        let Some(state) = load_allocations(&entry.path()) else {
             continue;
         };
         let alive = running.contains(&compose_project_name(&bundle_id))
@@ -1151,5 +1388,142 @@ mod tests {
                 .unwrap();
 
         assert_eq!(allocated, preferred);
+    }
+
+    fn reference(
+        field: &'static str,
+        key: &str,
+        host: &'static str,
+        port: u16,
+    ) -> transform::PortReference {
+        transform::PortReference {
+            service: "web".to_string(),
+            field,
+            key: key.to_string(),
+            host,
+            port,
+        }
+    }
+
+    fn wire(
+        repo: &str,
+        references: &[transform::PortReference],
+        own: &[u16],
+        siblings: &[(String, String, u16, u16)],
+    ) -> (Vec<(u16, u16)>, Vec<String>) {
+        let own: BTreeSet<u16> = own.iter().copied().collect();
+        wire_cross_stack_ports(repo, references, &own, siblings)
+    }
+
+    #[test]
+    fn ambiguous_sibling_reference_is_rejected_with_candidates() {
+        // api-a and api-b both publish source host port 8000; the frontend
+        // points at localhost:8000 — no single rewrite can resolve it.
+        let siblings = vec![
+            ("api-a".to_string(), "api".to_string(), 8000u16, 8010u16),
+            ("api-b".to_string(), "api".to_string(), 8000u16, 8020u16),
+        ];
+        let (cross, violations) = wire(
+            "frontend",
+            &[reference("environment", "APP_API_URL", "localhost", 8000)],
+            &[],
+            &siblings,
+        );
+        assert!(cross.is_empty());
+        assert_eq!(violations.len(), 1);
+        let message = &violations[0];
+        assert!(message.contains("`frontend`"), "{message}");
+        assert!(message.contains("`web`"), "{message}");
+        assert!(message.contains("`APP_API_URL`"), "{message}");
+        assert!(message.contains("localhost:8000"), "{message}");
+        assert!(message.contains("`api-a`"), "{message}");
+        assert!(message.contains("localhost:8010"), "{message}");
+        assert!(message.contains("`api-b`"), "{message}");
+        assert!(message.contains("localhost:8020"), "{message}");
+
+        // Build args are consumer references too.
+        let (_, violations) = wire(
+            "frontend",
+            &[reference("build args", "API_ORIGIN", "127.0.0.1", 8000)],
+            &[],
+            &siblings,
+        );
+        assert_eq!(violations.len(), 1);
+        assert!(violations[0].contains("`API_ORIGIN`"), "{}", violations[0]);
+    }
+
+    #[test]
+    fn duplicate_source_ports_without_consumer_reference_stay_allowed() {
+        let siblings = vec![
+            ("api-a".to_string(), "api".to_string(), 8000u16, 8010u16),
+            ("api-b".to_string(), "api".to_string(), 8000u16, 8020u16),
+        ];
+        let (cross, violations) = wire("frontend", &[], &[], &siblings);
+        assert!(cross.is_empty());
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn own_stack_precedence_is_preserved() {
+        // The frontend itself publishes 8000: phase 1 already rewrote its
+        // references to its own bundle port; sibling 8000s are not
+        // candidates and never a violation.
+        let siblings = vec![
+            ("api-a".to_string(), "api".to_string(), 8000u16, 8010u16),
+            ("api-b".to_string(), "api".to_string(), 8000u16, 8020u16),
+        ];
+        let (cross, violations) = wire(
+            "frontend",
+            &[reference(
+                "environment",
+                "SELF_URL",
+                "host.docker.internal",
+                8000,
+            )],
+            &[8000],
+            &siblings,
+        );
+        assert!(cross.is_empty());
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn unambiguous_references_still_rewrite() {
+        let siblings = vec![
+            ("api-a".to_string(), "api".to_string(), 8000u16, 8010u16),
+            ("assets".to_string(), "cdn".to_string(), 9000u16, 9010u16),
+        ];
+        let (cross, violations) = wire(
+            "frontend",
+            &[
+                reference("environment", "APP_API_URL", "localhost", 8000),
+                reference("environment", "ASSETS_URL", "localhost", 9000),
+            ],
+            &[],
+            &siblings,
+        );
+        assert_eq!(cross, vec![(8000, 8010), (9000, 9010)]);
+        assert!(violations.is_empty());
+    }
+
+    #[test]
+    fn port_prefixes_sibling_new_ports_and_unrelated_ports_are_not_violations() {
+        let siblings = vec![
+            ("api-a".to_string(), "api".to_string(), 8000u16, 8010u16),
+            ("api-b".to_string(), "api".to_string(), 8000u16, 8020u16),
+        ];
+        // References are exact ports: a sibling's NEW bundle port (8010) is
+        // not an old source port, 7000 is published by no sibling at all,
+        // and a longer digit run than 8000 can never parse as u16 8000.
+        for port in [8010u16, 7000] {
+            let (cross, violations) = wire(
+                "frontend",
+                &[reference("environment", "APP_API_URL", "localhost", port)],
+                &[],
+                &siblings,
+            );
+            assert!(cross.is_empty());
+            assert!(violations.is_empty());
+        }
     }
 }

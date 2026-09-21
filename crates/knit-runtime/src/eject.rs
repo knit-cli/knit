@@ -14,12 +14,20 @@
 //! - the configured shared-database service is kept but gated behind the
 //!   `bundle-db` profile and wired to `${KNIT_DB_*}`, so the one file serves
 //!   both database modes: `shared` attaches to the dev database, `bundle`
-//!   starts the profiled service per bundle
+//!   starts the profiled service per bundle. That parameterization applies
+//!   per repo in shared mode: the service is only treated as the shared
+//!   dev database when the per-repo policy in the `database` module says
+//!   so — an unrelated service that happens to share the configured name
+//!   keeps its own service, volume, and port pool instead of being profiled
+//!   away. Bundle database mode parameterizes every stack as before: its
+//!   per-bundle databases are not the shared dev database, whatever the
+//!   service declares
 //!
 //! Once the file exists, compose-file detection prefers it and the transform
 //! stops applying to that repo.
 
-use crate::config::{ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::config::{DatabaseMode, ProjectRuntime, ProjectRuntimeDatabase, RuntimeMode};
+use crate::database::{explicit_repo_scope, shared_database_attachment, SharedDatabaseAttachment};
 use crate::envfile;
 use crate::plan::{StackPlan, CONTRACT_COMPOSE_CANDIDATES};
 use crate::support::{self, env_var_suffix, out};
@@ -37,7 +45,15 @@ pub(crate) fn run_eject(
     plans: Vec<StackPlan>,
     force: bool,
 ) -> Result<()> {
+    if let Some(binding) = runtime.bindings.iter().find(|binding| {
+        plans
+            .iter()
+            .any(|plan| plan.repo.id == binding.repo || plan.repo.id == binding.target.repo)
+    }) {
+        bail!("Cannot eject stacks used by runtime.bindings (repo `{}` -> `{}`). Bindings require transform mode; migrate that dependency to the contract before ejecting.", binding.repo, binding.target.repo);
+    }
     let inputs = EjectInputs::from_context(ctx, runtime);
+    let multi_stack = plans.len() > 1;
     let mut wrote = false;
     for plan in &plans {
         if plan.mode == RuntimeMode::Contract {
@@ -58,6 +74,16 @@ pub(crate) fn run_eject(
         }
 
         let mut config = transform::resolve_compose_config(&plan.compose, &plan.repo.source_path)?;
+        // The database config applies per repo: only a service the shared
+        // database policy identifies as this stack's instance of the dev
+        // database is parameterized. An unrelated service that shares the
+        // configured name must not be profiled away.
+        let database = shared_database_for_repo(
+            inputs.database.as_ref(),
+            &plan.repo.id,
+            &config,
+            multi_stack,
+        );
         let env_files = match transform::resolve_compose_config_no_env(
             &plan.compose,
             &plan.repo.source_path,
@@ -73,7 +99,7 @@ pub(crate) fn run_eject(
                 Default::default()
             }
         };
-        let summary = eject_compose(&mut config, &inputs)?;
+        let summary = eject_compose(&mut config, &inputs, database)?;
         // The ejected file is committed: env values the repo's env files
         // provide stay references, so secrets never land in git. Paths are
         // expressed against ${KNIT_ROOT} where possible — the env file lives
@@ -127,6 +153,42 @@ pub(crate) fn run_eject(
     Ok(())
 }
 
+/// The database config a repo's stack parameterizes against: the runtime's
+/// database block, unless the per-repo shared-database policy decides the
+/// configured service is not (or cannot safely be assumed to be) this
+/// stack's instance of the shared dev database. Diagnostics print here so
+/// `eject_compose` stays pure; they never contain environment values.
+///
+/// Bundle database mode bypasses the policy: its per-bundle database is
+/// never the shared dev database, so every stack parameterizes onto the
+/// profile-gated service exactly as before.
+fn shared_database_for_repo<'a>(
+    database: Option<&'a ProjectRuntimeDatabase>,
+    repo_id: &str,
+    config: &Value,
+    multi_stack: bool,
+) -> Option<&'a ProjectRuntimeDatabase> {
+    let database = database?;
+    if database.mode != DatabaseMode::Shared {
+        return Some(database);
+    }
+    match shared_database_attachment(
+        repo_id,
+        database,
+        &explicit_repo_scope(database),
+        config,
+        multi_stack,
+    ) {
+        SharedDatabaseAttachment::Attach => Some(database),
+        SharedDatabaseAttachment::Keep(note) => {
+            if let Some(note) = &note {
+                println!("{} {note}", out::muted("Database:"));
+            }
+            None
+        }
+    }
+}
+
 fn header(source_compose: &Path, database_service: Option<&str>) -> String {
     // Variable names are written without `${` on purpose: a plain mention is
     // neither a contract opt-in for mode detection nor a port-scan hit.
@@ -171,7 +233,10 @@ pub(crate) struct EjectSummary {
 
 /// Everything path- and database-shaped the parameterization maps against.
 /// Repo paths are the *source* checkouts: eject runs on the source compose
-/// shape, and the variables resolve to bundle checkouts at `up` time.
+/// shape, and the variables resolve to bundle checkouts at `up` time. The
+/// database config is global input; whether a given repo's stack actually
+/// parameterizes against it is the per-repo decision in
+/// [`shared_database_for_repo`].
 pub(crate) struct EjectInputs {
     root: PathBuf,
     home: Option<PathBuf>,
@@ -208,12 +273,18 @@ impl EjectInputs {
 
 /// Parameterize a resolved compose config (the JSON output of `docker compose
 /// config` against the source repo) in place into the `KNIT_*` contract.
-pub(crate) fn eject_compose(config: &mut Value, inputs: &EjectInputs) -> Result<EjectSummary> {
+/// `database` is this repo's slice of the runtime database config (see
+/// [`shared_database_for_repo`]); `None` leaves every service ordinary.
+pub(crate) fn eject_compose(
+    config: &mut Value,
+    inputs: &EjectInputs,
+    database: Option<&ProjectRuntimeDatabase>,
+) -> Result<EjectSummary> {
     transform::strip_stack_identity(config);
 
     // Database first, so the database's published port never becomes a
     // KNIT_PORT pool and references to it aren't rewritten as app ports.
-    let database_service = parameterize_database(config, inputs);
+    let database_service = database.and_then(|database| parameterize_database(config, database));
 
     let Some(services) = config
         .get_mut("services")
@@ -313,8 +384,7 @@ pub(crate) fn eject_compose(config: &mut Value, inputs: &EjectInputs) -> Result<
 /// `${KNIT_DB_HOST_PORT}`, its dependents wired to `${KNIT_DB_HOST}` /
 /// `${KNIT_DB_PORT}` / `${KNIT_DB_NAME}` — which resolve to the shared dev
 /// database in `shared` mode and to the profiled service in `bundle` mode.
-fn parameterize_database(config: &mut Value, inputs: &EjectInputs) -> Option<String> {
-    let database = inputs.database.as_ref()?;
+fn parameterize_database(config: &mut Value, database: &ProjectRuntimeDatabase) -> Option<String> {
     let service_name = database.service.clone()?;
     let container_port = database.container_port.unwrap_or(5432);
 
@@ -785,7 +855,7 @@ mod tests {
         let inputs = inputs(&root);
         let mut config = resolved_config(&root_str);
 
-        let summary = eject_compose(&mut config, &inputs).unwrap();
+        let summary = eject_compose(&mut config, &inputs, inputs.database.as_ref()).unwrap();
 
         // Stack identity is stripped.
         assert!(config.get("name").is_none());
@@ -904,7 +974,7 @@ mod tests {
         inputs.database = None;
         let mut config = resolved_config(&root_str);
 
-        let summary = eject_compose(&mut config, &inputs).unwrap();
+        let summary = eject_compose(&mut config, &inputs, None).unwrap();
 
         // No database config: the db service is an ordinary service with its
         // own KNIT_PORT pool and keeps its volume (isolated per bundle by the
@@ -915,6 +985,127 @@ mod tests {
         assert_eq!(db["ports"][0]["published"], "${KNIT_PORT_DB:-5436}");
         assert_eq!(db["volumes"][0]["source"], "db-data");
         assert!(config["volumes"].get("db-data").is_some());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    /// Synthetic two-repo workspace: repo `alpha` runs a `db` service that
+    /// is NOT the project's shared dev database.
+    fn synthetic_inputs(root: &Path) -> EjectInputs {
+        EjectInputs {
+            root: root.to_path_buf(),
+            home: None,
+            repos: vec![("alpha".to_string(), root.join("alpha"))],
+            database: Some(ProjectRuntimeDatabase {
+                service: Some("db".to_string()),
+                name: "app_dev".to_string(),
+                ..Default::default()
+            }),
+        }
+    }
+
+    fn synthetic_root() -> PathBuf {
+        let root = std::env::temp_dir().join(format!(
+            "knit-eject-db-test-{}-{:?}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+        ));
+        std::fs::create_dir_all(root.join("alpha")).unwrap();
+        std::fs::write(root.join("alpha/Dockerfile"), "FROM scratch").unwrap();
+        support::canonicalize(&root).unwrap()
+    }
+
+    fn synthetic_stack(root: &Path, declared_db: Option<&str>) -> Value {
+        let mut environment = serde_json::Map::new();
+        if let Some(declared_db) = declared_db {
+            environment.insert("POSTGRES_DB".to_string(), json!(declared_db));
+        }
+        json!({
+            "services": {
+                "db": {
+                    "image": "postgres:17",
+                    "environment": environment,
+                    "ports": [{"mode": "ingress", "target": 5432, "published": "5436", "protocol": "tcp"}],
+                    "volumes": [{"type": "volume", "source": "alpha-db-data", "target": "/var/lib/postgresql/data"}]
+                },
+                "app": {
+                    "build": {
+                        "context": format!("{}/alpha", root.display()),
+                        "dockerfile": "Dockerfile"
+                    },
+                    "environment": {"DATABASE_URL": "postgres://u:p@db:5432/alpha_records"},
+                    "ports": [{"mode": "ingress", "target": 4000, "published": "4000", "protocol": "tcp"}],
+                    "depends_on": {"db": {"condition": "service_healthy", "required": true}}
+                }
+            },
+            "volumes": {"alpha-db-data": {}}
+        })
+    }
+
+    #[test]
+    fn eject_keeps_unrelated_database_sharing_the_configured_service_name() {
+        let root = synthetic_root();
+        let inputs = synthetic_inputs(&root);
+        // Same generic service name as the configuration, but the declared
+        // database belongs to this stack alone: in a multi-stack run the
+        // policy keeps it, and the ejected file treats it as an ordinary
+        // service instead of profiling it away.
+        let mut config = synthetic_stack(&root, Some("alpha_records"));
+        assert!(
+            shared_database_for_repo(inputs.database.as_ref(), "alpha", &config, true).is_none()
+        );
+
+        let summary = eject_compose(&mut config, &inputs, None).unwrap();
+
+        assert!(summary.database_service.is_none());
+        let db = &config["services"]["db"];
+        assert!(db.get("profiles").is_none());
+        assert_eq!(db["ports"][0]["published"], "${KNIT_PORT_DB:-5436}");
+        assert_eq!(db["volumes"][0]["source"], "alpha-db-data");
+        assert!(config["volumes"].get("alpha-db-data").is_some());
+        // Dependents keep pointing at the service by name; no KNIT_DB_*
+        // rewiring, no optional dependency.
+        assert_eq!(
+            config["services"]["app"]["environment"]["DATABASE_URL"],
+            "postgres://u:p@db:5432/alpha_records"
+        );
+        assert_eq!(
+            config["services"]["app"]["depends_on"]["db"]["required"],
+            json!(true)
+        );
+        assert!(config["services"]["app"].get("extra_hosts").is_none());
+
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn eject_database_policy_gates_the_shared_database_per_repo() {
+        let root = synthetic_root();
+        let inputs = synthetic_inputs(&root);
+
+        // Declared identity matches the configured shared name: attach.
+        let matching = synthetic_stack(&root, Some("app_dev"));
+        assert!(
+            shared_database_for_repo(inputs.database.as_ref(), "alpha", &matching, true).is_some()
+        );
+
+        // Unknown identity: kept in every stack count — a single-stack run
+        // cannot verify the service is the shared dev database either.
+        let unknown = synthetic_stack(&root, None);
+        assert!(
+            shared_database_for_repo(inputs.database.as_ref(), "alpha", &unknown, false).is_none()
+        );
+        assert!(
+            shared_database_for_repo(inputs.database.as_ref(), "alpha", &unknown, true).is_none()
+        );
+
+        // Bundle database mode bypasses the policy: every stack keeps the
+        // profile-gated per-bundle database, identity or scope aside.
+        let mut bundle_mode = inputs.database.clone().unwrap();
+        bundle_mode.mode = DatabaseMode::Bundle;
+        assert!(shared_database_for_repo(Some(&bundle_mode), "alpha", &unknown, true).is_some());
 
         std::fs::remove_dir_all(root).unwrap();
     }
