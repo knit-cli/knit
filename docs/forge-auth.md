@@ -11,7 +11,35 @@ knit clone demo --remote hosted
 
 Press Enter at the forge menu to finish. Your default token for each **exact host** serves every project, clone, pull, push, and forge API operation unless you choose an override. No repository selection or credential flags are needed. Bitbucket asks which token kind you have; an Atlassian API token also needs your account email.
 
-The first regular token saved for a host becomes its default. Adding another never displaces it. A legacy store with exactly one unscoped token inherits that token as its default; with several tokens, choose explicitly using `knit auth default NAME`. The bare wizard can also create a new default or deliberately replace the current default's secret. Replacing an environment-backed default with a pasted token clears its environment reference.
+The first regular token saved for a host becomes its default. Adding another never displaces it. A legacy store with exactly one token that is not project-only inherits that token as its default; with several tokens, choose explicitly using `knit auth default NAME`. The bare wizard can also create a new default or deliberately replace the current default's secret. Replacing an environment-backed default with a pasted token clears its environment reference.
+
+## Permissions for the normal workflow
+
+For clone/pull/push/publish/status/land, give the token access to the repositories you use and these permissions:
+
+| Forge / token kind | Permissions |
+| --- | --- |
+| GitHub fine-grained PAT | Contents and Pull requests: **Read + Write**; Checks and Commit statuses: **Read**; Metadata: **Read** (automatic). |
+| GitHub classic PAT | `repo`. |
+| Bitbucket Atlassian API token | Repositories and Pull requests: **Read + Write**, using a token **with scopes** (details below). |
+| GitLab personal access token | `api` (includes Git read/write and merge-request API access). |
+| GitLab project/group access token | `api` + `write_repository`; choose a role allowed to push and merge. |
+| Forgejo access token | `write:repository` (includes pull requests and checks); include your repositories, not public-only access for private repositories. |
+
+For changes to GitHub workflow files, also grant **Workflows: Write** (fine-grained) or `workflow` (classic). Token permissions do not override repository access, organization policies, or merge rules. Saving a token does not validate its scopes.
+
+Sources: [GitHub permissions](https://docs.github.com/en/rest/authentication/permissions-required-for-fine-grained-personal-access-tokens), [classic scopes](https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/scopes-for-oauth-apps), [GitLab scopes](https://docs.gitlab.com/security/tokens/access_token_scopes/), [Forgejo scopes](https://forgejo.org/docs/latest/user/authentication/token-scope/).
+
+## Bitbucket token requirements
+
+For an Atlassian API token (`atlassian_api_token`), select **Create API token with scopes**, choose **Bitbucket** as the app, and enable these permissions for the normal Knit workflow (clone/pull/push/publish/status/land):
+
+- **Repositories: Read + Write** — `read:repository:bitbucket`, `write:repository:bitbucket`.
+- **Pull requests: Read + Write** — `read:pullrequest:bitbucket`, `write:pullrequest:bitbucket`.
+
+Unscoped Atlassian API tokens cannot authenticate Bitbucket. See Atlassian's [creation instructions](https://support.atlassian.com/bitbucket-cloud/docs/create-an-api-token/), [API token permissions](https://support.atlassian.com/bitbucket-cloud/docs/api-token-permissions/), and [Git requirements](https://support.atlassian.com/bitbucket-cloud/docs/using-api-tokens/).
+
+Bitbucket repository/project/workspace access tokens (`access_token`) remain supported and use their own repository permissions, not Atlassian API-token scopes. Saving either kind in Knit does not validate its scopes or repository access.
 
 ## Optional project overrides
 
