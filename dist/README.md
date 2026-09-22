@@ -84,3 +84,74 @@ gh release upload v0.1.0-alpha.21 --repo knit-cli/knit homebrew-dist/bottles/*.b
 
 There is deliberately no `cargo publish` step; see the note in the release flow
 above.
+
+## Linux packages and APT
+
+`.github/workflows/linux-packages.yml` repackages the verified Linux release
+binaries into `.deb` and `.rpm` files using nFPM 2.47.0. No Rust build is needed.
+The packages install `/usr/bin/knit` and depend on Git 2.31+ and CA certificates.
+Prerelease versions sort before their eventual stable versions. Both amd64 and
+arm64 installs are tested through signed APT on Ubuntu 22.04 and 24.04 before
+publication. A changed repository index must fail authentication.
+
+The release workflow calls this automatically after the binaries are uploaded.
+To backfill an existing release after this workflow is on the default branch:
+
+```sh
+gh workflow run linux-packages.yml --repo knit-cli/knit -f release_tag=v0.1.0-alpha.22
+```
+
+Each run uploads immutable `.deb`, `.rpm`, and Linux-specific checksum assets
+to the existing GitHub release. Repeating a run accepts identical bytes and
+refuses replacements. It then adds packages to the existing `gh-pages` branch,
+regenerates and signs APT metadata, pushes without force, and explicitly requests
+a Pages build. Old packages remain available; backfilling an older version does
+not downgrade the latest version APT selects. Concurrent publications serialize.
+GitHub Pages serves `https://knit-cli.github.io/knit/`; this branch is reserved
+for the package site. RPM files support local `dnf install`; no DNF repository
+is configured by this workflow.
+
+### One-time maintainer setup
+
+1. Generate a dedicated OpenPGP signing key in a private directory. Keep an
+   offline backup. Use an unencrypted automation key; GitHub encrypts the secret
+   at rest and only the publication job imports it into an ephemeral keyring.
+2. Save its armored private export as the repository Actions secret
+   `APT_SIGNING_KEY`. Never commit this export or place it in a release artifact.
+3. Bootstrap `gh-pages` with the signed site generated below, commit and push it,
+   and enable GitHub Pages using **Deploy from a branch → gh-pages → / (root)**.
+   The workflow's `GITHUB_TOKEN` needs `contents: write` and `pages: write`.
+4. Confirm the live signing key and install using the commands in the root README.
+
+The initial public signing-key fingerprint is
+`873E5910AB55CBA214E5F7F2258C3BB163EC0B9A` (expires September 21, 2029).
+The builder refuses accidental signing-key changes once a public key exists.
+Key rotation requires a deliberate client migration, not replacing the secret.
+GitHub Pages is dedicated to packages for this repository; do not point the
+publisher at an unrelated documentation site.
+
+### Build and verify locally
+
+Install nFPM 2.47.0, Python 3, `dpkg-dev`, `apt-utils`, and GnuPG on Linux.
+Download the four Linux musl archives/checksum sidecars from the chosen release:
+
+```sh
+gh release download v0.1.0-alpha.22 --repo knit-cli/knit --dir assets \
+  --pattern '*unknown-linux-musl.tar.gz' --pattern '*unknown-linux-musl.sha256'
+python3 scripts/linux_packages.py --version v0.1.0-alpha.22 --assets-dir assets --output-dir linux-dist
+python3 -m unittest discover -s scripts -p '*_test.py' -v
+docker run --rm -v "$PWD:/src:ro" ubuntu:22.04 \
+  bash /src/scripts/linux_install_smoke.sh /src/linux-dist
+```
+
+To prepare the public site with your existing signing key:
+
+```sh
+bash scripts/build_apt_repository.sh linux-dist site YOUR_FULL_SIGNING_FINGERPRINT
+cp dist/linux-index.html site/index.html
+```
+
+`GNUPGHOME` must point to the private signing keyring. `site` may be a checkout
+of the existing `gh-pages` branch, which retains previously published packages.
+The smoke script generates a disposable test key and modifies APT configuration:
+run it only in a disposable container, never directly on your workstation.
