@@ -8,6 +8,21 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 
 ## Install
 
+Ubuntu / Debian (native packages and automatic updates):
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://knit-cli.github.io/knit/knit.gpg | sudo tee /etc/apt/keyrings/knit.gpg >/dev/null
+sudo chmod 0644 /etc/apt/keyrings/knit.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/knit.gpg] https://knit-cli.github.io/knit/apt ./' | sudo tee /etc/apt/sources.list.d/knit.list
+sudo apt-get update
+sudo apt-get install -y knit
+```
+Supports amd64 and arm64 on Ubuntu 22.04+ and Debian 12+. The repository includes
+prereleases. `.deb` and `.rpm` packages are also available on
+[GitHub Releases](https://github.com/knit-cli/knit/releases) for direct installation.
+
 Brew:
 ```sh
 brew install knit-cli/tap/knit   # macOS / Linux binaries
