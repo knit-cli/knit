@@ -35,6 +35,22 @@ fn assert_valid(schema: &Value, instance: &Value, label: &str) {
     );
 }
 
+/// The inverse of [`assert_valid`]: the published schema must reject the
+/// instance, with at least one error pointing at it.
+#[track_caller]
+fn assert_invalid(schema: &Value, instance: &Value, label: &str) {
+    let validator = jsonschema::validator_for(schema)
+        .unwrap_or_else(|error| panic!("{label}: schema itself is invalid: {error}"));
+    let errors: Vec<String> = validator
+        .iter_errors(instance)
+        .map(|error| format!("  at {}: {error}", error.instance_path))
+        .collect();
+    assert!(
+        !errors.is_empty(),
+        "{label} unexpectedly matches the schema Knit publishes for it"
+    );
+}
+
 fn read(path: &Path) -> Value {
     serde_json::from_str(&fs::read_to_string(path).unwrap()).unwrap()
 }
@@ -119,13 +135,29 @@ fn published_schemas_describe_the_artifacts_knit_writes() {
         "stacks": ["backend"],
         "stackRepo": "backend",
         "composeFile": "docker-compose.yml",
+        "startupTimeoutSeconds": 90,
         "database": {
             "mode": "bundle",
             "service": "postgres",
             "containerPort": 5432,
             "host": "localhost",
-            "portBase": 5436
-        }
+            "portBase": 5436,
+            "repos": ["backend"]
+        },
+        "bindings": [
+            {
+                "repo": "frontend",
+                "service": "web",
+                "environment": "APP_API_URL",
+                "target": {"repo": "backend", "service": "api", "port": 4000}
+            },
+            {
+                "repo": "frontend",
+                "service": "web",
+                "buildArg": "API_ORIGIN",
+                "target": {"repo": "backend", "service": "api"}
+            }
+        ]
     });
     fs::write(
         &project_path,
@@ -192,4 +224,178 @@ fn published_schemas_describe_the_artifacts_knit_writes() {
     );
 
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A minimal complete project object carrying the given runtime block: the
+/// published schema requires the project identity fields, so fragments
+/// like `{"runtime": ...}` alone cannot validate.
+fn project_with_runtime(runtime: Value) -> Value {
+    json!({
+        "schemaVersion": "0.1",
+        "kind": "KnitProject",
+        "id": "demo",
+        "createdAt": "2026-09-21T00:00:00Z",
+        "updatedAt": "2026-09-21T00:00:00Z",
+        "repos": [],
+        "runtime": runtime
+    })
+}
+
+/// The runtime's endpoint bindings, database repo list, and startup timeout
+/// must keep schema types and serde round-trips in lockstep: camelCase wire
+/// names, defaults omitted, and both authored and re-serialized shapes
+/// valid against the published schema.
+#[test]
+fn runtime_bindings_database_repos_and_startup_timeout_roundtrip() {
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string("schemas/project.schema.json").expect("run from the repository root"),
+    )
+    .unwrap();
+
+    let runtime_json = json!({
+        "kind": "docker-compose",
+        "startupTimeoutSeconds": 90,
+        "bindings": [
+            {
+                "repo": "frontend",
+                "service": "web",
+                "environment": "APP_API_URL",
+                "target": {"repo": "backend", "service": "api", "port": 4000}
+            },
+            {
+                "repo": "frontend",
+                "service": "web",
+                "buildArg": "API_ORIGIN",
+                "target": {"repo": "backend", "service": "api"}
+            }
+        ],
+        "database": {
+            "mode": "bundle",
+            "service": "postgres",
+            "repos": ["backend"]
+        }
+    });
+
+    let runtime: knit::model::ProjectRuntime = serde_json::from_value(runtime_json.clone())
+        .expect("the authored runtime block deserializes");
+    assert_eq!(runtime.startup_timeout_seconds, 90);
+    assert_eq!(runtime.bindings.len(), 2);
+    assert_eq!(
+        runtime.bindings[0].environment.as_deref(),
+        Some("APP_API_URL")
+    );
+    assert!(runtime.bindings[0].build_arg.is_none());
+    assert_eq!(runtime.bindings[0].target.port, Some(4000));
+    assert_eq!(runtime.bindings[1].build_arg.as_deref(), Some("API_ORIGIN"));
+    assert!(runtime.bindings[1].environment.is_none());
+    assert_eq!(runtime.bindings[1].target.port, None);
+    assert_eq!(
+        runtime.database.as_ref().unwrap().repos,
+        vec!["backend".to_string()]
+    );
+
+    let written = serde_json::to_value(&runtime).unwrap();
+    assert_eq!(written["startupTimeoutSeconds"], json!(90));
+    assert_eq!(written["bindings"][1]["buildArg"], json!("API_ORIGIN"));
+    assert!(written["bindings"][0].get("buildArg").is_none());
+    assert!(written["bindings"][0].get("environment").is_some());
+    assert_eq!(written["database"]["repos"], json!(["backend"]));
+
+    assert_valid(
+        &schema,
+        &project_with_runtime(runtime_json),
+        "an authored runtime bindings block",
+    );
+    assert_valid(
+        &schema,
+        &project_with_runtime(written.clone()),
+        "a round-tripped runtime bindings block",
+    );
+    let again: knit::model::ProjectRuntime = serde_json::from_value(written).unwrap();
+    assert_eq!(
+        again.startup_timeout_seconds,
+        runtime.startup_timeout_seconds
+    );
+    assert_eq!(again.bindings.len(), runtime.bindings.len());
+    assert_eq!(
+        again.database.unwrap().repos,
+        runtime.database.unwrap().repos
+    );
+
+    // Defaults: absent fields deserialize (120s timeout, no bindings, no
+    // database repos) and are omitted on write, so existing projects stay
+    // byte-compatible.
+    let bare: knit::model::ProjectRuntime = serde_json::from_value(json!({})).unwrap();
+    assert_eq!(bare.startup_timeout_seconds, 120);
+    assert!(bare.bindings.is_empty());
+    assert!(knit::model::ProjectRuntimeDatabase::default()
+        .repos
+        .is_empty());
+    let default_written = serde_json::to_value(&bare).unwrap();
+    assert!(default_written.get("startupTimeoutSeconds").is_none());
+    assert!(default_written.get("bindings").is_none());
+    assert_valid(
+        &schema,
+        &project_with_runtime(default_written),
+        "a default runtime block",
+    );
+}
+
+/// A binding must select exactly one of `environment`/`buildArg` (the
+/// schema's `oneOf`) and never disambiguate with container port 0; the
+/// published schema rejects every other shape so typoed projects fail at
+/// the door instead of mid-run.
+#[test]
+fn runtime_bindings_schema_rejects_broken_selections() {
+    let schema: Value = serde_json::from_str(
+        &fs::read_to_string("schemas/project.schema.json").expect("run from the repository root"),
+    )
+    .unwrap();
+    let runtime_with = |binding: Value| project_with_runtime(json!({"bindings": [binding]}));
+
+    // Exactly one selector: valid, and stays valid when the target
+    // carries a container-port disambiguator.
+    for valid in [
+        json!({
+            "repo": "frontend", "service": "web", "environment": "APP_API_URL",
+            "target": {"repo": "backend", "service": "api", "port": 4000}
+        }),
+        json!({
+            "repo": "frontend", "service": "web", "buildArg": "API_ORIGIN",
+            "target": {"repo": "backend", "service": "api"}
+        }),
+    ] {
+        assert_valid(&schema, &runtime_with(valid), "a well-formed binding");
+    }
+
+    // Neither selector: rejected.
+    assert_invalid(
+        &schema,
+        &runtime_with(json!({
+            "repo": "frontend", "service": "web",
+            "target": {"repo": "backend", "service": "api"}
+        })),
+        "a binding selecting neither environment nor buildArg",
+    );
+
+    // Both selectors: rejected.
+    assert_invalid(
+        &schema,
+        &runtime_with(json!({
+            "repo": "frontend", "service": "web",
+            "environment": "APP_API_URL", "buildArg": "API_ORIGIN",
+            "target": {"repo": "backend", "service": "api"}
+        })),
+        "a binding selecting both environment and buildArg",
+    );
+
+    // Zero container port: rejected (ports start at 1).
+    assert_invalid(
+        &schema,
+        &runtime_with(json!({
+            "repo": "frontend", "service": "web", "environment": "APP_API_URL",
+            "target": {"repo": "backend", "service": "api", "port": 0}
+        })),
+        "a binding with target.port 0",
+    );
 }
