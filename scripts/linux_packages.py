@@ -27,12 +27,17 @@ runs with SOURCE_DATE_EPOCH pinned, so rebuilding identical inputs with the
 same nfpm yields byte-identical packages.
 
 Outputs written flat under ``--output-dir`` (ready for
-scripts/build_apt_repository.sh and scripts/publish_linux_assets.sh):
+scripts/build_apt_repository.sh and scripts/publish_linux_assets.sh); file
+names spell the pre-release with a dash (GitHub normalizes '~' in asset
+names to '.'), while the versions inside the packages keep the tilde:
 
-    knit_<package-version>_<deb-arch>.deb     amd64, arm64
-    knit-<package-version>-1.<rpm-arch>.rpm   x86_64, aarch64
+    knit_<package-version>-spelled-with-dashes_<deb-arch>.deb     amd64, arm64
+    knit-<package-version>-spelled-with-dashes-1.<rpm-arch>.rpm   x86_64, aarch64
     SHA256SUMS                                package digests
     manifest.json                             machine-readable build record
+
+e.g. knit_0.1.0-alpha.22_amd64.deb and knit-0.1.0-alpha.22-1.x86_64.rpm for
+release v0.1.0-alpha.22.
 
     usage: linux_packages.py --version v0.1.0-alpha.22 \
         --assets-dir DIR --output-dir DIR
@@ -267,9 +272,14 @@ def nfpm_config(pkg_version, packager, arch, binary_path, license_path):
 
 
 def canonical_package_name(packager, arch, pkg_version):
+    # Output filenames spell the pre-release with '-': GitHub normalizes '~'
+    # in asset names to '.', which would break checksum files and reupload
+    # idempotence. The tilde stays inside package/config metadata, where the
+    # dpkg/rpm version ordering needs it.
+    file_version = pkg_version.replace("~", "-")
     if packager == "deb":
-        return "{}_{}_{}.deb".format(BIN, pkg_version, arch)
-    return "{}-{}-{}.{}.rpm".format(BIN, pkg_version, RPM_RELEASE, arch)
+        return "{}_{}_{}.deb".format(BIN, file_version, arch)
+    return "{}-{}-{}.{}.rpm".format(BIN, file_version, RPM_RELEASE, arch)
 
 
 def nfpm_env():

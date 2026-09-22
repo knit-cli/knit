@@ -5,11 +5,13 @@ set -euo pipefail
 repo=$1 tag=$2 dir=$3
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
+mkdir "$tmp/verify"
 shopt -s nullglob
 files=("$dir"/*.deb "$dir"/*.rpm "$dir"/SHA256SUMS)
 (( ${#files[@]} >= 5 )) || { echo 'Expected both architectures and checksums' >&2; exit 1; }
 for file in "${files[@]}"; do
   name=$(basename "$file")
+  [[ "$name" =~ ^[A-Za-z0-9_.-]+$ ]] || { echo "GitHub may rename unsafe asset filename: $name" >&2; exit 1; }
   # Separate from checksums belonging to other release packagers.
   [[ "$name" != SHA256SUMS ]] || name="knit-${tag}-linux-packages.sha256"
   if gh release view "$tag" --repo "$repo" --json assets | jq -e --arg name "$name" '.assets[] | select(.name == $name)' >/dev/null; then
@@ -18,5 +20,7 @@ for file in "${files[@]}"; do
   else
     cp "$file" "$tmp/$name"
     gh release upload "$tag" --repo "$repo" "$tmp/$name"
+    gh release download "$tag" --repo "$repo" --dir "$tmp/verify" --pattern "$name"
+    cmp "$file" "$tmp/verify/$name"
   fi
 done

@@ -51,9 +51,12 @@ def fake_elf(target):
 
 
 def canonical_name(packager, arch, pkg_version=PKG_VERSION):
+    # Output filenames are GitHub-safe: the '~' pre-release marker inside
+    # package metadata is spelled '-' in file names.
+    file_version = pkg_version.replace("~", "-")
     if packager == "deb":
-        return "knit_{}_{}.deb".format(pkg_version, arch)
-    return "knit-{}-{}.{}.rpm".format(pkg_version, lp.RPM_RELEASE, arch)
+        return "knit_{}_{}.deb".format(file_version, arch)
+    return "knit-{}-{}.{}.rpm".format(file_version, lp.RPM_RELEASE, arch)
 
 
 def expected_names(pkg_version=PKG_VERSION):
@@ -380,11 +383,21 @@ class VersionTest(unittest.TestCase):
         for version, expected in cases.items():
             self.assertEqual(lp.package_version(version), expected, version)
 
-    def test_prerelease_sorting_uses_generated_names(self):
-        self.assertIn("~", canonical_name("deb", "amd64", lp.package_version("0.1.0-alpha.22")))
-        self.assertNotIn(
-            "~", canonical_name("deb", "amd64", lp.package_version("0.1.0"))
+    def test_filenames_are_github_safe_metadata_keeps_tilde(self):
+        # GitHub normalizes '~' in asset names to '.', so file names must not
+        # contain it; the packaged version (nfpm config, manifest) keeps the
+        # tilde so dpkg/rpm ordering still holds.
+        for name in expected_names():
+            self.assertNotIn("~", name)
+        self.assertEqual(
+            canonical_name("deb", "amd64", "0.1.0-alpha.22"),
+            "knit_0.1.0-alpha.22_amd64.deb",
         )
+        self.assertEqual(
+            canonical_name("rpm", "x86_64", "0.1.0-alpha.22"),
+            "knit-0.1.0-alpha.22-1.x86_64.rpm",
+        )
+        self.assertEqual(lp.package_version("0.1.0-alpha.22"), "0.1.0~alpha.22")
 
 
 class RejectionTest(Fixtures):
