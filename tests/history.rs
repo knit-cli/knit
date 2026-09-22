@@ -267,6 +267,108 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
 }
 
 #[test]
+fn refresh_covers_archived_bundles_preserves_orphans_and_feeds_related() {
+    let root = unique_temp_dir();
+    let workspace = workspace_with_recorded_and_observed_commits(&root);
+    knit(&workspace, ["bundle", "other work", "--repo", "frontend"]);
+
+    // A partially recorded ledger: the second bundle's events are missing,
+    // and an orphan event from a deleted bundle must survive every refresh.
+    let mut events = history_events(&workspace);
+    events.retain(|event| event["bundleId"].as_str() != Some("other-work"));
+    events.push(serde_json::json!({
+        "schemaVersion": "knit.history.event.v1",
+        "eventId": "khist_ghostevent0002",
+        "projectId": "demo",
+        "kind": "commit.recorded",
+        "bundleId": "deleted-work",
+        "message": "Work from a deleted bundle",
+        "recordedAt": "2026-08-14T09:00:00Z",
+        "recordedBy": "knit",
+    }));
+    fs::write(
+        history_path(&workspace),
+        events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let recorded = events.len();
+
+    // `related` refreshes history itself, from a full sweep of every bundle,
+    // before joining with Git history. It must record the missing bundle and
+    // still answer from the whole ledger.
+    let checkout = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let related = knit(&checkout, ["related", "app.txt"]);
+    assert!(related.contains("History refreshed:"), "{related}");
+    assert!(related.contains("venue-capacity"), "{related}");
+    assert!(related.contains("Add capacity form"), "{related}");
+    let after_related = history_events(&workspace);
+    assert!(after_related.len() > recorded);
+    assert!(
+        after_related
+            .iter()
+            .any(|event| event["bundleId"] == "other-work" && event["kind"] == "bundle.created"),
+        "{after_related:#?}"
+    );
+    assert!(
+        after_related
+            .iter()
+            .any(|event| event["eventId"] == "khist_ghostevent0002"),
+        "{after_related:#?}"
+    );
+
+    let refreshed = knit(&workspace, ["history", "refresh"]);
+    assert!(refreshed.contains("0 new event(s)"), "{refreshed}");
+    assert_eq!(history_events(&workspace).len(), after_related.len());
+
+    // Archived bundles keep their history recorded too.
+    knit(
+        &workspace,
+        ["bundle", "archive", "venue-capacity", "--keep-worktrees"],
+    );
+    // Remove a matching commit event after archiving. `related` must still
+    // recover it from the archived artifact, not just query the current ledger.
+    let mut partial = history_events(&workspace);
+    partial.retain(|event| event["kind"] != "commit.observed");
+    fs::write(
+        history_path(&workspace),
+        partial
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let recovered = knit(&checkout, ["related", "app.txt"]);
+    assert!(recovered.contains("History refreshed:"), "{recovered}");
+    assert!(recovered.contains("Fix seat map rounding"), "{recovered}");
+    let after_archive = history_events(&workspace);
+    assert!(after_archive
+        .iter()
+        .any(|event| event["kind"] == "commit.observed"));
+    assert!(
+        after_archive.iter().any(
+            |event| event["bundleId"] == "venue-capacity" && event["kind"] == "bundle.archived"
+        ),
+        "{after_archive:#?}"
+    );
+    assert!(
+        after_archive
+            .iter()
+            .any(|event| event["eventId"] == "khist_ghostevent0002"),
+        "{after_archive:#?}"
+    );
+    let again = knit(&workspace, ["history", "refresh"]);
+    assert!(again.contains("0 new event(s)"), "{again}");
+    assert_eq!(history_events(&workspace).len(), after_archive.len());
+}
+
+#[test]
 fn artifacts_without_commit_details_still_name_their_commits() {
     let root = unique_temp_dir();
     let workspace = workspace_with_recorded_and_observed_commits(&root);
