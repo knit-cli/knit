@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width">
+<title>Knit Linux packages</title>
+<style>body{font:18px/1.6 system-ui;max-width:800px;margin:4rem auto;padding:0 1rem}pre{overflow:auto;padding:1rem;background:#f2f4f6;border-radius:8px}a{color:#2455b5}</style>
+<h1>Knit for Linux</h1>
+<p>Install on Ubuntu 22.04+, Debian 12+, and compatible systems (amd64 or arm64).</p>
+<pre>sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://knit-cli.github.io/knit/knit.gpg | sudo tee /etc/apt/keyrings/knit.gpg &gt;/dev/null
+sudo chmod 0644 /etc/apt/keyrings/knit.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/knit.gpg] https://knit-cli.github.io/knit/apt ./' | sudo tee /etc/apt/sources.list.d/knit.list
+sudo apt-get update
+sudo apt-get install -y knit
+knit --version</pre>
+<p>This repository includes Knit prereleases. Updates arrive through <code>sudo apt-get upgrade</code>.</p>
+<p>For a one-off install, download the .deb or .rpm matching your architecture from
+<a href="https://github.com/knit-cli/knit/releases">GitHub Releases</a>, then use
+<code>sudo apt install ./knit_…_amd64.deb</code> or <code>sudo dnf install ./knit-….x86_64.rpm</code>.</p>
+<p><a href="https://github.com/knit-cli/knit">Source and documentation</a> · <a href="knit.gpg">APT signing key</a></p>
+</html>
