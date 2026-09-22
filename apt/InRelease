@@ -1,0 +1,34 @@
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA256
+
+Architectures: amd64 arm64
+Date: Tue, 22 Sep 2026 10:16:13 +0000
+Description: Knit Linux packages
+Label: Knit
+Origin: Knit
+MD5Sum:
+ 64cd81dbd00a11ff761c3609c206d5db             1120 Packages
+ 99453ab2b2bf3bdca714a2d08c0f2f90              535 Packages.gz
+SHA1:
+ 88158356ed78a6aee4a1d70c0204fd6736265d4f             1120 Packages
+ 99cef46ae737bf6bb12fac16e3afb0ccc2b2c6ab              535 Packages.gz
+SHA256:
+ 123873cf450ff2638c8e64c47836aa96e63f2742a2360a71bbd3b7c9f8b0712d             1120 Packages
+ b25bb4bb36bf2fcb26f32b0d8d7292a92c42b7e8253e09b80c479e387c6c86fe              535 Packages.gz
+SHA512:
+ 6bbc8837375977eb71ad0850cedc838e8a7521cb66e8f0a2080085001940bbf3603116ad881a6a21dc108ba9c865719ea7523d364c9c2a98a1cefa11dea1113c             1120 Packages
+ fa35aa0416c11594cfad1a5dad2013a4c38ecebf24b2754067df41596dfafbcb9218f0a391d75992f0f107fe2ee9837aff787aa1342899ee20fbd572d5e35255              535 Packages.gz
+-----BEGIN PGP SIGNATURE-----
+
+iQGzBAEBCAAdFiEEhz5ZEKtVy6IU5ffyJYw7sWPsC5oFAmqyVW0ACgkQJYw7sWPs
+C5p0VQwAg0LASb1nP5ydsz1UssDP0Du0WWaRrCkVQEdNGI5G9ImXx+vkZJmGGxq1
+HjNU9Txll0Z/MakL/PoEVrfCEnp//dBY+0RFDr4nj5BZQYosAlJx0UeCReNrnK2P
+3gOWJ7ysNjrA4rn7gUUYz1gZZhTB1jjzep4NFX/RG7qxG1RoNS7mjSEuhJqHXi4z
+Jlw1luotTwcXY/t/EjmafF1RBC8O4Vzeht7aHCbaMwwhv5nVojlM1CsD7j5gVQQp
+RaufeIvftsSyBuJJg7SzFwAARQEnor7scmJxr17hwlyRDAE2BGiMf01jO2A6yMAR
+tSYuoif0QPGVN9eIPyEEQPy5/fu4MLxzViACPZRcINTP3sr97IBrNsiq2T+zlTlh
+01ZaMlhx5fvq9h+pXX7YMwwUlJDPC1MN7+BV/MLr5DkV1xA9TQSseQizfUiPpnu/
+BtKh7X80rSP2WURkYtnVc9vwzVXCObjXuUeu3X1ypA4zeR4IiEKXPGVW9T35TpDz
+Vupp4Rfz
+=BQlw
+-----END PGP SIGNATURE-----
