@@ -116,15 +116,36 @@ pub fn record_bundle_history(root: &Path, bundle: &ChangeGroup) -> Result<usize>
     append_history_events(root, &project_id, &events)
 }
 
+/// Record missing events from every bundle artifact in the project, including
+/// archived and landed ones. The sweep reads the ledger once up front,
+/// generates events for all bundles into one batch, drops the ids that are
+/// already recorded, and appends the rest through a single
+/// [`append_history_events`] call — which rereads the ledger under its lock to
+/// dedupe against concurrent writers. Appending per bundle instead would
+/// reread and reparse the whole ledger once per bundle, which stalls any
+/// project with a large ledger.
 pub fn refresh_project_history(root: &Path, project_id: &str) -> Result<usize> {
+    let bundles = project_bundles(root, project_id)?;
+    if bundles.is_empty() {
+        return Ok(0);
+    }
+
     let recorded = recorded_event_ids(root, project_id)?;
     let mut lookup = CommitLookup::new(root);
-    let mut appended = 0;
-    for (_, bundle) in project_bundles(root, project_id)? {
-        let events = events_for_bundle(project_id, &bundle, &mut lookup, Some(&recorded));
-        appended += append_history_events(root, project_id, &events)?;
+    let mut generated = Vec::new();
+    for (_, bundle) in bundles {
+        generated.extend(events_for_bundle(
+            project_id,
+            &bundle,
+            &mut lookup,
+            Some(&recorded),
+        ));
     }
-    Ok(appended)
+    let fresh = generated
+        .into_iter()
+        .filter(|event| !recorded.contains(&event.event_id))
+        .collect::<Vec<_>>();
+    append_history_events(root, project_id, &fresh)
 }
 
 /// Outcome of a rebuild: how many recorded events were rewritten with fresher
@@ -768,7 +789,297 @@ fn history_event_id(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BundleNode, CommitRef, Movement};
+    use crate::model::{BundleNode, BundleState, CommitRef, Movement};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_REFRESH_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    /// A synthetic workspace for refresh sweeps: a project marker, a bundle
+    /// directory, and the project ledger. All names are synthetic; no real
+    /// workspace data is copied in.
+    struct RefreshWorkspace(PathBuf);
+
+    impl RefreshWorkspace {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "knit-history-refresh-{}-{}",
+                std::process::id(),
+                NEXT_REFRESH_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(root.join(".knit/projects")).unwrap();
+            fs::create_dir_all(root.join(".knit/bundles")).unwrap();
+            fs::write(root.join(".knit/projects/demo.project.json"), "{}\n").unwrap();
+            Self(root)
+        }
+
+        fn root(&self) -> &Path {
+            &self.0
+        }
+
+        fn add_bundle(&self, bundle: &ChangeGroup) {
+            crate::store::write_json(
+                &self
+                    .0
+                    .join(".knit/bundles")
+                    .join(format!("{}.bundle.json", bundle.id)),
+                bundle,
+            )
+            .unwrap();
+        }
+
+        fn ledger(&self) -> PathBuf {
+            history_path(&self.0, "demo")
+        }
+
+        fn ledger_text(&self) -> String {
+            fs::read_to_string(self.ledger()).unwrap()
+        }
+    }
+
+    impl Drop for RefreshWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn project_bundle(slug: &str, state: BundleState, nodes: Vec<BundleNode>) -> ChangeGroup {
+        let mut bundle = ChangeGroup::new(
+            slug.to_string(),
+            format!("{} work", slug.replace('-', " ")),
+            "2026-08-01T10:00:00Z".to_string(),
+        );
+        bundle.project_id = Some("demo".to_string());
+        bundle.state = Some(state);
+        bundle.nodes.extend(nodes);
+        bundle
+    }
+
+    fn archived_bundle(slug: &str, shas: &[&str]) -> ChangeGroup {
+        let mut bundle = project_bundle(
+            slug,
+            BundleState::Archived,
+            vec![
+                commit_group_node(slug, shas),
+                BundleNode::feature_archived(
+                    format!("{slug}-archived"),
+                    "2026-08-15T12:05:00Z".to_string(),
+                    Some("landed".to_string()),
+                ),
+            ],
+        );
+        bundle.archived_at = Some("2026-08-15T12:05:00Z".to_string());
+        bundle
+    }
+
+    fn commit_group_node(slug: &str, shas: &[&str]) -> BundleNode {
+        BundleNode::commit_group(
+            format!("{slug}-group"),
+            "2026-08-02T09:00:00Z".to_string(),
+            format!("Add {slug} form"),
+            shas.iter()
+                .map(|sha| CommitRef {
+                    repo_id: "backend".to_string(),
+                    sha: sha.to_string(),
+                })
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    fn orphan_event(id: &str, bundle_id: &str, message: &str) -> HistoryEvent {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": HISTORY_EVENT_SCHEMA_VERSION,
+            "eventId": id,
+            "projectId": "demo",
+            "kind": "commit.recorded",
+            "bundleId": bundle_id,
+            "bundleTitle": "deleted work",
+            "repoId": "backend",
+            "nodeId": format!("{id}-node"),
+            "message": message,
+            "occurredAt": "2026-08-01T10:00:00Z",
+            "recordedAt": "2026-08-01T10:00:00Z",
+            "recordedBy": "knit",
+        }))
+        .unwrap()
+    }
+
+    fn append_events_file(workspace: &RefreshWorkspace, events: &[HistoryEvent]) {
+        let mut text = workspace.ledger_text();
+        for event in events {
+            text.push_str(&serde_json::to_string(event).unwrap());
+            text.push('\n');
+        }
+        fs::write(workspace.ledger(), text).unwrap();
+    }
+
+    fn count_kind(events: &[HistoryEvent], bundle_id: &str, kind: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| event.bundle_id.as_deref() == Some(bundle_id) && event.kind == kind)
+            .count()
+    }
+
+    #[test]
+    fn refresh_records_every_bundle_including_archived_and_landed() {
+        let workspace = RefreshWorkspace::new();
+        workspace.add_bundle(&project_bundle(
+            "alpha-work",
+            BundleState::Open,
+            vec![commit_group_node(
+                "alpha",
+                &["1111111111111111111111111111111111111111"],
+            )],
+        ));
+        workspace.add_bundle(&archived_bundle(
+            "beta-work",
+            &["2222222222222222222222222222222222222222"],
+        ));
+        workspace.add_bundle(&project_bundle(
+            "gamma-work",
+            BundleState::Closed,
+            vec![BundleNode::feature_landed(
+                "gamma-landed".to_string(),
+                "2026-08-15T12:00:00Z".to_string(),
+                "plan-1".to_string(),
+                "run-1".to_string(),
+                "github".to_string(),
+                vec!["backend".to_string()],
+                Vec::new(),
+                None,
+            )],
+        ));
+
+        let appended = refresh_project_history(workspace.root(), "demo").unwrap();
+        let events = load_history_events(workspace.root(), "demo").unwrap();
+        assert_eq!(count_kind(&events, "alpha-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "alpha-work", "commit.recorded"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "commit.recorded"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "bundle.archived"), 1);
+        assert_eq!(count_kind(&events, "gamma-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "gamma-work", "bundle.landed"), 1);
+        assert_eq!(appended, events.len());
+        assert_eq!(events.len(), 7, "{events:#?}");
+
+        // The sweep is idempotent: a second pass appends nothing and leaves
+        // the ledger bytes exactly as they were.
+        let before = workspace.ledger_text();
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(workspace.ledger_text(), before);
+    }
+
+    #[test]
+    fn refresh_preserves_orphans_and_appends_only_missing_events() {
+        let workspace = RefreshWorkspace::new();
+        let alpha = project_bundle(
+            "alpha-work",
+            BundleState::Open,
+            vec![commit_group_node(
+                "alpha",
+                &["1111111111111111111111111111111111111111"],
+            )],
+        );
+        workspace.add_bundle(&alpha);
+        record_bundle_history(workspace.root(), &alpha).unwrap();
+        append_events_file(
+            &workspace,
+            &[orphan_event(
+                "khist_orphan0000000001",
+                "deleted-work",
+                "Work from a deleted bundle",
+            )],
+        );
+
+        // An archived bundle whose history was never recorded locally.
+        let before = workspace.ledger_text();
+        let before_count = load_history_events(workspace.root(), "demo").unwrap().len();
+        workspace.add_bundle(&archived_bundle(
+            "beta-work",
+            &[
+                "2222222222222222222222222222222222222222",
+                "3333333333333333333333333333333333333333",
+            ],
+        ));
+
+        let appended = refresh_project_history(workspace.root(), "demo").unwrap();
+        assert_eq!(appended, 4, "created + two commits + archived");
+        let after = workspace.ledger_text();
+        let after_events = load_history_events(workspace.root(), "demo").unwrap();
+        assert_eq!(after_events.len(), before_count + 4);
+        // Append-only: the recorded prefix, orphan included, is untouched.
+        assert!(
+            after.starts_with(&before),
+            "refresh must never rewrite recorded lines"
+        );
+        assert!(after_events
+            .iter()
+            .any(|event| event.event_id == "khist_orphan0000000001"
+                && event.message.as_deref() == Some("Work from a deleted bundle")));
+
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(workspace.ledger_text(), after);
+    }
+
+    #[test]
+    fn fully_recorded_refresh_skips_appending_over_a_large_ledger() {
+        let workspace = RefreshWorkspace::new();
+        let bundles = 140;
+        for index in 0..bundles {
+            let slug = format!("team-{index:03}");
+            let sha_a = format!("{index:020x}aa");
+            let sha_b = format!("{index:020x}bb");
+            let bundle = if index % 2 == 0 {
+                project_bundle(
+                    &slug,
+                    BundleState::Open,
+                    vec![commit_group_node(&slug, &[sha_a.as_str(), sha_b.as_str()])],
+                )
+            } else {
+                archived_bundle(&slug, &[sha_a.as_str(), sha_b.as_str()])
+            };
+            workspace.add_bundle(&bundle);
+        }
+        refresh_project_history(workspace.root(), "demo").unwrap();
+
+        // Bulk the ledger out with orphan events from deleted bundles so the
+        // recorded set dwarfs anything a sweep could regenerate.
+        let fillers: Vec<HistoryEvent> = (0..4000)
+            .map(|index| {
+                orphan_event(
+                    &format!("khist_filler{index:08x}"),
+                    "deleted-filler-work",
+                    "Recorded filler change from a deleted bundle",
+                )
+            })
+            .collect();
+        append_events_file(&workspace, &fillers);
+        let before = fs::read(workspace.ledger()).unwrap();
+        assert!(
+            before.len() > 1_000_000,
+            "ledger should be large: {}",
+            before.len()
+        );
+        // Each append takes the history lock; dropping it leaves the lock
+        // directory behind, so its absence proves no append was attempted.
+        let _ = fs::remove_dir_all(workspace.root().join(".knit/locks"));
+
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(fs::read(workspace.ledger()).unwrap(), before);
+        assert!(
+            !workspace.root().join(".knit/locks").exists(),
+            "a fully recorded sweep must not append (or lock) once per bundle"
+        );
+    }
 
     fn bundle_with(nodes: Vec<BundleNode>) -> ChangeGroup {
         let mut bundle = ChangeGroup::new(

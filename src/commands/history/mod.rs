@@ -18,8 +18,8 @@ use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
 use related::{
-    git_commits_for_paths, print_related_instance, related_instance_time, related_instances,
-    related_repo_paths,
+    git_commits_for_paths, prefetch_commit_subjects, print_related_instance, related_instance_time,
+    related_instances, related_repo_paths,
 };
 use target::resolve_related_target;
 
@@ -171,8 +171,10 @@ pub fn show_related_history(
 
     let repo_paths = related_repo_paths(&project, &target);
     let total = instances.len();
-    for instance in instances.iter().take(limit) {
-        print_related_instance(instance, &repo_paths);
+    let displayed = &instances[..limit.min(instances.len())];
+    let subjects = prefetch_commit_subjects(displayed, &repo_paths);
+    for instance in displayed {
+        print_related_instance(instance, &repo_paths, &subjects);
     }
     if total > limit {
         println!(

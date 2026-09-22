@@ -3,7 +3,7 @@
 //! other repos, plus the rendering of the result.
 
 use super::target::RelatedTarget;
-use crate::git::{git_output, git_output_optional};
+use crate::git::git_output;
 use crate::ids::short_sha;
 use crate::model::{HistoryEvent, KnitProject};
 use crate::output as out;
@@ -204,9 +204,56 @@ pub(super) fn related_repo_paths(
     paths
 }
 
+/// Cached Git subjects keyed by `(repo_id, sha)` so rendering never runs one
+/// `git show` per row. Absent entries mean the subject is unknown, so
+/// rendering falls back to the recorded event message.
+pub(super) type CommitSubjects = BTreeMap<(String, String), String>;
+
+/// Load Git subjects once for every distinct commit rendered across the
+/// displayed instances, batched per repo via
+/// [`crate::git::commit_details`]. Blank subjects are not cached so the
+/// recorded-message fallback in [`event_message`] keeps the old precedence.
+pub(super) fn prefetch_commit_subjects(
+    instances: &[RelatedInstance],
+    repo_paths: &BTreeMap<String, PathBuf>,
+) -> CommitSubjects {
+    let mut shas_by_repo = BTreeMap::<&str, BTreeSet<&str>>::new();
+    for instance in instances {
+        for event in instance
+            .matched
+            .iter()
+            .chain(instance.related.iter())
+            .chain(instance.other_bundle.iter())
+        {
+            if let (Some(repo_id), Some(commit)) = (&event.repo_id, &event.commit) {
+                shas_by_repo.entry(repo_id).or_default().insert(commit);
+            }
+        }
+    }
+
+    let mut subjects = CommitSubjects::new();
+    for (repo_id, shas) in shas_by_repo {
+        let Some(repo_path) = repo_paths.get(repo_id) else {
+            continue;
+        };
+        let wanted = shas
+            .into_iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>();
+        for (sha, detail) in crate::git::commit_details(repo_path, &wanted) {
+            if detail.subject.trim().is_empty() {
+                continue;
+            }
+            subjects.insert((repo_id.to_string(), sha), detail.subject);
+        }
+    }
+    subjects
+}
+
 pub(super) fn print_related_instance(
     instance: &RelatedInstance,
     repo_paths: &BTreeMap<String, PathBuf>,
+    subjects: &CommitSubjects,
 ) {
     println!();
     let bundle = instance.bundle_id.as_deref().unwrap_or("-");
@@ -228,22 +275,22 @@ pub(super) fn print_related_instance(
     );
 
     println!("{}", out::heading("Touched path:"));
-    print_event_list(&instance.matched, repo_paths);
+    print_event_list(&instance.matched, subjects);
 
     if !instance.related.is_empty() {
         println!("{}", out::heading("Related in same scope:"));
-        print_event_list(&instance.related, repo_paths);
+        print_event_list(&instance.related, subjects);
     }
 
     if !instance.other_bundle.is_empty() {
         println!("{}", out::heading("Other commits in bundle:"));
-        print_event_list(&instance.other_bundle, repo_paths);
+        print_event_list(&instance.other_bundle, subjects);
     }
 
     print_inspect_commands(instance, repo_paths);
 }
 
-pub(super) fn print_event_list(events: &[HistoryEvent], repo_paths: &BTreeMap<String, PathBuf>) {
+pub(super) fn print_event_list(events: &[HistoryEvent], subjects: &CommitSubjects) {
     let mut events = events.to_vec();
     events.sort_by(|left, right| {
         event_time(left)
@@ -259,7 +306,7 @@ pub(super) fn print_event_list(events: &[HistoryEvent], repo_paths: &BTreeMap<St
             .as_deref()
             .map(short_sha)
             .unwrap_or_else(|| "-".to_string());
-        let message = event_message(&event, repo_paths);
+        let message = event_message(&event, subjects);
         println!(
             "  {} {} {}",
             out::repo_field(repo, 18),
@@ -269,15 +316,11 @@ pub(super) fn print_event_list(events: &[HistoryEvent], repo_paths: &BTreeMap<St
     }
 }
 
-fn event_message(event: &HistoryEvent, repo_paths: &BTreeMap<String, PathBuf>) -> String {
+fn event_message(event: &HistoryEvent, subjects: &CommitSubjects) -> String {
     if let (Some(repo_id), Some(commit)) = (&event.repo_id, &event.commit) {
-        if let Some(repo_path) = repo_paths.get(repo_id) {
-            if let Ok(Some(subject)) =
-                git_output_optional(repo_path, ["show", "-s", "--format=%s", commit.as_str()])
-            {
-                if !subject.trim().is_empty() {
-                    return subject;
-                }
+        if let Some(subject) = subjects.get(&(repo_id.clone(), commit.clone())) {
+            if !subject.trim().is_empty() {
+                return subject.clone();
             }
         }
     }
@@ -372,6 +415,51 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["knit"]
         );
+    }
+
+    #[test]
+    fn event_message_prefers_cached_git_subject() {
+        let event = event("e1", "backend", "aaa111", Some("kg1"), "n1");
+        let mut subjects = CommitSubjects::new();
+        subjects.insert(
+            ("backend".to_string(), "aaa111".to_string()),
+            "Git subject line".to_string(),
+        );
+
+        assert_eq!(event_message(&event, &subjects), "Git subject line");
+    }
+
+    #[test]
+    fn event_message_falls_back_to_recorded_message() {
+        let event = event("e1", "backend", "aaa111", Some("kg1"), "n1");
+
+        assert_eq!(
+            event_message(&event, &CommitSubjects::new()),
+            "backend change"
+        );
+    }
+
+    #[test]
+    fn event_message_falls_back_to_kind_when_message_blank() {
+        let mut event = event("e1", "backend", "aaa111", Some("kg1"), "n1");
+        event.message = Some("   ".to_string());
+
+        assert_eq!(
+            event_message(&event, &CommitSubjects::new()),
+            "commit.recorded"
+        );
+    }
+
+    #[test]
+    fn event_message_falls_back_when_cached_subject_blank() {
+        let event = event("e1", "backend", "aaa111", Some("kg1"), "n1");
+        let mut subjects = CommitSubjects::new();
+        subjects.insert(
+            ("backend".to_string(), "aaa111".to_string()),
+            "  ".to_string(),
+        );
+
+        assert_eq!(event_message(&event, &subjects), "backend change");
     }
 
     fn event(
