@@ -202,8 +202,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 name,
                 token,
                 clear,
+                token_stdin,
                 global,
-            } => commands::set_remote_token(&name, token.as_deref(), clear, global),
+            } => commands::set_remote_token(&name, token.as_deref(), clear, token_stdin, global),
         },
         Commands::GitCredential { remote, operation } => {
             commands::run_git_credential_helper(&remote, operation)

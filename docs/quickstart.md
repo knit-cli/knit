@@ -210,6 +210,13 @@ knit project push                       # create the hosted project (uploads vie
 KNIT_BUNDLE=my-feature knit sync push   # bundles + history for the walkthrough bundle
 ```
 
+Prefer not to put the token on the command line? `--token-stdin` at a terminal
+asks for it at a hidden prompt (Enter submits; no Ctrl-D), and piped stdin
+reads it up to EOF (`printf '%s\n' "$TOKEN" | knit remote add hosted <url>
+--global --token-stdin`). To rotate the token later, run
+`knit remote token hosted --global` — it shows the same hidden prompt — and
+check it with `knit remote auth-status hosted`.
+
 `knit project push` creates the hosted project record; run it once per project
 before the first sync. `knit sync push` resolves a bundle the same way every
 other command does — since step 8 archived `my-feature`, name it explicitly

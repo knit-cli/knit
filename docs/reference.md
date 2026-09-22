@@ -69,7 +69,7 @@ knit remote remove <name> [--global]
 knit remote projects [--remote <name>] [--json]
 knit remote auth-status <name> [--json]
 knit remote sync-helpers <name>
-knit remote token <name> [token] [--clear] [--global]
+knit remote token <name> [token] [--token-stdin] [--clear] [--global]
 knit git-credential --remote <name> get|store|erase
 knit view list [--project <name>]
 knit view show [name] [--project <name>] [--repos]
@@ -750,6 +750,8 @@ knit config set --global sync-remotes hosted
 knit config show
 knit remote show hosted
 ```
+
+Token entry is terminal-friendly on both token commands (`remote add` and `remote token`). With `--token-stdin`, a terminal shows a hidden prompt — type or paste the token and press Enter; no Ctrl-D is needed. Piped or redirected stdin keeps the scriptable contract instead: the token is read up to EOF, so `printf '%s\n' "$TOKEN" | knit remote add hosted <url> --global --token-stdin` works from secret managers and CI. `knit remote token <name> --global` with no token value shows the same hidden prompt at a terminal and replaces the stored token — the clean rotation path for a remote that already exists; without a terminal it fails immediately with that guidance instead of hanging. Hidden entry (prompt or stdin) requires `--global` — which `knit remote add` already implies outside a workspace — so per-user credentials never land in shared workspace config, and an empty submission never overwrites the stored token. Saving reports the config file path and the `knit remote auth-status <name>` check command; the token itself is never printed, and storing it does not verify it against the remote.
 
 Workspace-only overrides stay local:
 

@@ -1174,7 +1174,7 @@ pub enum RemoteCommand {
         /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
-        /// Read the remote token from stdin instead of command arguments.
+        /// Read the remote token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
         #[arg(long, conflicts_with = "token")]
         token_stdin: bool,
         /// Store this remote in the user-level Knit config instead of the workspace. This is automatic outside a workspace.
@@ -1243,12 +1243,17 @@ pub enum RemoteCommand {
         /// Remote name (must be configured in the user-level Knit config).
         name: String,
     },
-    /// Store or clear a token for a remote.
+    /// Store or clear a token for a remote. Without a token value, a terminal
+    /// (--global) shows a hidden prompt; without one, --token-stdin reads a
+    /// piped token up to EOF.
     Token {
         /// Remote name.
         name: String,
-        /// Token value. Omit with --clear.
+        /// Token value. Omit with --clear, or to be prompted at a terminal with --global.
         token: Option<String>,
+        /// Read the token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long, conflicts_with_all = ["token", "clear"])]
+        token_stdin: bool,
         /// Remove the stored token.
         #[arg(long)]
         clear: bool,
