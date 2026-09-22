@@ -5,7 +5,7 @@ use crate::model::{KnitProject, ProjectAuthGroup, ProjectRepoEntry};
 use anyhow::{bail, Context, Result};
 use serde_json::json;
 use std::collections::{BTreeMap, BTreeSet};
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Write};
 use std::path::Path;
 
 /// `knit auth` with no subcommand is the primary credential flow. `None`
@@ -59,10 +59,15 @@ fn describe_default(store: &auth::AuthStore, host: &str) -> String {
 
 /// The global default-token wizard: pick a forge, paste one hidden token,
 /// done. Existing defaults are shown and kept unless deliberately updated;
-/// the first token saved for a forge becomes its default automatically.
+/// the first token saved for a forge becomes its default automatically. `r`
+/// opens the separate sync-remote token flow — a hosted-service credential,
+/// never interchangeable with the forge tokens managed here.
 fn global_defaults_wizard() -> Result<()> {
     println!(
         "Personal forge tokens — one default token per forge, used for every project, clone, fetch, and push on that forge unless a project overrides it."
+    );
+    println!(
+        "Sync remote tokens (hosted Knit service) are separate: choose `r` below, or run `knit auth remote <name>`."
     );
     loop {
         let store = auth::load()?;
@@ -84,8 +89,9 @@ fn global_defaults_wizard() -> Result<()> {
         for (i, (label, _, host)) in WIZARD_FORGES.iter().enumerate() {
             println!("  {}. {label} ({host})", i + 1);
         }
+        println!("  r. Sync remote token (hosted Knit service)");
         println!("  Enter when done");
-        let choice = prompt("Forge (1-4, or Enter to finish): ")?;
+        let choice = prompt("Choice (1-4 for Git hosting, r for sync, Enter to finish): ")?;
         if choice.is_empty() {
             // Activating inside a project: plain Git picks up the saved
             // tokens here, without a separate `knit auth status` run.
@@ -93,6 +99,16 @@ fn global_defaults_wizard() -> Result<()> {
                 .context("Tokens were saved, but the plain-Git helper could not be refreshed")?;
             println!("Done. Tokens are saved in your personal Knit store; nothing was synced.");
             return Ok(());
+        }
+        if matches!(choice.as_str(), "r" | "R") {
+            // The same flow `knit auth remote` runs, on the user-level config
+            // only. A failure there (rejected token, unreachable service,
+            // cancellation) leaves this wizard's forge state untouched, so
+            // stay in the loop afterwards.
+            if let Err(error) = crate::commands::remote::auth_remote(None, None, false, false) {
+                println!("Sync remote token was not saved: {error:#}");
+            }
+            continue;
         }
         let Some((_, provider, host)) = choice
             .parse::<usize>()
@@ -112,7 +128,9 @@ fn global_defaults_wizard() -> Result<()> {
                     continue;
                 }
                 println!("{}", permission_help(provider));
-                let token = read_hidden(&format!("New token for {host} (hidden): "))?;
+                let token = read_hidden(&format!(
+                    "New token for {host} (input hidden, press Enter to submit): "
+                ))?;
                 let token = token.trim();
                 if token.is_empty() {
                     println!("Kept the current token.");
@@ -156,7 +174,9 @@ fn global_defaults_wizard() -> Result<()> {
                     Some(kind) => bitbucket_username_for_token_type(kind, &mut prompt)?,
                     None => None,
                 };
-                let token = read_hidden(&format!("Token for {host} (hidden): "))?;
+                let token = read_hidden(&format!(
+                    "Token for {host} (input hidden, press Enter to submit): "
+                ))?;
                 let token = token.trim();
                 if token.is_empty() {
                     println!("Skipped {host}.");
@@ -319,6 +339,17 @@ fn setup_with_prompt(
 
 pub fn run(command: AuthCommand) -> Result<()> {
     match command {
+        AuthCommand::Remote {
+            name,
+            url,
+            token_stdin,
+            offline,
+        } => crate::commands::remote::auth_remote(
+            name.as_deref(),
+            url.as_deref(),
+            token_stdin,
+            offline,
+        ),
         AuthCommand::Setup { project, repos } => setup(project.as_deref(), &repos),
         AuthCommand::Add {
             name,
@@ -617,20 +648,22 @@ fn add(name: &str, spec: CredentialSpec, token_stdin: bool, replace: bool) -> Re
         }
     }
     let token = if spec.token_env.is_none() {
+        // Both entry paths share the common token reader: `--token-stdin` at
+        // a terminal is a hidden prompt that submits on Enter (not a
+        // read-to-EOF that would wait on Ctrl-D), while piped stdin keeps
+        // the bounded EOF read for secret managers.
         let token = if token_stdin {
-            let mut token = String::new();
-            io::stdin()
-                .take(65537)
-                .read_to_string(&mut token)
-                .context("Could not read token from stdin")?;
-            if token.len() > 65536 {
-                bail!("Token input is too large.");
-            }
-            token
+            crate::token_entry::read_token(
+                &format!("Token for `{name}` (input hidden, press Enter to submit): "),
+                "forge token",
+            )?
         } else {
             require_terminal()?;
             println!("{}", permission_help(&spec.provider));
-            rpassword::prompt_password("Token (hidden): ").context("Could not read token")?
+            crate::token_entry::read_token(
+                "Token (input hidden, press Enter to submit): ",
+                "forge token",
+            )?
         };
         let token = token.trim();
         if token.is_empty() || token.chars().any(char::is_control) {

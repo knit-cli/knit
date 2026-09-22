@@ -107,6 +107,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_TAG: ${{ github.ref_name }}
+        shell: bash
         run: gh release edit "$RELEASE_TAG" --prerelease
 
   # Repackage the just-uploaded raw binaries into Homebrew bottles, publish

@@ -517,15 +517,15 @@ try:
         expect('Current default tokens:')
         expect('(none yet)')
         expect('1. GitHub (github.com)')
-        answer('Forge (1-4, or Enter to finish): ', '1')
-        answer('Token for github.com (hidden): ', 'GH-MAIN', hidden=True)
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '1')
+        answer('Token for github.com (input hidden, press Enter to submit): ', 'GH-MAIN', hidden=True)
         expect('`github.com` is now the default token for github.com.')
-        answer('Forge (1-4, or Enter to finish): ', '3')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '3')
         answer('Which kind of Bitbucket token is it? (name/number): ', '1')
         answer('Atlassian account email for this API token: ', 'dev@example.org')
-        answer('Token for bitbucket.org (hidden): ', 'BB-MAIN', hidden=True)
+        answer('Token for bitbucket.org (input hidden, press Enter to submit): ', 'BB-MAIN', hidden=True)
         expect('`bitbucket.org` is now the default token for bitbucket.org.')
-        answer('Forge (1-4, or Enter to finish): ', '')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '')
         expect('Done. Tokens are saved in your personal Knit store')
 
     conversation(conv7 / 'plain', conv7 / 'home', ['auth'], global_wizard_script)
@@ -612,11 +612,11 @@ try:
     (conv7 / 'home' / 'forge-auth.json').write_text(json.dumps(reg7d))
 
     def replace_env_default(expect, answer):
-        answer('Forge (1-4, or Enter to finish): ', '1')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '1')
         answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
-        answer('New token for github.com (hidden): ', 'GH-ROTATED', hidden=True)
+        answer('New token for github.com (input hidden, press Enter to submit): ', 'GH-ROTATED', hidden=True)
         expect('Updated the token on `github.com`; it stays the default for github.com.')
-        answer('Forge (1-4, or Enter to finish): ', '')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '')
 
     conversation(conv7 / 'plain', conv7 / 'home', ['auth'], replace_env_default)
     rotated = registry(conv7 / 'home')
@@ -631,10 +631,10 @@ try:
     (conv7 / 'home' / 'forge-auth.json').write_text(json.dumps(rotated))
 
     def choose_legacy_default(expect, answer):
-        answer('Forge (1-4, or Enter to finish): ', '1')
-        answer('Token for github.com (hidden): ', 'GH-CHOSEN', hidden=True)
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '1')
+        answer('Token for github.com (input hidden, press Enter to submit): ', 'GH-CHOSEN', hidden=True)
         expect('`github.com-2` is now the default token for github.com.')
-        answer('Forge (1-4, or Enter to finish): ', '')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '')
 
     conversation(conv7 / 'plain', conv7 / 'home', ['auth'], choose_legacy_default)
     assert registry(conv7 / 'home')['defaults']['github.com'] == 'github.com-2'
@@ -648,14 +648,14 @@ try:
             ('atlassian_api_token', 'dev@example.invalid', 'BB-API-ROTATED'),
             ('access_token', None, 'BB-ACCESS-ROTATED')]:
         def replace_bitbucket_default(expect, answer):
-            answer('Forge (1-4, or Enter to finish): ', '3')
+            answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '3')
             answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
-            answer('New token for bitbucket.org (hidden): ', token, hidden=True)
+            answer('New token for bitbucket.org (input hidden, press Enter to submit): ', token, hidden=True)
             answer('Which kind of Bitbucket token is it? (name/number): ', kind)
             if email:
                 answer('Atlassian account email for this API token: ', email)
             expect('Updated the token on `bitbucket.org`; it stays the default for bitbucket.org.')
-            answer('Forge (1-4, or Enter to finish): ', '')
+            answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '')
 
         conversation(conv7 / 'plain', conv7 / 'home', ['auth'], replace_bitbucket_default)
         after_bb = registry(conv7 / 'home')
@@ -671,11 +671,11 @@ try:
     secrets_decline = secrets(conv7 / 'home')
 
     def decline_bitbucket_replacement(expect, answer):
-        answer('Forge (1-4, or Enter to finish): ', '3')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '3')
         answer('Enter to keep it, or `t` to paste a replacement token: ', 't')
-        answer('New token for bitbucket.org (hidden): ', '', hidden=True)
+        answer('New token for bitbucket.org (input hidden, press Enter to submit): ', '', hidden=True)
         expect('Kept the current token.')
-        answer('Forge (1-4, or Enter to finish): ', '')
+        answer('Choice (1-4 for Git hosting, r for sync, Enter to finish): ', '')
 
     conversation(conv7 / 'plain', conv7 / 'home', ['auth'], decline_bitbucket_replacement)
     assert (conv7 / 'home' / 'forge-auth.json').read_bytes() == before_decline

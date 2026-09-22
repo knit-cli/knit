@@ -129,7 +129,7 @@ pub struct LogArgs {
 
 #[derive(Subcommand)]
 pub enum Commands {
-    /// Set up forge tokens: bare `knit auth` manages the personal default tokens used for everything; `knit auth --project NAME` wires one project.
+    /// Set up credentials: bare `knit auth` is a guided menu for both token kinds — personal forge tokens (GitHub/GitLab/Bitbucket/Forgejo) and the separate hosted sync-service token (`r`); `knit auth --project NAME` wires one project's forge tokens.
     Auth {
         /// Scope the wizard to one project: use the default tokens or give the project its own.
         #[arg(long)]
@@ -1174,7 +1174,7 @@ pub enum RemoteCommand {
         /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
-        /// Read the remote token from stdin instead of command arguments.
+        /// Read the remote token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
         #[arg(long, conflicts_with = "token")]
         token_stdin: bool,
         /// Store this remote in the user-level Knit config instead of the workspace. This is automatic outside a workspace.
@@ -1243,12 +1243,17 @@ pub enum RemoteCommand {
         /// Remote name (must be configured in the user-level Knit config).
         name: String,
     },
-    /// Store or clear a token for a remote.
+    /// Store or clear a token for a remote. Without a token value, a terminal
+    /// (--global) shows a hidden prompt; without one, --token-stdin reads a
+    /// piped token up to EOF.
     Token {
         /// Remote name.
         name: String,
-        /// Token value. Omit with --clear.
+        /// Token value. Omit with --clear, or to be prompted at a terminal with --global.
         token: Option<String>,
+        /// Read the token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long, conflicts_with_all = ["token", "clear"])]
+        token_stdin: bool,
         /// Remove the stored token.
         #[arg(long)]
         clear: bool,
@@ -1578,6 +1583,20 @@ pub enum HandoffCommand {
 
 #[derive(Subcommand)]
 pub enum AuthCommand {
+    /// Set up or update the sync remote token (hosted Knit service), verifying it against the server before saving.
+    Remote {
+        /// Remote name. Required without a terminal; interactively picked or typed when omitted.
+        name: Option<String>,
+        /// Service base URL, for example `https://host.example` or `http://localhost:4000`. Defaults to the remote's saved URL; prompted for a new remote.
+        #[arg(long)]
+        url: Option<String>,
+        /// Read the token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long)]
+        token_stdin: bool,
+        /// Save without contacting the server to verify it; the token is stored unverified.
+        #[arg(long)]
+        offline: bool,
+    },
     /// Choose host defaults or project-only tokens, with optional repository scope.
     Setup {
         #[arg(long)]
@@ -1586,7 +1605,7 @@ pub enum AuthCommand {
         #[arg(short = 'r', long = "repo")]
         repos: Vec<String>,
     },
-    /// Save a named credential. Prompts without echo unless --token-stdin or --token-env is used.
+    /// Save a named credential. `--token-stdin` reads a piped token to EOF (at a terminal it is typed at a hidden prompt, Enter submits); otherwise a terminal prompts hidden. `--token-env` stores a variable reference instead.
     Add {
         name: String,
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "forgejo"])]
@@ -1603,7 +1622,7 @@ pub enum AuthCommand {
         /// Store an environment variable reference instead of storing the token itself.
         #[arg(long, conflicts_with = "token_stdin")]
         token_env: Option<String>,
-        /// Read the token from stdin, never from a command-line argument.
+        /// Read the token from stdin, never from a command-line argument. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
         #[arg(long)]
         token_stdin: bool,
         /// Explicitly rotate an existing named credential for all its assignments.

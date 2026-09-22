@@ -9,7 +9,7 @@ import termios
 import threading
 import time
 
-def conversation(binary, cwd, env, args, script):
+def conversation(binary, cwd, env, args, script, exit_code=0):
     DEADLINE = time.monotonic() + 120
     finished = threading.Event()
     pid, fd = pty.fork()
@@ -76,7 +76,7 @@ def conversation(binary, cwd, env, args, script):
             waited, status = os.waitpid(pid, os.WNOHANG)
             if waited:
                 reaped = True
-                assert os.waitstatus_to_exitcode(status) == 0, transcript.decode(errors='replace')
+                assert os.waitstatus_to_exitcode(status) == exit_code, transcript.decode(errors='replace')
                 break
             assert time.monotonic() < exit_deadline, (
                 'conversation did not exit: ' + transcript.decode(errors='replace'))
