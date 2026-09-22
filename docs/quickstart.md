@@ -204,18 +204,36 @@ stored on a compatible remote so they survive machines and can appear in
 dashboards:
 
 ```sh
-knit remote add hosted https://<your-knit-api-url> --token <your-token> --global
+knit auth remote hosted --url https://<your-knit-api-url>
 knit config set --global sync-remotes hosted
 knit project push                       # create the hosted project (uploads views too)
 KNIT_BUNDLE=my-feature knit sync push   # bundles + history for the walkthrough bundle
 ```
 
-Prefer not to put the token on the command line? `--token-stdin` at a terminal
-asks for it at a hidden prompt (Enter submits; no Ctrl-D), and piped stdin
-reads it up to EOF (`printf '%s\n' "$TOKEN" | knit remote add hosted <url>
---global --token-stdin`). To rotate the token later, run
-`knit remote token hosted --global` — it shows the same hidden prompt — and
-check it with `knit remote auth-status hosted`.
+`knit auth remote hosted` asks for the token at a hidden prompt — paste,
+press Enter — has the service verify it **before** anything is saved, then
+prints the config file it wrote: `$KNIT_HOME/config.json`, else
+`$XDG_CONFIG_HOME/knit/config.json`, else `~/.config/knit/config.json`. That
+folder is created on the first successful save, so it normally does not exist
+beforehand. A rejected token is re-prompted instead of being stored, and a
+cancelled or failed attempt leaves the previous configuration untouched. Run
+the same command again to rotate the token, and `knit remote auth-status
+hosted` to inspect it any time. Bare `knit auth` offers the same flow as its
+`r` option — the sync-service token is a separate credential, never
+interchangeable with the forge tokens that wizard otherwise manages.
+
+For scripts and secret managers, pipe the token instead:
+
+```sh
+printf '%s\n' "$TOKEN" | knit auth remote hosted --token-stdin
+```
+
+The older commands remain as a non-verifying compatibility path:
+`knit remote add hosted <url> --global` registers the remote (`--token-stdin`
+instead of `--token <token>` keeps the token off the command line), and
+`knit remote token hosted --global` replaces the token later at the same
+hidden prompt. Neither contacts the service; check the result with `knit
+remote auth-status hosted`.
 
 `knit project push` creates the hosted project record; run it once per project
 before the first sync. `knit sync push` resolves a bundle the same way every

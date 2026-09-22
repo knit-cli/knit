@@ -4,9 +4,9 @@
 
 use super::client::{
     configured_sync_remote_names, decode_response, effective_workspace_config,
-    fetch_project_export, load_project_if_present, normalize_base_url, request, request_json,
-    resolve_project_id, resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env,
-    workspace_config,
+    fetch_project_export, load_project_if_present, normalize_base_url, remote_token_env_name,
+    request, request_json, resolve_project_id, resolve_remote, resolve_sync_remote_names,
+    resolve_token, token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::commands::push::PushForce;
@@ -21,10 +21,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{self, IsTerminal, Read};
+use std::io::{self, IsTerminal};
 use std::path::Path;
-
-const MAX_STDIN_TOKEN_BYTES: u64 = 64 * 1024;
 
 pub fn add_remote(
     name: &str,
@@ -97,50 +95,12 @@ fn token_prompt(remote_name: &str) -> String {
     format!("Token for remote `{remote_name}` (input hidden, press Enter to submit): ")
 }
 
-/// Read a remote token from stdin. At a terminal this is a hidden prompt
-/// that completes as soon as Enter is pressed — no Ctrl-D. Piped or
-/// redirected stdin keeps the bounded read-to-EOF contract used by secret
-/// managers (`printf '%s\n' "$TOKEN" | knit remote add …`).
+/// Read a remote token from stdin through the shared token reader: at a
+/// terminal a hidden prompt that completes as soon as Enter is pressed — no
+/// Ctrl-D; piped or redirected stdin the bounded read-to-EOF contract used
+/// by secret managers (`printf '%s\n' "$TOKEN" | knit remote add …`).
 fn read_token_input(prompt: &str) -> Result<String> {
-    if io::stdin().is_terminal() {
-        let token = rpassword::prompt_password(prompt)
-            .context("could not read the token from the hidden prompt")?;
-        let token = token.trim();
-        if token.is_empty() {
-            bail!("remote token is empty; nothing was saved");
-        }
-        Ok(token.to_string())
-    } else {
-        let mut bytes = Vec::new();
-        io::stdin()
-            .take(MAX_STDIN_TOKEN_BYTES + 1)
-            .read_to_end(&mut bytes)
-            .context("failed to read remote token from stdin")?;
-        if bytes.len() as u64 > MAX_STDIN_TOKEN_BYTES {
-            bail!("remote token exceeds {MAX_STDIN_TOKEN_BYTES} bytes");
-        }
-        let token = String::from_utf8(bytes).context("remote token from stdin is not UTF-8")?;
-        let token = token.trim_end_matches(['\r', '\n']);
-        if token.is_empty() {
-            bail!("remote token from stdin is empty");
-        }
-        Ok(token.to_string())
-    }
-}
-
-/// The environment variable that overrides a named remote's stored token.
-fn remote_token_env_name(remote_name: &str) -> String {
-    format!(
-        "KNIT_REMOTE_{}_TOKEN",
-        remote_name
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
-    )
+    crate::token_entry::read_token(prompt, "remote token")
 }
 
 /// Where a just-saved token lives and how to check or replace it. Saving the
@@ -267,75 +227,6 @@ pub fn show_remote(name: &str, global: bool) -> Result<()> {
             "not configured"
         }
     );
-    Ok(())
-}
-
-pub fn remote_auth_status(name: &str, json_output: bool) -> Result<()> {
-    // Environment-bound credentials live only in the private user config;
-    // workspace config is repository-controlled and must not redirect token
-    // introspection to another server.
-    let config = load_global_config()?;
-    let remote_name = slugify(name);
-    let remote = resolve_remote(&config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
-    let mut status: Value = request_json(remote, &token, "GET", "/me/access-token", None)?;
-    let forge_response = request(remote, &token, "GET", "/me/forge-credentials", None)?;
-    let forge_credentials: Value = if (200..300).contains(&forge_response.status) {
-        decode_response(forge_response)?
-    } else if status
-        .get("scopes")
-        .and_then(Value::as_array)
-        .is_some_and(|scopes| scopes.iter().any(|scope| scope == "forge:credential"))
-    {
-        bail!(
-            "Sync remote returned HTTP {} while checking forge credential capabilities: {}",
-            forge_response.status,
-            forge_response.body.trim()
-        );
-    } else {
-        Value::Array(Vec::new())
-    };
-    if let Some(status) = status.as_object_mut() {
-        status.insert("forgeCredentials".to_string(), forge_credentials);
-    }
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(());
-    }
-
-    let kind = status
-        .get("tokenKind")
-        .and_then(Value::as_str)
-        .unwrap_or("legacy");
-    let subject = status
-        .get("subjectUserId")
-        .and_then(Value::as_str)
-        .unwrap_or("unbound");
-    let environment = status
-        .get("environmentId")
-        .and_then(Value::as_str)
-        .unwrap_or("unbound");
-    let expiry = status
-        .get("expiresAt")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    let scopes = status
-        .get("scopes")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-    println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
-    println!("{} {kind}", out::heading("Token kind:"));
-    println!("{} {subject}", out::heading("Subject:"));
-    println!("{} {environment}", out::heading("Environment:"));
-    println!("{} {expiry}", out::heading("Expires:"));
-    println!("{} {scopes}", out::heading("Scopes:"));
     Ok(())
 }
 

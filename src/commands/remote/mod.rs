@@ -3,6 +3,7 @@
 //!
 //! - [`client`] HTTP transport, remote/token resolution, and bundle localization
 //! - [`push`] remote config CRUD plus pushing projects/bundles and sync-on-push
+//! - [`sync_auth`] `knit auth remote` token setup/verification and `remote auth-status`
 //! - [`clone`] cloning a remote project export into a fresh workspace
 //! - [`pull`] pulling/fetching recorded bundle state and remote bundle cleanup
 //! - [`history`] project history event sync
@@ -17,6 +18,7 @@ mod history;
 mod projects;
 mod pull;
 mod push;
+mod sync_auth;
 mod views;
 
 pub use client::configured_sync_remote_names;
@@ -36,11 +38,12 @@ pub use pull::{
 pub use push::sync_remote_helpers_command;
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote, push_all_bundles_to_remote,
-    push_bundle_to_remote, push_project_to_remote, push_views_to_remote, remote_auth_status,
-    remove_remote, set_remote_token, show_remote, sync_active_bundle_to_remote_if_enabled,
+    push_bundle_to_remote, push_project_to_remote, push_views_to_remote, remove_remote,
+    set_remote_token, show_remote, sync_active_bundle_to_remote_if_enabled,
     sync_bundle_to_remote_if_enabled,
 };
 pub(crate) use push::{push_active_bundle_to_remote, push_handoff_bundle_to_remote};
+pub use sync_auth::{auth_remote, remote_auth_status};
 pub use views::list_remote_views;
 
 use crate::model::{HistoryEvent, KnitProject, ProjectView};

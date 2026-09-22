@@ -677,13 +677,28 @@ pub(super) fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
 }
 
-fn api_base_url(url: &str) -> String {
+pub(super) fn api_base_url(url: &str) -> String {
     let url = normalize_base_url(url);
     if url.ends_with("/api/v1") {
         url
     } else {
         format!("{url}/api/v1")
     }
+}
+
+/// The environment variable that overrides a named remote's stored token
+/// (the name is slugified, like `token_from_env` builds it).
+pub(super) fn remote_token_env_name(name: &str) -> String {
+    format!(
+        "KNIT_REMOTE_{}_TOKEN",
+        name.chars()
+            .map(|ch| if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_uppercase()
+            } else {
+                '_'
+            })
+            .collect::<String>()
+    )
 }
 
 #[cfg(test)]

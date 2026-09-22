@@ -2,6 +2,28 @@
 
 Knit keeps your GitHub, Bitbucket, GitLab, and Forgejo tokens locally. Your sync remote token authorizes the ledger separately; it is never used as a forge token.
 
+## Sync remote tokens: the other credential
+
+The hosted Knit service (sync remote) uses its **own** token. It is not interchangeable with any forge token: a forge token cannot sync bundles, and a sync token cannot push Git.
+
+```sh
+knit auth remote hosted            # hidden prompt, verifies with the server, then saves
+knit remote auth-status hosted     # inspect the resolved token (kind, subject, scopes)
+knit auth remote hosted            # rotate later: same flow, replaces the stored token
+```
+
+`knit auth remote` works from any directory — the remote always lives in the user-level Knit config, never in shared workspace config. With a name omitted at a terminal it lists your configured remotes and accepts an existing or new name; an existing remote reuses its saved URL, a new one asks for it (or pass `--url`). The flow always collects a **fresh** token at a hidden prompt — paste, press Enter; the previously stored token is never re-sent, least of all to a changed URL — and the server verifies it **before** anything is saved. A rejected token (HTTP 401/403) is re-prompted at a terminal; Ctrl-C cancels and leaves the old configuration untouched. A network failure or server error never claims the token invalid, changes nothing, and suggests retrying — or `--offline`, which saves the token without contacting the service; check it later with `knit remote auth-status <name>`. A successful save prints the exact config file it wrote plus that check command.
+
+The file follows `KNIT_HOME`, then `XDG_CONFIG_HOME`, then the home directory: `$KNIT_HOME/config.json`, `$XDG_CONFIG_HOME/knit/config.json`, or `~/.config/knit/config.json`. Its folder is created on the first successful save, so its absence beforehand is expected.
+
+Noninteractive use needs a name, an existing remote or `--url`, and `--token-stdin`; a rejected token fails the command there instead of re-prompting:
+
+```sh
+printf '%s\n' "$TOKEN" | knit auth remote hosted --token-stdin
+```
+
+Environment overrides (`KNIT_REMOTE_<NAME>_TOKEN`, `KNIT_REMOTE_TOKEN`) are reported by variable name only, are never verified by this flow, and still win over the stored token at use time. Bare `knit auth` offers the same flow as its `r` option alongside the forge menu. The compatibility commands `knit remote add <name> <url> --global [--token-stdin]` and `knit remote token <name> --global` store a token without verification; `knit remote auth-status <name>` checks any of them afterwards, and a failed optional forge-credential probe there never invalidates the sync login it already confirmed.
+
 ## Default tokens: the normal setup
 
 ```sh

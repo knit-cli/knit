@@ -21,6 +21,7 @@ pub mod selectors;
 pub mod status;
 pub mod store;
 pub mod time;
+pub mod token_entry;
 pub mod tracking;
 
 use anyhow::Result;
