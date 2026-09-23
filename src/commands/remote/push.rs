@@ -766,10 +766,13 @@ fn push_active_bundle_to_remote_impl(
     }
 
     let pushed_bundle = upsert_bundle(remote, &token, &pushed_project.slug, &active.bundle)?;
-    if active
-        .bundle
-        .record_sync_target(remote_name, &pushed_bundle.id, &remote.url)
-    {
+    if active.bundle.record_sync_target_with_web_url(
+        remote_name,
+        &pushed_bundle.id,
+        &remote.url,
+        pushed_bundle.web_url.as_deref(),
+        None,
+    ) {
         save_active_bundle(active)?;
     }
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
@@ -1492,7 +1495,13 @@ pub fn push_all_bundles_to_remote(
         };
         let outcome =
             upsert_bundle(remote, &token, &project_slug, &bundle).and_then(|remote_bundle| {
-                if bundle.record_sync_target(remote_name, &remote_bundle.id, &remote.url) {
+                if bundle.record_sync_target_with_web_url(
+                    remote_name,
+                    &remote_bundle.id,
+                    &remote.url,
+                    remote_bundle.web_url.as_deref(),
+                    None,
+                ) {
                     crate::store::write_json(&path, &bundle)?;
                     crate::history::record_bundle_history(&root, &bundle)?;
                 }

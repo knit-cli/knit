@@ -2176,10 +2176,11 @@ fn localized_export_bundles(
             continue;
         }
         let mut imported = localize_bundle(payload, project)?;
-        imported.record_sync_target_with_artifact(
+        imported.record_sync_target_with_web_url(
             remote_name,
             &bundle.id,
             &remote.url,
+            bundle.web_url.as_deref(),
             Some(&artifact_hash),
         );
         localized.push(imported);

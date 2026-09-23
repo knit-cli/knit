@@ -19,8 +19,8 @@ use crate::store::{load_active_bundle_for_update, save_active_bundle};
 use anyhow::{bail, Context, Result};
 use remote::{
     apply_artifact_publish_result, apply_publish_remote_result, publish_repo_remote,
-    publish_repo_remote_from_artifact, report_publish_remote_result, report_pushed, PublishEvent,
-    PublishJob, PublishRemoteResult,
+    publish_repo_remote_from_artifact, push_publish_branch, report_publish_remote_result,
+    report_pushed, PublishEvent, PublishJob, PublishRemoteResult, PushedInfo,
 };
 pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
@@ -54,7 +54,6 @@ pub fn create_publications(
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
     let destination = resolve_publish_destination(&active, target, lane)?;
-    let bundle_snapshot = active.bundle.clone();
     let mut failures = Vec::new();
     let mut bundle_changed = false;
 
@@ -69,16 +68,14 @@ pub fn create_publications(
         println!("{}", out::muted(publishing_header(total, limit)));
     }
 
-    // Workers stream their steps over a channel so every repo's push and
-    // review object are printed the moment they exist, not after the slowest
-    // worker joined. The pool is bounded by the forge limit: a hundred-repo
-    // bundle must not open a hundred simultaneous writes against a host that
-    // rate-limits them. The bundle is updated afterwards, once the workers
-    // have released their borrow of it.
+    // Phase 1: every selected repo's feature branch reaches origin before any
+    // review object is touched. Workers stream their steps over a channel so
+    // each push is printed the moment it exists. The pool is bounded by the
+    // forge limit: a hundred-repo bundle must not open a hundred simultaneous
+    // writes against a host that rate-limits them.
     let (tx, rx) = std::sync::mpsc::channel();
-    let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
+    let pushed: Vec<(String, Result<PushedInfo>)> = std::thread::scope(|scope| {
         let active = &active;
-        let bundle = &bundle_snapshot;
         let sender = tx.clone();
         crate::parallel::spawn_bounded(scope, &jobs, limit, move |job| {
             let repo_id = job.repo.id.clone();
@@ -90,17 +87,86 @@ pub fn create_publications(
                     out::repo(&note_repo)
                 )));
             });
-            let pushed_id = repo_id.clone();
-            let pushed_tx = sender.clone();
-            let on_pushed = move |pushed| {
-                let _ = pushed_tx.send(PublishEvent::Pushed {
-                    repo_id: pushed_id.clone(),
-                    pushed,
-                });
-            };
-            let result =
-                publish_repo_remote(active, bundle, job, draft, renew, set_upstream, &on_pushed);
+            let result = push_publish_branch(active, job, set_upstream);
             // The receiver outlives every worker; a send cannot fail.
+            let _ = sender.send(PublishEvent::PushDone {
+                repo_id,
+                result: Box::new(result),
+            });
+        });
+        drop(tx);
+
+        let mut pushed = Vec::new();
+        for event in rx {
+            match event {
+                PublishEvent::Note(line) => println!("{line}"),
+                PublishEvent::PushDone { repo_id, result } => match *result {
+                    Ok(pushed_info) => {
+                        report_pushed(&repo_id, &pushed_info);
+                        pushed.push((repo_id, Ok(pushed_info)));
+                    }
+                    Err(error) => {
+                        println!("{}: {}", out::repo(&repo_id), out::danger("push failed"));
+                        pushed.push((repo_id, Err(error)));
+                    }
+                },
+                PublishEvent::Done { .. } => unreachable!("review phase event in push phase"),
+            }
+        }
+        pushed
+    });
+
+    // Phase 2: best-effort hosted bundle sync. Publishing an open bundle
+    // means branches + artifact, so the sync's own gate (every open branch on
+    // origin) is now satisfiable, and its upsert teaches the bundle the
+    // hosted web URL before any PR body is rendered. Failures stay
+    // best-effort warnings, exactly like the final sync below.
+    crate::commands::remote::maybe_sync_bundle_to_remote(
+        &mut active,
+        remote,
+        no_remote,
+        crate::commands::push::PushForce::No,
+    )?;
+
+    // Phase 3: create or adopt the review objects, using a bundle snapshot
+    // refreshed after the sync recorded the hosted web URL. A repo whose
+    // branch push failed is left out: its review cannot point at a branch
+    // that is not on origin.
+    let bundle_snapshot = active.bundle.clone();
+    let create_jobs: Vec<(PublishJob, PushedInfo)> = jobs
+        .into_iter()
+        .filter_map(|job| {
+            let repo_id = &job.repo.id;
+            let pushed = pushed
+                .iter()
+                .find(|(pushed_id, _)| pushed_id == repo_id)
+                .and_then(|(_, result)| result.as_ref().ok().cloned());
+            pushed.map(|pushed| (job, pushed))
+        })
+        .collect();
+    for (repo_id, result) in &pushed {
+        if let Err(error) = result {
+            failures.push(format!("{repo_id}: {error:#}"));
+        }
+    }
+    let total = create_jobs.len();
+
+    let (tx, rx) = std::sync::mpsc::channel();
+    let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
+        let active = &active;
+        let bundle = &bundle_snapshot;
+        let sender = tx.clone();
+        crate::parallel::spawn_bounded(scope, &create_jobs, limit, move |(job, pushed)| {
+            let repo_id = job.repo.id.clone();
+            let notes = sender.clone();
+            let note_repo = repo_id.clone();
+            let _notes = crate::retry::stream_notes_to(move |line| {
+                let _ = notes.send(PublishEvent::Note(format!(
+                    "{}: {line}",
+                    out::repo(&note_repo)
+                )));
+            });
+            let result = publish_repo_remote(active, bundle, job, draft, renew, &pushed.sha);
             let _ = sender.send(PublishEvent::Done {
                 repo_id,
                 result: Box::new(result),
@@ -113,7 +179,7 @@ pub fn create_publications(
         for event in rx {
             match event {
                 PublishEvent::Note(line) => println!("{line}"),
-                PublishEvent::Pushed { repo_id, pushed } => report_pushed(&repo_id, &pushed),
+                PublishEvent::PushDone { .. } => unreachable!("push event in review phase"),
                 PublishEvent::Done { repo_id, result } => {
                     done += 1;
                     let progress = out::progress(done, total);
@@ -176,8 +242,8 @@ pub fn create_publications(
         );
     }
 
-    // Sync the bundle artifact to the configured sync remote alongside the
-    // host review objects (default on; see `knit config set push-sync`).
+    // Final hosted bundle sync: the artifact that reaches the sync remote now
+    // records this run's review objects (and the web URL) together.
     crate::commands::remote::maybe_sync_bundle_to_remote(
         &mut active,
         remote,
@@ -424,14 +490,15 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
 #[cfg(test)]
 mod tests {
     use super::pr_body::{
-        initial_pr_body, render_knit_pr_block, upsert_knit_pr_block, KNIT_PR_BLOCK_BEGIN,
-        KNIT_PR_BLOCK_BEGIN_REFS, KNIT_PR_BLOCK_END, KNIT_PR_BLOCK_END_REFS,
+        hosted_bundle_links, initial_pr_body, render_knit_pr_block, upsert_knit_pr_block,
+        KNIT_PR_BLOCK_BEGIN, KNIT_PR_BLOCK_BEGIN_REFS, KNIT_PR_BLOCK_END, KNIT_PR_BLOCK_END_REFS,
     };
     use super::scope::publish_scope_repo_ids;
     use super::*;
     use crate::model::RepoEntry;
     use crate::model::{
-        CommitGroup, CommitRef, PublicationEntry, CHANGE_GROUP_KIND, SCHEMA_VERSION,
+        BundleSyncTarget, CommitGroup, CommitRef, PublicationEntry, CHANGE_GROUP_KIND,
+        SCHEMA_VERSION,
     };
     use crate::providers;
 
@@ -640,5 +707,247 @@ mod tests {
         let scope = publish_scope_repo_ids(&bundle);
         assert!(scope.contains("backend"));
         assert!(!scope.contains("docs"));
+    }
+
+    /// The bundle fixture plus one hosted sync target whose server reported a
+    /// canonical web URL.
+    fn hosted_bundle(url: &str) -> ChangeGroup {
+        let mut bundle = published_bundle();
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "hosted".to_string(),
+            bundle_id: "rb-venue-capacity".to_string(),
+            api_url: "https://sync.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some(url.to_string()),
+        });
+        bundle
+    }
+
+    #[test]
+    fn hosted_link_leads_the_managed_block() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        let block = render_knit_pr_block(&bundle, Some("backend"), "github");
+        let content = block
+            .strip_prefix(KNIT_PR_BLOCK_BEGIN)
+            .unwrap()
+            .strip_suffix(KNIT_PR_BLOCK_END)
+            .unwrap()
+            .trim_start_matches('\n');
+        assert!(
+            content.starts_with(
+                "[View bundle](https://app.example.test/bundles/rb-venue-capacity)\n\n## Knit Bundle"
+            ),
+            "{content}"
+        );
+        // The link is the first visible content of a fresh PR body too.
+        let body = initial_pr_body(&bundle, "backend", "github");
+        assert!(
+            body.starts_with(&format!(
+                "{KNIT_PR_BLOCK_BEGIN}\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"
+            )),
+            "{body}"
+        );
+    }
+
+    #[test]
+    fn hosted_links_are_deduped_sorted_and_invalid_omitted() {
+        let mut bundle = hosted_bundle("https://b.example.test/bundles/1");
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "mirror".to_string(),
+            bundle_id: "rb-2".to_string(),
+            api_url: "https://mirror.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("https://a.example.test/bundles/2".to_string()),
+        });
+        // A duplicate of an existing URL, plus unusable values a server could
+        // send: wrong scheme, credentials, garbage, and an empty host.
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "dup".to_string(),
+            bundle_id: "rb-3".to_string(),
+            api_url: "https://dup.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("https://b.example.test/bundles/1".to_string()),
+        });
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "ftp".to_string(),
+            bundle_id: "rb-4".to_string(),
+            api_url: "https://ftp.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("ftp://app.example.test/bundles/4".to_string()),
+        });
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "creds".to_string(),
+            bundle_id: "rb-5".to_string(),
+            api_url: "https://creds.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("https://user:pass@app.example.test/bundles/5".to_string()),
+        });
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "junk".to_string(),
+            bundle_id: "rb-6".to_string(),
+            api_url: "https://junk.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("not a url".to_string()),
+        });
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "bare".to_string(),
+            bundle_id: "rb-7".to_string(),
+            api_url: "https://bare.example.test".to_string(),
+            artifact_hash: None,
+            web_url: Some("https://".to_string()),
+        });
+        bundle.sync_targets.push(BundleSyncTarget {
+            remote: "none".to_string(),
+            bundle_id: "rb-8".to_string(),
+            api_url: "https://none.example.test".to_string(),
+            artifact_hash: None,
+            web_url: None,
+        });
+
+        assert_eq!(
+            hosted_bundle_links(&bundle),
+            vec![
+                "https://a.example.test/bundles/2".to_string(),
+                "https://b.example.test/bundles/1".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn hosted_link_destinations_are_normalized_and_escaped() {
+        // Normalization: scheme and host casing, and a space in the path.
+        assert_eq!(
+            hosted_bundle_links(&hosted_bundle("HTTPS://APP.EXAMPLE.TEST/bundles/a b"))
+                .first()
+                .map(String::as_str),
+            Some("https://app.example.test/bundles/a%20b")
+        );
+        // Parentheses would reshape an inline destination: angle brackets.
+        assert_eq!(
+            hosted_bundle_links(&hosted_bundle("https://app.example.test/bundles/(1)"))
+                .first()
+                .map(String::as_str),
+            Some("<https://app.example.test/bundles/(1)>")
+        );
+        // IPv6 authorities survive, angle-bracketed so the brackets stay
+        // part of the destination.
+        assert_eq!(
+            hosted_bundle_links(&hosted_bundle("http://[::1]:8080/bundles/1"))
+                .first()
+                .map(String::as_str),
+            Some("<http://[::1]:8080/bundles/1>")
+        );
+        // Control characters never reach a body: URL normalization strips
+        // them out of the destination entirely.
+        let sanitized = hosted_bundle_links(&hosted_bundle("https://app.example.test/bundles/1\t"));
+        assert_eq!(
+            sanitized.first().map(String::as_str),
+            Some("https://app.example.test/bundles/1")
+        );
+        assert!(!sanitized[0].contains('\t'));
+    }
+
+    #[test]
+    fn upsert_moves_the_linked_block_above_user_prose_in_order() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        let linked = render_knit_pr_block(&bundle, Some("backend"), "github");
+        let plain = render_knit_pr_block(&published_bundle(), Some("backend"), "github");
+
+        // Without a hosted link the placement is untouched, as before.
+        let previous = format!("Intro\n\n{plain}\n\nTail");
+        assert_eq!(
+            upsert_knit_pr_block(&previous, &plain),
+            format!("Intro\n\n{plain}\n\nTail")
+        );
+
+        // With one, the block leads and the surrounding prose keeps its
+        // original order after it.
+        assert_eq!(
+            upsert_knit_pr_block(&previous, &linked),
+            format!("{linked}\n\nIntro\n\nTail")
+        );
+    }
+
+    #[test]
+    fn repeated_sync_with_a_hosted_link_is_idempotent_and_replaces_changed_urls() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        let linked = render_knit_pr_block(&bundle, Some("backend"), "github");
+        // The body a pre-link era wrote: the plain block after user prose.
+        let plain = render_knit_pr_block(&published_bundle(), Some("backend"), "github");
+        let body = format!("Intro\n\n{plain}\n\nTail");
+
+        let once = upsert_knit_pr_block(&body, &linked);
+        assert_eq!(once, format!("{linked}\n\nIntro\n\nTail"));
+        // The next sync finds the block where it now lives and is a no-op.
+        assert_eq!(upsert_knit_pr_block(&once, &linked), once);
+
+        // The host moves: the new URL replaces the old one, still exactly
+        // once, and the block stays on top.
+        let moved = render_knit_pr_block(
+            &hosted_bundle("https://next.example.test/bundles/rb-venue-capacity"),
+            Some("backend"),
+            "github",
+        );
+        let twice = upsert_knit_pr_block(&once, &moved);
+        assert_eq!(twice, format!("{moved}\n\nIntro\n\nTail"));
+        assert_eq!(twice.matches("[View bundle](").count(), 1);
+        assert!(!twice.contains("app.example.test"));
+    }
+
+    #[test]
+    fn new_linked_block_prepends_verbatim_prose_with_trailing_whitespace() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        let linked = render_knit_pr_block(&bundle, Some("backend"), "github");
+
+        // No managed block yet, user prose with trailing spaces and newline:
+        // the block moves in front and the prose is kept verbatim.
+        let previous = "My own write-up  \n";
+        assert_eq!(
+            upsert_knit_pr_block(previous, &linked),
+            format!("{linked}\n\nMy own write-up  \n")
+        );
+
+        // Without a hosted link the historical append placement holds.
+        let plain = render_knit_pr_block(&published_bundle(), Some("backend"), "github");
+        assert_eq!(
+            upsert_knit_pr_block(previous, &plain),
+            format!("My own write-up\n\n{plain}")
+        );
+    }
+
+    #[test]
+    fn bitbucket_linked_block_stays_ref_fenced_with_the_link_first_visible() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        let block = render_knit_pr_block(&bundle, Some("backend"), "bitbucket");
+        assert!(
+            block.starts_with(&format!(
+                "{KNIT_PR_BLOCK_BEGIN_REFS}\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)\n\n## Knit Bundle"
+            )),
+            "{block}"
+        );
+        assert!(block.ends_with(&format!("\n\n{KNIT_PR_BLOCK_END_REFS}")));
+        assert!(!block.contains("<!--"));
+
+        // A legacy HTML-commented body migrates to the ref-fenced shape and
+        // the link lands on top.
+        let legacy = format!(
+            "Intro\n\n{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\nstale\n{KNIT_PR_BLOCK_END}\n\nTail"
+        );
+        let migrated = upsert_knit_pr_block(&legacy, &block);
+        assert_eq!(migrated, format!("{block}\n\nIntro\n\nTail"));
+        assert!(!migrated.contains("<!--"));
+        assert_eq!(upsert_knit_pr_block(&migrated, &block), migrated);
+    }
+
+    #[test]
+    fn a_stray_label_deeper_in_the_block_does_not_relocate_it() {
+        // A crafted block whose first content line is a heading and whose
+        // label appears later must not count as leading with the hosted link.
+        let stray = format!("{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/1)\n{KNIT_PR_BLOCK_END}");
+        let previous = format!("Intro\n\n{stray}");
+        assert_eq!(
+            upsert_knit_pr_block(&previous, "replacement"),
+            format!("Intro\n\nreplacement")
+        );
     }
 }

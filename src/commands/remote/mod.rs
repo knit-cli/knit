@@ -94,6 +94,10 @@ struct RemoteProject {
 struct RemoteBundle {
     id: String,
     slug: String,
+    /// Canonical browser URL of the bundle on the host, derived server side.
+    /// Absent when an older server does not report one.
+    #[serde(default)]
+    web_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -240,6 +244,10 @@ struct RemoteExportBundle {
     slug: String,
     lifecycle_state: String,
     current_artifact: Option<RemoteExportArtifact>,
+    /// Canonical browser URL of the bundle on the host, derived server side.
+    /// Absent when an older server does not report one.
+    #[serde(default)]
+    web_url: Option<String>,
 }
 
 /// The artifact metadata a project export carries for a bundle. The default

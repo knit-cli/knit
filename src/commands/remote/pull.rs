@@ -1173,10 +1173,11 @@ pub fn pull_bundle_remote_state(
             let localized = localize_bundle(remote_payload, &context.project)?;
             prepare_feature_branches(&localized)?;
             let mut merged = merge_ledgers(&local, &localized, now_iso());
-            merged.record_sync_target_with_artifact(
+            merged.record_sync_target_with_web_url(
                 &context.remote_name,
                 &remote_bundle.id,
                 &context.remote.url,
+                remote_bundle.web_url.as_deref(),
                 Some(&artifact_hash),
             );
             let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, merged);
@@ -1203,12 +1204,16 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::RemoteAhead => {}
     }
     let mut localized = localize_bundle(remote_payload, &context.project)?;
-    localized.record_sync_target_with_artifact(
+    localized.record_sync_target_with_web_url(
         &context.remote_name,
         &remote_bundle.id,
         &context.remote.url,
+        remote_bundle.web_url.as_deref(),
         Some(&artifact_hash),
     );
+    // The replaced artifact knew this remote already; keep its hosted URL
+    // when the incoming copy predates it.
+    localized.inherit_missing_sync_target_web_urls(&local);
     prepare_feature_branches(&localized)?;
     ensure_remote_bundle_fast_forward(&local, &localized)?;
     let mut active = ActiveBundle::unlocked(root.to_path_buf(), path, localized);
@@ -1230,10 +1235,11 @@ fn record_synced_artifact(
     remote_bundle: &RemoteExportBundle,
     artifact_hash: &str,
 ) -> Result<ChangeGroup> {
-    if bundle.record_sync_target_with_artifact(
+    if bundle.record_sync_target_with_web_url(
         &context.remote_name,
         &remote_bundle.id,
         &context.remote.url,
+        remote_bundle.web_url.as_deref(),
         Some(artifact_hash),
     ) {
         write_json(path, &bundle)?;
@@ -1754,10 +1760,11 @@ pub fn fetch_bundles_from_remote(
             // ledger is deliberately not recorded: it must keep reporting
             // divergence until the user combines the two.
             let record_synced = |local: &mut ChangeGroup| -> Result<()> {
-                if local.record_sync_target_with_artifact(
+                if local.record_sync_target_with_web_url(
                     &remote_name,
                     &remote_bundle.id,
                     &remote.url,
+                    remote_bundle.web_url.as_deref(),
                     Some(&artifact_hash),
                 ) {
                     crate::store::write_json(&bundle_path, local).with_context(|| {
@@ -1797,12 +1804,16 @@ pub fn fetch_bundles_from_remote(
                                 .and_then(|local_repo| local_repo.worktree_path.clone());
                         }
                     }
-                    bundle.record_sync_target_with_artifact(
+                    bundle.record_sync_target_with_web_url(
                         &remote_name,
                         &remote_bundle.id,
                         &remote.url,
+                        remote_bundle.web_url.as_deref(),
                         Some(&artifact_hash),
                     );
+                    // The replaced local artifact may know the hosted URL
+                    // from before this copy left the remote.
+                    bundle.inherit_missing_sync_target_web_urls(&local);
                     crate::store::write_json(&bundle_path, &bundle).with_context(|| {
                         format!("failed to write bundle `{}`", remote_bundle.slug)
                     })?;
@@ -1813,10 +1824,11 @@ pub fn fetch_bundles_from_remote(
         } else {
             bundle = localize_bundle(bundle, &local_project)
                 .with_context(|| format!("failed to localize bundle `{}`", remote_bundle.slug))?;
-            bundle.record_sync_target_with_artifact(
+            bundle.record_sync_target_with_web_url(
                 &remote_name,
                 &remote_bundle.id,
                 &remote.url,
+                remote_bundle.web_url.as_deref(),
                 Some(&artifact_hash),
             );
             crate::store::write_json(&bundle_path, &bundle)
@@ -1978,10 +1990,11 @@ fn pull_bundle_by_slug_classified(
         let _lock = acquire_named_lock(&root, &bundle_id).map_err(other)?;
         if !path.exists() {
             bundle = localize_bundle(bundle, &local_project).map_err(other)?;
-            bundle.record_sync_target_with_artifact(
+            bundle.record_sync_target_with_web_url(
                 &remote_name,
                 &remote_bundle.id,
                 &remote.url,
+                remote_bundle.web_url.as_deref(),
                 Some(&artifact_hash),
             );
             write_json(&path, &bundle).map_err(other)?;
@@ -2024,12 +2037,14 @@ fn pull_bundle_by_slug_classified(
                                 .and_then(|local_repo| local_repo.worktree_path.clone());
                         }
                     }
-                    localized.record_sync_target_with_artifact(
+                    localized.record_sync_target_with_web_url(
                         &remote_name,
                         &remote_bundle.id,
                         &remote.url,
+                        remote_bundle.web_url.as_deref(),
                         Some(&artifact_hash),
                     );
+                    localized.inherit_missing_sync_target_web_urls(&local);
                     write_json(&path, &localized).map_err(other)?;
                     crate::human!(
                         "{} {} {}",

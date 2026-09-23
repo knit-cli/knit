@@ -3596,3 +3596,200 @@ fn bundle_pull_by_name_extends_the_scope_view_with_what_it_cloned() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_push_sweep_records_and_retains_the_hosted_bundle_url() {
+    // Two open bundles from the workspace root: nothing resolves as the
+    // active bundle, so `sync push --bundles` is the pure project-wide sweep.
+    let (root, workspace, fake_dir) = force_push_scaffold(&["hosted url work", "second work"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    let hosted_url = "https://app.example.test/bundles/rb-hosted-url-work";
+    fs::write(fake_dir.join("bundle-web-url"), format!("{hosted_url}\n")).unwrap();
+
+    let pushed = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(pushed.contains("pushed 2 bundle artifact(s)"), "{pushed}");
+    let bundle_path = workspace.join(".knit/bundles/hosted-url-work.bundle.json");
+    let bundle: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+    // The swept sibling learned the same URL from the same server.
+    let sibling: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/second-work.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sibling["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{sibling}"
+    );
+    // The artifact body the server received already carries the URL.
+    let body = last_artifact_body(&fake_dir, "hosted-url-work");
+    assert_eq!(
+        body["payload"]["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{body}"
+    );
+
+    // An older server that stops reporting a URL must not erase the known
+    // one on the next sweep.
+    fs::remove_file(fake_dir.join("bundle-web-url")).unwrap();
+    knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    let bundle: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn branch_push_sync_records_the_hosted_bundle_url() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let hosted_url = "https://app.example.test/bundles/rb-quick-fix";
+    fs::write(fake_dir.join("bundle-web-url"), format!("{hosted_url}\n")).unwrap();
+
+    knit(&workspace, ["bundle", "quick fix", "--repo", "backend"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    let output = knit_with_env(&workspace, ["push", "--set-upstream"], &env);
+    assert!(output.contains("syncing quick-fix"), "{output}");
+
+    let bundle: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/quick-fix.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_remote_ahead_pull_keeps_the_locally_cached_hosted_url() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    // The feature branch is on origin, so the pull can refresh checkouts.
+    git(&backend, ["push", "origin", "knit/remote-made"]);
+
+    // The local artifact already reconciled with an older hosted server that
+    // reported the canonical web URL; its ledger is behind the remote's.
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
+    let local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+
+    // The remote is a newer copy made before the URL existed: one extra node,
+    // no syncTargets, and an export entry whose server never reports webUrl.
+    let mut payload = local.clone();
+    payload["syncTargets"] = serde_json::json!([]);
+    payload["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "node-extra",
+            "type": "git.observed",
+            "createdAt": "2026-06-01T00:00:00.000Z",
+            "repoChanges": [],
+        }));
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "remote-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-new"},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "remote-made",
+                "currentArtifact": {"artifactHash": "hash-new", "payload": payload},
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    // The local artifact's sync target carries the cached URL against this
+    // exact hosted identity (remote name, bundle id, API URL).
+    let mut local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    local["syncTargets"] = serde_json::json!([{
+        "remote": "hosted",
+        "bundleId": "rb-1",
+        "apiUrl": base_url,
+        "artifactHash": "hash-old",
+        "webUrl": "https://app.example.test/bundles/cached",
+    }]);
+    fs::write(
+        &artifact_path,
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull"], &env);
+    assert!(output.contains("pulled hash-new"), "{output}");
+
+    // The remote-ahead copy replaced the artifact without losing the cached
+    // hosted URL, and the reconciliation hash moved to the remote's.
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["syncTargets"][0]["webUrl"],
+        serde_json::json!("https://app.example.test/bundles/cached"),
+        "{saved}"
+    );
+    assert_eq!(
+        saved["syncTargets"][0]["artifactHash"],
+        serde_json::json!("hash-new"),
+        "{saved}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
