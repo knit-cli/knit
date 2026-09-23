@@ -155,9 +155,17 @@ Rewind example:
   "headBranch": "knit/venue-capacity",
   "state": "OPEN",
   "title": "venue capacity (backend)",
+  "author": {
+    "login": "dana",
+    "name": "Dana Ruiz",
+    "avatarUrl": "https://github.com/dana.png",
+    "url": "https://github.com/dana"
+  },
   "updatedAt": "2026-05-05T00:00:00.000Z"
 }
 ```
+
+`author` is the host account that opened the review object, as the host reports it. It is optional, and only `login` is always present. It can differ from the person who made the bundle, for example when a bundle takes in a PR someone else opened. A refresh that gets no author from the host keeps the one already recorded.
 
 Publication metadata is publishing state, not code state. Git branches, SHAs, and bundle nodes remain the source of truth for what changed. Knit uses this field to sync the managed cross-link block in each review body. The `provider` and `kind` identify the host adapter and review object: `github`/`pull_request`, `gitlab`/`merge_request`, `forgejo`/`pull_request`, or `bitbucket`/`pull_request`. Knit records at most one review object per repo per bundle.
 

@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     PULL_REQUEST_KIND,
 };
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -53,6 +54,19 @@ struct ForgejoApiPr {
     merged: bool,
     #[serde(default)]
     mergeable: Option<bool>,
+    #[serde(default)]
+    user: Option<ForgejoApiUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoApiUser {
+    login: String,
+    #[serde(default)]
+    full_name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -400,6 +414,12 @@ fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<Pull
         }),
         merge_state_status: None,
         review_decision: approved.then(|| "APPROVED".to_string()),
+        author: pr.user.map(|user| ForgeAuthor {
+            login: user.login,
+            name: user.full_name,
+            avatar_url: user.avatar_url,
+            url: user.html_url,
+        }),
     })
 }
 
@@ -608,6 +628,7 @@ fn into_pull_request(pr: TeaPr) -> PullRequest {
         mergeable: None,
         merge_state_status: None,
         review_decision: None,
+        author: None,
     }
 }
 

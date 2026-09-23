@@ -4,6 +4,7 @@
 
 use super::transport::{github_api_output, native_github_api_output, use_native_github_api};
 use super::CLI;
+use crate::model::ForgeAuthor;
 use crate::providers::{
     cli_output, parse_pr_url, pr_number_from_url, BranchMergeStatus, CheckRun, PrTarget,
     PullRequest,
@@ -35,6 +36,17 @@ struct GitHubApiPullRequest {
     mergeable: Option<bool>,
     #[serde(default)]
     mergeable_state: Option<String>,
+    #[serde(default)]
+    user: Option<GitHubApiUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiUser {
+    login: String,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -91,6 +103,12 @@ impl GitHubApiPullRequest {
             mergeable: github_api_mergeable(self.mergeable, self.mergeable_state.as_deref()),
             merge_state_status: self.mergeable_state.map(|state| state.to_ascii_uppercase()),
             review_decision: None,
+            author: self.user.map(|user| ForgeAuthor {
+                login: user.login,
+                name: None,
+                avatar_url: user.avatar_url,
+                url: user.html_url,
+            }),
         }
     }
 }
@@ -489,6 +507,19 @@ fn encode_path(input: &str, allow_slash: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_api_pull_request_user_to_author() {
+        let json = r#"{"number":5,"html_url":"https://github.com/acme/backend/pull/5","user":{"login":"dana","avatar_url":"https://avatars.githubusercontent.com/u/1","html_url":"https://github.com/dana"}}"#;
+        let pr: GitHubApiPullRequest = serde_json::from_str(json).unwrap();
+        let author = pr.into_pull_request().author.expect("author");
+        assert_eq!(author.login, "dana");
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://avatars.githubusercontent.com/u/1")
+        );
+        assert_eq!(author.url.as_deref(), Some("https://github.com/dana"));
+    }
 
     #[test]
     fn artifact_create_uses_repo_scoped_api_payload() {

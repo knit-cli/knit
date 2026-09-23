@@ -3,7 +3,7 @@ pub mod forgejo;
 pub mod github;
 pub mod gitlab;
 
-use crate::model::{ChangeGroup, PublicationEntry, RepoEntry};
+use crate::model::{ChangeGroup, ForgeAuthor, PublicationEntry, RepoEntry};
 use crate::output as out;
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -52,6 +52,10 @@ pub struct PullRequest {
     /// Review decision: `APPROVED`, `CHANGES_REQUESTED`, `REVIEW_REQUIRED`, or empty.
     #[serde(default)]
     pub review_decision: Option<String>,
+    /// Who opened it. `gh` reports `{login, name}`; other adapters map their
+    /// own user object onto this.
+    #[serde(default)]
+    pub author: Option<ForgeAuthor>,
 }
 
 impl PullRequest {
@@ -308,6 +312,18 @@ pub(crate) fn remote_host(remote: &str) -> Option<String> {
     (!host.is_empty()).then(|| host.to_string())
 }
 
+/// Drops an author the host reported without a login, and blank optional
+/// fields (`gh` sends `"name": ""` for accounts without a display name).
+fn clean_author(author: ForgeAuthor) -> Option<ForgeAuthor> {
+    let blank_to_none = |value: Option<String>| value.filter(|value| !value.trim().is_empty());
+    (!author.login.trim().is_empty()).then(|| ForgeAuthor {
+        login: author.login,
+        name: blank_to_none(author.name),
+        avatar_url: blank_to_none(author.avatar_url),
+        url: blank_to_none(author.url),
+    })
+}
+
 pub fn is_review_kind(kind: &str) -> bool {
     kind == PULL_REQUEST_KIND || kind == MERGE_REQUEST_KIND
 }
@@ -353,6 +369,7 @@ pub fn upsert_publication(
             .unwrap_or_default(),
         state: pr.state.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
         title: pr.title.clone(),
+        author: pr.author.clone().and_then(clean_author),
         updated_at: now_iso(),
     };
 
@@ -361,6 +378,12 @@ pub fn upsert_publication(
         .iter_mut()
         .find(|publication| publication.repo_id == repo.id && is_review_kind(&publication.kind))
     {
+        let mut entry = entry;
+        // A host answer without the author (an older adapter path, a
+        // trimmed response) keeps the one already recorded.
+        if entry.author.is_none() && existing.number == entry.number {
+            entry.author = existing.author.clone();
+        }
         let unchanged = existing.provider == entry.provider
             && existing.kind == entry.kind
             && existing.number == entry.number
@@ -368,7 +391,8 @@ pub fn upsert_publication(
             && existing.base_branch == entry.base_branch
             && existing.head_branch == entry.head_branch
             && existing.state == entry.state
-            && existing.title == entry.title;
+            && existing.title == entry.title
+            && existing.author == entry.author;
         if unchanged {
             return false;
         }
@@ -892,6 +916,75 @@ fn display_args(args: &[OsString]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn publication_bundle() -> (ChangeGroup, RepoEntry) {
+        let bundle: ChangeGroup = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "knit.bundle.v1",
+            "kind": "change-group",
+            "id": "b",
+            "title": "b",
+            "createdAt": "2026-05-05T00:00:00.000Z",
+            "updatedAt": "2026-05-05T00:00:00.000Z",
+            "repos": [],
+            "commitGroups": []
+        }))
+        .unwrap();
+        let repo: RepoEntry = serde_json::from_value(serde_json::json!({
+            "id": "backend",
+            "path": "backend",
+            "remote": null,
+            "baseBranch": "main",
+            "featureBranch": "knit/b",
+            "worktreePath": null
+        }))
+        .unwrap();
+        (bundle, repo)
+    }
+
+    fn pr_with_author(author: Option<ForgeAuthor>) -> PullRequest {
+        let mut pr: PullRequest = serde_json::from_value(serde_json::json!({
+            "number": 9,
+            "url": "https://github.com/acme/backend/pull/9",
+            "state": "OPEN"
+        }))
+        .unwrap();
+        pr.author = author;
+        pr
+    }
+
+    #[test]
+    fn publication_records_the_host_author_and_keeps_it_when_a_refresh_omits_it() {
+        let (mut bundle, repo) = publication_bundle();
+        let forge = github::GitHub;
+        let dana = ForgeAuthor {
+            login: "dana".into(),
+            name: Some(" ".into()),
+            avatar_url: Some("https://github.com/dana.png".into()),
+            url: None,
+        };
+
+        assert!(upsert_publication(
+            &mut bundle,
+            &repo,
+            &forge,
+            &pr_with_author(Some(dana))
+        ));
+        let recorded = bundle.publications[0].author.clone().expect("author");
+        assert_eq!(recorded.login, "dana");
+        assert_eq!(recorded.name, None, "blank names are dropped");
+
+        assert!(!upsert_publication(
+            &mut bundle,
+            &repo,
+            &forge,
+            &pr_with_author(None)
+        ));
+        assert_eq!(bundle.publications[0].author, Some(recorded));
+
+        let json = serde_json::to_value(&bundle.publications[0]).unwrap();
+        assert_eq!(json["author"]["login"], "dana");
+        assert_eq!(json["author"]["avatarUrl"], "https://github.com/dana.png");
+    }
 
     fn credential(provider: &str, host: &str, token: &str) -> crate::auth::ResolvedCredential {
         crate::auth::ResolvedCredential {

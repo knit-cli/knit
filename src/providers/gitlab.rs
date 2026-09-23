@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     MERGE_REQUEST_KIND,
 };
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -43,6 +44,19 @@ struct GlabMr {
     head_pipeline: Option<GlabPipeline>,
     #[serde(default)]
     pipeline: Option<GlabPipeline>,
+    #[serde(default)]
+    author: Option<GlabUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GlabUser {
+    username: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    web_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -781,6 +795,12 @@ fn into_pull_request(mr: GlabMr) -> PullRequest {
         mergeable: gitlab_mergeable(merge_status.as_deref()),
         merge_state_status: merge_status.map(|status| status.to_ascii_uppercase()),
         review_decision: None,
+        author: mr.author.map(|user| ForgeAuthor {
+            login: user.username,
+            name: user.name,
+            avatar_url: user.avatar_url,
+            url: user.web_url,
+        }),
     }
 }
 
@@ -831,6 +851,20 @@ pub(crate) fn full_name(remote: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_mr_author() {
+        let json = r#"{"iid":3,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/3","author":{"username":"dana","name":"Dana Ruiz","avatar_url":"https://gitlab.com/uploads/dana.png","web_url":"https://gitlab.com/dana"}}"#;
+        let pr = into_pull_request(serde_json::from_str(json).unwrap());
+        let author = pr.author.expect("author");
+        assert_eq!(author.login, "dana");
+        assert_eq!(author.name.as_deref(), Some("Dana Ruiz"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://gitlab.com/uploads/dana.png")
+        );
+        assert_eq!(author.url.as_deref(), Some("https://gitlab.com/dana"));
+    }
 
     #[test]
     fn parses_nested_full_name() {

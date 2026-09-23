@@ -358,6 +358,7 @@ mod tests {
                 head_branch: format!("knit/feature-{index}"),
                 state: (*state).to_string(),
                 title: None,
+                author: None,
                 updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             })
             .collect();
