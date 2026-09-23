@@ -1147,3 +1147,316 @@ fn pr_create_bounds_forge_writes_and_still_publishes_every_repo() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// One project workspace with a backend repo, one committed bundle, a fake
+/// forge, and a fake hosted sync remote sharing one directory (so their
+/// request order is observable). The hosted server reports the canonical
+/// web URL on bundle upsert.
+fn hosted_publish_scaffold(root: &std::path::Path, web_url: Option<&str>) -> std::path::PathBuf {
+    let (_backend_remote, backend, _collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("shared-fake");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    if let Some(url) = web_url {
+        fs::write(fake_dir.join("bundle-web-url"), format!("{url}\n")).unwrap();
+    }
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    // The project's default repos (backend) join the bundle at creation.
+    let feature = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&feature.join("app.txt"), "hosted link");
+    knit(&workspace, ["commit", "--all", "-m", "Hosted link"]);
+    write_fake_gh(&root.join("fake-bin"), &fake_dir);
+    workspace
+}
+
+fn order_log(fake_dir: &std::path::Path) -> Vec<String> {
+    fs::read_to_string(fake_dir.join("order-log.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+fn artifact_bodies(fake_dir: &std::path::Path, slug: &str) -> Vec<Value> {
+    fs::read_to_string(fake_dir.join(format!("artifact-{slug}.bodies")))
+        .unwrap_or_default()
+        .lines()
+        .filter(|line| !line.trim().is_empty())
+        .map(|line| serde_json::from_str(line).unwrap())
+        .collect()
+}
+
+#[test]
+fn hosted_url_is_learned_before_pr_create_and_final_artifact_records_publications() {
+    let root = unique_temp_dir();
+    let hosted_url = "https://app.example.test/bundles/rb-venue-capacity";
+    let workspace = hosted_publish_scaffold(&root, Some(hosted_url));
+    let fake_dir = root.join("shared-fake");
+
+    let create = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &root.join("fake-bin"),
+        &fake_dir,
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(create.contains("created"), "{create}");
+    assert!(create.contains("synced"), "{create}");
+
+    // The hosted upsert (and its URL) landed before the review-object
+    // create; the final sync's upsert follows the create.
+    assert_eq!(
+        order_log(&fake_dir),
+        vec![
+            "bundle-upsert".to_string(),
+            "pr-create-backend".to_string(),
+            "bundle-upsert".to_string(),
+        ],
+        "{create}"
+    );
+
+    // The initial PR body leads with the generic hosted link, ahead of the
+    // managed heading.
+    let body = fs::read_to_string(fake_dir.join("create-backend.md")).unwrap();
+    let link = format!("[View bundle]({hosted_url})");
+    assert!(
+        body.find(&link).unwrap() < body.find("## Knit Bundle").unwrap(),
+        "{body}"
+    );
+
+    // The local bundle records the learned URL alongside the publication.
+    let bundle = read_bundle(&workspace);
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        json!(hosted_url),
+        "{bundle}"
+    );
+    assert_eq!(bundle["publications"].as_array().unwrap().len(), 1);
+
+    // The final artifact sync carried both the publication and the URL.
+    let bodies = artifact_bodies(&fake_dir, "venue-capacity");
+    let last = bodies.last().unwrap();
+    assert_eq!(
+        last["payload"]["publications"].as_array().unwrap().len(),
+        1,
+        "{last}"
+    );
+    assert_eq!(
+        last["payload"]["syncTargets"][0]["webUrl"],
+        json!(hosted_url)
+    );
+
+    // The body-sync edit keeps the link on top of the user's prose.
+    let edited = fs::read_to_string(fake_dir.join("edit-backend.md")).unwrap();
+    assert!(
+        edited.find(&link).unwrap() < edited.find("Existing body").unwrap(),
+        "{edited}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn no_remote_flag_makes_no_hosted_calls_and_links_nothing() {
+    let root = unique_temp_dir();
+    let hosted_url = "https://app.example.test/bundles/rb-venue-capacity";
+    let workspace = hosted_publish_scaffold(&root, Some(hosted_url));
+    let fake_dir = root.join("shared-fake");
+
+    let create = knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-remote"],
+        &root.join("fake-bin"),
+        &fake_dir,
+    );
+    assert!(create.contains("created"), "{create}");
+
+    // No hosted request left the machine: no upsert order entry, no recorded
+    // sync target, no link in the body.
+    assert!(
+        !order_log(&fake_dir)
+            .iter()
+            .any(|entry| entry == "bundle-upsert"),
+        "{create}"
+    );
+    let body = fs::read_to_string(fake_dir.join("create-backend.md")).unwrap();
+    assert!(!body.contains("[View bundle]"), "{body}");
+    let bundle = read_bundle(&workspace);
+    assert!(
+        bundle
+            .get("syncTargets")
+            .and_then(|targets| targets.as_array())
+            .is_none_or(|targets| targets.is_empty()),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn unreachable_remote_warns_and_publishes_without_a_link() {
+    let root = unique_temp_dir();
+    let workspace = hosted_publish_scaffold(&root, None);
+    let fake_dir = root.join("shared-fake");
+    // Point the configured remote at a port that refuses connections.
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["remotes"]["hosted"]["url"] = json!(unreachable_remote_url());
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+
+    let create = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &root.join("fake-bin"),
+        &fake_dir,
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(create.contains("created"), "{create}");
+    assert!(create.contains("remote sync skipped"), "{create}");
+
+    // Publishing proceeded; no URL was known, so no link is invented.
+    let body = fs::read_to_string(fake_dir.join("create-backend.md")).unwrap();
+    assert!(!body.contains("[View bundle]"), "{body}");
+    let bundle = read_bundle(&workspace);
+    assert!(
+        bundle
+            .get("syncTargets")
+            .and_then(|targets| targets.as_array())
+            .is_none_or(|targets| targets.is_empty()),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_cached_hosted_link_survives_a_later_remote_outage() {
+    let root = unique_temp_dir();
+    let hosted_url = "https://app.example.test/bundles/rb-venue-capacity";
+    let workspace = hosted_publish_scaffold(&root, Some(hosted_url));
+    let fake_dir = root.join("shared-fake");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+
+    let first = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &root.join("fake-bin"),
+        &fake_dir,
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(first.contains("created"), "{first}");
+
+    // The hosted remote goes dark, and a second repo joins the bundle.
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["remotes"]["hosted"]["url"] = json!(unreachable_remote_url());
+    fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap()).unwrap();
+    knit(&workspace, ["bundle", "add", frontend.to_str().unwrap()]);
+    let frontend_feature = workspace.join(".knit/worktrees/venue-capacity/frontend");
+    append_line(&frontend_feature.join("app.txt"), "second repo");
+    knit(&workspace, ["commit", "--all", "-m", "Second repo"]);
+
+    let second = knit_with_fake_gh_env(
+        &workspace,
+        ["publish", "create", "--github"],
+        &root.join("fake-bin"),
+        &fake_dir,
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(second.contains("created"), "{second}");
+    assert!(second.contains("remote sync skipped"), "{second}");
+
+    // Both bodies still carry the cached link the earlier sync learned.
+    let link = format!("[View bundle]({hosted_url})");
+    for repo in ["backend", "frontend"] {
+        let edited = fs::read_to_string(fake_dir.join(format!("edit-{repo}.md"))).unwrap();
+        assert!(edited.contains(&link), "{repo}: {edited}");
+    }
+    let bundle = read_bundle(&workspace);
+    assert_eq!(bundle["syncTargets"][0]["webUrl"], json!(hosted_url));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn artifact_publish_uses_the_persisted_web_url_without_remote_calls() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "artifact hosted link"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/artifact-hosted-link/backend");
+    append_line(&feature.join("app.txt"), "artifact link");
+    knit(&workspace, ["commit", "--all", "-m", "Artifact link"]);
+
+    let fake_dir = root.join("shared-fake");
+    write_fake_gh(&root.join("fake-bin"), &fake_dir);
+
+    // The artifact carries a sync target whose server already reported the
+    // canonical URL: the persisted value is used as-is, with no remote.
+    let hosted_url = "https://app.example.test/bundles/rb-artifact-hosted-link";
+    let artifact = workspace.join(".knit/bundles/artifact-hosted-link.bundle.json");
+    let mut payload: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    payload["repos"][0]["remote"] = json!("https://github.com/acme/backend.git");
+    payload["syncTargets"] = json!([{
+        "remote": "hosted",
+        "bundleId": "rb-artifact-hosted-link",
+        "apiUrl": "https://sync.example.test",
+        "webUrl": hosted_url,
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&payload).unwrap()).unwrap();
+
+    let out = root.join("artifact-hosted-link.out.bundle.json");
+    let create = knit_with_fake_gh(
+        &root,
+        vec![
+            "publish".to_string(),
+            "create".to_string(),
+            "--github".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+            "--no-push".to_string(),
+        ],
+        &root.join("fake-bin"),
+        &fake_dir,
+    );
+    assert!(create.contains("created"), "{create}");
+
+    // Artifact mode publishes through the GitHub REST API: the initial body
+    // is the create payload's `body`.
+    let payload: Value =
+        serde_json::from_str(&fs::read_to_string(fake_dir.join("api-backend.json")).unwrap())
+            .unwrap();
+    let body = payload["body"].as_str().unwrap();
+    let link = format!("[View bundle]({hosted_url})");
+    assert!(
+        body.find(&link).unwrap() < body.find("## Knit Bundle").unwrap(),
+        "{body}"
+    );
+
+    // The output artifact preserves the sync target untouched.
+    let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(published["syncTargets"][0]["webUrl"], json!(hosted_url));
+    // No hosted request was made: artifact mode never syncs or pushes.
+    assert!(
+        !order_log(&fake_dir)
+            .iter()
+            .any(|entry| entry == "bundle-upsert"),
+        "{create}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

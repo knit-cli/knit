@@ -927,6 +927,7 @@ case "$sub" in
     printf '%s\n' "$args" > "$GH_FAKE_DIR/create-$repo.args"
     cat > "$GH_FAKE_DIR/create-$repo.md"
     printf 'x\n' >> "$GH_FAKE_DIR/create-attempts-$repo"
+    printf 'pr-create-%s\n' "$repo" >> "$GH_FAKE_DIR/order-log.txt"
     touch "$GH_FAKE_DIR/create-attempted-$repo"
     if [ -f "$GH_FAKE_DIR/create-gate-$repo" ]; then
       sh "$GH_FAKE_DIR/create-gate-$repo"
@@ -1874,9 +1875,23 @@ fn handle_fake_remote_push_request(
         }
         ("POST", ["api", "v1", "projects", _, "bundles"]) => {
             let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
+            // The staged order log records when the bundle upsert landed, so
+            // a test sharing this directory with the fake forge can prove the
+            // hosted sync ran before (or after) a review-object create.
+            let order = dir.join("order-log.txt");
+            let mut existing = fs::read_to_string(&order).unwrap_or_default();
+            existing.push_str("bundle-upsert\n");
+            fs::write(&order, existing).unwrap();
+            // Stage `bundle-web-url` to answer with the canonical browser URL
+            // the hosted server derives; without it the response carries none,
+            // the shape an older server still sends.
+            let web_url = match fs::read_to_string(dir.join("bundle-web-url")) {
+                Ok(url) => format!(",\"webUrl\":\"{}\"", url.trim()),
+                Err(_) => String::new(),
+            };
             (
                 201,
-                format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"}}}}"),
+                format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"{web_url}}}}}"),
             )
         }
         ("GET", ["api", "v1", "bundles", _, "artifacts"]) => {

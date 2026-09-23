@@ -36,6 +36,11 @@ pub struct BundleSyncTarget {
     /// fetching the payload at all.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub artifact_hash: Option<String>,
+    /// Canonical browser URL of this bundle on the host, as the server
+    /// derived and reported it. The CLI never guesses it from `api_url`.
+    /// Absent when the host did not report one (older servers).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub web_url: Option<String>,
 }
 
 impl BundleState {
@@ -117,13 +122,15 @@ impl ChangeGroup {
     /// Record (or refresh) the hosted identity returned by a successful
     /// bundle upsert. Returns whether the persisted artifact changed.
     pub fn record_sync_target(&mut self, remote: &str, bundle_id: &str, api_url: &str) -> bool {
-        self.record_sync_target_with_artifact(remote, bundle_id, api_url, None)
+        self.record_sync_target_entry(remote, bundle_id, api_url, None, None)
     }
 
     /// Record the hosted identity together with the hash of the remote
     /// artifact this bundle is now in sync with. `artifact_hash` of `None`
     /// leaves any previously recorded hash alone, so callers that only learn
-    /// the identity (an upsert) never erase what a pull recorded.
+    /// the identity (an upsert) never erase what a pull recorded. The
+    /// response taught nothing about the hosted web URL, so a known URL for
+    /// the same hosted identity is retained.
     pub fn record_sync_target_with_artifact(
         &mut self,
         remote: &str,
@@ -131,11 +138,46 @@ impl ChangeGroup {
         api_url: &str,
         artifact_hash: Option<&str>,
     ) -> bool {
+        self.record_sync_target_entry(remote, bundle_id, api_url, None, artifact_hash)
+    }
+
+    /// Record the hosted identity together with the canonical web URL the
+    /// host reported for this bundle. `web_url` of `None` means the host said
+    /// nothing (an older server): a previously known URL is retained while
+    /// the hosted identity — bundle id or API URL — stays the same, and
+    /// dropped when it changed, so a stale URL never survives a different
+    /// hosted record.
+    pub fn record_sync_target_with_web_url(
+        &mut self,
+        remote: &str,
+        bundle_id: &str,
+        api_url: &str,
+        web_url: Option<&str>,
+        artifact_hash: Option<&str>,
+    ) -> bool {
+        self.record_sync_target_entry(remote, bundle_id, api_url, web_url, artifact_hash)
+    }
+
+    fn record_sync_target_entry(
+        &mut self,
+        remote: &str,
+        bundle_id: &str,
+        api_url: &str,
+        web_url: Option<&str>,
+        artifact_hash: Option<&str>,
+    ) -> bool {
+        let api_url = api_url.trim_end_matches('/');
+        let identity_changed = self
+            .sync_targets
+            .iter()
+            .find(|existing| existing.remote == remote)
+            .is_some_and(|existing| existing.bundle_id != bundle_id || existing.api_url != api_url);
         let mut target = BundleSyncTarget {
             remote: remote.to_string(),
             bundle_id: bundle_id.to_string(),
-            api_url: api_url.trim_end_matches('/').to_string(),
+            api_url: api_url.to_string(),
             artifact_hash: artifact_hash.map(ToString::to_string),
+            web_url: web_url.map(ToString::to_string),
         };
         if let Some(existing) = self
             .sync_targets
@@ -144,6 +186,9 @@ impl ChangeGroup {
         {
             if target.artifact_hash.is_none() {
                 target.artifact_hash = existing.artifact_hash.clone();
+            }
+            if target.web_url.is_none() && !identity_changed {
+                target.web_url = existing.web_url.clone();
             }
             if existing == &target {
                 return false;
@@ -162,6 +207,30 @@ impl ChangeGroup {
             .iter()
             .find(|target| target.remote == remote)
             .and_then(|target| target.artifact_hash.as_deref())
+    }
+
+    /// Fill hosted web URLs an incoming artifact did not carry, using a
+    /// previous local copy of the same bundle. Only a target whose hosted
+    /// identity — remote name, bundle id, normalized API URL — matches
+    /// exactly and whose URL is still missing inherits; a newly reported URL
+    /// is never replaced, and a changed identity never inherits the previous
+    /// URL. Used where a pull replaces the local artifact with a remote copy
+    /// that predates the URL.
+    pub fn inherit_missing_sync_target_web_urls(&mut self, previous: &ChangeGroup) {
+        for target in &mut self.sync_targets {
+            if target.web_url.is_some() {
+                continue;
+            }
+            let Some(known) = previous.sync_targets.iter().find(|known| {
+                known.remote == target.remote
+                    && known.bundle_id == target.bundle_id
+                    && known.api_url == target.api_url
+                    && known.web_url.is_some()
+            }) else {
+                continue;
+            };
+            target.web_url = known.web_url.clone();
+        }
     }
 }
 
@@ -269,12 +338,23 @@ pub fn merge_ledgers(local: &ChangeGroup, remote: &ChangeGroup, now: String) -> 
     merged.commit_groups = commit_groups;
 
     for target in &remote.sync_targets {
-        if !merged
+        match merged
             .sync_targets
-            .iter()
-            .any(|local_target| local_target.remote == target.remote)
+            .iter_mut()
+            .find(|local_target| local_target.remote == target.remote)
         {
-            merged.sync_targets.push(target.clone());
+            // Local wins for the same remote, except a local target that
+            // never learned the hosted URL takes it from the remote copy
+            // when the hosted identity matches exactly.
+            Some(existing) => {
+                if existing.web_url.is_none()
+                    && existing.bundle_id == target.bundle_id
+                    && existing.api_url == target.api_url
+                {
+                    existing.web_url = target.web_url.clone();
+                }
+            }
+            None => merged.sync_targets.push(target.clone()),
         }
     }
 
@@ -1101,5 +1181,240 @@ mod handoff_tests {
         let mut invalid = value;
         invalid["nodes"][1]["handoff"]["sizeMib"] = serde_json::json!(-1);
         assert!(!validator.is_valid(&invalid));
+    }
+}
+
+#[cfg(test)]
+mod sync_target_tests {
+    use super::*;
+
+    fn bundle() -> ChangeGroup {
+        ChangeGroup::new(
+            "venue-capacity".into(),
+            "venue capacity".into(),
+            "2026-01-01T00:00:00Z".into(),
+        )
+    }
+
+    #[test]
+    fn web_url_serializes_camel_case_and_stays_optional() {
+        let mut group = bundle();
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test/",
+            Some("https://app.example.test/bundles/rb-1"),
+            None,
+        ));
+        let encoded = serde_json::to_value(&group).unwrap();
+        assert_eq!(
+            encoded["syncTargets"][0]["webUrl"],
+            serde_json::json!("https://app.example.test/bundles/rb-1")
+        );
+        // The api URL keeps its normalized trailing-slash-free form.
+        assert_eq!(
+            encoded["syncTargets"][0]["apiUrl"],
+            serde_json::json!("https://sync.example.test")
+        );
+
+        // An older artifact without webUrl decodes to None, and one that
+        // carries it round-trips.
+        let without: ChangeGroup = serde_json::from_value(serde_json::json!({
+            "schemaVersion": "0.1",
+            "kind": "ChangeGroup",
+            "id": "venue-capacity",
+            "title": "venue capacity",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "repos": [],
+            "commitGroups": [],
+            "nodes": [],
+            "syncTargets": [{
+                "remote": "hosted",
+                "bundleId": "rb-1",
+                "apiUrl": "https://sync.example.test",
+            }],
+        }))
+        .unwrap();
+        assert_eq!(without.sync_targets[0].web_url, None);
+        let round: ChangeGroup = serde_json::from_value(encoded).unwrap();
+        assert_eq!(
+            round.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/rb-1")
+        );
+    }
+
+    #[test]
+    fn a_response_without_web_url_retains_the_known_one() {
+        let mut group = bundle();
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test",
+            Some("https://app.example.test/bundles/rb-1"),
+            None,
+        ));
+        // An older server answers the next upsert without a URL: identity
+        // unchanged, so the known URL survives.
+        assert!(!group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test",
+            None,
+            None,
+        ));
+        assert_eq!(
+            group.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/rb-1")
+        );
+        // The plain identity-only recording keeps it too.
+        assert!(!group.record_sync_target("hosted", "rb-1", "https://sync.example.test"));
+        assert_eq!(
+            group.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/rb-1")
+        );
+    }
+
+    #[test]
+    fn a_changed_hosted_identity_never_carries_a_stale_url() {
+        let mut group = bundle();
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test",
+            Some("https://app.example.test/bundles/rb-1"),
+            None,
+        ));
+        // Same remote name, different hosted bundle: the old URL described a
+        // different bundle record and must not survive.
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-2",
+            "https://sync.example.test",
+            None,
+            None,
+        ));
+        assert_eq!(group.sync_targets[0].web_url, None);
+
+        // A changed API URL is a different hosted identity the same way.
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-2",
+            "https://other.example.test",
+            Some("https://other.example.test/bundles/rb-2"),
+            None,
+        ));
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-2",
+            "https://third.example.test",
+            None,
+            None,
+        ));
+        assert_eq!(group.sync_targets[0].web_url, None);
+    }
+
+    #[test]
+    fn a_new_url_replaces_the_previous_one() {
+        let mut group = bundle();
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test",
+            Some("https://app.example.test/bundles/rb-1"),
+            None,
+        ));
+        assert!(group.record_sync_target_with_web_url(
+            "hosted",
+            "rb-1",
+            "https://sync.example.test",
+            Some("https://app.example.test/bundles/rb-1?v=2"),
+            None,
+        ));
+        assert_eq!(group.sync_targets.len(), 1);
+        assert_eq!(
+            group.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/rb-1?v=2")
+        );
+    }
+
+    fn local_with_cached_url(bundle_id: &str, api: &str) -> ChangeGroup {
+        let mut group = bundle();
+        group.record_sync_target_with_web_url(
+            "hosted",
+            bundle_id,
+            api,
+            Some("https://app.example.test/bundles/cached"),
+            Some("hash-old"),
+        );
+        group
+    }
+
+    fn incoming_remote_copy(bundle_id: &str, api: &str) -> ChangeGroup {
+        // The remote payload's own sync target never learned a URL.
+        let mut group = bundle();
+        group.record_sync_target_with_artifact("hosted", bundle_id, api, Some("hash-old"));
+        group
+    }
+
+    #[test]
+    fn a_replacement_pull_keeps_the_cached_url_for_the_same_identity() {
+        let previous = local_with_cached_url("rb-1", "https://sync.example.test");
+        let mut incoming = incoming_remote_copy("rb-1", "https://sync.example.test");
+        // The pull's record call with no server-reported URL keeps nothing
+        // (the incoming copy has no URL to retain), and the previous local
+        // artifact fills the gap.
+        incoming.inherit_missing_sync_target_web_urls(&previous);
+        assert_eq!(
+            incoming.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/cached")
+        );
+    }
+
+    #[test]
+    fn inheritance_refuses_changed_identities_and_reported_urls() {
+        let previous = local_with_cached_url("rb-1", "https://sync.example.test");
+
+        // Different hosted bundle id: no inheritance.
+        let mut incoming = incoming_remote_copy("rb-2", "https://sync.example.test");
+        incoming.inherit_missing_sync_target_web_urls(&previous);
+        assert_eq!(incoming.sync_targets[0].web_url, None);
+
+        // Different API URL: a different hosted record the same way.
+        let mut incoming = incoming_remote_copy("rb-1", "https://other.example.test");
+        incoming.inherit_missing_sync_target_web_urls(&previous);
+        assert_eq!(incoming.sync_targets[0].web_url, None);
+
+        // A URL the incoming copy already carries is never replaced.
+        let mut incoming = incoming_remote_copy("rb-1", "https://sync.example.test");
+        incoming.sync_targets[0].web_url =
+            Some("https://app.example.test/bundles/fresh".to_string());
+        incoming.inherit_missing_sync_target_web_urls(&previous);
+        assert_eq!(
+            incoming.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/fresh")
+        );
+    }
+
+    #[test]
+    fn a_ledger_merge_fills_a_missing_local_url_from_the_remote_copy() {
+        let local = incoming_remote_copy("rb-1", "https://sync.example.test");
+        let mut remote = incoming_remote_copy("rb-1", "https://sync.example.test");
+        remote.sync_targets[0].web_url =
+            Some("https://app.example.test/bundles/remote-known".to_string());
+
+        let merged = merge_ledgers(&local, &remote, "2026-01-02T00:00:00Z".into());
+        assert_eq!(
+            merged.sync_targets[0].web_url.as_deref(),
+            Some("https://app.example.test/bundles/remote-known")
+        );
+
+        // Same remote name but a different bundle id keeps the local target
+        // untouched — no cross-identity inheritance.
+        let mut other_id = incoming_remote_copy("rb-9", "https://sync.example.test");
+        other_id.sync_targets[0].web_url =
+            Some("https://app.example.test/bundles/other".to_string());
+        let merged = merge_ledgers(&local, &other_id, "2026-01-02T00:00:00Z".into());
+        assert_eq!(merged.sync_targets[0].web_url, None);
     }
 }

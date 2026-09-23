@@ -355,3 +355,102 @@ fn bitbucket_provider_filter_skips_github_and_uses_basic_auth() {
     .is_empty());
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn artifact_publish_leads_bitbucket_descriptions_with_the_hosted_link() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "artifact hosted bitbucket"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/artifact-hosted-bitbucket/backend");
+    append_line(&feature.join("app.txt"), "bitbucket hosted link");
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Bitbucket hosted link"],
+    );
+
+    // The artifact carries the hosted web URL a server reported earlier;
+    // artifact mode uses the persisted value with no remote calls.
+    let hosted_url = "https://app.example.test/bundles/rb-artifact-hosted-bitbucket";
+    let artifact = workspace.join(".knit/bundles/artifact-hosted-bitbucket.bundle.json");
+    let mut bundle: Value = serde_json::from_str(&fs::read_to_string(&artifact).unwrap()).unwrap();
+    bundle["repos"][0]["remote"] =
+        Value::String("https://bitbucket.org/acme/backend.git".to_string());
+    bundle["syncTargets"] = serde_json::json!([{
+        "remote": "hosted",
+        "bundleId": "rb-artifact-hosted-bitbucket",
+        "apiUrl": "https://sync.example.test",
+        "webUrl": hosted_url,
+    }]);
+    fs::write(&artifact, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+
+    let state = root.join("fake-bitbucket-hosted");
+    let base = spawn_fake_bitbucket_api(&state);
+    let out = root.join("published.bundle.json");
+    let output = knit_with_env(
+        &root,
+        vec![
+            "publish".to_string(),
+            "create".to_string(),
+            "--provider".to_string(),
+            "bitbucket".to_string(),
+            "--from-artifact".to_string(),
+            artifact.to_string_lossy().to_string(),
+            "--out".to_string(),
+            out.to_string_lossy().to_string(),
+            "--no-push".to_string(),
+        ],
+        &[
+            ("KNIT_BITBUCKET_API_BASE", &base),
+            ("KNIT_BITBUCKET_ACCESS_TOKEN", "test-token"),
+        ],
+    );
+    assert!(output.contains("created"), "{output}");
+    assert!(output.contains("synced"), "{output}");
+
+    let link = format!("[View bundle]({hosted_url})");
+    let create: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("bitbucket-create.json")).unwrap())
+            .unwrap();
+    let created_description = create["description"].as_str().unwrap();
+    // The invisible reference-definition markers stay, the hosted link is the
+    // first visible content, and no HTML comment is written.
+    assert!(
+        created_description.starts_with(&format!(
+            "[knit-bundle-begin]: #\n\n{link}\n\n## Knit Bundle"
+        )),
+        "{created_description}"
+    );
+    assert!(created_description.contains("[knit-bundle-end]: #"));
+    assert!(!created_description.contains("<!--"));
+    assert_eq!(created_description.matches(&link).count(), 1);
+
+    // The synced body moves the linked block above the user's prose, keeping
+    // the reference-definition fencing Bitbucket needs.
+    let edit: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("bitbucket-edit.json")).unwrap())
+            .unwrap();
+    let edited_description = edit["description"].as_str().unwrap();
+    assert!(
+        edited_description.starts_with(&format!(
+            "[knit-bundle-begin]: #\n\n{link}\n\n## Knit Bundle"
+        )),
+        "{edited_description}"
+    );
+    assert!(edited_description.contains("Existing body"));
+    assert!(
+        edited_description.find(&link).unwrap() < edited_description.find("Existing body").unwrap(),
+        "{edited_description}"
+    );
+    assert!(!edited_description.contains("<!--"));
+    assert_eq!(edited_description.matches(&link).count(), 1);
+
+    let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
+    assert_eq!(
+        published["syncTargets"][0]["webUrl"],
+        Value::String(hosted_url.to_string())
+    );
+    fs::remove_dir_all(root).unwrap();
+}

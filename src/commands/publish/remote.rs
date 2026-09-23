@@ -1,6 +1,8 @@
 //! Per-repo publish execution: push the feature branch (workspace mode),
 //! create or adopt the host review object, and fold the result back into the
-//! bundle. The `*_from_artifact` variants run without local checkouts.
+//! bundle. The push lives in its own phase ([`push_publish_branch`]) so the
+//! hosted bundle sync can run between branch pushes and review-object
+//! creation. The `*_from_artifact` variants run without local checkouts.
 
 use super::pr_body::initial_pr_body;
 use crate::checkout::checkout_dir;
@@ -25,19 +27,20 @@ pub(super) struct PublishJob {
 
 #[derive(Clone)]
 pub(super) struct PushedInfo {
-    sha: String,
-    branch: String,
+    pub(super) sha: String,
+    pub(super) branch: String,
 }
 
-/// What a publish worker reports while it runs. `Pushed` fires as soon as the
-/// branch is on origin, before the review object is looked up or created, so
-/// the caller can print progress per step instead of per joined worker.
+/// What a publish worker reports while it runs. `PushDone` fires as soon as
+/// one repo's branch phase finishes (success or failure) and `Done` when its
+/// review object does, so the caller can print progress per step instead of
+/// per joined worker.
 pub(super) enum PublishEvent {
     /// A mid-publish line (a retry, say) to print in the main thread's stream.
     Note(String),
-    Pushed {
+    PushDone {
         repo_id: String,
-        pushed: PushedInfo,
+        result: Box<Result<PushedInfo>>,
     },
     Done {
         repo_id: String,
@@ -68,14 +71,49 @@ pub(super) struct ArtifactPublishResult {
     status: PublishStatus,
 }
 
+/// Validate one selected repo's checkout and push its feature branch to
+/// origin — publishing's first phase, split from review-object creation so
+/// the hosted bundle sync (which needs every open branch on origin) can run
+/// between the two and teach the bundle its hosted web URL before any PR
+/// body is rendered.
+pub(super) fn push_publish_branch(
+    active: &ActiveBundle,
+    job: &PublishJob,
+    set_upstream: bool,
+) -> Result<PushedInfo> {
+    let repo = &job.repo;
+    let branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: no feature branch recorded. Run `knit bundle worktree`.",
+            repo.id
+        )
+    })?;
+    let Some(cwd) = checkout_dir(active, repo) else {
+        bail!("{}: no feature checkout is recorded.", repo.id);
+    };
+    ensure_feature_branch(repo, branch, &cwd)?;
+    ensure_origin(repo, &cwd)?;
+    // Resolve the forge before anything mutates the remote: a repo on an
+    // unsupported host must fail here, the way the pre-split publish did,
+    // instead of after its branch is already pushed.
+    providers::for_repo(repo)?;
+    let sha = rev_parse(&cwd, "HEAD")
+        .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
+    run_push(&cwd, branch, set_upstream, PushForce::No)
+        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+    Ok(PushedInfo {
+        sha,
+        branch: format!("origin/{branch}"),
+    })
+}
+
 pub(super) fn publish_repo_remote(
     active: &ActiveBundle,
     bundle: &ChangeGroup,
     job: &PublishJob,
     draft: bool,
     renew: bool,
-    set_upstream: bool,
-    on_pushed: &dyn Fn(PushedInfo),
+    pushed_sha: &str,
 ) -> Result<PublishRemoteResult> {
     let repo = &job.repo;
     let base_branch = &job.base_branch;
@@ -88,20 +126,8 @@ pub(super) fn publish_repo_remote(
     let Some(cwd) = checkout_dir(active, repo) else {
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
-    ensure_feature_branch(repo, branch, &cwd)?;
-    ensure_origin(repo, &cwd)?;
     let forge = providers::for_repo(repo)?;
     let target = PrTarget::checkout(&cwd);
-
-    let sha = rev_parse(&cwd, "HEAD")
-        .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream, PushForce::No)
-        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
-    let pushed = PushedInfo {
-        sha,
-        branch: format!("origin/{branch}"),
-    };
-    on_pushed(pushed.clone());
 
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
         if let Some(status) =
@@ -126,12 +152,12 @@ pub(super) fn publish_repo_remote(
                 repo.id, existing.url
             )
         })?;
-        ensure_review_can_be_renewed(repo, &summary, Some(&pushed.sha))?;
+        ensure_review_can_be_renewed(repo, &summary, Some(pushed_sha))?;
     }
 
     if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
         if renew && review_is_terminal(&existing) {
-            ensure_review_has_new_head(repo, &existing, Some(&pushed.sha))?;
+            ensure_review_has_new_head(repo, &existing, Some(pushed_sha))?;
         } else {
             return Ok(PublishRemoteResult {
                 repo_index: job.repo_index,

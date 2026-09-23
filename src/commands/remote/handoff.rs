@@ -15,6 +15,7 @@ pub(crate) struct HandoffExport {
     export: RemoteProjectExport,
     artifact_hash: String,
     remote_bundle_id: String,
+    remote_web_url: Option<String>,
 }
 
 impl HandoffExport {
@@ -34,20 +35,20 @@ impl HandoffExport {
         let export = client::fetch_project_export(&remote, Some(&token), project)?;
         let entry = export.bundles.iter().find(|b| b.slug == slug);
         let unpublished = entry.is_none();
-        let (bundle, artifact_hash, remote_bundle_id) = if let Some(entry) = entry {
+        let (bundle, artifact_hash, remote_bundle_id, remote_web_url) = if let Some(entry) = entry {
             if entry.lifecycle_state != "open" {
                 bail!("Bundle `{slug}` is not open.");
             }
             let (bundle, hash) =
                 client::resolve_export_bundle_payload(&remote, Some(&token), entry)?;
-            (bundle, hash, entry.id.clone())
+            (bundle, hash, entry.id.clone(), entry.web_url.clone())
         } else if allow_unpublished {
             let mut bundle = ChangeGroup::new(slug.into(), slug.into(), crate::time::now_iso());
             bundle.project_id = Some(export.project.slug.clone());
             for repo in unpublished_bundle_repos(&export) {
                 bundle.repos.push(serde_json::from_value(repo)?);
             }
-            (bundle, String::new(), String::new())
+            (bundle, String::new(), String::new(), None)
         } else {
             bail!("Remote has no bundle `{slug}` in `{project}`; publish handoff out first.");
         };
@@ -69,6 +70,7 @@ impl HandoffExport {
             export,
             artifact_hash,
             remote_bundle_id,
+            remote_web_url,
         })
     }
 
@@ -184,7 +186,7 @@ impl HandoffExport {
             helpers::ensure_helpers_for_git(&self.remote_name);
             ensure_bundle_repositories(root, &mut project, &self.export, &self.bundle)?;
             let mut localized = client::localize_bundle(self.bundle, &project)?;
-            if let Some(local) = local {
+            if let Some(ref local) = local {
                 for repo in &mut localized.repos {
                     repo.worktree_path = local
                         .repos
@@ -193,12 +195,18 @@ impl HandoffExport {
                         .and_then(|r| r.worktree_path.clone());
                 }
             }
-            localized.record_sync_target_with_artifact(
+            localized.record_sync_target_with_web_url(
                 &self.remote_name,
                 &self.remote_bundle_id,
                 &self.remote.url,
+                self.remote_web_url.as_deref(),
                 Some(&self.artifact_hash),
             );
+            if let Some(local) = &local {
+                // A previous acceptance may have learned the hosted URL;
+                // keep it when the incoming copy predates it.
+                localized.inherit_missing_sync_target_web_urls(local);
+            }
             store::write_json(&path, &localized)?;
             drop(_lock);
             helpers::ensure_helpers_for_git(&self.remote_name);
