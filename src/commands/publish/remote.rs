@@ -358,6 +358,7 @@ fn create_or_adopt(
         mergeable: None,
         merge_state_status: None,
         review_decision: None,
+        author: None,
     });
     Ok(PublishStatus::Created(summary))
 }

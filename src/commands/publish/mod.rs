@@ -445,6 +445,7 @@ mod tests {
             head_branch: "knit/venue-capacity".to_string(),
             state: "OPEN".to_string(),
             title: None,
+            author: None,
             updated_at: "2026-05-05T00:00:00.000Z".to_string(),
         }
     }

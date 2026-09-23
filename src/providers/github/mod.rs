@@ -16,7 +16,22 @@ use transport::use_native_github_api;
 
 pub(super) const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
-    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision";
+    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision,author";
+
+/// `gh --json author` reports only the login and name. The avatar and the
+/// profile page follow from the PR's host.
+fn with_author_links(mut pr: PullRequest) -> PullRequest {
+    let host = crate::providers::remote_host(&pr.url);
+    if let (Some(author), Some(host)) = (pr.author.as_mut(), host) {
+        if author.url.is_none() {
+            author.url = Some(format!("https://{host}/{}", author.login));
+        }
+        if author.avatar_url.is_none() {
+            author.avatar_url = Some(format!("https://{host}/{}.png", author.login));
+        }
+    }
+    pr
+}
 
 /// GitHub forge adapter, backed by the `gh` CLI.
 pub struct GitHub;
@@ -80,7 +95,7 @@ impl Forge for GitHub {
         let output = cli_output(CLI, target, args, None)?;
         let prs: Vec<PullRequest> =
             serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
-        Ok(prs.into_iter().next())
+        Ok(prs.into_iter().next().map(with_author_links))
     }
 
     fn create(
@@ -133,7 +148,9 @@ impl Forge for GitHub {
             ],
         );
         let output = cli_output(CLI, target, args, None)?;
-        serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
+        let pr: PullRequest =
+            serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")?;
+        Ok(with_author_links(pr))
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
@@ -322,6 +339,18 @@ fn is_checks_permission_error(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_author_gets_profile_links_from_the_pr_host() {
+        let json = r#"{"number":5,"url":"https://github.com/acme/backend/pull/5","author":{"login":"dana","name":"","is_bot":false}}"#;
+        let pr = with_author_links(serde_json::from_str(json).unwrap());
+        let author = pr.author.expect("author");
+        assert_eq!(author.url.as_deref(), Some("https://github.com/dana"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://github.com/dana.png")
+        );
+    }
 
     #[test]
     fn treats_checks_permission_errors_as_nonfatal() {

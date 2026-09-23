@@ -335,7 +335,25 @@ pub struct PublicationEntry {
     pub state: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Who opened the review object, as the host reports it. It can differ
+    /// from the bundle's author when a bundle takes in someone else's PR.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<ForgeAuthor>,
     pub updated_at: String,
+}
+
+/// A host account that opened a review object.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ForgeAuthor {
+    pub login: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// The account's profile page on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -197,6 +197,7 @@ pub(crate) fn create_provider_revert_prs(
                     mergeable: None,
                     merge_state_status: None,
                     review_decision: None,
+                    author: None,
                 });
                 providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
                 repo_ids.insert(repo_id.clone());

@@ -1,4 +1,5 @@
 use super::{pr_number_from_url, CheckRun, Forge, PrTarget, PullRequest, PULL_REQUEST_KIND};
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +28,26 @@ struct BitbucketPullRequest {
     draft: Option<bool>,
     #[serde(default)]
     participants: Vec<BitbucketParticipant>,
+    #[serde(default)]
+    author: Option<BitbucketUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketUser {
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    links: Option<BitbucketUserLinks>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketUserLinks {
+    #[serde(default)]
+    avatar: Option<BitbucketHref>,
+    #[serde(default)]
+    html: Option<BitbucketHref>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -262,6 +283,24 @@ impl Bitbucket {
     }
 }
 
+impl BitbucketUser {
+    /// Bitbucket has no stable public login; the nickname is the closest,
+    /// and the display name stands in when it is missing.
+    fn into_author(self) -> Option<ForgeAuthor> {
+        let login = self.nickname.or_else(|| self.display_name.clone())?;
+        let links = self.links;
+        Some(ForgeAuthor {
+            login,
+            name: self.display_name,
+            avatar_url: links
+                .as_ref()
+                .and_then(|links| links.avatar.as_ref())
+                .map(|href| href.href.clone()),
+            url: links.and_then(|links| links.html).map(|href| href.href),
+        })
+    }
+}
+
 impl BitbucketPullRequest {
     fn into_pull_request(self) -> PullRequest {
         let approved = self
@@ -284,6 +323,7 @@ impl BitbucketPullRequest {
             mergeable: None,
             merge_state_status: None,
             review_decision: approved.then(|| "APPROVED".to_string()),
+            author: self.author.and_then(BitbucketUser::into_author),
         }
     }
 }
@@ -607,6 +647,20 @@ fn base64_encode(input: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_pull_request_author() {
+        let json = r#"{"id":7,"links":{"html":{"href":"https://bitbucket.org/acme/backend/pull-requests/7"}},"source":{"branch":{"name":"knit/x"}},"destination":{"branch":{"name":"main"}},"author":{"display_name":"Dana Ruiz","nickname":"dana","links":{"avatar":{"href":"https://bitbucket.org/avatar/dana"},"html":{"href":"https://bitbucket.org/dana"}}}}"#;
+        let pr: BitbucketPullRequest = serde_json::from_str(json).unwrap();
+        let author = pr.into_pull_request().author.expect("author");
+        assert_eq!(author.login, "dana");
+        assert_eq!(author.name.as_deref(), Some("Dana Ruiz"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://bitbucket.org/avatar/dana")
+        );
+        assert_eq!(author.url.as_deref(), Some("https://bitbucket.org/dana"));
+    }
 
     #[test]
     fn parses_full_name() {
