@@ -424,7 +424,8 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
 #[cfg(test)]
 mod tests {
     use super::pr_body::{
-        render_knit_pr_block, upsert_knit_pr_block, KNIT_PR_BLOCK_BEGIN, KNIT_PR_BLOCK_END,
+        initial_pr_body, render_knit_pr_block, upsert_knit_pr_block, KNIT_PR_BLOCK_BEGIN,
+        KNIT_PR_BLOCK_BEGIN_REFS, KNIT_PR_BLOCK_END, KNIT_PR_BLOCK_END_REFS,
     };
     use super::scope::publish_scope_repo_ids;
     use super::*;
@@ -471,9 +472,10 @@ mod tests {
         assert_eq!(next, "Intro\n\nnew block\n\nTail");
     }
 
-    #[test]
-    fn rendered_block_lists_known_and_pending_prs() {
-        let mut bundle = ChangeGroup {
+    /// One bundle with recorded backend work and a backend publication: the
+    /// shape every managed-block rendering test below starts from.
+    fn published_bundle() -> ChangeGroup {
+        ChangeGroup {
             schema_version: SCHEMA_VERSION.to_string(),
             kind: CHANGE_GROUP_KIND.to_string(),
             id: "venue-capacity".to_string(),
@@ -511,9 +513,14 @@ mod tests {
             )],
             sync_targets: Vec::new(),
             work_item_ids: Vec::new(),
-        };
+        }
+    }
 
-        let block = render_knit_pr_block(&bundle, Some("backend"));
+    #[test]
+    fn rendered_block_lists_known_and_pending_prs() {
+        let mut bundle = published_bundle();
+
+        let block = render_knit_pr_block(&bundle, Some("backend"), "github");
         assert!(block.contains("This PR is part of Knit bundle `venue-capacity`."));
         assert!(block.contains("`backend`: https://github.com/acme/backend/pull/123 (this PR)"));
         assert!(block.contains("`frontend`: pending"));
@@ -524,9 +531,78 @@ mod tests {
             456,
             "https://github.com/acme/frontend/pull/456",
         ));
-        let synced = render_knit_pr_block(&bundle, Some("backend"));
+        let synced = render_knit_pr_block(&bundle, Some("backend"), "github");
         assert!(synced.contains("`frontend`: https://github.com/acme/frontend/pull/456"));
         assert!(!synced.contains("`docs`: pending"));
+    }
+
+    #[test]
+    fn bitbucket_body_is_fenced_with_invisible_reference_definitions() {
+        let body = initial_pr_body(&published_bundle(), "backend", "bitbucket");
+        assert!(
+            body.starts_with(&format!("{KNIT_PR_BLOCK_BEGIN_REFS}\n\n## Knit Bundle")),
+            "{body}"
+        );
+        assert!(body.ends_with(&format!("\n\n{KNIT_PR_BLOCK_END_REFS}")));
+        assert!(!body.contains("<!--"));
+        assert!(body.contains("This PR is part of Knit bundle `venue-capacity`."));
+    }
+
+    #[test]
+    fn non_bitbucket_providers_keep_html_comment_delimiters() {
+        for provider in ["github", "gitlab", "forgejo"] {
+            let block = render_knit_pr_block(&published_bundle(), Some("backend"), provider);
+            assert!(
+                block.starts_with(&format!("{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle")),
+                "{provider}"
+            );
+            assert!(
+                block.ends_with(&format!(
+                    "Bundle title: venue capacity\n{KNIT_PR_BLOCK_END}"
+                )),
+                "{provider}"
+            );
+            assert!(!block.contains(KNIT_PR_BLOCK_BEGIN_REFS), "{provider}");
+        }
+    }
+
+    #[test]
+    fn sync_migrates_a_legacy_html_block_to_bitbucket_references() {
+        let block = render_knit_pr_block(&published_bundle(), Some("backend"), "bitbucket");
+        let legacy = format!(
+            "Intro\n\n{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\nstale\n{KNIT_PR_BLOCK_END}\n\nTail"
+        );
+
+        let migrated = upsert_knit_pr_block(&legacy, &block);
+        assert_eq!(migrated, format!("Intro\n\n{block}\n\nTail"));
+        assert!(!migrated.contains("<!--"));
+
+        // A repeated sync finds the migrated pair and changes nothing.
+        assert_eq!(upsert_knit_pr_block(&migrated, &block), migrated);
+    }
+
+    #[test]
+    fn upsert_preserves_surrounding_text_with_its_spacing() {
+        let block = render_knit_pr_block(&published_bundle(), Some("backend"), "bitbucket");
+        let previous = format!(
+            "Intro\n\n{KNIT_PR_BLOCK_BEGIN_REFS}\n\nold\n\n{KNIT_PR_BLOCK_END_REFS}\n\nTail  "
+        );
+        assert_eq!(
+            upsert_knit_pr_block(&previous, &block),
+            format!("Intro\n\n{block}\n\nTail  ")
+        );
+    }
+
+    #[test]
+    fn unmatched_markers_of_mixed_generations_never_eat_user_text() {
+        // An HTML begin closed by a reference end is no pair at all: the body
+        // is kept verbatim and the block is appended instead.
+        let previous =
+            format!("Intro\n\n{KNIT_PR_BLOCK_BEGIN}\nstray text\n{KNIT_PR_BLOCK_END_REFS}\n\nTail");
+        assert_eq!(
+            upsert_knit_pr_block(&previous, "new block"),
+            format!("{previous}\n\nnew block")
+        );
     }
 
     #[test]

@@ -112,7 +112,6 @@ fn artifact_publish_records_bitbucket_review_and_syncs_body() {
             "--out".to_string(),
             out.to_string_lossy().to_string(),
             "--no-push".to_string(),
-            "--no-sync".to_string(),
         ],
         &[
             ("KNIT_BITBUCKET_API_BASE", &base),
@@ -120,6 +119,7 @@ fn artifact_publish_records_bitbucket_review_and_syncs_body() {
         ],
     );
     assert!(output.contains("created"), "{output}");
+    assert!(output.contains("synced"), "{output}");
     let published: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
     assert_eq!(published["publications"][0]["provider"], "bitbucket");
     assert_eq!(published["publications"][0]["kind"], "pull_request");
@@ -127,13 +127,22 @@ fn artifact_publish_records_bitbucket_review_and_syncs_body() {
         published["publications"][0]["url"],
         "https://bitbucket.org/acme/backend/pull-requests/101"
     );
+    // Both the initial create and the artifact-mode body sync fence the
+    // managed block with reference definitions, never HTML comments.
     let create: Value =
         serde_json::from_str(&fs::read_to_string(state.join("bitbucket-create.json")).unwrap())
             .unwrap();
-    assert!(create["description"]
-        .as_str()
-        .unwrap()
-        .contains("Knit bundle `artifact-bitbucket`"));
+    let created_description = create["description"].as_str().unwrap();
+    assert!(created_description.contains("Knit bundle `artifact-bitbucket`"));
+    assert!(created_description.contains("[knit-bundle-begin]: #"));
+    assert!(!created_description.contains("<!-- BEGIN KNIT BUNDLE -->"));
+    let edit: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("bitbucket-edit.json")).unwrap())
+            .unwrap();
+    let edited_description = edit["description"].as_str().unwrap();
+    assert!(edited_description.contains("Existing body"));
+    assert!(edited_description.contains("[knit-bundle-begin]: #"));
+    assert!(!edited_description.contains("<!-- BEGIN KNIT BUNDLE -->"));
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -196,18 +205,30 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
         &env,
     );
     assert!(publish.contains("created"), "{publish}");
+    assert!(publish.contains("synced"), "{publish}");
     let published: Value =
         serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
     assert_eq!(published["publications"][0]["provider"], "bitbucket");
     assert_eq!(published["publications"][0]["kind"], "pull_request");
 
+    // Bitbucket shows HTML comments as text, so both the initial body and the
+    // synced body fence the managed block with reference definitions.
+    let create: Value =
+        serde_json::from_str(&fs::read_to_string(state.join("bitbucket-create.json")).unwrap())
+            .unwrap();
+    let created_description = create["description"].as_str().unwrap();
+    assert!(created_description.contains("[knit-bundle-begin]: #"));
+    assert!(created_description.contains("[knit-bundle-end]: #"));
+    assert!(!created_description.contains("<!-- BEGIN KNIT BUNDLE -->"));
+
     let edit: Value =
         serde_json::from_str(&fs::read_to_string(state.join("bitbucket-edit.json")).unwrap())
             .unwrap();
-    assert!(edit["description"]
-        .as_str()
-        .unwrap()
-        .contains("Knit bundle `bitbucket-workspace`"));
+    let edited_description = edit["description"].as_str().unwrap();
+    assert!(edited_description.contains("[knit-bundle-begin]: #"));
+    assert!(edited_description.contains("[knit-bundle-end]: #"));
+    assert!(edited_description.contains("Knit bundle `bitbucket-workspace`"));
+    assert!(!edited_description.contains("<!-- BEGIN KNIT BUNDLE -->"));
 
     let status = knit_with_env(
         &workspace,

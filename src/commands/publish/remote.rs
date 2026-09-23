@@ -333,7 +333,7 @@ fn create_or_adopt(
     draft: bool,
 ) -> Result<PublishStatus> {
     let title = format!("{} ({})", bundle.title, repo.id);
-    let initial_body = initial_pr_body(bundle, &repo.id);
+    let initial_body = initial_pr_body(bundle, &repo.id, forge.id());
     let url = match forge.create(target, base_branch, branch, &title, &initial_body, draft) {
         Ok(url) => url,
         Err(error) => {
