@@ -1365,6 +1365,10 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
         Some("feature.landed")
     );
     assert_ne!(bundle_after_failure["state"].as_str(), Some("archived"));
+    let receipt = latest_node_of_type(&bundle_after_failure, "branch.landed");
+    assert_eq!(receipt["repoIds"], json!(["backend"]));
+    assert_eq!(receipt["landing"]["targetBranch"], "main");
+
     assert!(workspace
         .join(".knit/worktrees/venue-capacity/backend")
         .exists());
@@ -1381,6 +1385,16 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     // and the local ledger said it had not.
     let landed = read_bundle(&workspace);
     assert_eq!(landed["state"].as_str(), Some("archived"));
+    assert_eq!(
+        landed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["type"] == "branch.landed")
+            .count(),
+        1
+    );
+
     assert_eq!(
         latest_node_of_type(&landed, "feature.landed")["landing"]["terminal"].as_bool(),
         Some(true)
