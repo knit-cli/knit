@@ -947,7 +947,7 @@ mod tests {
         let previous = format!("Intro\n\n{stray}");
         assert_eq!(
             upsert_knit_pr_block(&previous, "replacement"),
-            format!("Intro\n\nreplacement")
+            "Intro\n\nreplacement"
         );
     }
 }
