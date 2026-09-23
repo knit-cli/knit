@@ -768,7 +768,7 @@ knit config set sync-remotes staging
 knit push
 ```
 
-Knit preserves user-written PR text and only replaces the block between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->`.
+Knit preserves user-written PR text and only replaces the managed Knit bundle block: the text between `<!-- BEGIN KNIT BUNDLE -->` and `<!-- END KNIT BUNDLE -->` on GitHub, GitLab, and Forgejo, and between the invisible Markdown reference definitions `[knit-bundle-begin]: #` and `[knit-bundle-end]: #` on Bitbucket, which renders HTML comments as visible text. Sync recognizes both delimiter styles, so a body written by an older Knit is migrated to the provider's current style on the next sync.
 
 When PRs are approved and the user says to land, merge, release, ship, or continue after review, keep the workflow on the Knit bundle:
 
