@@ -125,6 +125,11 @@ fn repin_default_land_plan(active: &ActiveBundle) -> Result<()> {
     if !path.exists() {
         return Ok(());
     }
+    let raw: serde_json::Value = crate::store::read_json(&path)?;
+    if raw["schemaVersion"] == "0.2" {
+        eprintln!("Saved v0.2 plan is now stale; regenerate and review it with `knit land plan --force`. The saved revision was preserved.");
+        return Ok(());
+    }
     let mut plan: super::LandPlan = crate::store::read_json(&path)?;
     if plan.bundle_id != active.bundle.id || plan.bundle_heads.is_empty() {
         return Ok(());

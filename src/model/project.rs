@@ -389,6 +389,9 @@ pub struct ProjectRunCommand {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingPlan {
+    /// Versioned recipe extensions are preserved across project edits and export.
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub provider: Option<String>,
     /// What `knit land apply` does when a step fails: `resume` (default) stops
@@ -418,6 +421,9 @@ pub struct ProjectLandingPlan {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingLane {
+    /// Versioned recipe extensions are preserved across project edits and export.
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
     /// Fallback branch for repositories without an explicit entry in
     /// `branches`. A `"*"` entry in `branches` is accepted as an equivalent
     /// shorthand.
@@ -444,6 +450,9 @@ pub struct ProjectLandingLane {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingTarget {
+    /// Versioned recipe extensions are preserved across project edits and export.
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
     /// Whether landing into this branch finishes the bundle; see
     /// [`ProjectLandingLane::terminal`]. When unset, the branch is terminal
     /// only if it is the configured base branch of every merging repository.
@@ -479,6 +488,9 @@ pub struct ProjectLandingMergePlan {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingDeployment {
+    /// Versioned recipe extensions are preserved across project edits and export.
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
     pub id: String,
     #[serde(default, alias = "repo", skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,

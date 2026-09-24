@@ -570,6 +570,7 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Land {
+            schema_version,
             target,
             lane,
             repo_targets,
@@ -582,9 +583,46 @@ pub fn run(cli: Cli) -> Result<()> {
                         "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
                     );
                 }
-                commands::land_default(target.as_deref(), lane.as_deref())
+                commands::land::land_default_version(
+                    target.as_deref(),
+                    lane.as_deref(),
+                    &schema_version,
+                )
             }
+            Some(LandCommand::Validate {
+                plan,
+                from_artifact,
+                project_file,
+                json,
+            }) => commands::land::v2::validate(
+                &plan,
+                from_artifact.as_deref(),
+                project_file.as_deref(),
+                json,
+            ),
+            Some(LandCommand::Recover {
+                plan,
+                run,
+                from_artifact,
+                repo_roots,
+                run_out,
+                out,
+                apply,
+                json,
+            }) => commands::land::v2::recover(
+                plan.as_deref(),
+                &run,
+                from_artifact.as_deref(),
+                repo_roots.as_deref(),
+                run_out.as_deref(),
+                out.as_deref(),
+                apply,
+                json,
+            ),
             Some(LandCommand::Plan {
+                from_artifact,
+                project_file,
+                json,
                 provider,
                 out,
                 force,
@@ -594,15 +632,36 @@ pub fn run(cli: Cli) -> Result<()> {
                         "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
                     );
                 }
-                commands::generate_land_plan(
-                    provider.as_deref(),
-                    out.as_deref(),
-                    force,
-                    target.as_deref(),
-                    lane.as_deref(),
-                )
+                if schema_version == "0.1" {
+                    if from_artifact.is_some() {
+                        anyhow::bail!("artifact generation requires schema 0.2");
+                    }
+                    commands::generate_land_plan(
+                        provider.as_deref(),
+                        out.as_deref(),
+                        force,
+                        target.as_deref(),
+                        lane.as_deref(),
+                    )
+                } else {
+                    commands::land::v2::generate(
+                        from_artifact.as_deref(),
+                        project_file.as_deref(),
+                        out.as_deref(),
+                        provider.as_deref(),
+                        target.as_deref(),
+                        lane.as_deref(),
+                        force,
+                        json,
+                    )
+                }
             }
             Some(LandCommand::Apply {
+                project_file,
+                repo_roots,
+                run_out,
+                resume,
+                json,
                 plan,
                 from_artifact,
                 out,
@@ -616,6 +675,42 @@ pub fn run(cli: Cli) -> Result<()> {
                 intermediate,
             }) => match from_artifact {
                 Some(path) => {
+                    if let Some(plan) = &plan {
+                        if tag.is_some()
+                            || no_tag
+                            || terminal
+                            || intermediate
+                            || !repo_targets.is_empty()
+                            || !repo_absent.is_empty()
+                        {
+                            anyhow::bail!("artifact exact-plan execution cannot override saved destinations/lifecycle or tag local bases");
+                        }
+                        let saved: serde_json::Value = crate::store::read_json(plan)?;
+                        if target
+                            .as_deref()
+                            .is_some_and(|t| saved["targetBranch"] != t)
+                            || lane.as_deref().is_some_and(|l| saved["lane"] != l)
+                        {
+                            anyhow::bail!(
+                                "requested destination differs from the exact saved plan"
+                            );
+                        }
+                        return commands::land::v2::apply_with_checks(
+                            plan,
+                            &path,
+                            project_file.as_deref(),
+                            repo_roots.as_deref(),
+                            run_out.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!("--run-out required for exact-plan execution")
+                            })?,
+                            out.as_deref().ok_or_else(|| {
+                                anyhow::anyhow!("--out required for exact-plan execution")
+                            })?,
+                            resume,
+                            json,
+                            skip_checks,
+                        );
+                    }
                     if tag.is_some() || no_tag {
                         anyhow::bail!(
                             "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
@@ -637,6 +732,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     )
                 }
                 None => {
+                    if project_file.is_some()
+                        || repo_roots.is_some()
+                        || run_out.is_some()
+                        || out.is_some()
+                        || resume
+                        || json
+                    {
+                        anyhow::bail!("--project-file/--repo-roots/--run-out/--out/--resume/--json are artifact execution flags; pass --from-artifact, or use local `knit land resume --run FILE`.");
+                    }
                     if !repo_targets.is_empty() || !repo_absent.is_empty() {
                         anyhow::bail!(
                             "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
@@ -772,6 +876,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.architecture,
                     targets.kg,
                     targets.all,
+                )
+                .with_plans(
+                    targets.plans,
+                    targets.bundles
+                        || targets.history
+                        || targets.views
+                        || targets.architecture
+                        || targets.kg
+                        || targets.all,
                 );
                 commands::remote::sync_push(
                     targets,
@@ -791,6 +904,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.architecture,
                     targets.kg,
                     targets.all,
+                )
+                .with_plans(
+                    targets.plans,
+                    targets.bundles
+                        || targets.history
+                        || targets.views
+                        || targets.architecture
+                        || targets.kg
+                        || targets.all,
                 );
                 commands::remote::sync_pull(targets, &remote, artifacts_only)
             }

@@ -174,7 +174,12 @@ fn land_apply_gates_on_required_checks() {
         &fake_bin,
         &fake_gh_dir,
     );
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
 
     // Require a check by editing the per-bundle plan, the documented override
     // point for one bundle.
@@ -232,7 +237,7 @@ fn land_apply_gates_on_required_checks() {
     // still exercises the check-freshness gate rather than the pin.
     knit_with_fake_gh(
         &workspace,
-        ["land", "plan", "--force"],
+        ["land", "plan", "--force", "--schema-version", "0.1"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -289,7 +294,12 @@ fn skip_checks_bypasses_the_gate() {
         &fake_bin,
         &fake_gh_dir,
     );
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let plan_path = workspace.join(".knit/land-plans/venue-capacity.land.json");
     let mut plan: Value = serde_json::from_str(&fs::read_to_string(&plan_path).unwrap()).unwrap();
     plan["requireChecks"] = serde_json::json!(["ci"]);

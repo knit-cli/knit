@@ -36,6 +36,19 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
     ensure_provider(&plan.provider)?;
     ensure_plan_matches_bundle_state(active, plan)?;
     ordered_step_ids(&plan.steps)?;
+    if plan.terminal {
+        let covered: BTreeSet<_> = plan
+            .steps
+            .iter()
+            .filter(|s| s.step_type == LandStepKind::MergePr)
+            .filter_map(|s| s.repo_id.as_ref())
+            .collect();
+        for id in crate::commands::publish::publish_scope_repo_ids(&active.bundle) {
+            if !covered.contains(&id) {
+                bail!("Terminal land plan omits changed repository `{id}`; it would strand work when archiving.");
+            }
+        }
+    }
     if plan.target_branch.is_some() && plan.lane.is_some() {
         bail!("land plan cannot contain both targetBranch and lane");
     }

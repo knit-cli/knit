@@ -1,0 +1,148 @@
+<div id="landing-editor-proposal" aria-label="Landing plan editor design">
+  <style>
+    #landing-editor-proposal { --lp-bg:light-dark(#fafaf9,#171819);--lp-panel:light-dark(#fff,#222426);--lp-ink:light-dark(#202526,#ecedeb);--lp-muted:light-dark(#606968,#afb7b3);--lp-line:light-dark(#dedfdc,#414643);--lp-accent:light-dark(#27644c,#93cbae);--lp-soft:light-dark(#edf5ef,#25392d);--lp-error:light-dark(#953f25,#f3ab85);font:14px/1.5 system-ui,sans-serif;color:var(--lp-ink);background:var(--lp-bg);border:1px solid var(--lp-line);border-radius:12px;overflow-wrap:anywhere; }
+    #landing-editor-proposal * {box-sizing:border-box;}
+    #landing-editor-proposal [hidden] {display:none!important;}
+    #landing-editor-proposal header {padding:20px 22px 15px;border-bottom:1px solid var(--lp-line);}
+    #landing-editor-proposal h2 {font:500 21px/1.3 system-ui;margin:5px 0 12px;}
+    #landing-editor-proposal h3 {font:500 15px/1.4 system-ui;margin:0;}
+    #landing-editor-proposal .lp-meta {color:var(--lp-muted);font-size:12px;}
+    #landing-editor-proposal .lp-row {display:flex;align-items:center;gap:9px;flex-wrap:wrap;}
+    #landing-editor-proposal button,#landing-editor-proposal select {font:inherit;color:var(--lp-ink);background:var(--lp-panel);border:1px solid var(--lp-line);padding:6px 10px;border-radius:6px;max-width:100%;}
+    #landing-editor-proposal button[aria-pressed="true"] {border-color:var(--lp-accent);background:var(--lp-soft);color:var(--lp-accent);}
+    #landing-editor-proposal button:disabled {opacity:.4;}
+    #landing-editor-proposal .lp-tabs {display:flex;gap:8px;padding:15px 22px 0;flex-wrap:wrap;}
+    #landing-editor-proposal .lp-work {display:grid;grid-template-columns:minmax(0,1fr) minmax(230px,.8fr);gap:20px;padding:18px 22px;align-items:start;}
+    #landing-editor-proposal .lp-stage {margin:0 0 10px;}
+    #landing-editor-proposal .lp-caption {display:flex;align-items:center;gap:8px;font-size:12px;color:var(--lp-muted);margin-bottom:5px;}
+    #landing-editor-proposal .lp-number {color:var(--lp-accent);min-width:17px;}
+    #landing-editor-proposal .lp-steps {display:grid;grid-template-columns:repeat(auto-fit,minmax(115px,1fr));gap:6px;}
+    #landing-editor-proposal .lp-step {text-align:left;display:block;min-width:0;padding:9px 10px;}
+    #landing-editor-proposal .lp-step span {display:block;}
+    #landing-editor-proposal .lp-step .lp-command {font:11px/1.5 ui-monospace,monospace;margin-top:4px;white-space:pre-wrap;}
+    #landing-editor-proposal .lp-next {border-left:1px solid var(--lp-line);margin:6px 0 0 8px;padding:0 0 0 10px;color:var(--lp-muted);font-size:11px;}
+    #landing-editor-proposal aside {background:var(--lp-panel);border:1px solid var(--lp-line);border-radius:8px;padding:15px;min-width:0;}
+    #landing-editor-proposal label {display:block;font-size:12px;color:var(--lp-muted);margin:12px 0 5px;}
+    #landing-editor-proposal textarea {width:100%;font:12px/1.5 ui-monospace,monospace;color:var(--lp-ink);background:var(--lp-bg);border:1px solid var(--lp-line);border-radius:5px;padding:9px;resize:vertical;}
+    #landing-editor-proposal .lp-inspect-line {margin:12px 0;font-size:12px;}
+    #landing-editor-proposal .lp-inspect-line span {display:block;color:var(--lp-muted);}
+    #landing-editor-proposal .lp-inspect-line code {white-space:pre-wrap;overflow-wrap:anywhere;}
+    #landing-editor-proposal .lp-raw {padding:18px 22px;}
+    #landing-editor-proposal .lp-raw textarea {min-height:300px;}
+    #landing-editor-proposal footer {border-top:1px solid var(--lp-line);padding:12px 22px;font-size:12px;display:flex;justify-content:space-between;gap:10px;flex-wrap:wrap;}
+    #landing-editor-proposal .lp-error {color:var(--lp-error);font-size:12px;padding:0 22px 12px;}
+    #landing-editor-proposal .lp-recovery-note {padding:12px 22px 0;color:var(--lp-accent);font-size:12px;}
+    #landing-editor-proposal .lp-compact .lp-command {display:none;}
+    @media(max-width:620px) {#landing-editor-proposal .lp-work {grid-template-columns:1fr;}#landing-editor-proposal header,#landing-editor-proposal .lp-work,#landing-editor-proposal .lp-raw {padding:16px;}#landing-editor-proposal .lp-tabs {padding:14px 16px 0;}}
+    @media(pointer:coarse) {#landing-editor-proposal button,#landing-editor-proposal select {min-height:44px;}#landing-editor-proposal textarea {font-size:16px;}}
+  </style>
+  <header>
+    <div class="lp-meta">BUNDLE / SERVICE UPDATE · DESIGN PREVIEW</div>
+    <h2>Landing plan</h2>
+    <div class="lp-row">
+      <span>Production</span><span class="lp-meta">·</span><span id="lp-revision" class="lp-meta">Revision 1</span>
+      <label for="lp-runner" style="margin:0">Execute on</label>
+      <select id="lp-runner"><option>Local machine</option><option>Hosted runner</option></select>
+    </div>
+  </header>
+  <div class="lp-tabs" role="group" aria-label="Plan view">
+    <button type="button" data-mode="forward" aria-pressed="true" class="cursor-interaction">Forward plan</button>
+    <button type="button" data-mode="recovery" aria-pressed="false" class="cursor-interaction">Recovery plan</button>
+    <button type="button" data-mode="raw" aria-pressed="false" class="cursor-interaction">Raw plan</button>
+  </div>
+  <div id="lp-recovery-note" class="lp-recovery-note" hidden>Example failure: web deploy partially applied. Restore captured releases; source reverts remain a separate action.</div>
+  <div id="lp-work" class="lp-work">
+    <div id="lp-canvas" aria-label="Ordered execution groups"></div>
+    <aside id="lp-inspector" aria-label="Selected step">
+      <div class="lp-meta" id="lp-step-id"></div><h3 id="lp-step-title"></h3>
+      <div class="lp-inspect-line"><span>Working directory · timeout</span><code id="lp-location"></code></div>
+      <label for="lp-command" id="lp-command-label">Command argv · JSON</label>
+      <textarea id="lp-command" rows="4" spellcheck="false"></textarea>
+      <button id="lp-save-command" type="button" class="cursor-interaction">Apply command edit</button>
+      <div class="lp-inspect-line"><span>Reverse action</span><code id="lp-reverse"></code></div>
+      <div class="lp-inspect-line"><span>Inputs / execution rule</span><div id="lp-inputs"></div></div>
+      <div class="lp-row" id="lp-move-actions">
+        <button id="lp-earlier" type="button" class="cursor-interaction">Move earlier</button>
+        <button id="lp-later" type="button" class="cursor-interaction">Move later</button>
+        <button id="lp-parallel" type="button" class="cursor-interaction">Run with previous</button>
+      </div>
+    </aside>
+  </div>
+  <div id="lp-raw" class="lp-raw" hidden>
+    <label for="lp-json">Ordered groups · operations in each group run in parallel</label>
+    <textarea id="lp-json" spellcheck="false"></textarea>
+    <button id="lp-apply-json" type="button" class="cursor-interaction">Apply raw edit</button>
+  </div>
+  <div id="lp-error" class="lp-error" role="alert" hidden></div>
+  <footer>
+    <label for="lp-policy" style="margin:0">On failure
+      <select id="lp-policy"><option value="automatic">Automatically restore deployment</option><option value="offer">Stop and offer recovery</option></select>
+    </label>
+    <span id="lp-message" class="lp-meta" aria-live="polite">Synthetic example · no commands execute</span>
+  </footer>
+  <script>
+    (() => {
+      const root = document.getElementById('landing-editor-proposal');
+      const q = s => root.querySelector(s);
+      const steps = {
+        capture: {title:'Capture current state',repo:'environment',command:['release','snapshot','production'],reverse:'Read only; retain captured release identities.',needs:[]},
+        'merge-api': {title:'Merge api',repo:'api',operation:'Merge PR #41 into main; require passing checks',reverse:'Propose source revert; merging it is a separate operation.',needs:['capture']},
+        'merge-web': {title:'Merge web',repo:'web',operation:'Merge PR #42 into main; require passing checks',reverse:'Propose source revert; merging it is a separate operation.',needs:['capture']},
+        'build-api': {title:'Build api',repo:'api',command:['./build.sh','--revision','${merge-api.sha}'],reverse:'No deployed effect; retain immutable build output.',needs:['merge-api']},
+        'build-web': {title:'Build web',repo:'web',command:['./build.sh','--revision','${merge-web.sha}'],reverse:'No deployed effect; retain immutable build output.',needs:['merge-web']},
+        'deploy-api': {title:'Deploy api',repo:'api',command:['./deploy.sh','${build-api.digest}'],reverse:'./restore.sh ${capture.api.digest}',needs:['capture','build-api']},
+        'deploy-web': {title:'Deploy web',repo:'web',command:['./deploy.sh','${build-web.digest}'],reverse:'./restore.sh ${capture.web.digest}',needs:['capture','build-web','deploy-api']},
+        verify: {title:'Verify production',repo:'environment',command:['./healthcheck.sh','production'],reverse:'Read only; verify again after restoration.',needs:['deploy-api','deploy-web']}
+      };
+      let groups = [['capture'],['merge-api','merge-web'],['build-api','build-web'],['deploy-api'],['deploy-web'],['verify']];
+      const recovery = {
+        quiesce:{title:'Reconcile active work',repo:'environment',operation:'Wait for in-flight deployment operations; inspect partial web effect',reverse:'Recovery operation',needs:[]},
+        'restore-web':{title:'Restore web',repo:'web',command:['./restore.sh','${capture.web.digest}'],reverse:'Captured web release, including partially applied failure.',needs:['quiesce']},
+        'restore-api':{title:'Restore api',repo:'api',command:['./restore.sh','${capture.api.digest}'],reverse:'Captured api release before this landing.',needs:['restore-web']},
+        'verify-restored':{title:'Verify restored state',repo:'environment',command:['./healthcheck.sh','--snapshot','${capture.id}'],reverse:'Only then report service restored.',needs:['restore-api']},
+        'source-reverts':{title:'Propose source reverts',repo:'api + web',operation:'Open revert PRs for the two recorded merges; do not claim source restored',reverse:'Source state: revert proposed; deployment state: restored after verification.',needs:['verify-restored']}
+      };
+      let mode='forward', selected='deploy-api', revision=1;
+      const design={showCommands:true};
+      const el=(tag,text,cls)=>{const n=document.createElement(tag);if(text)n.textContent=text;if(cls)n.className=cls;return n;};
+      function error(message){q('#lp-error').textContent=message||'';q('#lp-error').hidden=!message;}
+      function message(text){q('#lp-message').textContent=text;}
+      function remember(){if(window.openai?.setWidgetState)window.openai.setWidgetState({modelContent:{view:mode,executionGroups:groups,failurePolicy:q('#lp-policy').value},privateContent:{selected}}).catch(()=>{});}
+      function validate(candidate,operations=steps){
+        if(!Array.isArray(candidate)||candidate.length===0||candidate.some(g=>!Array.isArray(g)||g.length===0))throw Error('Each ordered group must contain at least one operation.');
+        const ids=candidate.flat();if(new Set(ids).size!==ids.length)throw Error('An operation may appear only once.');
+        if(ids.length!==Object.keys(operations).length||ids.some(id=>!Object.hasOwn(operations,id)))throw Error('Keep all eight known operations in this example.');
+        const positions=new Map();candidate.forEach((g,i)=>g.forEach(id=>positions.set(id,i)));
+        for(const [id,s] of Object.entries(operations))for(const need of s.needs)if(positions.get(need)>=positions.get(id))throw Error(s.title+' must run after '+operations[need].title+'.');
+      }
+      function edited(){revision++;error('');message('Preview updated · no remote changes');render();remember();}
+      function render(){
+        q('#lp-revision').textContent='Revision '+revision+' · preview';
+        root.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.mode===mode)));
+        q('#lp-work').hidden=mode==='raw';q('#lp-raw').hidden=mode!=='raw';q('#lp-recovery-note').hidden=mode!=='recovery';
+        if(mode==='raw'){q('#lp-json').value=JSON.stringify({groups,commands:Object.fromEntries(Object.entries(steps).filter(([,s])=>s.command).map(([id,s])=>[id,s.command]))},null,2);return;}
+        const items=mode==='recovery'?recovery:steps;
+        const ordered=mode==='recovery'?Object.keys(recovery).map(id=>[id]):groups;
+        if(!items[selected])selected=ordered[0][0];
+        const canvas=q('#lp-canvas');canvas.replaceChildren();canvas.classList.toggle('lp-compact',!design.showCommands);
+        ordered.forEach((group,index)=>{
+          const section=el('div',null,'lp-stage');const caption=el('div',null,'lp-caption');caption.append(el('span',String(index+1).padStart(2,'0'),'lp-number'),el('span',group.length>1?'PARALLEL · '+group.length+' operations':'SEQUENTIAL'));section.append(caption);
+          const row=el('div',null,'lp-steps');group.forEach(id=>{const s=items[id],b=el('button',null,'lp-step cursor-interaction');b.type='button';b.dataset.step=id;b.setAttribute('aria-pressed',String(selected===id));b.append(el('span',s.title),el('span',s.repo,'lp-meta'));if(design.showCommands)b.append(el('span',s.command?s.command.join(' '):s.operation,'lp-command'));b.onclick=()=>{selected=id;error('');render();remember();};row.append(b);});section.append(row);if(index<ordered.length-1)section.append(el('div','↓ Wait for group to complete','lp-next'));canvas.append(section);
+        });
+        const s=items[selected];q('#lp-step-id').textContent=selected;q('#lp-step-title').textContent=s.title;q('#lp-location').textContent=(s.operation?'Provider operation':s.repo+' checkout · 10 min');q('#lp-command-label').textContent=s.operation?'Provider operation':'Command argv · JSON';
+        q('#lp-command').value=s.operation||JSON.stringify(s.command,null,2);q('#lp-command').readOnly=Boolean(s.operation)||mode==='recovery';q('#lp-save-command').hidden=Boolean(s.operation)||mode==='recovery';q('#lp-reverse').textContent=s.reverse;q('#lp-inputs').textContent=s.needs.length?'Requires: '+s.needs.join(', '):'Runs before any mutation.';q('#lp-move-actions').hidden=mode==='recovery';
+        const i=groups.findIndex(g=>g.includes(selected));q('#lp-earlier').disabled=i<=0;q('#lp-later').disabled=i<0||i===groups.length-1;q('#lp-parallel').disabled=i<=0;
+      }
+      function move(direction){try{const next=groups.map(g=>g.slice()),i=next.findIndex(g=>g.includes(selected));if(i<0)return;next[i]=next[i].filter(id=>id!==selected);if(direction==='parallel')next[i-1].push(selected);else next.splice(direction==='earlier'?i-1:i+2,0,[selected]);const cleaned=next.filter(g=>g.length);validate(cleaned);groups=cleaned;edited();}catch(e){error(e.message);}}
+      root.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>{mode=b.dataset.mode;error('');render();remember();});
+      q('#lp-earlier').onclick=()=>move('earlier');q('#lp-later').onclick=()=>move('later');q('#lp-parallel').onclick=()=>move('parallel');
+      q('#lp-save-command').onclick=()=>{try{const argv=JSON.parse(q('#lp-command').value);if(!Array.isArray(argv)||!argv.length||argv.some(x=>typeof x!=='string')||!argv[0].trim())throw Error('Use a JSON array with an executable and string arguments.');steps[selected].command=argv;edited();}catch(e){error(e.message);}};
+      q('#lp-apply-json').onclick=()=>{try{const next=JSON.parse(q('#lp-json').value);validate(next.groups);const ids=Object.keys(steps).filter(id=>steps[id].command);if(!next.commands||Object.keys(next.commands).length!==ids.length)throw Error('Keep each command operation in the commands object.');for(const id of ids){const v=next.commands[id];if(!Array.isArray(v)||!v.length||v.some(x=>typeof x!=='string')||!v[0].trim())throw Error('Invalid argv for '+id);}groups=next.groups;for(const id of ids)steps[id].command=next.commands[id];mode='forward';edited();}catch(e){error(e.message);}};
+      q('#lp-runner').onchange=()=>{message('Preview runner: '+q('#lp-runner').value+' · same plan');remember();};
+      q('#lp-policy').onchange=()=>{message(q('#lp-policy').value==='automatic'?'Example deployment restoration is automatic; source reverts remain explicit.':'Failure stops execution and presents the recovery plan.');remember();};
+      function restore(saved){if(!saved)return;try{if(saved.modelContent?.executionGroups){validate(saved.modelContent.executionGroups);groups=saved.modelContent.executionGroups;}const view=saved.modelContent?.view;if(['forward','recovery','raw'].includes(view))mode=view;const policy=saved.modelContent?.failurePolicy;if(['automatic','offer'].includes(policy))q('#lp-policy').value=policy;if(typeof saved.privateContent?.selected==='string')selected=saved.privateContent.selected;}catch{}render();}
+      render();restore(window.openai?.widgetState);window.addEventListener('openai:set_globals',e=>restore(e.detail?.globals?.widgetState));
+      if(globalThis.Tweak){const tweak=new Tweak({container:root,onChange:render});tweak.addToggle(design,'showCommands',{label:'Commands on canvas'});}
+    })();
+  </script>
+</div>

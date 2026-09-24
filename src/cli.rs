@@ -475,6 +475,9 @@ pub enum Commands {
     },
     /// Create or show the landing plan. Use `knit land apply` to execute it.
     Land {
+        /// Authoring version for newly generated plans; existing plans keep their semantics.
+        #[arg(long, global = true, value_parser = ["0.1", "0.2"], default_value = "0.2")]
+        schema_version: String,
         /// Land every recorded review object into this target branch. The target is
         /// stored in the plan and applied by Knit before checks and merging.
         #[arg(long, global = true, value_name = "BRANCH", conflicts_with = "lane")]
@@ -708,6 +711,9 @@ pub struct SyncTargetArgs {
     /// Sync your saved views for the project.
     #[arg(long)]
     pub views: bool,
+    /// Sync editable landing plans and their execution/recovery receipts.
+    #[arg(long)]
+    pub plans: bool,
     /// Sync the project architecture artifact (produced by `urdir kg architecture`).
     #[arg(long)]
     pub architecture: bool,
@@ -1435,6 +1441,12 @@ pub enum TagCommand {
 pub enum LandCommand {
     /// Generate an editable landing plan from recorded publications.
     Plan {
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
         /// Landing provider to target (github, gitlab, forgejo, bitbucket).
         #[arg(long)]
         provider: Option<String>,
@@ -1445,8 +1457,48 @@ pub enum LandCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Validate an exact saved plan without executing it.
+    Validate {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore captured deployment state for an immutable run.
+    Recover {
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        run_out: Option<PathBuf>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Execute a landing plan.
     Apply {
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        run_out: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        json: bool,
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
         #[arg(long)]
         plan: Option<PathBuf>,

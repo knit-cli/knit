@@ -22,6 +22,7 @@ mod process;
 mod rollback;
 mod types;
 mod update;
+pub mod v2;
 mod validate;
 
 pub use artifact::apply_land_from_artifact;
@@ -95,7 +96,53 @@ pub fn generate_land_plan(
 }
 
 pub fn land_default(target_branch: Option<&str>, lane_name: Option<&str>) -> Result<()> {
+    land_default_version(target_branch, lane_name, "0.2")
+}
+
+pub fn land_default_version(
+    target_branch: Option<&str>,
+    lane_name: Option<&str>,
+    version: &str,
+) -> Result<()> {
     let active = load_active_bundle()?;
+    let candidate = if version == "0.2" {
+        v2::destination_path(&active, target_branch, lane_name)
+    } else {
+        default_plan_path(&active)
+    };
+    if !candidate.exists() && version == "0.2" {
+        return v2::generate(
+            None,
+            None,
+            None,
+            None,
+            target_branch,
+            lane_name,
+            false,
+            false,
+        );
+    }
+    let raw: serde_json::Value = if candidate.exists() {
+        read_json(&candidate)?
+    } else {
+        serde_json::Value::Null
+    };
+    if raw["schemaVersion"] == "0.2" {
+        if let Some(path) = resolve_land_run_path(&active, None)? {
+            let run: serde_json::Value = read_json(&path)?;
+            if run["schemaVersion"] == "0.2"
+                && run["planId"] == raw["id"]
+                && run["planHash"] == v2::canonical_hash(&raw)
+            {
+                println!("Run {}: {}", run["id"], run["status"]);
+                println!(
+                    "Service: {}; source: {}",
+                    run["serviceStatus"], run["sourceStatus"]
+                );
+            }
+        }
+        return v2::display_plan(&active, &raw, &candidate);
+    }
     let target_branch = normalize_target_branch(target_branch)?;
     let lane_name = normalize_lane_name(lane_name)?;
     if let Some(path) = resolve_land_run_path(&active, None)? {
@@ -195,6 +242,34 @@ pub fn apply_land_plan(
     lane_name: Option<&str>,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    let destination = v2::destination_path(&active, target_branch, lane_name);
+    let candidate = if plan_path.is_none() && destination.exists() {
+        destination
+    } else {
+        resolve_land_plan_path(&active, plan_path)?
+    };
+    if candidate.exists() && read_json::<serde_json::Value>(&candidate)?["schemaVersion"] == "0.2" {
+        let raw: serde_json::Value = read_json(&candidate)?;
+        if plan_path.is_none() || target_branch.is_some() || lane_name.is_some() {
+            let typed: LandPlan = serde_json::from_value(raw.clone())?;
+            ensure_requested_selection_matches_plan(&active, target_branch, lane_name, &typed)?;
+        }
+        return v2::local_apply(
+            &mut active,
+            &candidate,
+            None,
+            false,
+            Some(&FinishLandOptions {
+                remote,
+                no_remote,
+                keep_worktrees,
+                tag,
+                no_tag,
+            }),
+            skip_checks,
+            false,
+        );
+    }
     let target_branch = normalize_target_branch(target_branch)?;
     let lane_name = normalize_lane_name(lane_name)?;
     let path = resolve_land_plan_path(&active, plan_path)?;
@@ -227,9 +302,11 @@ pub fn apply_land_plan(
     write_json(&run_path, &run)?;
     display::warn_if_reviews_merge_without_finishing(&plan);
     execute::execute_run(&mut active, &plan, &order, &mut run, &run_path)?;
-    finish_successful_land(
+    finalize_legacy_run(
         &mut active,
         &plan,
+        &mut run,
+        &run_path,
         &FinishLandOptions {
             remote,
             no_remote,
@@ -238,6 +315,18 @@ pub fn apply_land_plan(
             no_tag,
         },
     )
+}
+
+fn finalize_legacy_run(
+    active: &mut ActiveBundle,
+    plan: &LandPlan,
+    run: &mut LandRun,
+    path: &Path,
+    options: &FinishLandOptions<'_>,
+) -> Result<()> {
+    finish_successful_land(active, plan, options)?;
+    run.finalized = true;
+    write_json(path, run)
 }
 
 /// What a finished landing still has to do, once every step has succeeded.
@@ -273,7 +362,15 @@ fn finish_successful_land(
         print_intermediate_landing_summary(active, plan);
         return Ok(());
     }
-    let removed_worktrees = archive_landed_bundle(active, options.keep_worktrees)?;
+    let removed_worktrees = if active.bundle.state == Some(crate::model::BundleState::Archived) {
+        if options.keep_worktrees {
+            0
+        } else {
+            crate::commands::clean::clean_worktrees_for_bundle(active, false)?
+        }
+    } else {
+        archive_landed_bundle(active, options.keep_worktrees)?
+    };
     crate::commands::remote::sync_active_bundle_to_remote_if_enabled(
         active,
         options.remote,
@@ -573,8 +670,27 @@ pub fn resume_land_run(
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
+    let raw: serde_json::Value = read_json(&path)?;
+    if raw["schemaVersion"] == "0.2" {
+        let plan_path = v2::immutable_plan_path(&active.root, &raw)?;
+        return v2::local_apply(
+            &mut active,
+            &plan_path,
+            Some(&path),
+            false,
+            Some(&FinishLandOptions {
+                remote,
+                no_remote,
+                keep_worktrees,
+                tag,
+                no_tag,
+            }),
+            skip_checks,
+            false,
+        );
+    }
     let mut run: LandRun = read_json(&path)?;
-    if run.status == LandStatus::Succeeded {
+    if run.status == LandStatus::Succeeded && run.finalized {
         println!(
             "{} {} is already succeeded.",
             out::heading("Land run"),
@@ -591,6 +707,21 @@ pub fn resume_land_run(
     let plan_path = resolve_stored_path(&active.root, &run.plan_path);
     let plan: LandPlan = read_json(&plan_path)?;
     ensure_run_matches_plan(&run, &plan)?;
+    if run.status == LandStatus::Succeeded {
+        return finalize_legacy_run(
+            &mut active,
+            &plan,
+            &mut run,
+            &path,
+            &FinishLandOptions {
+                remote,
+                no_remote,
+                keep_worktrees,
+                tag,
+                no_tag,
+            },
+        );
+    }
     validate::validate_plan_for_bundle(&active, &plan)?;
     validate::preflight_required_checks(&active, &plan.require_checks, skip_checks)?;
     let order = validate::ordered_step_ids(&plan.steps)?;
@@ -600,9 +731,11 @@ pub fn resume_land_run(
     run.updated_at = now_iso();
     write_json(&path, &run)?;
     execute::execute_run(&mut active, &plan, &order, &mut run, &path)?;
-    finish_successful_land(
+    finalize_legacy_run(
         &mut active,
         &plan,
+        &mut run,
+        &path,
         &FinishLandOptions {
             remote,
             no_remote,
@@ -623,6 +756,12 @@ fn ensure_run_matches_plan(run: &LandRun, plan: &LandPlan) -> Result<()> {
     let run_ids: BTreeSet<&str> = run.steps.iter().map(|step| step.id.as_str()).collect();
     let plan_ids: BTreeSet<&str> = plan.steps.iter().map(|step| step.id.as_str()).collect();
     if run_ids == plan_ids {
+        if let Some(expected) = &run.plan_hash {
+            if *expected != v2::canonical_hash(&serde_json::to_value(plan)?) {
+                bail!("This run was recorded against a different plan: complete plan content changed. Start a new landing with `knit land apply`.");
+            }
+        }
+
         return Ok(());
     }
     let added = plan_ids.difference(&run_ids).copied().collect::<Vec<_>>();
@@ -651,6 +790,11 @@ fn ensure_run_matches_plan(run: &LandRun, plan: &LandPlan) -> Result<()> {
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
     let active = load_active_bundle()?;
     if let Some(path) = resolve_land_run_path(&active, run_path)? {
+        let raw: serde_json::Value = read_json(&path)?;
+        if raw["schemaVersion"] == "0.2" {
+            println!("{}", serde_json::to_string_pretty(&raw)?);
+            return Ok(());
+        }
         let run: LandRun = read_json(&path)?;
         display::print_run_status(&active, &run, &path);
         return Ok(());
@@ -659,6 +803,10 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
     let plan_path = default_plan_path(&active);
     if !plan_path.exists() {
         bail!("No land run or default land plan found. Run `knit land plan` first.");
+    }
+    let raw: serde_json::Value = read_json(&plan_path)?;
+    if raw["schemaVersion"] == "0.2" {
+        return v2::display_plan(&active, &raw, &plan_path);
     }
     let plan: LandPlan = read_json(&plan_path)?;
     validate::validate_plan_for_bundle(&active, &plan)?;
@@ -901,10 +1049,10 @@ fn latest_run_path(active: &ActiveBundle) -> Result<Option<PathBuf>> {
         .filter_map(|entry| entry.ok().map(|entry| entry.path()))
         .filter(|path| path.extension().and_then(|ext| ext.to_str()) == Some("json"))
         .collect::<Vec<_>>();
-    paths.sort();
+    paths.sort_by_key(|p| fs::metadata(p).and_then(|m| m.modified()).ok());
     for path in paths.into_iter().rev() {
-        let run: LandRun = read_json(&path)?;
-        if run.bundle_id == active.bundle.id {
+        let run: serde_json::Value = read_json(&path)?;
+        if run["bundleId"] == active.bundle.id {
             return Ok(Some(path));
         }
     }
@@ -1027,6 +1175,8 @@ mod tests {
     #[test]
     fn resume_dependencies_must_have_succeeded() {
         let run = LandRun {
+            plan_hash: None,
+            finalized: false,
             schema_version: SCHEMA_VERSION.to_string(),
             kind: LAND_RUN_KIND.to_string(),
             id: "run".to_string(),
@@ -1173,6 +1323,8 @@ mod tests {
 
     fn write_test_run(path: &Path, bundle_id: &str) {
         let run = LandRun {
+            plan_hash: None,
+            finalized: false,
             schema_version: SCHEMA_VERSION.to_string(),
             kind: LAND_RUN_KIND.to_string(),
             id: format!("run-{bundle_id}"),

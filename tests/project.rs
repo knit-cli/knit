@@ -46,6 +46,32 @@ fn init_can_generate_agents_tutorial() {
     assert!(agents.contains("minimum capable subagent/model"));
     assert!(agents.contains("Project JSON can define a default `landing` template"));
     assert!(agents.contains(".knit/land-plans/<bundle>.land.json"));
+    for guidance in [
+        "canonical schema `0.2` `KnitLandPlan`",
+        "Edit visually or as raw JSON",
+        "knit land validate --plan",
+        "knit land apply --plan reviewed.land.json --from-artifact",
+        "knit sync pull --plans --remote hosted",
+        "knit sync push --plans --remote hosted",
+        "--views|--plans|--architecture|--kg|--all",
+        "landing.steps[]",
+        "associated project landing recipes",
+        "complete immutable plan hash",
+        "knit land recover --run execution.run.json --apply",
+        "unavailable authority blocks execution",
+        "does not expire automatically",
+        "superseded run cannot restore",
+        "knit land --schema-version 0.1 plan",
+        "it does not restore deployed services",
+    ] {
+        assert!(
+            agents.contains(guidance),
+            "missing guide content: {guidance}"
+        );
+    }
+    assert!(!agents.contains(
+        "A landing template or plan can set `onFailure: \"rollback\"` to do this automatically."
+    ));
     assert!(agents.contains("urdir review --bundle"));
     assert!(agents.contains("gloss view --review"));
 
@@ -1768,6 +1794,23 @@ fn project_agents_are_generated_from_project_json() {
     assert!(landing_agents.contains("This project defines a default landing template"));
     assert!(landing_agents
         .contains("`knit land` expands it into `.knit/land-plans/<bundle>.land.json`"));
+    for guidance in [
+        "New canonical plans use schema `0.2`",
+        "Edit visually or as raw JSON",
+        "knit land validate --plan <path> --json",
+        "knit sync push --plans",
+        "knit sync pull --plans",
+        "landing.steps[]",
+        "immutable plan and receipts",
+        "knit land recover --run <path>",
+        "requires hosted ownership",
+        "Legacy v0.1 rollback only proposes source revert PRs",
+    ] {
+        assert!(
+            landing_agents.contains(guidance),
+            "missing project guide content: {guidance}"
+        );
+    }
     assert!(landing_agents.contains("- `backend`"));
     assert!(landing_agents.contains("- `frontend`"));
     assert!(

@@ -562,7 +562,11 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
 
     format!(
         r#"
-This project defines a default landing template. `knit land` expands it into `.knit/land-plans/<bundle>.land.json`; inspect or edit that per-bundle plan before `knit land apply`.
+This project defines a default landing template. `knit land` expands it into `.knit/land-plans/<bundle>.land.json` for the default destination; target/lane plans use separate destination files. New canonical plans use schema `0.2` and execute the same saved document locally and hosted. Edit visually or as raw JSON in the hosted plan editor, or edit local JSON; validate with `knit land validate --plan <path> --json` before `knit land apply --plan <path>`.
+
+Project/repository recipes in `landing.deployments[]` support build, deploy, verify and recovery commands; `landing.steps[]` adds explicit operations. Edit recipes in the hosted recipe editor or local project JSON, preserving unrelated fields. `knit sync push --plans` and `knit sync pull --plans` exchange plan revisions, run receipts and associated recipes. Source or recipe changes require a new reviewed plan revision.
+
+Runs retain their immutable plan and receipts. `knit land resume --run <path>` continues that run; `knit land recover --run <path>` previews recovery and `--apply` executes it. Recovery blocks forward resume, and superseded runs cannot restore over newer executions. Synchronized execution requires hosted ownership; never bypass an unavailable authority or steal an interrupted lock. v0.2 defaults to `onFailure: "stop"`; `recover` requires captured state, idempotent restoration and verification. Legacy v0.1 rollback only proposes source revert PRs, not service restoration.
 
 Configured landing merge order:
 

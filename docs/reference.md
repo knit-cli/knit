@@ -355,7 +355,53 @@ knit bundle "docs work" --view scope --include docs
 
 The scope view is ordinary view data — personal, or a shared template: renaming or deleting a personal scope view leaves the workspace scoped with nothing addable until it is restored (`knit sync pull --views`) or recreated with `knit view save`. A template-scoped workspace is extended by forking the template into a personal override (`knit view include <scope> <repo>` does this automatically), so a later admin change to the template never silently resizes the scope.
 
-Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
+### Saved landing and recovery plans (v0.2)
+
+New plans use schema `0.2`; `knit land --schema-version 0.1 plan` explicitly generates the legacy format. Existing v0.1 files keep their dependency-wave execution and source-revert-only rollback behavior. A legacy project `onFailure: rollback` is not permission to execute deployment compensation in v0.2; new plans use `stop` unless the recipe explicitly selects `recover`.
+
+Generate, inspect and execute the same document locally or on a runner:
+
+```sh
+knit land plan --out reviewed.land.json
+knit land validate --plan reviewed.land.json --json
+knit land apply --plan reviewed.land.json
+
+knit land plan --from-artifact bundle.json --project-file project.json --out reviewed.land.json --json
+knit land validate --plan reviewed.land.json --from-artifact bundle.json --project-file project.json --json
+knit land apply --plan reviewed.land.json --from-artifact bundle.json --project-file project.json --repo-roots roots.json --run-out execution.run.json --out result.bundle.json --json
+knit land recover --plan reviewed.land.json --run execution.run.json --from-artifact result.bundle.json --repo-roots roots.json --run-out recovery.run.json --out recovered.bundle.json --apply --json
+```
+
+`roots.json` maps repository IDs to absolute runner-owned checkouts. Missing commands, bindings, required named checks, unsupported operations and stale source fingerprints refuse execution before effects. A synchronized plan also requires its hosted execution authority; network failure cannot fall back to offline deployment. Artifact apply with `--plan` never falls back to the old merge-only path. `--resume` on artifact apply resumes `--run-out`; local `knit land resume --run FILE` uses the original plan. The complete plan hash, including commands and recovery, must remain unchanged.
+
+A plan's `workflow` is either `{ "step": "id" }`, `{ "sequence": [...] }` or `{ "parallel": [...] }`. When supplied it determines execution edges; otherwise `steps[].needs` remains authoritative. Every step must occur exactly once in a workflow. Explicit group barriers and dependency waves are retained. `maxParallel` defaults to four; checkout and resource locks may further serialize a wave. `requires` records input-producing prerequisites that workflow edits cannot remove. Builds and deployments must follow their repository's merge and consume its recorded revision. Commands use detached pinned checkouts; source checkouts are not switched. `KNIT_LAND_INPUTS` contains prerequisite receipts, and `KNIT_CHECKOUT_<repo>` names their bound checkouts.
+
+Project `landing.deployments[]` supports `build`, `verify`, `label` and `recovery`; `landing.steps[]` adds explicit command operations. Target and lane overrides support the same recipes. `whenChanged` selects a recipe, while `needs` declares execution dependencies. A consumer repository can have a deployment triggered by another repository even when the consumer is absent from the bundle; it still needs a runner binding. Generation freezes the recipe and its source fingerprint. Target/lane plans have separate `<bundle>--<destination-hash>.land.json` files; the default destination retains `<bundle>.land.json`.
+
+Command specifications contain exact `command` argv, repo-relative `cwd`, nonsecret `env` values and positive `timeoutSeconds`. Secret values come from runner bindings. A deployment can declare:
+
+```json
+{
+  "effect": "deployment",
+  "recovery": {
+    "mode": "command",
+    "idempotent": true,
+    "capture": {"command": ["./release", "inspect", "--json"]},
+    "command": ["./release", "restore"],
+    "verify": {"command": ["./release", "verify-restored"]}
+  }
+}
+```
+
+Capture stdout must be a JSON object. It is persisted before the effect and passed unchanged to restoration and verification as `KNIT_LAND_CAPTURE` and `KNIT_LAND_CAPTURE_FILE`. Every command receives a stable `KNIT_LAND_OPERATION_ID`, a fresh `KNIT_LAND_ATTEMPT_ID`, `KNIT_LAND_RUN_FILE` and `KNIT_LAND_OUTPUT_FILE`. A structured output receipt can declare `attribution: already_satisfied`; such a pre-existing effect is not compensated. Optional `recovery.probe` returns JSON with `status: absent|applied|partial|unknown`; every uncertain-effect probe also requires `quiesced: true`. For an interrupted inverse, the probe receives `KNIT_LAND_PHASE=probe-restore` and `KNIT_LAND_RECONCILE_ATTEMPT_ID`; it must return `quiesced: true`, the matching `attemptId`, and the original `phase` (`restore` or `verify-restored`) before idempotent restoration can retry. An uncertain command without authoritative reconciliation cannot be blindly retried.
+
+Use `onFailure: recover` only when every deployment/external effect has executable capture, idempotent restoration and verification. Other effects require an honest `manual` declaration with a reason, or `none` for read-only operations. Source PR merges default to proposing revert PRs and do not imply restored services. Cancellation stops new work and waits for process-tree quiescence; recovery then requires an explicit invocation. Recovery proceeds in reverse dependency order, blocks prerequisite restoration when a dependent restoration fails, preserves completed receipts across retries, and permanently prevents forward resume of that run. A newer environment generation prevents an old run from restoring over it.
+
+Run files retain partial outputs on execution failure and distinguish forward outcome, service restoration, source revert proposals, and finalization. Ledger persistence, cleanup and synchronization are journaled separately so completed commands are not rerun after finalization failure. Capture files and run receipts use private permissions. Local project ownership is conservative across destination aliases; locks survive a crash and must only be removed after operator-verified process quiescence and reconciliation. `knit land recover` without `--apply` previews the saved recovery coverage.
+
+Bundle and project fingerprints use portable semantic projections: repo IDs, remotes, base/feature branches, pinned heads, publications, changed scope and landing recipes. Local checkout paths, timestamps and sync receipts do not make a plan stale. Missing and null optional entry fields normalize identically. The plan hash still covers the entire saved plan.
+
+The following template illustrates legacy source rollback; generate it with `--schema-version 0.1` to retain that policy. Projects can define a default landing template. `knit land plan` expands it into the bundle-specific `.knit/land-plans/<bundle-id>.land.json`, where it can still be edited for that one bundle before `knit land apply`:
 
 ```json
 {
@@ -1014,3 +1060,5 @@ helper; `knit clone --prefer-https` exposes the same transport fallback.
 ## Forge credentials
 
 Bare `knit auth` configures local per-forge-host defaults from any directory; `knit auth --project <name>` optionally chooses between those defaults and a project-only token. The defaults apply to clone, pull, and push and to forge API calls; the Svartal ledger token is separate, and `knit auth remote <name>` (or the same wizard's `r` option) sets up that sync-service token with server verification. Per-repo assignments are not required — one credential can still serve many repositories across owners, and `knit auth use shared-token --repo backend --repo frontend` remains a deliberate override. `knit auth setup` (or `knit project auth`) uses the same project wizard; `--repo` limits edits, and the final summary shows full-project coverage. `knit auth add`, `status --check`, `list`, `clear`, and `remove` support scripted setup, inspection, and rotation. `knit auth status` also activates plain-Git credential integration for existing installs (no token re-entry): ordinary `git fetch`/`pull`/`push` in tracked checkouts then use saved Knit credentials, failing closed instead of falling back to ambient helpers. Links control where Knit uses credentials, not provider permissions. See [Project-aware forge credentials](forge-auth.md) for storage, selection, and permissions. No hosted service or desktop application is required.
+
+Deployment recipes and custom steps may declare `sourceRepos: ["library", "tools"]`. Generated build, release, and verification steps retain this list and must follow every included source merge. Unchanged dependencies use the recorded bundle head, or a run-wide pinned project base for an unbundled repository. Every declared source requires a runner root binding; commands receive its isolated `KNIT_CHECKOUT_<REPO>` path even when the source checkout is dirty or has advanced.

@@ -238,6 +238,48 @@ impl Forge for GitLab {
         enrich_pull_request(target, &repo, mr)
     }
 
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Review {
+            state: Option<String>,
+            merge_commit_sha: Option<String>,
+        }
+        let output = if target.repo_full_name.is_some() {
+            let repo = resolve_repo(target)?;
+            api_output(
+                target,
+                "GET",
+                &format!(
+                    "projects/{}/merge_requests/{}",
+                    encode_path_component(&repo),
+                    selector_iid(publication_url)
+                ),
+                None,
+            )?
+        } else {
+            // Keep checkout-mode authentication in glab, just like view/merge.
+            cli_output(
+                CLI,
+                target,
+                [
+                    "mr",
+                    "view",
+                    &selector_iid(publication_url),
+                    "--output",
+                    "json",
+                ],
+                None,
+            )?
+        };
+        let review: Review =
+            serde_json::from_str(&output).context("failed to parse GitLab merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("merged") {
+            review.merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
         if target.repo_full_name.is_some() {
             return edit_merge_request(target, selector, &json!({ "description": body }), "body");

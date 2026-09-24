@@ -192,10 +192,12 @@ fn published_schemas_describe_the_artifacts_knit_writes() {
     let plan_schema = schema(&workspace, "land-plan");
     let plan_path = workspace.join(".knit/land-plans/schema-parity.land.json");
 
+    // Explicitly retain legacy provider fixtures; v0.2 generated plans/runs are
+    // schema-checked by landing_v2 and the executor tests.
     // An intermediate lane plan: merge_branch steps, targetBranches, laneAbsent.
     knit_with_fake_gh(
         &workspace,
-        ["land", "--lane", "staging"],
+        ["land", "--schema-version", "0.1", "--lane", "staging"],
         &fake_bin,
         &fake_gh_dir,
     );
@@ -206,7 +208,7 @@ fn published_schemas_describe_the_artifacts_knit_writes() {
     // A terminal plan over the recorded review bases.
     knit_with_fake_gh(
         &workspace,
-        ["land", "plan", "--force"],
+        ["land", "--schema-version", "0.1", "plan", "--force"],
         &fake_bin,
         &fake_gh_dir,
     );

@@ -188,6 +188,32 @@ impl Forge for Bitbucket {
         Ok(pr.into_pull_request())
     }
 
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Review {
+            state: Option<String>,
+            merge_commit: Option<BitbucketCommit>,
+        }
+        let repo = resolve_repo(target)?;
+        let id = selector_id(publication_url).context("could not determine Bitbucket PR id")?;
+        let output = api_output(
+            target,
+            "GET",
+            &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
+            None,
+        )?;
+        let review: Review = serde_json::from_str(&output)
+            .context("failed to parse Bitbucket merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("MERGED") {
+            review
+                .merge_commit
+                .and_then(|c| c.hash)
+                .filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
         self.edit(
             target,

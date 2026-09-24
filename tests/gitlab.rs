@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/provider_fixture.rs"]
+mod provider_fixture;
 
 use common::{
     append_line, git, init_remote_repo, knit, knit_with_fake_forge, unique_temp_dir,
@@ -158,8 +160,8 @@ fn gitlab_cli_workspace_publish_and_land_loop() {
     bundle["repos"][0]["remote"] = Value::String("https://gitlab.com/acme/backend.git".to_string());
     fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
 
-    let fake_bin = root.join("fake-bin");
-    let fake_dir = root.join("fake-forge");
+    let fake_bin = root.join("fake bin");
+    let fake_dir = root.join("fake forge");
     write_fake_glab(&fake_bin, &fake_dir);
     let publish = knit_with_fake_forge(
         &workspace,
@@ -180,15 +182,106 @@ fn gitlab_cli_workspace_publish_and_land_loop() {
     assert_eq!(recorded["publications"][0]["provider"], "gitlab");
     assert_eq!(recorded["publications"][0]["kind"], "merge_request");
 
-    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &[]);
-    let landed = knit_with_fake_forge(
+    let merged = configure_landing_fixture(&fake_dir, &feature, &remote);
+    configure_cli_landing(&fake_bin, &fake_dir);
+    let env = [];
+    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
+    let _landed = knit_with_fake_forge(
         &workspace,
         ["land", "apply", "--no-remote"],
         &fake_bin,
         &fake_dir,
-        &[],
+        &env,
     );
-    assert!(landed.contains("Feature landed"), "{landed}");
     assert!(fake_dir.join("glab-merged").exists());
+    let calls = fs::read_to_string(fake_dir.join("glab-landing.calls")).unwrap();
+    assert!(calls.contains("mr view 12 --output json"), "{calls}");
+    let archived: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(archived["state"], "archived");
+    assert_eq!(archived["publications"][0]["state"], "MERGED");
+    assert!(!feature.exists());
+    assert_eq!(git(&remote, ["rev-parse", "main"]).trim(), merged);
+    let run_path = fs::read_dir(workspace.join(".knit/land-runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".run.json"))
+        .unwrap();
+    let run: Value = serde_json::from_str(&fs::read_to_string(run_path).unwrap()).unwrap();
+    assert_eq!(run["status"], "succeeded");
+    let merge_step = run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["type"] == "merge_pr")
+        .unwrap();
+    assert_eq!(merge_step["output"]["revision"], merged);
+    assert_eq!(merge_step["attribution"], "performed");
     fs::remove_dir_all(root).unwrap();
+}
+
+// Model a real merge commit, distinct from the review head, using only disposable repositories.
+fn configure_landing_fixture(
+    state: &std::path::Path,
+    feature: &std::path::Path,
+    remote: &std::path::Path,
+) -> String {
+    let head = git(feature, ["rev-parse", "HEAD"]);
+    let base = git(feature, ["rev-parse", "HEAD^"]);
+    let tree = git(feature, ["rev-parse", "HEAD^{tree}"]);
+    let merged = git(
+        feature,
+        [
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base.trim(),
+            "-p",
+            head.trim(),
+            "-m",
+            "Synthetic review merge",
+        ],
+    );
+    git(
+        feature,
+        [
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{}:refs/fixture/merge", merged.trim()),
+        ],
+    );
+    fs::write(state.join("head-sha"), head.trim()).unwrap();
+    fs::write(state.join("merge-sha"), merged.trim()).unwrap();
+    fs::write(state.join("remote-path"), remote.to_str().unwrap()).unwrap();
+    // Keep provider detection realistic while ensuring Git never contacts the forge.
+    git(
+        feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", remote.display()),
+            "https://gitlab.com/acme/backend.git",
+        ],
+    );
+    assert_ne!(head.trim(), merged.trim());
+    let parents = git(feature, ["rev-list", "--parents", "-n", "1", merged.trim()]);
+    assert_eq!(
+        parents.split_whitespace().collect::<Vec<_>>(),
+        [merged.trim(), base.trim(), head.trim()]
+    );
+    merged.trim().to_owned()
+}
+
+fn configure_cli_landing(bin: &std::path::Path, state: &std::path::Path) {
+    let head = fs::read_to_string(state.join("head-sha")).unwrap();
+    let merged = fs::read_to_string(state.join("merge-sha")).unwrap();
+    for status in ["opened", "merged"] {
+        let review = serde_json::json!({"iid":12,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/12",
+            "state":status,"title":"feature","target_branch":"main","source_branch":"knit/forge-workspace",
+            "sha":head,"merge_commit_sha":if status=="merged" {Some(&merged)} else {None},"detailed_merge_status":"mergeable"});
+        fs::write(
+            state.join(format!("review-{status}.json")),
+            review.to_string(),
+        )
+        .unwrap();
+    }
+    provider_fixture::install(bin, Some("glab"));
 }

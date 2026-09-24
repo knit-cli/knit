@@ -5,6 +5,74 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 
+// This suite is the v0.1 compatibility contract. New saved-plan execution is
+// covered separately; pin legacy generation instead of depending on the default.
+fn legacy_args<I, S>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args: Vec<_> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    if let Some(i) = args.iter().position(|s| s == "land") {
+        args.splice(i + 1..i + 1, ["--schema-version".into(), "0.1".into()]);
+    }
+    args
+}
+fn knit<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit(cwd, legacy_args(args))
+}
+fn knit_fails<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails(cwd, legacy_args(args))
+}
+fn knit_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_with_fake_gh(cwd, legacy_args(args), fake_bin, fake_gh_dir)
+}
+fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails_with_fake_gh(cwd, legacy_args(args), fake_bin, fake_gh_dir)
+}
+fn knit_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_with_fake_gh_env(cwd, legacy_args(args), fake_bin, fake_gh_dir, env)
+}
+fn knit_fails_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails_with_fake_gh_env(cwd, legacy_args(args), fake_bin, fake_gh_dir, env)
+}
+
 fn latest_node_of_type<'a>(bundle: &'a Value, node_type: &str) -> &'a Value {
     bundle["nodes"]
         .as_array()

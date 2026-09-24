@@ -1,12 +1,15 @@
 mod common;
+#[path = "common/provider_fixture.rs"]
+mod provider_fixture;
 
 use common::{
     append_line, git, init_remote_repo, knit, knit_with_env, knit_with_fake_gh_env,
-    spawn_fake_bitbucket_api, unique_temp_dir, write_fake_gh,
+    unique_temp_dir, write_fake_gh,
 };
 use knit::providers::{bitbucket::Bitbucket, Forge, PrTarget};
 use serde_json::Value;
 use std::fs;
+use std::path::Path;
 
 #[test]
 fn bitbucket_native_adapter_covers_publish_status_retarget_and_land_surfaces() {
@@ -236,10 +239,23 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
         &env,
     );
     assert!(status.contains("#101"), "{status}");
+    let merged = configure_landing_fixture(&state, &feature, &remote);
+    let bin = root.join("landing bin");
+    fs::create_dir_all(&bin).unwrap();
+    provider_fixture::install(&bin, None);
+    let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    )))
+    .unwrap();
+    let path = path.to_str().unwrap();
+    let env = [
+        ("KNIT_BITBUCKET_API_BASE", base.as_str()),
+        ("KNIT_BITBUCKET_ACCESS_TOKEN", "workspace-token"),
+        ("PATH", path),
+    ];
     let land_plan = knit_with_env(&workspace, ["land"], &env);
     assert!(land_plan.contains("Provider: bitbucket"), "{land_plan}");
-    let landed = knit_with_env(&workspace, ["land", "apply", "--no-remote"], &env);
-    assert!(landed.contains("Feature landed"), "{landed}");
+    let _landed = knit_with_env(&workspace, ["land", "apply", "--no-remote"], &env);
 
     let merge: Value =
         serde_json::from_str(&fs::read_to_string(state.join("bitbucket-merge.json")).unwrap())
@@ -253,6 +269,22 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
         Value::String("MERGED".to_string())
     );
     assert!(!feature.exists());
+    assert_eq!(git(&remote, ["rev-parse", "main"]).trim(), merged);
+    let run_path = fs::read_dir(workspace.join(".knit/land-runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".run.json"))
+        .unwrap();
+    let run: Value = serde_json::from_str(&fs::read_to_string(run_path).unwrap()).unwrap();
+    assert_eq!(run["status"], "succeeded");
+    let merge_step = run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["type"] == "merge_pr")
+        .unwrap();
+    assert_eq!(merge_step["output"]["revision"], merged);
+    assert_eq!(merge_step["attribution"], "performed");
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -452,4 +484,206 @@ fn artifact_publish_leads_bitbucket_descriptions_with_the_hosted_link() {
         Value::String(hosted_url.to_string())
     );
     fs::remove_dir_all(root).unwrap();
+}
+
+fn spawn_fake_bitbucket_api(dir: &Path) -> String {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    fs::create_dir_all(dir).unwrap();
+    let dir = dir.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let dir = dir.clone();
+            std::thread::spawn(move || {
+                let _ = handle_fake_bitbucket_request(&mut stream, &dir);
+            });
+        }
+    });
+    base_url
+}
+
+fn fake_bitbucket_pr_json(dir: &Path, number: &str) -> String {
+    let merged = dir.join("merged-backend").exists();
+    let state = if merged { "MERGED" } else { "OPEN" };
+    let base =
+        fs::read_to_string(dir.join("bitbucket-backend.base")).unwrap_or_else(|_| "main".into());
+    let head = fs::read_to_string(dir.join("head-sha")).unwrap_or_else(|_| "deadbeefcafe".into());
+    let mut pr = serde_json::json!({
+        "id":number.parse::<u64>().unwrap(),
+        "links":{"html":{"href":format!("https://bitbucket.org/acme/backend/pull-requests/{number}")}},
+        "title":"backend PR", "state":state, "description":"Existing body", "draft":false,
+        "source":{"branch":{"name":"knit/forge"},"commit":{"hash":head.trim()}},
+        "destination":{"branch":{"name":base.trim()}}, "participants":[{"approved":true}]
+    });
+    if merged {
+        if let Ok(sha) = fs::read_to_string(dir.join("merge-sha")) {
+            pr["merge_commit"] = serde_json::json!({"hash":sha.trim()});
+        }
+    }
+    pr.to_string()
+}
+
+fn handle_fake_bitbucket_request(
+    stream: &mut std::net::TcpStream,
+    dir: &Path,
+) -> std::io::Result<()> {
+    use std::io::{BufRead, BufReader, Read, Write};
+
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut request_line = String::new();
+    reader.read_line(&mut request_line)?;
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+    let mut content_length = 0usize;
+    let mut authorization = String::new();
+    loop {
+        let mut line = String::new();
+        reader.read_line(&mut line)?;
+        let line = line.trim_end();
+        if line.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = line.split_once(':') {
+            match name.trim().to_ascii_lowercase().as_str() {
+                "content-length" => content_length = value.trim().parse().unwrap_or(0),
+                "authorization" => authorization = value.trim().to_string(),
+                _ => {}
+            }
+        }
+    }
+    let mut body = vec![0; content_length];
+    if content_length > 0 {
+        reader.read_exact(&mut body)?;
+    }
+    let body = String::from_utf8_lossy(&body).to_string();
+    if !authorization.is_empty() {
+        fs::write(dir.join("bitbucket.authorization"), authorization).unwrap();
+    }
+    let path = target
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches('/');
+    if target.contains("?q=") {
+        fs::write(dir.join("bitbucket.query"), &target).unwrap();
+    }
+    let segments = path.split('/').collect::<Vec<_>>();
+    let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET", ["repositories", "acme", "backend", "pullrequests"]) => {
+            let response = if dir.join("existing-backend").exists() {
+                format!("{{\"values\":[{}]}}", fake_bitbucket_pr_json(dir, "101"))
+            } else {
+                "{\"values\":[]}".to_string()
+            };
+            (200, response)
+        }
+        ("POST", ["repositories", "acme", "backend", "pullrequests"]) => {
+            fs::write(dir.join("bitbucket-create.json"), &body).unwrap();
+            (201, fake_bitbucket_pr_json(dir, "101"))
+        }
+        ("GET", ["repositories", "acme", "backend", "pullrequests", number]) => {
+            (200, fake_bitbucket_pr_json(dir, number))
+        }
+        ("PUT", ["repositories", "acme", "backend", "pullrequests", number]) => {
+            fs::write(dir.join("bitbucket-edit.json"), &body).unwrap();
+            if let Ok(payload) = serde_json::from_str::<Value>(&body) {
+                if let Some(base) = payload
+                    .pointer("/destination/branch/name")
+                    .and_then(Value::as_str)
+                {
+                    fs::write(dir.join("bitbucket-backend.base"), base).unwrap();
+                }
+            }
+            (200, fake_bitbucket_pr_json(dir, number))
+        }
+        ("POST", ["repositories", "acme", "backend", "pullrequests", _, "merge"]) => {
+            fs::write(dir.join("bitbucket-merge.json"), &body).unwrap();
+            if let Ok(remote) = fs::read_to_string(dir.join("remote-path")) {
+                let sha = fs::read_to_string(dir.join("merge-sha")).unwrap();
+                git(
+                    std::path::Path::new(remote.trim()),
+                    ["update-ref", "refs/heads/main", sha.trim()],
+                );
+            }
+            fs::write(dir.join("merged-backend"), "").unwrap();
+            (200, fake_bitbucket_pr_json(dir, "101"))
+        }
+        ("GET", ["repositories", "acme", "backend", "pullrequests", _, "statuses"]) => {
+            let state = if dir.join("ci-fail-backend").exists() {
+                "FAILED"
+            } else {
+                "SUCCESSFUL"
+            };
+            (
+                200,
+                format!("{{\"values\":[{{\"key\":\"ci\",\"state\":\"{state}\"}}]}}"),
+            )
+        }
+        ("GET", ["repositories", "acme", "backend", "commit", _, "statuses", "build"]) => {
+            (200, "{\"values\":[]}".to_string())
+        }
+        _ => (
+            404,
+            format!("{{\"error\":{{\"message\":\"unexpected {method} /{path}\"}}}}"),
+        ),
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} Fake\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
+}
+
+// Model a real merge commit, distinct from the review head, using only disposable repositories.
+fn configure_landing_fixture(
+    state: &std::path::Path,
+    feature: &std::path::Path,
+    remote: &std::path::Path,
+) -> String {
+    let head = git(feature, ["rev-parse", "HEAD"]);
+    let base = git(feature, ["rev-parse", "HEAD^"]);
+    let tree = git(feature, ["rev-parse", "HEAD^{tree}"]);
+    let merged = git(
+        feature,
+        [
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base.trim(),
+            "-p",
+            head.trim(),
+            "-m",
+            "Synthetic review merge",
+        ],
+    );
+    git(
+        feature,
+        [
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{}:refs/fixture/merge", merged.trim()),
+        ],
+    );
+    fs::write(state.join("head-sha"), head.trim()).unwrap();
+    fs::write(state.join("merge-sha"), merged.trim()).unwrap();
+    fs::write(state.join("remote-path"), remote.to_str().unwrap()).unwrap();
+    // Keep provider detection realistic while ensuring Git never contacts the forge.
+    git(
+        feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", remote.display()),
+            "https://bitbucket.org/acme/backend.git",
+        ],
+    );
+    assert_ne!(head.trim(), merged.trim());
+    let parents = git(feature, ["rev-list", "--parents", "-n", "1", merged.trim()]);
+    assert_eq!(
+        parents.split_whitespace().collect::<Vec<_>>(),
+        [merged.trim(), base.trim(), head.trim()]
+    );
+    merged.trim().to_owned()
 }
