@@ -35,6 +35,10 @@ fn base_ledger_records_direct_commits_and_keeps_open_work_separate() {
         .iter()
         .any(|e| e["kind"] == "base.commit" && e["commit"] == base_sha));
     assert!(!base.iter().any(|e| e["commit"] == ongoing_sha));
+    let default_history = knit(&workspace, ["log", "--all", "--json"]);
+    let explicit_base = knit(&workspace, ["log", "--all", "--scope", "base", "--json"]);
+    assert_eq!(default_history, explicit_base);
+    assert!(knit(&checkout, ["log", "--json"]).contains(&ongoing_sha));
     let ongoing = events(&workspace, "ongoing");
     assert!(ongoing.iter().any(|e| e["commit"] == ongoing_sha));
     assert!(!ongoing.iter().any(|e| e["kind"] == "base.commit"));
@@ -144,6 +148,11 @@ fn configured_base_tracks_external_merges_but_not_an_intermediate_branch() {
     assert!(!base.iter().any(|e| e["commit"] == staging_sha));
     let display = knit(&workspace, ["log", "--all", "--oneline"]);
     assert!(display.contains("[base]"));
-    assert!(display.contains("[bundle activity]"));
+    assert!(!display.contains("[bundle activity]"));
+    let combined = knit(
+        &workspace,
+        ["log", "--all", "--scope", "base-and-ongoing", "--oneline"],
+    );
+    assert!(combined.contains("[bundle activity]"));
     fs::remove_dir_all(root).unwrap();
 }

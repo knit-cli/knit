@@ -127,7 +127,18 @@ fn all_scope_needs_no_bundle_and_json_is_clean_and_read_only() {
         })
         .collect::<Vec<_>>();
 
-    let output = knit(&workspace, ["log", "--all", "--project", "demo", "--json"]);
+    let output = knit(
+        &workspace,
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--project",
+            "demo",
+            "--json",
+        ],
+    );
     let entries: Value = serde_json::from_str(&output).unwrap();
     assert!(entries.as_array().unwrap().len() >= 2, "{entries:#}");
     assert!(entries.as_array().unwrap().iter().all(|entry| {
@@ -181,7 +192,7 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
     let personal: Value = serde_json::from_str(&knit(
         &workspace,
         [
-            "log", "--all", "--view", "shared", "--grep", "Shared", "--json",
+            "log", "--all", "--scope", "activity", "--view", "shared", "--grep", "Shared", "--json",
         ],
     ))
     .unwrap();
@@ -194,6 +205,8 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
         [
             "log",
             "--all",
+            "--scope",
+            "activity",
             "--view",
             "shared",
             "--grep",
@@ -210,6 +223,8 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
         [
             "log",
             "--all",
+            "--scope",
+            "activity",
             "--repo",
             "backend",
             "--repo",
@@ -226,7 +241,15 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
 
     let template = knit(
         &workspace,
-        ["log", "--all", "--view", "template-only", "--oneline"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--view",
+            "template-only",
+            "--oneline",
+        ],
     );
     assert!(template.contains("Frontend followup subject"), "{template}");
 
@@ -234,14 +257,17 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
         vec!["--view", "empty"],
         vec!["--view", "shared", "--repo", "frontend"],
     ] {
-        let mut args = vec!["log", "--all", "--json"];
+        let mut args = vec!["log", "--all", "--scope", "activity", "--json"];
         args.extend(extra);
         let empty: Value = serde_json::from_str(&knit(&workspace, args)).unwrap();
         assert_eq!(empty, json!([]));
     }
 
     // A saved default view never narrows history unless --view is explicit.
-    let unscoped = knit(&workspace, ["log", "--all", "--oneline"]);
+    let unscoped = knit(
+        &workspace,
+        ["log", "--all", "--scope", "activity", "--oneline"],
+    );
     assert!(unscoped.contains("Shared history subject"), "{unscoped}");
     // Explicit ids retain historical access; views use current membership.
     let project_path = workspace.join(".knit/projects/demo.project.json");
@@ -257,11 +283,24 @@ fn repo_views_intersect_and_full_context_preserves_companions() {
     )
     .unwrap();
 
-    let removed = knit(&workspace, ["log", "--all", "-r", "backend", "--oneline"]);
+    let removed = knit(
+        &workspace,
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "-r",
+            "backend",
+            "--oneline",
+        ],
+    );
     assert!(removed.contains("Shared history subject"));
     let empty: Value = serde_json::from_str(&knit(
         &workspace,
-        ["log", "--all", "--view", "shared", "--json"],
+        [
+            "log", "--all", "--scope", "activity", "--view", "shared", "--json",
+        ],
     ))
     .unwrap();
     assert_eq!(empty, json!([]));
@@ -276,6 +315,8 @@ fn filters_limits_reverse_and_legacy_list_use_the_local_query_engine() {
         [
             "log",
             "--all",
+            "--scope",
+            "activity",
             "--kind",
             "commit.recorded",
             "--grep",
@@ -295,6 +336,8 @@ fn filters_limits_reverse_and_legacy_list_use_the_local_query_engine() {
         [
             "log",
             "--all",
+            "--scope",
+            "activity",
             "--kind",
             "commit.recorded",
             "--max-count",
@@ -315,12 +358,27 @@ fn filters_limits_reverse_and_legacy_list_use_the_local_query_engine() {
 
     let dated = knit(
         &workspace,
-        ["log", "--all", "--since", "2 weeks ago", "--oneline"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--since",
+            "2 weeks ago",
+            "--oneline",
+        ],
     );
     assert!(!dated.contains("Invalid --since"), "{dated}");
     let invalid = knit_fails(
         &workspace,
-        ["log", "--all", "--since", "definitely-not-a-date"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--since",
+            "definitely-not-a-date",
+        ],
     );
     assert!(invalid.contains("Invalid --since"), "{invalid}");
 
@@ -339,7 +397,15 @@ fn project_show_resolves_entries_and_orphans_remain_inspectable() {
     let workspace = setup_history_workspace(&root);
     let entries: Value = serde_json::from_str(&knit(
         &workspace,
-        ["log", "--all", "--grep", "Frontend followup", "--json"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--grep",
+            "Frontend followup",
+            "--json",
+        ],
     ))
     .unwrap();
     let id = entries[0]["id"].as_str().unwrap();
@@ -372,8 +438,13 @@ fn offline_dates_parser_flags_and_missing_project_artifact() {
         .unwrap(),
     )
     .unwrap();
-    let empty: Value =
-        serde_json::from_str(&knit(&root, ["log", "--all", "--view", "empty", "--json"])).unwrap();
+    let empty: Value = serde_json::from_str(&knit(
+        &root,
+        [
+            "log", "--all", "--scope", "activity", "--view", "empty", "--json",
+        ],
+    ))
+    .unwrap();
     assert_eq!(empty, json!([]));
     for date in [
         "2 weeks ago",
@@ -382,7 +453,12 @@ fn offline_dates_parser_flags_and_missing_project_artifact() {
         "2026-01-01",
         "2026-01-01T12:00:00Z",
     ] {
-        let output = knit(&root, ["log", "--all", "--since", date, "--json"]);
+        let output = knit(
+            &root,
+            [
+                "log", "--all", "--scope", "activity", "--since", date, "--json",
+            ],
+        );
         assert!(serde_json::from_str::<Value>(&output).unwrap().is_array());
     }
     for date in [
@@ -391,10 +467,14 @@ fn offline_dates_parser_flags_and_missing_project_artifact() {
         "2026-02-30",
         "yesterday junk",
     ] {
-        assert!(knit_fails(&root, ["log", "--all", "--after", date]).contains("Invalid --since"));
+        assert!(knit_fails(
+            &root,
+            ["log", "--all", "--scope", "activity", "--after", date]
+        )
+        .contains("Invalid --since"));
     }
     for flag in ["--unknown", "-wat", "-2x"] {
-        knit_fails(&root, ["log", "--all", flag]);
+        knit_fails(&root, ["log", "--all", "--scope", "activity", flag]);
     }
     for flags in [
         vec!["-n"],
@@ -403,7 +483,7 @@ fn offline_dates_parser_flags_and_missing_project_artifact() {
         vec!["--limit", "2"],
         vec!["-E", "--grep", "foo|bar"],
     ] {
-        let mut args = vec!["log", "--all", "--json"];
+        let mut args = vec!["log", "--all", "--scope", "activity", "--json"];
         args.extend(flags);
         assert!(serde_json::from_str::<Value>(&knit(&root, args))
             .unwrap()
@@ -415,6 +495,8 @@ fn offline_dates_parser_flags_and_missing_project_artifact() {
         [
             "log",
             "--all",
+            "--scope",
+            "activity",
             "--project",
             "demo",
             "-r",
@@ -469,7 +551,9 @@ fn bundle_views_and_every_group_selector_round_trip() {
     for group in ["event", "commit", "bundle"] {
         let entries: Value = serde_json::from_str(&knit(
             &workspace,
-            ["log", "--all", "--group", group, "--json"],
+            [
+                "log", "--all", "--scope", "activity", "--group", group, "--json",
+            ],
         ))
         .unwrap();
         for entry in entries.as_array().unwrap() {
@@ -483,11 +567,22 @@ fn bundle_views_and_every_group_selector_round_trip() {
     let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
     config["activeProject"] = json!("another-project");
     fs::write(&config_path, serde_json::to_vec(&config).unwrap()).unwrap();
-    let inferred = knit(checkout, ["log", "--all", "--oneline"]);
+    let inferred = knit(
+        checkout,
+        ["log", "--all", "--scope", "activity", "--oneline"],
+    );
     assert!(inferred.contains("Shared history subject"));
     let explicit: Value = serde_json::from_str(&knit(
         checkout,
-        ["log", "--all", "--project", "another-project", "--json"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--project",
+            "another-project",
+            "--json",
+        ],
     ))
     .unwrap();
     assert_eq!(explicit, json!([]));
