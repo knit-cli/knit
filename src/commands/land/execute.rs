@@ -944,6 +944,10 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
 pub(super) fn new_run(active: &ActiveBundle, plan: &LandPlan, plan_path: &Path) -> LandRun {
     let now = now_iso();
     LandRun {
+        plan_hash: Some(super::v2::canonical_hash(
+            &serde_json::to_value(plan).expect("plan JSON"),
+        )),
+        finalized: false,
         schema_version: SCHEMA_VERSION.to_string(),
         kind: LAND_RUN_KIND.to_string(),
         id: format!("run-{}", safe_timestamp()),

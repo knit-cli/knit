@@ -153,6 +153,48 @@ impl Forge for GitHub {
         Ok(with_author_links(pr))
     }
 
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        if let Some(repo) = &target.repo_full_name {
+            return api::merged_revision(target, repo, publication_url);
+        }
+        #[derive(serde::Deserialize)]
+        struct Review {
+            state: Option<String>,
+            #[serde(rename = "mergeCommit")]
+            merge_commit: Option<Commit>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Commit {
+            oid: Option<String>,
+        }
+        let output = cli_output(
+            CLI,
+            target,
+            repo_scoped_args(
+                target,
+                "--repo",
+                vec![
+                    "pr".into(),
+                    "view".into(),
+                    publication_url.into(),
+                    "--json".into(),
+                    "state,mergeCommit".into(),
+                ],
+            ),
+            None,
+        )?;
+        let review: Review =
+            serde_json::from_str(&output).context("failed to parse GitHub merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("MERGED") {
+            review
+                .merge_commit
+                .and_then(|c| c.oid)
+                .filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
         if let Some(repo_full_name) = &target.repo_full_name {
             return api::edit_body(target, repo_full_name, selector, body);

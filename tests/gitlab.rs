@@ -180,15 +180,128 @@ fn gitlab_cli_workspace_publish_and_land_loop() {
     assert_eq!(recorded["publications"][0]["provider"], "gitlab");
     assert_eq!(recorded["publications"][0]["kind"], "merge_request");
 
-    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &[]);
-    let landed = knit_with_fake_forge(
+    let merged = configure_landing_fixture(&fake_dir, &feature, &remote);
+    configure_cli_landing(&fake_bin, &fake_dir);
+    let env = [];
+    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
+    let _landed = knit_with_fake_forge(
         &workspace,
         ["land", "apply", "--no-remote"],
         &fake_bin,
         &fake_dir,
-        &[],
+        &env,
     );
-    assert!(landed.contains("Feature landed"), "{landed}");
     assert!(fake_dir.join("glab-merged").exists());
+    let archived: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(archived["state"], "archived");
+    assert_eq!(archived["publications"][0]["state"], "MERGED");
+    assert!(!feature.exists());
+    assert_eq!(git(&remote, ["rev-parse", "main"]).trim(), merged);
+    let run_path = fs::read_dir(workspace.join(".knit/land-runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".run.json"))
+        .unwrap();
+    let run: Value = serde_json::from_str(&fs::read_to_string(run_path).unwrap()).unwrap();
+    assert_eq!(run["status"], "succeeded");
+    let merge_step = run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["type"] == "merge_pr")
+        .unwrap();
+    assert_eq!(merge_step["output"]["revision"], merged);
+    assert_eq!(merge_step["attribution"], "performed");
     fs::remove_dir_all(root).unwrap();
+}
+
+// Model a real merge commit, distinct from the review head, using only disposable repositories.
+fn configure_landing_fixture(
+    state: &std::path::Path,
+    feature: &std::path::Path,
+    remote: &std::path::Path,
+) -> String {
+    let head = git(feature, ["rev-parse", "HEAD"]);
+    let base = git(feature, ["rev-parse", "HEAD^"]);
+    let tree = git(feature, ["rev-parse", "HEAD^{tree}"]);
+    let merged = git(
+        feature,
+        [
+            "commit-tree",
+            tree.trim(),
+            "-p",
+            base.trim(),
+            "-p",
+            head.trim(),
+            "-m",
+            "Synthetic review merge",
+        ],
+    );
+    git(
+        feature,
+        [
+            "push",
+            remote.to_str().unwrap(),
+            &format!("{}:refs/fixture/merge", merged.trim()),
+        ],
+    );
+    fs::write(state.join("head-sha"), head.trim()).unwrap();
+    fs::write(state.join("merge-sha"), merged.trim()).unwrap();
+    fs::write(state.join("remote-path"), remote.to_str().unwrap()).unwrap();
+    // Keep provider detection realistic while ensuring Git never contacts the forge.
+    git(
+        feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", remote.display()),
+            "https://gitlab.com/acme/backend.git",
+        ],
+    );
+    assert_ne!(head.trim(), merged.trim());
+    merged.trim().to_owned()
+}
+
+fn configure_cli_landing(bin: &std::path::Path, state: &std::path::Path) {
+    let head = fs::read_to_string(state.join("head-sha")).unwrap();
+    let merged = fs::read_to_string(state.join("merge-sha")).unwrap();
+    for status in ["opened", "merged"] {
+        let review = serde_json::json!({"iid":12,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/12",
+            "state":status,"title":"feature","target_branch":"main","source_branch":"knit/forge-workspace",
+            "sha":head,"merge_commit_sha":if status=="merged" {Some(&merged)} else {None},"detailed_merge_status":"mergeable"});
+        fs::write(
+            state.join(format!("review-{status}.json")),
+            review.to_string(),
+        )
+        .unwrap();
+    }
+    let script = bin.join("glab");
+    let original = fs::read_to_string(&script).unwrap();
+    let script_text = original.lines().map(|line| {
+        if line.contains("printf '{\"iid\":12") {
+            "    cat \"$FORGE_FAKE_DIR/review-$state.json\"".to_owned()
+        } else if line.contains(": >\"$FORGE_FAKE_DIR/glab-merged\"") {
+            "    git --git-dir=\"$(cat \"$FORGE_FAKE_DIR/remote-path\")\" update-ref refs/heads/main \"$(cat \"$FORGE_FAKE_DIR/merge-sha\")\"\n    : >\"$FORGE_FAKE_DIR/glab-merged\"".to_owned()
+        } else { line.to_owned() }
+    }).collect::<Vec<_>>().join("\n");
+    fs::write(script, script_text).unwrap();
+    write_checkout_git(bin);
+}
+
+fn write_checkout_git(bin: &std::path::Path) {
+    let real = std::process::Command::new("git")
+        .args(["--exec-path"])
+        .output()
+        .unwrap();
+    assert!(real.status.success());
+    let real = std::path::PathBuf::from(String::from_utf8(real.stdout).unwrap().trim()).join("git");
+    let quoted = format!("'{}'", real.to_string_lossy().replace('\'', "'\\''"));
+    let script = bin.join("git");
+    fs::write(&script, format!("#!/bin/sh\nif [ \"$*\" = 'remote get-url origin' ]; then\n  exec {quoted} config --get remote.origin.url\nfi\nexec {quoted} \"$@\"\n")).unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    #[cfg(windows)]
+    fs::write(script.with_extension("cmd"), "@sh \"%~dp0git\" %*\r\n").unwrap();
 }

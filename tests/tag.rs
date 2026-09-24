@@ -433,7 +433,12 @@ fn land_apply_tag_flag_records_named_tag() {
     let root = unique_temp_dir();
     let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
 
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let apply = knit_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote", "--tag", "rel-2"],
@@ -461,7 +466,12 @@ fn land_apply_auto_tag_config_defaults_to_bundle_slug() {
     knit(&workspace, ["config", "set", "auto-tag", "true"]);
     assert!(knit(&workspace, ["config", "show"]).contains("Auto tag: true"));
 
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let apply = knit_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote"],
@@ -495,7 +505,12 @@ fn alternate_target_landing_does_not_auto_tag_configured_project_bases() {
     fs::write(fake_gh_dir.join("create-frontend.base"), "staging\n").unwrap();
 
     knit(&workspace, ["config", "set", "auto-tag", "true"]);
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let apply = knit_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote"],
@@ -521,7 +536,12 @@ fn land_apply_no_tag_overrides_auto_tag_config() {
     let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
 
     knit(&workspace, ["config", "set", "auto-tag", "true"]);
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let apply = knit_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote", "--no-tag"],
@@ -568,7 +588,12 @@ fn land_apply_advises_tag_command() {
     let root = unique_temp_dir();
     let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
 
-    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--schema-version", "0.1"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
     let apply = knit_with_fake_gh(
         &workspace,
         ["land", "apply", "--no-remote"],

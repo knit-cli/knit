@@ -180,6 +180,34 @@ pub(super) fn view(target: &PrTarget, repo_full_name: &str, selector: &str) -> R
     Ok(pr.into_pull_request())
 }
 
+pub(super) fn merged_revision(
+    target: &PrTarget,
+    repo: &str,
+    publication_url: &str,
+) -> Result<Option<String>> {
+    #[derive(Deserialize)]
+    struct Review {
+        merged: Option<bool>,
+        merge_commit_sha: Option<String>,
+    }
+    let number =
+        selector_pr_number(publication_url).context("could not determine GitHub PR number")?;
+    let output = github_api_output(
+        target,
+        "GET",
+        &pull_request_api_item_endpoint(repo, number),
+        None,
+    )?;
+    let review: Review =
+        serde_json::from_str(&output).context("failed to parse GitHub merged revision JSON")?;
+    // An open GitHub PR may have a synthetic test-merge SHA in this field.
+    Ok(if review.merged == Some(true) {
+        review.merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+    } else {
+        None
+    })
+}
+
 pub(super) fn edit_body(
     target: &PrTarget,
     repo_full_name: &str,

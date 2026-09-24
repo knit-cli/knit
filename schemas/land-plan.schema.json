@@ -12,7 +12,10 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "0.1"
+      "enum": [
+        "0.1",
+        "0.2"
+      ]
     },
     "kind": {
       "const": "KnitLandPlan"
@@ -37,7 +40,9 @@
     "onFailure": {
       "enum": [
         "resume",
-        "rollback"
+        "rollback",
+        "stop",
+        "recover"
       ],
       "default": "resume"
     },
@@ -190,6 +195,49 @@
             "type": "string",
             "minLength": 1,
             "description": "Destination branch for a merge_branch step."
+          },
+          "label": {
+            "type": "string"
+          },
+          "role": {
+            "enum": [
+              "build",
+              "verify",
+              "release",
+              "capture",
+              "custom"
+            ]
+          },
+          "effect": {
+            "enum": [
+              "read_only",
+              "source",
+              "deployment",
+              "external"
+            ]
+          },
+          "recovery": {
+            "$ref": "#/$defs/recovery"
+          },
+          "locks": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "requires": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "sourceRepos": {
+            "type": "array",
+            "uniqueItems": true,
+            "items": {
+              "type": "string",
+              "minLength": 1
+            }
           }
         },
         "additionalProperties": false
@@ -254,7 +302,248 @@
         "type": "string"
       },
       "description": "Each tracked repository's head when the plan was generated."
+    },
+    "bundleFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "projectFingerprint": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "maxParallel": {
+      "type": "integer",
+      "minimum": 1,
+      "default": 4
+    },
+    "workflow": {
+      "$ref": "#/$defs/workflow"
+    },
+    "recipeRepos": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "recipeBases": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "string"
+      }
+    },
+    "requiredCapabilities": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    },
+    "requiredExecutorVersion": {
+      "type": "string"
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "$defs": {
+    "commandSpec": {
+      "type": "object",
+      "required": [
+        "command"
+      ],
+      "properties": {
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "recovery": {
+      "type": "object",
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "enum": [
+            "none",
+            "manual",
+            "command",
+            "revert_pr"
+          ]
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1
+        },
+        "command": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          }
+        },
+        "cwd": {
+          "type": "string"
+        },
+        "env": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        },
+        "timeoutSeconds": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "capture": {
+          "$ref": "#/$defs/commandSpec"
+        },
+        "verify": {
+          "$ref": "#/$defs/commandSpec"
+        },
+        "probe": {
+          "$ref": "#/$defs/commandSpec"
+        },
+        "idempotent": {
+          "type": "boolean"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "manual"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "reason"
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "mode": {
+                "const": "command"
+              }
+            }
+          },
+          "then": {
+            "required": [
+              "command",
+              "capture",
+              "verify",
+              "idempotent"
+            ],
+            "properties": {
+              "idempotent": {
+                "const": true
+              }
+            }
+          }
+        }
+      ]
+    },
+    "workflow": {
+      "oneOf": [
+        {
+          "type": "object",
+          "required": [
+            "step"
+          ],
+          "properties": {
+            "step": {
+              "type": "string",
+              "minLength": 1
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "sequence"
+          ],
+          "properties": {
+            "sequence": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/workflow"
+              }
+            }
+          },
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "required": [
+            "parallel"
+          ],
+          "properties": {
+            "parallel": {
+              "type": "array",
+              "minItems": 1,
+              "items": {
+                "$ref": "#/$defs/workflow"
+              }
+            }
+          },
+          "additionalProperties": false
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "bundleFingerprint",
+          "projectFingerprint"
+        ],
+        "properties": {
+          "onFailure": {
+            "enum": [
+              "stop",
+              "recover"
+            ]
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "onFailure": {
+            "enum": [
+              "resume",
+              "rollback"
+            ]
+          }
+        }
+      }
+    }
+  ]
 }

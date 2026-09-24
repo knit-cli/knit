@@ -30,6 +30,8 @@ pub struct SyncTargets {
     pub views: bool,
     pub architecture: bool,
     pub kg: bool,
+    pub plans: bool,
+    pub plans_required: bool,
 }
 
 impl SyncTargets {
@@ -55,6 +57,8 @@ impl SyncTargets {
                 views: true,
                 architecture: true,
                 kg,
+                plans: true,
+                plans_required: false,
             }
         } else {
             SyncTargets {
@@ -63,8 +67,24 @@ impl SyncTargets {
                 views,
                 architecture,
                 kg,
+                plans: false,
+                plans_required: false,
             }
         }
+    }
+
+    /// Keep the original resolver compatible with internal callers while
+    /// allowing an explicit plans-only selection on the CLI.
+    pub fn with_plans(mut self, plans: bool, other_flags: bool) -> Self {
+        if plans && !other_flags {
+            self.bundles = false;
+            self.history = false;
+            self.views = false;
+            self.architecture = false;
+        }
+        self.plans |= plans;
+        self.plans_required = plans;
+        self
     }
 }
 
@@ -172,6 +192,12 @@ pub fn sync_push(
                 failures.push(format!("{remote} kg: {error:#}"));
             }
         }
+        if targets.plans {
+            if let Err(error) = super::landing::push_plans(project, remote, targets.plans_required)
+            {
+                failures.push(format!("{remote} landing plans: {error:#}"));
+            }
+        }
     }
 
     finish(failures, "push")
@@ -249,6 +275,12 @@ pub fn sync_pull(
                 failures.push(format!("{remote} views: {error:#}"));
             }
         }
+        if targets.plans {
+            if let Err(error) = super::landing::pull_plans(project, remote, targets.plans_required)
+            {
+                failures.push(format!("{remote} landing plans: {error:#}"));
+            }
+        }
     }
 
     finish(failures, "pull")
@@ -318,5 +350,20 @@ mod tests {
         assert!(targets.views);
         assert!(!targets.architecture);
         assert!(!targets.kg);
+    }
+
+    #[test]
+    fn plans_only_does_not_push_branches_or_other_artifacts() {
+        let targets =
+            SyncTargets::resolve(false, false, false, false, false, false).with_plans(true, false);
+        assert!(targets.plans);
+        assert!(targets.plans_required);
+        assert!(
+            !targets.bundles
+                && !targets.history
+                && !targets.views
+                && !targets.architecture
+                && !targets.kg
+        );
     }
 }

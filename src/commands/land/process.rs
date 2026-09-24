@@ -60,8 +60,31 @@ pub(super) fn run_streamed(
     command: &mut Command,
     timeout_seconds: Option<u64>,
 ) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, false)
+}
+
+pub(super) fn run_captured(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, true)
+}
+
+fn run_with_output(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+    quiet: bool,
+) -> Result<StreamedCommandOutput> {
     ensure_cancellation_handler()?;
+    if quiet && cancellation_requested() {
+        anyhow::bail!("landing cancelled before spawning command");
+    }
     let timeout_seconds = timeout_seconds.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS);
+    #[cfg(unix)]
+    if quiet {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
     let mut child = command
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -71,8 +94,20 @@ pub(super) fn run_streamed(
     let active_child = ActiveChild::register(child.id());
     let stdout = child.stdout.take().expect("piped child stdout");
     let stderr = child.stderr.take().expect("piped child stderr");
-    let stdout_reader = thread::spawn(move || tee_and_capture(stdout, io::stdout()));
-    let stderr_reader = thread::spawn(move || tee_and_capture(stderr, io::stderr()));
+    let stdout_reader = thread::spawn(move || {
+        if quiet {
+            tee_and_capture(stdout, io::sink())
+        } else {
+            tee_and_capture(stdout, io::stdout())
+        }
+    });
+    let stderr_reader = thread::spawn(move || {
+        if quiet {
+            tee_and_capture(stderr, io::sink())
+        } else {
+            tee_and_capture(stderr, io::stderr())
+        }
+    });
 
     let started = Instant::now();
     let mut timed_out = false;
@@ -95,6 +130,23 @@ pub(super) fn run_streamed(
         }
         thread::sleep(WAIT_INTERVAL);
     };
+
+    // Machine adapters must quiesce descendants even when a shell exits after
+    // launching background children. Their private group is never reused.
+    #[cfg(unix)]
+    if quiet {
+        let group = -(child.id() as i32);
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        let until = Instant::now() + TERMINATION_GRACE;
+        while unsafe { libc::kill(group, 0) } == 0 && Instant::now() < until {
+            thread::sleep(WAIT_INTERVAL);
+        }
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
 
     // Always drain and join both readers, including after a wait failure, so a
     // subprocess can never be left blocked on a full pipe.

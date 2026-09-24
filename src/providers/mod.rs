@@ -143,6 +143,12 @@ pub trait Forge {
         draft: bool,
     ) -> Result<String>;
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest>;
+    /// The immutable commit recorded by the host for a merged review. Never
+    /// substitutes the current destination branch tip or the feature head.
+    /// Returns `None` for an unmerged review or unavailable merge identity;
+    /// transport and decoding failures remain errors.
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>>;
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()>;
     /// Change the destination branch of an existing open review object.
     fn edit_base(&self, _target: &PrTarget, _selector: &str, _base: &str) -> Result<()> {

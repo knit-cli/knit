@@ -187,6 +187,10 @@ pub(super) struct LandCheckout {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) plan_hash: Option<String>,
+    #[serde(default)]
+    pub(super) finalized: bool,
     pub(super) schema_version: String,
     pub(super) kind: String,
     pub(super) id: String,

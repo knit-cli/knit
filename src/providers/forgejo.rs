@@ -35,6 +35,12 @@ struct TeaPr {
 }
 
 #[derive(Debug, Deserialize)]
+struct MergeRevision {
+    merged: Option<bool>,
+    merge_commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ForgejoApiPr {
     #[serde(default, alias = "index")]
     number: u64,
@@ -222,6 +228,26 @@ impl Forge for Forgejo {
             .with_context(|| format!("no Forgejo PR found for selector `{selector}`"))
     }
 
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        let review: MergeRevision = if use_api(target)? {
+            let repo = resolve_repo(target)?;
+            let output = api_output(
+                target,
+                "GET",
+                &format!("repos/{repo}/pulls/{}", selector_index(publication_url)),
+                None,
+            )?;
+            serde_json::from_str(&output).context("failed to parse Forgejo merged revision JSON")?
+        } else {
+            tea_merge_metadata(target, publication_url)?
+        };
+        Ok(if review.merged == Some(true) {
+            review.merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
         if use_api(target)? {
             return edit_api_pr(target, selector, &json!({ "body": body }));
@@ -283,6 +309,9 @@ impl Forge for Forgejo {
             )?;
             return Ok(());
         }
+        // Older tea list JSON contains branch names, not a merged commit identity.
+        // Check the authenticated raw metadata capability before any source mutation.
+        tea_merge_metadata(target, selector)?;
         let mut args = vec![
             OsString::from("pr"),
             OsString::from("merge"),
@@ -341,6 +370,23 @@ impl Forgejo {
         }
         serde_json::from_str(&output).context("failed to parse `tea pr list` JSON")
     }
+}
+
+/// `tea api` uses tea's saved login and repository context. List fields such as
+/// `head` and `base-commit` are not evidence of the commit produced by a merge.
+fn tea_merge_metadata(target: &PrTarget, selector: &str) -> Result<MergeRevision> {
+    let endpoint = format!(
+        "repos/{{owner}}/{{repo}}/pulls/{}",
+        selector_index(selector)
+    );
+    let output = cli_output(CLI, target, ["api", "--method", "GET", &endpoint], None)
+        .context("cannot establish authoritative Forgejo merge metadata before merging; use a tea version with authenticated `tea api` support, or configure native Forgejo credentials")?;
+    let review: MergeRevision = serde_json::from_str(&output)
+        .context("tea api did not return valid Forgejo merge metadata")?;
+    if review.merged.is_none() {
+        bail!("tea api response lacks confirmed merge state; refusing to infer a merged revision from branch or feature heads");
+    }
+    Ok(review)
 }
 
 fn use_api(target: &PrTarget) -> Result<bool> {

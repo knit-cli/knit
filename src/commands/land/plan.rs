@@ -27,6 +27,22 @@ pub(super) fn build_default_plan(
     lane_name: Option<&str>,
 ) -> Result<LandPlan> {
     let project = load_project_for_bundle(active)?;
+    build_plan_with_project(
+        active,
+        project,
+        requested_provider,
+        target_branch,
+        lane_name,
+    )
+}
+
+pub(super) fn build_plan_with_project(
+    active: &ActiveBundle,
+    project: Option<KnitProject>,
+    requested_provider: Option<&str>,
+    target_branch: Option<&str>,
+    lane_name: Option<&str>,
+) -> Result<LandPlan> {
     let landing = project
         .as_ref()
         .and_then(|project| project.landing.as_ref());
@@ -215,7 +231,14 @@ pub(super) fn build_default_plan(
         &mut deployments_skipped,
     )?;
 
-    if steps.is_empty() {
+    if steps.is_empty()
+        && !landing.is_some_and(|l| {
+            l.extensions
+                .get("steps")
+                .and_then(serde_json::Value::as_array)
+                .is_some_and(|s| !s.is_empty())
+        })
+    {
         bail!(
             "No PR publications or project landing deployments are available for this bundle. Run `knit publish create` first or configure project landing deployments."
         );

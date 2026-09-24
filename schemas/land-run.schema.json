@@ -13,7 +13,10 @@
   ],
   "properties": {
     "schemaVersion": {
-      "const": "0.1"
+      "enum": [
+        "0.1",
+        "0.2"
+      ]
     },
     "kind": {
       "const": "KnitLandRun"
@@ -128,7 +131,10 @@
             ]
           },
           "repoId": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "targetBranch": {
             "type": "string"
@@ -146,16 +152,117 @@
             "type": "string"
           },
           "stdout": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "stderr": {
-            "type": "string"
+            "type": [
+              "string",
+              "null"
+            ]
           },
           "exitCode": {
-            "type": "integer"
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "before": {
+            "type": "object"
+          },
+          "reviewBefore": {
+            "type": "object"
+          },
+          "output": {
+            "type": "object"
+          },
+          "capture": {
+            "type": "object"
+          },
+          "recovery": {
+            "type": "object"
+          },
+          "sourceRevisions": {
+            "type": "object"
+          },
+          "attribution": {
+            "enum": [
+              "performed",
+              "already_satisfied",
+              "uncertain"
+            ]
+          },
+          "attempts": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
+          },
+          "quiesced": {
+            "type": "boolean"
+          },
+          "intentAt": {
+            "type": "string"
+          },
+          "error": {
+            "type": "string"
           }
         }
       }
+    },
+    "planHash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "plan": {
+      "type": "object"
+    },
+    "sourceBundle": {
+      "type": "object"
+    },
+    "recoveryStartedAt": {
+      "type": "string"
+    },
+    "recoveryStatus": {
+      "enum": [
+        "running",
+        "restored",
+        "failed",
+        "manual"
+      ]
+    },
+    "serviceStatus": {
+      "enum": [
+        "unchanged",
+        "restored",
+        "partially_restored",
+        "unknown"
+      ]
+    },
+    "sourceStatus": {
+      "enum": [
+        "unchanged",
+        "revert_proposed",
+        "reverted",
+        "partial"
+      ]
+    },
+    "finalization": {
+      "type": "object"
+    },
+    "resultBundle": {
+      "type": "object"
+    },
+    "finalized": {
+      "type": "boolean"
+    },
+    "error": {
+      "type": "string"
+    },
+    "checksSkipped": {
+      "type": "boolean"
     }
   },
   "additionalProperties": false
