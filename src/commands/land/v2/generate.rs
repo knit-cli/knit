@@ -71,7 +71,41 @@ pub(super) fn build(
     target: Option<&str>,
     lane: Option<&str>,
 ) -> Result<Value> {
+    if target.is_none() && lane.is_none() {
+        for publication in &active.bundle.publications {
+            if project["landing"]["targets"][&publication.base_branch]["merge"]["enabled"] == false
+            {
+                bail!("Recorded target {} delegates integration to its procedure; select it explicitly with --target {} before generating a plan", publication.base_branch, publication.base_branch);
+            }
+        }
+    }
+    let override_config = if let Some(lane) = lane {
+        &project["landing"]["lanes"][lane]
+    } else if let Some(target) = target {
+        &project["landing"]["targets"][target]
+    } else {
+        &Value::Null
+    };
+    let merge_enabled = override_config["merge"]
+        .get("enabled")
+        .or_else(|| project["landing"]["merge"].get("enabled"))
+        .map(|v| {
+            v.as_bool()
+                .ok_or_else(|| anyhow::anyhow!("merge.enabled must be boolean"))
+        })
+        .transpose()?
+        .unwrap_or(true);
     let mut compatible = project.clone();
+    if compatible["landing"].is_object() {
+        compatible["landing"]["merge"]["enabled"] = json!(merge_enabled);
+        if lane.is_some() || target.is_some() {
+            compatible["landing"]["steps"] = override_config["steps"]
+                .as_array()
+                .cloned()
+                .map(Value::Array)
+                .unwrap_or(json!([]));
+        }
+    }
     // Legacy typed recipe resolution supplies destinations and trigger selection.
     // Policy is read from the untouched input below.
     if compatible["landing"].is_object() {
@@ -110,7 +144,8 @@ pub(super) fn build(
     )?;
     let mut plan = serde_json::to_value(base)?;
     plan["schemaVersion"] = json!("0.2");
-    plan["requiredExecutorVersion"] = json!("0.2");
+    plan["merge"] = json!({"enabled":merge_enabled});
+    plan["requiredExecutorVersion"] = json!("0.3");
     plan["recipeRepos"] = json!(project["repos"]
         .as_array()
         .into_iter()
@@ -148,16 +183,21 @@ pub(super) fn build(
         .as_array()
         .cloned()
         .unwrap_or_default();
-    let override_config = if let Some(lane) = lane {
-        &project["landing"]["lanes"][lane]
-    } else if let Some(target) = target {
-        &project["landing"]["targets"][target]
-    } else {
-        &Value::Null
-    };
-    if let Some(a) = override_config["deployments"].as_array() {
-        recipes.extend(a.clone());
+    if lane.is_some() || target.is_some() {
+        recipes = override_config["deployments"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
+        for key in ["maxParallel", "onFailure"] {
+            if let Some(value) = override_config.get(key) {
+                plan[key] = value.clone();
+            }
+        }
     }
+    let mut default_custom = project["landing"]["steps"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
     // Match only the branch recipes selected by the shared legacy resolver.
     if lane.is_none() && target.is_none() {
         let branches: BTreeSet<String> = plan["steps"]
@@ -176,7 +216,25 @@ pub(super) fn build(
                 })
             })
             .collect();
+        let configured_target = branches
+            .iter()
+            .any(|b| project["landing"]["targets"].get(b).is_some());
+        let non_base = active.bundle.publications.iter().any(|p| {
+            branches.contains(&p.base_branch)
+                && active
+                    .bundle
+                    .repos
+                    .iter()
+                    .any(|r| r.id == p.repo_id && r.base_branch != p.base_branch)
+        });
+        if configured_target || non_base {
+            recipes.clear();
+            default_custom.clear();
+        }
         for branch in branches {
+            if let Some(a) = project["landing"]["targets"][&branch]["steps"].as_array() {
+                default_custom.extend(a.clone());
+            }
             if let Some(a) = project["landing"]["targets"][&branch]["deployments"].as_array() {
                 recipes.extend(a.clone());
             }
@@ -192,7 +250,15 @@ pub(super) fn build(
     let mut steps = vec![];
     for mut s in plan["steps"].as_array().unwrap().clone() {
         if let Some(recipe) = recipes.iter().rev().find(|r| r["id"] == s["id"]) {
-            for k in ["label", "recovery", "effect", "locks", "sourceRepos"] {
+            for k in [
+                "label",
+                "recovery",
+                "effect",
+                "locks",
+                "sourceRepos",
+                "interactive",
+                "runner",
+            ] {
                 if let Some(v) = recipe.get(k) {
                     s[k] = v.clone();
                 }
@@ -258,12 +324,12 @@ pub(super) fn build(
             steps.push(s);
         }
     }
-    let mut custom = project["landing"]["steps"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
-    if let Some(a) = override_config["steps"].as_array() {
-        custom.extend(a.clone());
+    let mut custom = default_custom;
+    if lane.is_some() || target.is_some() {
+        custom = override_config["steps"]
+            .as_array()
+            .cloned()
+            .unwrap_or_default();
     }
     for mut s in custom {
         if s.get("type").is_none() {
@@ -328,6 +394,9 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
     let display: super::super::LandPlan = serde_json::from_value(effective)?;
     super::super::display::print_plan(active, &display, path);
     println!("Hash: {}", canonical_hash(plan));
+    if plan["merge"]["enabled"] == false {
+        println!("Source integration: declared procedure (automatic merges disabled)");
+    }
     println!(
         "Maximum parallel commands: {} (checkout and resource locks can serialize them)",
         plan["maxParallel"].as_u64().unwrap_or(4)
@@ -336,6 +405,16 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
         println!("Wave {}: {}", i + 1, wave.join(" | "));
     }
     for step in steps {
+        if step["interactive"] == true {
+            println!("{}: attached local terminal required", step["id"]);
+        }
+        if step["type"] == "manual" {
+            println!(
+                "{}: manual acknowledgement required — {}",
+                step["id"],
+                step["instructions"].as_str().unwrap_or("")
+            );
+        }
         if !step["command"].is_null() {
             println!(
                 "{} argv={} cwd={}",

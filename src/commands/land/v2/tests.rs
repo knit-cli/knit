@@ -772,3 +772,87 @@ fn durable_receipts_replace_existing_files_and_preserve_destination_on_failure()
         .extension()
         .is_some_and(|s| s == "tmp")));
 }
+
+#[test]
+fn manual_and_interactive_validate_but_artifact_execution_refuses_before_journal() {
+    for mut step in [
+        json!({"id":"ack","type":"manual","repoId":"service","instructions":"Inspect synthetic service","effect":"external","recovery":{"mode":"manual","reason":"Inspect and restore manually"}}),
+        json!({"id":"ask","type":"run","repoId":"service","interactive":true,"command":["true"],"effect":"read_only","recovery":{"mode":"none"}}),
+    ] {
+        let mut f = Fixture::new();
+        f.plan["onFailure"] = json!("stop");
+        f.plan["steps"] = json!([step]);
+        f.plan["requiredExecutorVersion"] = json!("0.3");
+        assert_eq!(validation(&f.plan, Some(&f.bundle), None)["valid"], true);
+        let error = f.apply(false).unwrap_err().to_string();
+        assert!(error.contains("local execution"), "{error}");
+        assert!(!f.dir.join("run.json").exists());
+        assert!(!f.dir.join("out.json").exists());
+        step["runner"] = json!("hosted");
+        f.plan["steps"] = json!([step]);
+        f.plan["requiredExecutorVersion"] = json!("0.3");
+        assert_eq!(validation(&f.plan, None, None)["valid"], false);
+    }
+}
+
+#[test]
+fn scoped_recipes_replace_defaults_and_external_integration_needs_no_publications() {
+    let f = Fixture::new();
+    let active = crate::store::ActiveBundle::unlocked(
+        f.dir.clone(),
+        f.dir.join("bundle.json"),
+        serde_json::from_value(f.bundle.clone()).unwrap(),
+    );
+    let mut project = serde_json::to_value(crate::model::KnitProject::new(
+        "synthetic".into(),
+        crate::time::now_iso(),
+    ))
+    .unwrap();
+    project["repos"] = json!([{"id":"service","path":"portable","baseBranch":"main"}]);
+    let default = json!({"id":"default-release","repoId":"service","command":["default-release"],"effect":"read_only"});
+    let stage =
+        json!({"id":"stage","repoId":"service","command":["stage-only"],"effect":"read_only"});
+    project["landing"] = json!({"steps":[default],"deployments":[{"id":"default-deploy","repoId":"service","command":["default-deploy"],"whenChanged":["*"]}],"lanes":{"preview":{"terminal":false,"branches":{"service":"preview"},"merge":{"enabled":false},"steps":[stage]}},"targets":{"release":{"terminal":true,"merge":{"enabled":false},"steps":[stage]}}});
+    for (target, lane) in [(None, Some("preview")), (Some("release"), None)] {
+        let plan = generate::build(&active, &f.bundle, &project, None, target, lane).unwrap();
+        assert_eq!(plan["merge"]["enabled"], false);
+        assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
+        assert_eq!(plan["steps"][0]["command"], json!(["stage-only"]));
+        assert_eq!(plan["terminal"], json!(target.is_some()));
+    }
+    project["landing"]["lanes"]["preview"]["steps"] = json!([]);
+    assert!(generate::build(&active, &f.bundle, &project, None, None, Some("preview")).is_err());
+}
+
+#[test]
+fn recorded_non_base_review_uses_target_commands_without_default_inheritance() {
+    let mut f = Fixture::new();
+    f.bundle["publications"] = json!([{"repoId":"service","provider":"github","kind":"pull_request","number":1,"url":"https://example.test/service/pull/1","baseBranch":"preview","headBranch":"feature","state":"OPEN","updatedAt":crate::time::now_iso()}]);
+    f.bundle["commitGroups"] = json!([{"id":"change","message":"Synthetic change","createdAt":crate::time::now_iso(),"commits":[{"repoId":"service","sha":"synthetic"}]}]);
+    let active = crate::store::ActiveBundle::unlocked(
+        f.dir.clone(),
+        f.dir.join("bundle.json"),
+        serde_json::from_value(f.bundle.clone()).unwrap(),
+    );
+    let mut project = serde_json::to_value(crate::model::KnitProject::new(
+        "synthetic".into(),
+        crate::time::now_iso(),
+    ))
+    .unwrap();
+    project["repos"] = json!([{"id":"service","path":"portable","baseBranch":"main"}]);
+    project["landing"] = json!({"steps":[{"id":"default-release","repoId":"service","command":["default-release"],"effect":"read_only"}],"targets":{"preview":{"steps":[{"id":"preview-check","repoId":"service","command":["preview-check"],"effect":"read_only"}]}}});
+    let plan = generate::build(&active, &f.bundle, &project, None, None, None).unwrap();
+    assert_eq!(plan["steps"].as_array().unwrap().len(), 2);
+    assert_eq!(plan["steps"][1]["id"], "preview-check");
+    project["landing"]["targets"]["preview"]["merge"] = json!({"enabled":false});
+    assert!(
+        generate::build(&active, &f.bundle, &project, None, None, None)
+            .unwrap_err()
+            .to_string()
+            .contains("select it explicitly")
+    );
+    project["landing"]["targets"] = json!({});
+    let plan = generate::build(&active, &f.bundle, &project, None, None, None).unwrap();
+    assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["steps"][0]["type"], "merge_pr");
+}

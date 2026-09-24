@@ -240,8 +240,9 @@ pub fn apply_land_plan(
     no_tag: bool,
     target_branch: Option<&str>,
     lane_name: Option<&str>,
+    expected_plan_hash: Option<&str>,
 ) -> Result<()> {
-    let mut active = load_active_bundle_for_update()?;
+    let active = crate::store::load_active_bundle()?;
     let destination = v2::destination_path(&active, target_branch, lane_name);
     let candidate = if plan_path.is_none() && destination.exists() {
         destination
@@ -250,10 +251,12 @@ pub fn apply_land_plan(
     };
     if candidate.exists() && read_json::<serde_json::Value>(&candidate)?["schemaVersion"] == "0.2" {
         let raw: serde_json::Value = read_json(&candidate)?;
+        v2::verify_expected_hash(&raw, expected_plan_hash)?;
         if plan_path.is_none() || target_branch.is_some() || lane_name.is_some() {
             let typed: LandPlan = serde_json::from_value(raw.clone())?;
             ensure_requested_selection_matches_plan(&active, target_branch, lane_name, &typed)?;
         }
+        let mut active = load_active_bundle_for_update()?;
         return v2::local_apply(
             &mut active,
             &candidate,
@@ -268,8 +271,13 @@ pub fn apply_land_plan(
             }),
             skip_checks,
             false,
+            expected_plan_hash,
         );
     }
+    if expected_plan_hash.is_some() {
+        bail!("--expected-plan-hash requires a saved schema 0.2 plan");
+    }
+    let mut active = load_active_bundle_for_update()?;
     let target_branch = normalize_target_branch(target_branch)?;
     let lane_name = normalize_lane_name(lane_name)?;
     let path = resolve_land_plan_path(&active, plan_path)?;
@@ -687,6 +695,7 @@ pub fn resume_land_run(
             }),
             skip_checks,
             false,
+            None,
         );
     }
     let mut run: LandRun = read_json(&path)?;

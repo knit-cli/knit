@@ -403,9 +403,13 @@
             "intervalSeconds": {
               "type": "integer",
               "minimum": 1
+            },
+            "enabled": {
+              "type": "boolean",
+              "default": true
             }
           },
-          "additionalProperties": false
+          "additionalProperties": true
         },
         "deployments": {
           "type": "array",
@@ -432,8 +436,7 @@
                 "items": {
                   "type": "object",
                   "required": [
-                    "id",
-                    "command"
+                    "id"
                   ],
                   "properties": {
                     "id": {
@@ -454,12 +457,68 @@
                     },
                     "recovery": {
                       "$ref": "#/$defs/recovery"
+                    },
+                    "type": {
+                      "enum": [
+                        "run",
+                        "deploy",
+                        "manual"
+                      ]
+                    },
+                    "interactive": {
+                      "type": "boolean"
+                    },
+                    "instructions": {
+                      "type": "string",
+                      "minLength": 1
                     }
-                  }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "manual"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "instructions"
+                        ],
+                        "not": {
+                          "required": [
+                            "command"
+                          ]
+                        }
+                      },
+                      "else": {
+                        "required": [
+                          "command"
+                        ]
+                      }
+                    }
+                  ]
                 }
+              },
+              "merge": {
+                "$ref": "#/properties/landing/properties/merge"
+              },
+              "maxParallel": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "onFailure": {
+                "enum": [
+                  "stop",
+                  "recover"
+                ]
               }
             },
-            "additionalProperties": false
+            "additionalProperties": true
           }
         },
         "lanes": {
@@ -495,8 +554,7 @@
                 "items": {
                   "type": "object",
                   "required": [
-                    "id",
-                    "command"
+                    "id"
                   ],
                   "properties": {
                     "id": {
@@ -517,12 +575,68 @@
                     },
                     "recovery": {
                       "$ref": "#/$defs/recovery"
+                    },
+                    "type": {
+                      "enum": [
+                        "run",
+                        "deploy",
+                        "manual"
+                      ]
+                    },
+                    "interactive": {
+                      "type": "boolean"
+                    },
+                    "instructions": {
+                      "type": "string",
+                      "minLength": 1
                     }
-                  }
+                  },
+                  "allOf": [
+                    {
+                      "if": {
+                        "properties": {
+                          "type": {
+                            "const": "manual"
+                          }
+                        },
+                        "required": [
+                          "type"
+                        ]
+                      },
+                      "then": {
+                        "required": [
+                          "instructions"
+                        ],
+                        "not": {
+                          "required": [
+                            "command"
+                          ]
+                        }
+                      },
+                      "else": {
+                        "required": [
+                          "command"
+                        ]
+                      }
+                    }
+                  ]
                 }
+              },
+              "merge": {
+                "$ref": "#/properties/landing/properties/merge"
+              },
+              "maxParallel": {
+                "type": "integer",
+                "minimum": 1
+              },
+              "onFailure": {
+                "enum": [
+                  "stop",
+                  "recover"
+                ]
               }
             },
-            "additionalProperties": false
+            "additionalProperties": true
           }
         },
         "maxParallel": {
@@ -534,8 +648,7 @@
           "items": {
             "type": "object",
             "required": [
-              "id",
-              "command"
+              "id"
             ],
             "properties": {
               "id": {
@@ -556,8 +669,51 @@
               },
               "recovery": {
                 "$ref": "#/$defs/recovery"
+              },
+              "type": {
+                "enum": [
+                  "run",
+                  "deploy",
+                  "manual"
+                ]
+              },
+              "interactive": {
+                "type": "boolean"
+              },
+              "instructions": {
+                "type": "string",
+                "minLength": 1
               }
-            }
+            },
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "type": {
+                      "const": "manual"
+                    }
+                  },
+                  "required": [
+                    "type"
+                  ]
+                },
+                "then": {
+                  "required": [
+                    "instructions"
+                  ],
+                  "not": {
+                    "required": [
+                      "command"
+                    ]
+                  }
+                },
+                "else": {
+                  "required": [
+                    "command"
+                  ]
+                }
+              }
+            ]
           }
         }
       },
@@ -764,6 +920,9 @@
             "type": "string",
             "minLength": 1
           }
+        },
+        "interactive": {
+          "type": "boolean"
         }
       },
       "additionalProperties": false

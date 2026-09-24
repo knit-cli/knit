@@ -33,8 +33,14 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
             .any(|step| step.step_type == LandStepKind::MergeBranch)
         {
             "feature branches into the destination; review objects stay open"
-        } else {
+        } else if plan
+            .steps
+            .iter()
+            .any(|step| step.step_type == LandStepKind::MergePr)
+        {
             "the recorded review objects"
+        } else {
+            "none"
         }
     );
     println!(

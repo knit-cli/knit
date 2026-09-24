@@ -363,6 +363,16 @@ fn preflight(
                     executable(step, p, &cwd(step, p, roots)?)?;
                 }
             }
+        } else if step["type"] == "manual" {
+            let r = recovery(step);
+            if r["mode"] == "command" {
+                for spec in [&r["capture"], &r, &r["verify"]] {
+                    executable(step, spec, &cwd(step, spec, roots)?)?;
+                }
+                if let Some(probe) = r.get("probe") {
+                    executable(step, probe, &cwd(step, probe, roots)?)?;
+                }
+            }
         } else if matches!(step["type"].as_str(), Some("merge_pr" | "wait_checks")) {
             let typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
             let id = step["repoId"].as_str().context("repoId required")?;
@@ -629,10 +639,12 @@ fn run_command(
             .unwrap()
             .push(json!({"id":attempt,"phase":phase,"status":"running","startedAt":now_iso()}));
     })?;
-    let result = super::super::process::run_captured(
-        &mut cmd,
-        Some(spec["timeoutSeconds"].as_u64().unwrap_or(1800)),
-    );
+    let timeout = Some(spec["timeoutSeconds"].as_u64().unwrap_or(1800));
+    let result = if phase == "forward" && step["interactive"] == true {
+        super::super::process::run_attached(&mut cmd, timeout)
+    } else {
+        super::super::process::run_captured(&mut cmd, timeout)
+    };
     let receipt = match result {
         Ok(o) => {
             json!({"id":attempt,"phase":phase,"status":if o.status.success() && !o.timed_out && !o.cancelled {"succeeded"}else{"failed"},"stdout":o.stdout,"stderr":o.stderr,"exitCode":o.status.code(),"timedOut":o.timed_out,"cancelled":o.cancelled,"finishedAt":now_iso(),"output":if output.exists(){read_json::<Value>(&output).unwrap_or(Value::Null)}else{Value::Null}})
@@ -853,6 +865,108 @@ fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Va
     Ok(())
 }
 
+fn needs_terminal(step: &Value) -> bool {
+    step["interactive"] == true || step["type"] == "manual"
+}
+
+fn terminal_preflight(plan: &Value, local: bool) -> Result<()> {
+    use std::io::IsTerminal;
+    let (steps, _) = compile(plan)?;
+    if steps.iter().any(needs_terminal) {
+        if !local {
+            bail!("interactive/manual steps require local execution; hosted/artifact runners cannot acknowledge them");
+        }
+        if !std::io::stdin().is_terminal()
+            || !std::io::stdout().is_terminal()
+            || !std::io::stderr().is_terminal()
+        {
+            bail!("interactive/manual steps require a local terminal (TTY) before any landing mutations");
+        }
+        #[cfg(unix)]
+        {
+            // A tty descriptor alone is insufficient: this process must own
+            // its foreground before any earlier merge or external effect.
+            let foreground = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+            if foreground < 0 || foreground != unsafe { libc::getpgrp() } {
+                bail!("interactive/manual steps require the controlling foreground terminal before any landing mutations");
+            }
+        }
+    }
+    Ok(())
+}
+
+fn manual_checkpoint(step: &Value) -> Result<Value> {
+    #[cfg(not(unix))]
+    use std::io::Read;
+    use std::io::Write;
+    eprintln!(
+        "\nManual checkpoint {}: {}",
+        step["id"].as_str().unwrap(),
+        step["instructions"].as_str().unwrap()
+    );
+    eprint!("Type acknowledge to confirm completion, optionally followed by a space and notes (max 4096 bytes): ");
+    std::io::stderr().flush()?;
+    let mut answer = Vec::new();
+    // Read a bounded line; never retain a terminal transcript or synthesize an answer.
+    #[cfg(not(unix))]
+    let stdin = std::io::stdin();
+    #[cfg(not(unix))]
+    let mut input = stdin.lock();
+    while answer.len() <= 4096 {
+        if super::super::process::cancellation_requested() {
+            bail!("manual checkpoint cancelled; effect requires reconciliation");
+        }
+        #[cfg(unix)]
+        {
+            let mut fd = libc::pollfd {
+                fd: libc::STDIN_FILENO,
+                events: libc::POLLIN,
+                revents: 0,
+            };
+            // SAFETY: poll receives a valid single stack-owned descriptor.
+            let ready = unsafe { libc::poll(&mut fd, 1, 100) };
+            if ready < 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::Interrupted
+            {
+                bail!("manual terminal read failed");
+            }
+            if ready <= 0 {
+                continue;
+            }
+        }
+        let mut byte = [0];
+        #[cfg(unix)]
+        let count = unsafe { libc::read(libc::STDIN_FILENO, byte.as_mut_ptr().cast(), 1) };
+        #[cfg(not(unix))]
+        let count = input.read(&mut byte)? as isize;
+        if count < 0 {
+            bail!("manual terminal read failed");
+        }
+        if count == 0 {
+            bail!(
+                "manual checkpoint ended without acknowledgement; effect requires reconciliation"
+            );
+        }
+        if byte[0] == b'\n' {
+            break;
+        }
+        answer.push(byte[0]);
+    }
+    if answer.len() > 4096 {
+        bail!("manual checkpoint notes exceed 4096 bytes");
+    }
+    let answer = String::from_utf8(answer).context("manual acknowledgement must be UTF-8")?;
+    let answer = answer.trim();
+    let notes = answer
+        .strip_prefix("acknowledge")
+        .filter(|s| s.is_empty() || s.starts_with(char::is_whitespace))
+        .context("manual checkpoint not acknowledged; effect requires reconciliation")?
+        .trim();
+    Ok(
+        json!({"attribution":if effect(step) == "read_only" {"already_satisfied"} else {"performed"},"acknowledged":true,"notes":notes}),
+    )
+}
+
 fn forward_step(
     step: &Value,
     plan: &Value,
@@ -930,7 +1044,9 @@ fn forward_step(
         s["intentAt"] = json!(now_iso());
         s["quiesced"] = json!(false);
     })?;
-    let result = if matches!(step["type"].as_str(), Some("run" | "deploy"))
+    let result = if step["type"] == "manual" {
+        manual_checkpoint(step)
+    } else if matches!(step["type"].as_str(), Some("run" | "deploy"))
         && step["deploymentMode"] != "push"
     {
         let capture = journal.step(id).get("capture").cloned();
@@ -1034,9 +1150,16 @@ fn forward(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) -> Re
             let mut used = BTreeSet::new();
             let mut batch = vec![];
             let mut rest = vec![];
+            let mut exclusive = false;
             for s in pending {
                 let locks = resources(s, roots, &steps);
-                if batch.len() < max && used.is_disjoint(&locks) {
+                let terminal = needs_terminal(s);
+                if !exclusive
+                    && (!terminal || batch.is_empty())
+                    && batch.len() < max
+                    && used.is_disjoint(&locks)
+                {
+                    exclusive = terminal;
                     used.extend(locks);
                     batch.push(s);
                 } else {
@@ -1460,6 +1583,7 @@ pub fn apply(
         resume,
         json_output,
         false,
+        None,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -1473,8 +1597,10 @@ pub fn apply_with_checks(
     resume: bool,
     json_output: bool,
     skip_checks: bool,
+    expected_plan_hash: Option<&str>,
 ) -> Result<()> {
     let plan: Value = read_json(plan_path)?;
+    super::verify_expected_hash(&plan, expected_plan_hash)?;
     let bundle: Value = read_json(artifact)?;
     let project = project_file.map(read_json::<Value>).transpose()?;
     if project.is_none()
@@ -1516,6 +1642,7 @@ fn execute(
     )>,
     skip_checks: bool,
 ) -> Result<()> {
+    terminal_preflight(plan, local.is_some())?;
     if !resume && run_out.exists() {
         bail!("run output already exists; use --resume or a new path");
     }
@@ -1821,6 +1948,7 @@ pub fn recover(
             None,
             false,
             json_output,
+            None,
         );
     }
     let out_run = run_out.unwrap_or(run_path);
@@ -1858,8 +1986,10 @@ pub(crate) fn local_apply(
     options: Option<&super::super::FinishLandOptions<'_>>,
     skip_checks: bool,
     json_output: bool,
+    expected_plan_hash: Option<&str>,
 ) -> Result<()> {
     let plan: Value = read_json(plan_path)?;
+    super::verify_expected_hash(&plan, expected_plan_hash)?;
     let project = super::generate::local_project(active)?;
     let mut roots: Roots = active
         .bundle

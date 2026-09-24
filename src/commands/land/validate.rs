@@ -114,6 +114,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
             LandStepKind::WaitChecks => {
                 required_repo_id(step)?;
             }
+            LandStepKind::Manual => bail!("manual steps require schemaVersion 0.2"),
             LandStepKind::Run => {
                 if step.command.is_empty() {
                     bail!("run step `{}` must provide command", step.id);

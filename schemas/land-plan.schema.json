@@ -93,6 +93,25 @@
                 "targetBranch"
               ]
             }
+          },
+          {
+            "if": {
+              "properties": {
+                "type": {
+                  "const": "manual"
+                }
+              }
+            },
+            "then": {
+              "required": [
+                "instructions"
+              ],
+              "not": {
+                "required": [
+                  "command"
+                ]
+              }
+            }
           }
         ],
         "properties": {
@@ -106,7 +125,8 @@
               "merge_branch",
               "wait_checks",
               "run",
-              "deploy"
+              "deploy",
+              "manual"
             ]
           },
           "needs": {
@@ -238,6 +258,14 @@
               "type": "string",
               "minLength": 1
             }
+          },
+          "interactive": {
+            "type": "boolean",
+            "description": "Attach a local terminal; command output is not captured."
+          },
+          "instructions": {
+            "type": "string",
+            "minLength": 1
           }
         },
         "additionalProperties": false
@@ -338,7 +366,19 @@
       }
     },
     "requiredExecutorVersion": {
-      "type": "string"
+      "enum": [
+        "0.2",
+        "0.3"
+      ]
+    },
+    "merge": {
+      "type": "object",
+      "properties": {
+        "enabled": {
+          "type": "boolean",
+          "default": true
+        }
+      }
     }
   },
   "additionalProperties": false,
@@ -541,6 +581,55 @@
               "resume",
               "rollback"
             ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
+          },
+          "steps": {
+            "contains": {
+              "anyOf": [
+                {
+                  "required": [
+                    "interactive"
+                  ],
+                  "properties": {
+                    "interactive": {
+                      "const": true
+                    }
+                  }
+                },
+                {
+                  "required": [
+                    "type"
+                  ],
+                  "properties": {
+                    "type": {
+                      "const": "manual"
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        },
+        "required": [
+          "schemaVersion",
+          "steps"
+        ]
+      },
+      "then": {
+        "required": [
+          "requiredExecutorVersion"
+        ],
+        "properties": {
+          "requiredExecutorVersion": {
+            "const": "0.3"
           }
         }
       }

@@ -2103,6 +2103,45 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
     }
 
     let (status, response) = match (method.as_str(), path.as_str()) {
+        ("GET" | "PATCH", path) if dir.join("initial-project.json").exists()
+            && !dir.join("landing-recipes.json").exists()
+            && (path.ends_with("/landing-recipes") || path == "/api/v1/projects/demo") => {
+            (404, "{\"error\":{\"message\":\"project not found\"}}".into())
+        }
+
+        ("GET" | "PUT", path) if path.ends_with("/landing-recipes") && dir.join("landing-artifacts.json").exists() => {
+            use sha2::{Digest, Sha256};
+            let file = dir.join("landing-recipes.json");
+            let mut landing: serde_json::Value = fs::read(&file).ok().map(|b| serde_json::from_slice(&b).unwrap()).unwrap_or(serde_json::json!({}));
+            let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&landing).unwrap()));
+            let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
+            if method == "PUT" && payload["expectedHash"] != hash {
+                (409, "{\"error\":{\"message\":\"recipe conflict\"}}".to_string())
+            } else {
+                if method == "PUT" {
+                    landing = payload["landing"].clone();
+                    fs::write(file, landing.to_string())?;
+                }
+                let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&landing).unwrap()));
+                (200, serde_json::json!({"data":{"landing":landing,"hash":hash}}).to_string())
+            }
+        }
+        ("GET", path) if path == "/api/v1/projects/demo" && dir.join("landing-artifacts.json").exists() => {
+            (200, "{\"data\":{\"id\":\"p-1\",\"slug\":\"demo\"}}".to_string())
+        }
+
+        ("GET", path) if path.ends_with("/landing-artifacts") && dir.join("landing-artifacts.json").exists() => {
+            writeln!(fs::OpenOptions::new().create(true).append(true).open(dir.join("landing-gets.txt"))?, "{target}")?;
+            (200, fs::read_to_string(dir.join("landing-artifacts.json"))?)
+        }
+        ("POST", path) if path.ends_with("/landing-artifacts") && dir.join("landing-artifacts.json").exists() => {
+            writeln!(fs::OpenOptions::new().create(true).append(true).open(dir.join("landing-posts.jsonl"))?, "{body}")?;
+            (200, "{\"data\":{}}".to_string())
+        }
+        ("POST", path) if path.starts_with("/api/v1/bundles/") && path.ends_with("/artifacts") && dir.join("landing-artifacts.json").exists() => {
+            (200, "{\"data\":{\"id\":\"artifact-synthetic\",\"artifactHash\":\"synthetic-hash\"}}".to_string())
+        }
+
         ("GET", "/api/v1/me/forge-credentials") => (
             200,
             "{\"data\":[{\"forge\":\"test-forge\",\"hosts\":[\"code.example.test\"],\"connected\":true},{\"forge\":\"other\",\"hosts\":[\"off.example.test\"],\"connected\":false}]}"
@@ -2157,6 +2196,12 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
                 && !path.contains("/repositories")
                 && !path.ends_with("/view") =>
         {
+            if dir.join("initial-project.json").exists() {
+                let payload: serde_json::Value = serde_json::from_str(&body)?;
+                if let Some(landing) = payload["metadata"]["knitProject"].get("landing") {
+                    fs::write(dir.join("landing-recipes.json"), landing.to_string())?;
+                }
+            }
             // Project upserts: record the payload (its `metadata.knitProject`
             // is the shared membership every collaborator reconciles against).
             let mut log =

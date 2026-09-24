@@ -319,8 +319,27 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 bail!("targetBranch and lane are mutually exclusive");
             }
             if let Some(version) = plan.get("requiredExecutorVersion") {
-                if version != "0.2" && version != env!("CARGO_PKG_VERSION") {
+                if version != "0.2" && version != "0.3" {
                     bail!("unsupported requiredExecutorVersion");
+                }
+            }
+            if steps
+                .iter()
+                .any(|step| step["interactive"] == true || step["type"] == "manual")
+                && plan["requiredExecutorVersion"] != "0.3"
+            {
+                bail!("interactive and manual operations require requiredExecutorVersion 0.3");
+            }
+            if let Some(enabled) = plan["merge"].get("enabled") {
+                if !enabled.is_boolean() {
+                    bail!("merge.enabled must be boolean");
+                }
+                if enabled == false
+                    && steps
+                        .iter()
+                        .any(|s| matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch")))
+                {
+                    bail!("merge.enabled false cannot contain source merge operations");
                 }
             }
             for key in ["id", "bundleId", "bundleFingerprint", "projectFingerprint"] {
@@ -359,6 +378,17 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
         for s in &steps {
             let id = s["id"].as_str().unwrap();
             match s["type"].as_str() {
+                Some("manual") if v2 => {
+                    if s["instructions"]
+                        .as_str()
+                        .is_none_or(|v| v.trim().is_empty())
+                    {
+                        bail!("{id}: manual instructions required");
+                    }
+                    if s.get("command").is_some() {
+                        bail!("{id}: manual steps cannot have a command");
+                    }
+                }
                 Some("run" | "deploy") if s["deploymentMode"] != "push" => {
                     if v2 {
                         check_spec(s, id)?;
@@ -374,7 +404,20 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             if !v2 {
                 continue;
             }
-            if s["repoId"].as_str().is_none_or(|r| r.trim().is_empty()) {
+            if let Some(interactive) = s.get("interactive") {
+                if !interactive.is_boolean()
+                    || !matches!(s["type"].as_str(), Some("run" | "deploy"))
+                    || s["deploymentMode"] == "push"
+                {
+                    bail!("{id}: interactive requires a run or command deployment and a boolean");
+                }
+            }
+            if (s["interactive"] == true || s["type"] == "manual") && s["runner"] == "hosted" {
+                bail!("{id}: interactive/manual steps require a local runner");
+            }
+            if (s["type"] != "manual" || recovery(s)["mode"] == "command")
+                && s["repoId"].as_str().is_none_or(|r| r.trim().is_empty())
+            {
                 bail!("{id}: portable operations require repoId");
             }
             if let Some(sources) = s.get("sourceRepos") {
@@ -499,7 +542,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 .filter(|s| matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch")))
                 .filter_map(|s| s["repoId"].as_str())
                 .collect();
-            if plan["terminal"] != false {
+            if plan["terminal"] != false && plan["merge"]["enabled"] != false {
                 for id in &changed {
                     if !merged.contains(id.as_str()) {
                         bail!("terminal plan omits changed repository {id}");
@@ -515,7 +558,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             for s in &steps {
                 if let Some(id) = s["repoId"].as_str() {
                     if !(typed.repos.iter().any(|r| r.id == id)
-                        || matches!(s["type"].as_str(), Some("run" | "deploy"))
+                        || matches!(s["type"].as_str(), Some("run" | "deploy" | "manual"))
                             && strings(&plan["recipeRepos"]).iter().any(|r| r == id))
                     {
                         bail!("unknown repository {id}");

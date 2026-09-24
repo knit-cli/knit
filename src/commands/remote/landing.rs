@@ -96,6 +96,20 @@ fn install_recipes(root: &Path, index: &mut SyncIndex, remote: RecipeRecord) -> 
         index.recipe_hash = Some(remote.hash);
         return Ok(false);
     }
+    // Clone and project membership writes use the typed project model. They
+    // can add defaults or omit empty arrays without a user's recipe edit.
+    // Restore the exact remote bytes only when that precise serialization
+    // explains the entire local document; real edits still require ancestry.
+    let serialized_remote =
+        serde_json::from_value::<crate::model::ProjectLandingPlan>(remote.landing.clone())
+            .and_then(serde_json::to_value)
+            .ok();
+    if serialized_remote.as_ref() == Some(&local) {
+        project["landing"] = remote.landing;
+        save(&crate::store::project_path(root, &index.project), &project)?;
+        index.recipe_hash = Some(remote.hash);
+        return Ok(true);
+    }
     if index.recipe_hash.as_ref() == Some(&remote.hash) {
         return Ok(false); // Only the local recipe moved.
     }
@@ -287,6 +301,10 @@ fn retain_record(root: &Path, record: &PlanRecord) -> Result<()> {
 }
 
 fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
+    outgoing_scoped(root, index, None)
+}
+
+fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) -> Result<Artifacts> {
     let mut result = Artifacts::default();
     let mut authored: BTreeMap<String, Value> = BTreeMap::new();
     for path in json_files(&root.join(".knit/land-plans"), ".land.json")? {
@@ -295,7 +313,9 @@ fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
             continue;
         }
         let bundle = text(&plan, "bundleId")?;
-        if !belongs_to_project(root, bundle, &index.project)? {
+        if bundle_slug.is_some_and(|slug| slug != bundle)
+            || !belongs_to_project(root, bundle, &index.project)?
+        {
             continue;
         }
         let key = plan_key(&plan)?;
@@ -319,7 +339,9 @@ fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
             continue;
         }
         let bundle = text(&run, "bundleId")?;
-        if !belongs_to_project(root, bundle, &index.project)? {
+        if bundle_slug.is_some_and(|slug| slug != bundle)
+            || !belongs_to_project(root, bundle, &index.project)?
+        {
             continue;
         }
         let id = text(&run, "id")?;
@@ -544,7 +566,26 @@ fn install_plan(root: &Path, index: &mut SyncIndex, record: &PlanRecord) -> Resu
         bail!("Unsupported landing plan document");
     }
     let key = plan_key(&record.plan)?;
-    let file = plan_file(&record.plan)?;
+    let mut file = plan_file(&record.plan)?;
+    let mut matching = Vec::new();
+    for path in json_files(&root.join(".knit/land-plans"), ".land.json")? {
+        let local: Value = read_json(&path)?;
+        if local["bundleId"] == record.bundle_slug
+            && environment_key(&local) == environment_key(&record.plan)
+        {
+            matching.push(path);
+        }
+    }
+    if matching.len() > 1 {
+        bail!("Multiple authored plans for the same destination; reconcile local files before pulling");
+    }
+    if let Some(path) = matching.first() {
+        file = path
+            .file_name()
+            .context("local plan filename missing")?
+            .to_string_lossy()
+            .into_owned();
+    }
     let path = root.join(".knit/land-plans").join(&file);
     let old = index.plans.get(&key);
     if old.is_some_and(|old| record.revision == old.revision && old.hash != record.hash) {
@@ -641,12 +682,29 @@ fn install_run(root: &Path, index: &mut SyncIndex, record: &RunRecord) -> Result
 }
 
 pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: bool) -> Result<()> {
+    push_plans_scoped(project, remote_name, required, None)
+}
+
+pub(super) fn push_plans_scoped(
+    project: Option<&str>,
+    remote_name: &str,
+    required: bool,
+    bundle_slug: Option<&str>,
+) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let _lock = crate::store::acquire_named_lock(&root, "landing-sync")?;
     let project = resolve_project_id(&root, &config, project)?;
     let mut index = load_index(&root, &project, remote_name)?;
-    let payload = outgoing(&root, &index)?;
-    if !required && payload.plans.is_empty() && payload.runs.is_empty() && index.plans.is_empty() {
+    let payload = match bundle_slug {
+        Some(_) => outgoing_scoped(&root, &index, bundle_slug)?,
+        None => outgoing(&root, &index)?,
+    };
+    if bundle_slug.is_none()
+        && !required
+        && payload.plans.is_empty()
+        && payload.runs.is_empty()
+        && index.plans.is_empty()
+    {
         return Ok(());
     }
     let remote = resolve_remote(&config, remote_name)?;
@@ -656,12 +714,16 @@ pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: boo
     if payload.plans.is_empty() && payload.runs.is_empty() {
         return Ok(());
     }
+    let mut body = serde_json::to_value(&payload)?;
+    if let Some(slug) = bundle_slug {
+        body["bundleSlug"] = json!(slug);
+    }
     let _: Value = request_json(
         remote,
         &token,
         "POST",
         &format!("/projects/{project}/landing-artifacts"),
-        Some(&serde_json::to_value(&payload)?),
+        Some(&body),
     )?;
     // The server commits the import atomically. Only record ancestry after it
     // accepts; a lost response is safe to retry by immutable content hash.
@@ -692,7 +754,7 @@ pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: boo
             .insert(text(&record.run, "id")?.into(), document_hash(&record.run));
     }
     save(&index_path(&root, &project, remote_name), &index)?;
-    println!(
+    crate::human!(
         "Pushed {} landing plan(s), {} run(s) to {remote_name}",
         payload.plans.len(),
         payload.runs.len()
@@ -701,6 +763,15 @@ pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: boo
 }
 
 pub(super) fn pull_plans(project: Option<&str>, remote_name: &str, required: bool) -> Result<()> {
+    pull_plans_scoped(project, remote_name, required, None)
+}
+
+pub(super) fn pull_plans_scoped(
+    project: Option<&str>,
+    remote_name: &str,
+    required: bool,
+    bundle_slug: Option<&str>,
+) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
     let _lock = crate::store::acquire_named_lock(&root, "landing-sync")?;
     let project = resolve_project_id(&root, &config, project)?;
@@ -710,7 +781,17 @@ pub(super) fn pull_plans(project: Option<&str>, remote_name: &str, required: boo
         remote,
         &token,
         "GET",
-        &format!("/projects/{project}/landing-artifacts"),
+        &format!(
+            "/projects/{project}/landing-artifacts{}",
+            bundle_slug
+                .map(|slug| format!(
+                    "?{}",
+                    url::form_urlencoded::Serializer::new(String::new())
+                        .append_pair("bundleSlug", slug)
+                        .finish()
+                ))
+                .unwrap_or_default()
+        ),
         None,
     )?;
     if response.status == 404 {
@@ -722,8 +803,13 @@ pub(super) fn pull_plans(project: Option<&str>, remote_name: &str, required: boo
         );
         return Ok(());
     }
-    let artifacts: Artifacts = super::client::decode_response(response)?;
+    let mut artifacts: Artifacts = super::client::decode_response(response)?;
+    if let Some(slug) = bundle_slug {
+        artifacts.plans.retain(|r| r.bundle_slug == slug);
+        artifacts.runs.retain(|r| r.bundle_slug == slug);
+    }
     let mut index = load_index(&root, &project, remote_name)?;
+    let mut errors = Vec::new();
     let recipes: RecipeRecord = request_json(
         remote,
         &token,
@@ -731,7 +817,6 @@ pub(super) fn pull_plans(project: Option<&str>, remote_name: &str, required: boo
         &format!("/projects/{project}/landing-recipes"),
         None,
     )?;
-    let mut errors = Vec::new();
     match install_recipes(&root, &mut index, recipes) {
         Ok(true) => crate::commands::refresh_agents(Some(&project))?,
         Ok(false) => (),
@@ -757,7 +842,7 @@ pub(super) fn pull_plans(project: Option<&str>, remote_name: &str, required: boo
             errors.join("\n")
         );
     }
-    println!(
+    crate::human!(
         "Pulled {} landing revision(s), {} run(s) from {remote_name}",
         plans.len(),
         artifacts.runs.len()
@@ -994,6 +1079,62 @@ mod tests {
             project_snapshot: None,
         }
     }
+    #[test]
+    fn clone_serialization_restores_exact_recipe_but_preserves_real_local_edits() {
+        let root = temp();
+        let mut index = SyncIndex {
+            project: "demo".into(),
+            ..Default::default()
+        };
+        let recipe = json!({"lanes":{"testing":{"terminal":false,"deployments":[],"steps":[{"id":"check","command":["true"]}]}}});
+        let typed: crate::model::ProjectLandingPlan =
+            serde_json::from_value(recipe.clone()).unwrap();
+        let normalized = serde_json::to_value(typed).unwrap();
+        assert_ne!(normalized, recipe);
+        let path = crate::store::project_path(&root, "demo");
+        save(&path, &json!({"id":"demo","landing":normalized})).unwrap();
+        assert!(install_recipes(
+            &root,
+            &mut index,
+            RecipeRecord {
+                landing: recipe.clone(),
+                hash: document_hash(&recipe)
+            }
+        )
+        .unwrap());
+        assert_eq!(read_json::<Value>(&path).unwrap()["landing"], recipe);
+        let mut changed = normalized;
+        changed["lanes"]["testing"]["steps"][0]["command"] = json!(["local-edit"]);
+        save(&path, &json!({"id":"demo","landing":changed})).unwrap();
+        index.recipe_hash = None;
+        assert!(install_recipes(
+            &root,
+            &mut index,
+            RecipeRecord {
+                landing: recipe.clone(),
+                hash: document_hash(&recipe)
+            }
+        )
+        .is_err());
+        assert_eq!(read_json::<Value>(&path).unwrap()["landing"], changed);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn pull_updates_authored_filename_without_creating_competing_destination() {
+        let root = temp();
+        let mut index = SyncIndex::default();
+        let first = record(1, "old");
+        let authored = root.join(".knit/land-plans/reviewed.land.json");
+        save(&authored, &first.plan).unwrap();
+        install_plan(&root, &mut index, &first).unwrap();
+        let next = record(2, "new");
+        install_plan(&root, &mut index, &next).unwrap();
+        assert_eq!(read_json::<Value>(&authored).unwrap(), next.plan);
+        assert!(!root.join(".knit/land-plans/demo.land.json").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn divergent_pull_preserves_both_edits() {
         let root = temp();

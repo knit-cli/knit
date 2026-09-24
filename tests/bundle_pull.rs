@@ -209,3 +209,270 @@ fn bundle_pull_clones_a_repository_added_to_the_remote_bundle() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn native_bundle_pull_imports_all_destinations_and_receipts_with_scoped_query() {
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    let root = unique_temp_dir();
+    let fake_dir = root.join("fake");
+    let (export, _) = export_with_feature_bundle(&root);
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let workspace = cloned_workspace(&root, &base_url);
+    let mut records = vec![];
+    for lane in [None, Some("preview")] {
+        let mut plan = json!({"kind":"KnitLandPlan","schemaVersion":"0.2","id":"plan-synthetic","bundleId":"feature-a","steps":[{"id":"inspect","type":"run","repoId":"backend","command":["synthetic-inspect"]}]});
+        if let Some(lane) = lane {
+            plan["lane"] = json!(lane);
+        }
+        let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap()));
+        records.push(json!({"bundleSlug":"feature-a","revision":1,"hash":hash,"plan":plan}));
+    }
+    // Simulate an older server ignoring the query. Foreign payload is invalid
+    // deliberately: filtering must happen before installing/validating it.
+    records.push(
+        json!({"bundleSlug":"unrelated","revision":1,"hash":"bad","plan":{"bundleId":"unrelated"}}),
+    );
+    fs::write(fake_dir.join("landing-artifacts.json"),json!({"data":{"plans":records,"runs":[{"bundleSlug":"feature-a","run":{"kind":"KnitLandRun","schemaVersion":"0.2","id":"run-synthetic","bundleId":"feature-a","status":"succeeded"}}]}}).to_string()).unwrap();
+    let (stdout, stderr, success) =
+        knit_split_output(&workspace, &["bundle", "pull", "feature-a", "--json"], &[]);
+    assert!(success, "{stderr}\n{stdout}");
+    serde_json::from_str::<Value>(&stdout).expect("bundle JSON remains clean");
+    assert!(fs::read_to_string(fake_dir.join("landing-gets.txt"))
+        .unwrap()
+        .contains("?bundleSlug=feature-a"));
+    let plans: Vec<_> = fs::read_dir(workspace.join(".knit/land-plans"))
+        .unwrap()
+        .flatten()
+        .filter(|e| e.path().is_file())
+        .collect();
+    assert_eq!(plans.len(), 2);
+    assert!(workspace
+        .join(".knit/land-runs/run-synthetic.run.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/land-plans/unrelated.land.json")
+        .exists());
+    let local = workspace.join(".knit/land-plans/feature-a.land.json");
+    let mut edit: Value = serde_json::from_str(&fs::read_to_string(&local).unwrap()).unwrap();
+    edit["steps"][0]["command"] = json!(["local-edit"]);
+    fs::write(&local, edit.to_string()).unwrap();
+    let mut remote = records[0].clone();
+    remote["plan"]["steps"][0]["command"] = json!(["remote-edit"]);
+    remote["revision"] = json!(2);
+    remote["hash"] = json!(format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&remote["plan"]).unwrap())
+    ));
+    fs::write(
+        fake_dir.join("landing-artifacts.json"),
+        json!({"data":{"plans":[remote],"runs":[]}}).to_string(),
+    )
+    .unwrap();
+    let failed = knit_fails(&workspace, ["bundle", "pull", "feature-a"]);
+    assert!(failed.contains("Local file preserved"), "{failed}");
+    assert_eq!(
+        serde_json::from_str::<Value>(&fs::read_to_string(local).unwrap()).unwrap(),
+        edit
+    );
+    assert_eq!(
+        fs::read_dir(workspace.join(".knit/land-plans/conflicts"))
+            .unwrap()
+            .count(),
+        1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn native_bundle_push_sends_authored_plans_with_safe_project_recipe_sync() {
+    use serde_json::{json, Value};
+    let root = unique_temp_dir();
+    let fake_dir = root.join("fake");
+    let (export, _) = export_with_feature_bundle(&root);
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let workspace = cloned_workspace(&root, &base_url);
+    fs::write(
+        fake_dir.join("landing-artifacts.json"),
+        json!({"data":{"plans":[],"runs":[]}}).to_string(),
+    )
+    .unwrap();
+    knit(&workspace, ["bundle", "pull", "feature-a"]);
+    let plan = json!({"kind":"KnitLandPlan","schemaVersion":"0.2","id":"plan-synthetic","bundleId":"feature-a","lane":"preview","steps":[{"id":"inspect","command":["synthetic-inspect"]}]});
+    fs::create_dir_all(workspace.join(".knit/land-plans")).unwrap();
+    fs::write(
+        workspace.join(".knit/land-plans/authored.land.json"),
+        plan.to_string(),
+    )
+    .unwrap();
+    // The previously pulled recipe establishes the CAS base for this push.
+    let (_, stderr, success) = knit_split_output(
+        &workspace,
+        &["--bundle", "feature-a", "push", "--remote", "hosted"],
+        &[],
+    );
+    assert!(success, "{stderr}");
+    let posted = fs::read_to_string(fake_dir.join("landing-posts.jsonl")).unwrap();
+    let body: Value = serde_json::from_str(posted.lines().last().unwrap()).unwrap();
+    assert_eq!(body["bundleSlug"], "feature-a");
+    assert_eq!(body["plans"].as_array().unwrap().len(), 1);
+    assert_eq!(body["plans"][0]["plan"], plan);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ordinary_bundle_pull_updates_web_recipes_and_preserves_divergent_local_recipes() {
+    use serde_json::{json, Value};
+    use sha2::{Digest, Sha256};
+    let root = unique_temp_dir();
+    let fake_dir = root.join("fake");
+    let (export, _) = export_with_feature_bundle(&root);
+    let base_url = spawn_fake_remote_api(&fake_dir, export.to_string());
+    let workspace = cloned_workspace(&root, &base_url);
+    fs::write(
+        fake_dir.join("landing-artifacts.json"),
+        json!({"data":{"plans":[],"runs":[]}}).to_string(),
+    )
+    .unwrap();
+    knit(&workspace, ["bundle", "pull", "feature-a"]); // establishes recipe ancestor
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let original: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    let recipe = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{"id":"inspect","type":"run","repoId":"backend","command":["git","--version"],"effect":"read_only"}]});
+    let mut web_project = original.clone();
+    web_project["landing"] = recipe.clone();
+    fs::write(&project_path, web_project.to_string()).unwrap();
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-a",
+            "land",
+            "plan",
+            "--out",
+            "web.land.json",
+            "--json",
+        ],
+    );
+    let plan: Value =
+        serde_json::from_slice(&fs::read(workspace.join("web.land.json")).unwrap()).unwrap();
+    let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&plan).unwrap()));
+    fs::write(&project_path, original.to_string()).unwrap();
+    fs::write(fake_dir.join("landing-recipes.json"), recipe.to_string()).unwrap();
+    fs::write(fake_dir.join("landing-artifacts.json"),json!({"data":{"plans":[{"bundleSlug":"feature-a","revision":1,"hash":hash,"plan":plan}],"runs":[]}}).to_string()).unwrap();
+    knit(&workspace, ["bundle", "pull", "feature-a"]);
+    let pulled: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    assert_eq!(pulled["landing"], recipe);
+    let saved = workspace.join(".knit/land-plans/feature-a.land.json");
+    // Exact source/recipe fingerprint verification proves the pulled plan is
+    // executable against this project, without asking the mock for ownership.
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-a",
+            "land",
+            "validate",
+            "--plan",
+            saved.to_str().unwrap(),
+            "--from-artifact",
+            ".knit/bundles/feature-a.bundle.json",
+            "--project-file",
+            project_path.to_str().unwrap(),
+            "--json",
+        ],
+    );
+    let mut local = pulled;
+    local["landing"]["steps"][0]["command"] = json!(["git", "status"]);
+    fs::write(&project_path, local.to_string()).unwrap();
+    let mut remote = recipe.clone();
+    remote["steps"][0]["command"] = json!(["git", "--version", "--build-options"]);
+    fs::write(fake_dir.join("landing-recipes.json"), remote.to_string()).unwrap();
+    let failed = knit_fails(&workspace, ["bundle", "pull", "feature-a"]);
+    assert!(failed.contains("Project preserved"), "{failed}");
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(&project_path).unwrap()).unwrap(),
+        local
+    );
+    let conflicts = workspace.join(".knit/landing-sync/conflicts");
+    assert_eq!(fs::read_dir(conflicts).unwrap().count(), 1);
+    let metadata_before = fs::read(fake_dir.join("project-upserts.jsonl")).unwrap_or_default();
+    let (stdout, stderr, _) = knit_split_output(
+        &workspace,
+        &["--bundle", "feature-a", "push", "--remote", "hosted"],
+        &[],
+    );
+    assert_eq!(
+        fs::read(fake_dir.join("project-upserts.jsonl")).unwrap_or_default(),
+        metadata_before,
+        "ordinary push must not PATCH project metadata before recipe CAS"
+    );
+    assert!(
+        format!("{stdout}{stderr}").contains("409"),
+        "{stdout}\n{stderr}"
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(fake_dir.join("landing-recipes.json")).unwrap())
+            .unwrap(),
+        remote
+    );
+    // Reconcile to remote, pull to record its base, then a local recipe edit
+    // is safely pushed through CAS by the same ordinary bundle command.
+    local["landing"] = remote;
+    fs::write(&project_path, local.to_string()).unwrap();
+    knit(&workspace, ["bundle", "pull", "feature-a"]);
+    local["landing"]["steps"][0]["command"] = json!(["git", "status", "--short"]);
+    fs::write(&project_path, local.to_string()).unwrap();
+    knit(
+        &workspace,
+        ["--bundle", "feature-a", "push", "--remote", "hosted"],
+    );
+    assert_eq!(
+        serde_json::from_slice::<Value>(&fs::read(fake_dir.join("landing-recipes.json")).unwrap())
+            .unwrap(),
+        local["landing"]
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn review_corrections_first_push_preserves_raw_recipe_identity() {
+    use serde_json::{json, Value};
+    let root = unique_temp_dir();
+    let fake = root.join("fake");
+    let (export, _) = export_with_feature_bundle(&root);
+    let url = spawn_fake_remote_api(&fake, export.to_string());
+    let workspace = cloned_workspace(&root, &url);
+    knit(&workspace, ["bundle", "pull", "feature-a"]);
+    // Start the recipe-capable API as a new project, with no recipe ancestor.
+    fs::write(fake.join("initial-project.json"), "{}").unwrap();
+    fs::write(
+        fake.join("landing-artifacts.json"),
+        json!({"data":{"plans":[],"runs":[]}}).to_string(),
+    )
+    .unwrap();
+    let path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let recipe = json!({"steps":[],"deployments":[],"lanes":{"preview":{"branches":{"backend":"preview"},"steps":[],"deployments":[],"extension":{"values":[]}}},"extension":[]});
+    project["landing"] = recipe.clone();
+    fs::write(path, project.to_string()).unwrap();
+    let plan = json!({"kind":"KnitLandPlan","schemaVersion":"0.2","requiredExecutorVersion":"0.3","id":"synthetic","bundleId":"feature-a","lane":"preview","steps":[]});
+    fs::create_dir_all(workspace.join(".knit/land-plans")).unwrap();
+    fs::write(
+        workspace.join(".knit/land-plans/authored.land.json"),
+        plan.to_string(),
+    )
+    .unwrap();
+    let (_, stderr, success) = knit_split_output(
+        &workspace,
+        &["--bundle", "feature-a", "push", "--remote", "hosted"],
+        &[],
+    );
+    assert!(success, "{stderr}");
+    let remote: Value =
+        serde_json::from_slice(&fs::read(fake.join("landing-recipes.json")).unwrap()).unwrap();
+    assert_eq!(remote, recipe);
+    let posts = fs::read_to_string(fake.join("landing-posts.jsonl")).unwrap();
+    let posted: Value = serde_json::from_str(posts.lines().last().unwrap()).unwrap();
+    assert_eq!(posted["plans"][0]["plan"], plan);
+    fs::remove_dir_all(root).unwrap();
+}
