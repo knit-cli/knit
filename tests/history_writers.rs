@@ -29,7 +29,15 @@ fn empty_bundle_creation_and_archive_record_history_at_write_time() {
     let before = fs::read(root.join(".knit/history/demo.history.jsonl")).unwrap();
     let output = knit(
         &root,
-        ["log", "--all", "--kind", "bundle.archived", "--json"],
+        [
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--kind",
+            "bundle.archived",
+            "--json",
+        ],
     );
     let entries: Vec<Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(entries.len(), 1);
@@ -52,7 +60,7 @@ fn deletion_preserves_events_missing_from_an_older_ledger() {
     assert!(events(&root)
         .iter()
         .any(|event| event["bundleId"] == "legacy-work"));
-    let output = knit(&root, ["log", "--all", "--json"]);
+    let output = knit(&root, ["log", "--all", "--scope", "activity", "--json"]);
     let entries: Vec<Value> = serde_json::from_str(&output).unwrap();
     assert_eq!(entries.len(), 1);
     assert_eq!(entries[0]["bundleId"], "legacy-work");

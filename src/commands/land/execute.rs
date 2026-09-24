@@ -163,6 +163,61 @@ pub(super) fn execute_run(
                 );
             }
 
+            if outcome.success {
+                let step = plan
+                    .steps
+                    .iter()
+                    .find(|step| &step.id == step_id)
+                    .expect("plan step");
+                if matches!(
+                    step.step_type,
+                    LandStepKind::MergePr | LandStepKind::MergeBranch
+                ) {
+                    if let Some(repo_id) = &step.repo_id {
+                        let destination = outcome
+                            .publication_update
+                            .as_ref()
+                            .and_then(|update| update.pr.base_ref_name.clone())
+                            .or_else(|| step.target_branch.clone());
+                        if let Some(destination) = destination.filter(|target| !target.is_empty()) {
+                            if active.bundle.nodes.iter().any(|node| {
+                                node.node_type == "branch.landed"
+                                    && node.run_id.as_deref() == Some(run.id.as_str())
+                                    && node
+                                        .repo_ids
+                                        .as_ref()
+                                        .is_some_and(|ids| ids.contains(repo_id))
+                                    && node
+                                        .landing
+                                        .as_ref()
+                                        .and_then(|landing| landing.target_branch.as_ref())
+                                        == Some(&destination)
+                            }) {
+                                continue;
+                            }
+                            let source = outcome
+                                .publication_update
+                                .as_ref()
+                                .and_then(|update| update.pr.head_ref_oid.clone())
+                                .or_else(|| plan.bundle_heads.get(repo_id).cloned());
+                            active.bundle.nodes.push(BundleNode::branch_landed(
+                                node_id("landing"),
+                                now_iso(),
+                                repo_id.clone(),
+                                destination,
+                                source,
+                                run.id.clone(),
+                                plan.lane.clone(),
+                            ));
+                            active.bundle.head_node_id =
+                                active.bundle.nodes.last().map(|n| n.id.clone());
+                            active.bundle.updated_at = now_iso();
+                            bundle_dirty = true;
+                        }
+                    }
+                }
+            }
+
             if let Some(update) = &outcome.publication_update {
                 let forge = providers::for_repo(&update.repo)?;
                 providers::upsert_publication(
@@ -181,10 +236,12 @@ pub(super) fn execute_run(
         } else {
             LandStatus::Running
         };
-        write_json(run_path, run)?;
+        // Save receipts before marking these steps durably succeeded. A retry
+        // can recover an already-merged review, but must not skip its receipt.
         if bundle_dirty {
             save_active_bundle(active)?;
         }
+        write_json(run_path, run)?;
 
         if any_failed {
             print_failed_output_excerpts(&results, &active.root, run_path);
@@ -839,12 +896,9 @@ pub(super) fn ensure_needs_succeeded(run: &LandRun, step: &LandStep) -> Result<(
 }
 
 fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun) -> Result<()> {
-    if active
-        .bundle
-        .nodes
-        .iter()
-        .any(|node| node.run_id.as_deref() == Some(run.id.as_str()))
-    {
+    if active.bundle.nodes.iter().any(|node| {
+        node.node_type == "feature.landed" && node.run_id.as_deref() == Some(run.id.as_str())
+    }) {
         return Ok(());
     }
 

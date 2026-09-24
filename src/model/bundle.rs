@@ -742,6 +742,10 @@ pub struct BundleNode {
     /// other types and nodes written by older Knit versions omit it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<NodeLanding>,
+    /// Source head observed when a branch receipt was recorded. This is not a
+    /// new commit on the bundle branch and must not advance its recorded head.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publication_urls: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -825,6 +829,7 @@ impl BundleNode {
             run_id: None,
             provider: None,
             landing: None,
+            source_commit: None,
             publication_urls: Vec::new(),
             commits: Vec::new(),
             repo_changes: Vec::new(),
@@ -1038,6 +1043,31 @@ impl BundleNode {
             landing,
             publication_urls,
             ..Self::base(id, "feature.landed", created_at)
+        }
+    }
+
+    /// Evidence of one successful branch merge. Bundle completion and
+    /// deployment success are recorded separately.
+    pub fn branch_landed(
+        id: String,
+        created_at: String,
+        repo_id: String,
+        target_branch: String,
+        source_commit: Option<String>,
+        run_id: String,
+        lane: Option<String>,
+    ) -> Self {
+        Self {
+            repo_ids: Some(vec![repo_id.clone()]),
+            message: Some(format!("Landed into {target_branch}")),
+            source_commit,
+            run_id: Some(run_id),
+            landing: Some(NodeLanding {
+                terminal: false,
+                lane,
+                target_branch: Some(target_branch),
+            }),
+            ..Self::base(id, "branch.landed", created_at)
         }
     }
 

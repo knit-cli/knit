@@ -53,7 +53,9 @@ fn histories() -> (PathBuf, PathBuf) {
 }
 
 fn knit_subjects(workspace: &Path, arguments: &[&str]) -> Vec<String> {
-    let mut args = vec!["log", "--all", "--group", "event", "--json"];
+    let mut args = vec![
+        "log", "--all", "--scope", "activity", "--group", "event", "--json",
+    ];
     args.extend_from_slice(arguments);
     let output = knit(workspace, args);
     let entries: Vec<Value> = serde_json::from_str(&output).unwrap();
@@ -130,7 +132,10 @@ fn failed_query_does_not_change_preserved_history() {
     let (workspace, _) = histories();
     let path = workspace.join(".knit/history/demo.history.jsonl");
     let before = fs::read(&path).unwrap();
-    let error = knit_fails(&workspace, ["log", "--all", "--grep", "["]);
+    let error = knit_fails(
+        &workspace,
+        ["log", "--all", "--scope", "activity", "--grep", "["],
+    );
     assert!(
         error.contains("grep") || error.contains("pattern"),
         "{error}"
@@ -169,7 +174,14 @@ fn boolean_expression_cli_intersects_legacy_filters_and_validates_before_io() {
     assert!(listed.contains("Update api endpoint"), "{listed}");
     assert!(!listed.contains("Update web endpoint"), "{listed}");
     for args in [
-        vec!["log", "--all", "--query", "repo:api OR"],
+        vec![
+            "log",
+            "--all",
+            "--scope",
+            "activity",
+            "--query",
+            "repo:api OR",
+        ],
         vec!["history", "list", "--query", "repo:api OR"],
     ] {
         fs::write(
@@ -214,9 +226,11 @@ fn expression_views_use_exact_current_membership_and_personal_override() {
         "repo:api OR view:Missing",
         "NOT (repo:api AND view:Missing)",
     ] {
-        assert!(
-            knit_fails(&workspace, ["log", "--all", "--query", query]).contains("resolving view")
-        );
+        assert!(knit_fails(
+            &workspace,
+            ["log", "--all", "--scope", "activity", "--query", query]
+        )
+        .contains("resolving view"));
     }
     // A changed personal view takes effect immediately, without rewriting history.
     views["views"]["Backend"]["exclude"] = json!(["api"]);

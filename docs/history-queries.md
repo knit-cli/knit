@@ -1,7 +1,8 @@
 # Inspect local history
 
 `knit log` inspects the current bundle. Add `--all` to inspect the current
-project's locally recorded history, including archived bundles and preserved
+project's locally recorded base ledger with open bundles. Use `--scope activity`
+for the complete activity ledger, including archived bundles and preserved
 events from deleted bundles. Neither command fetches from Git, contacts a sync
 remote, or regenerates the history ledger.
 
@@ -209,3 +210,47 @@ NOT operators. Invalid syntax reports a byte position. `match:` is replaced by
 AND/OR. `context:` is not a predicate: Boolean selection keeps companions.
 For legacy CLI `--repo`/`--view` detail narrowing, use `--full-context` to include
 companions.
+
+## Base ledger and open bundles
+
+`knit log --all` defaults to the **base ledger plus open bundle activity**.
+These are distinct records: base commits were observed on a configured base
+branch; an open bundle's commits are authoring activity and do not establish
+that a merge happened. Bundle-scoped `knit log` keeps its activity reading.
+
+```sh
+knit log --all --scope base                 # configured bases only
+knit log --all --scope ongoing              # activity in currently open bundles
+knit log --all --scope base-and-ongoing     # project default
+knit log --all --scope landings             # recorded merges, every destination
+knit log --all --scope activity             # complete preserved activity ledger
+```
+
+The scope applies before repository/expression selection, grouping, and paging.
+`--full-context` cannot bring ongoing activity into a base-only query.
+Archiving a bundle does not make its work part of the base ledger. Historical
+activity from archived or deleted bundles remains available with `--scope activity`.
+An open bundle can already have some work on a base branch; the overlay labels
+its activity as open bundle work, not proof that every commit is still unmerged.
+
+`knit history refresh` and history sync record `base.commit` events from each
+project repository's cached `origin/<baseBranch>` first-parent Git history.
+Repositories without a configured remote use their local configured base.
+This includes direct commits and merges outside Knit. A missing remote ref
+never falls back to unpushed local commits. Inspection and refresh do not fetch;
+refresh Git explicitly when current remote state is needed. Shallow clones can
+only contribute the history they contain. The ledger preserves observations,
+including commits subsequently reverted or removed by a branch rewrite.
+
+Successful landing steps also record one `branch.landed` receipt per repository,
+with its destination and observed source head when available. Receipts survive
+later merge or deployment failures; they do not assert deployment success.
+Completed older landings can be reconstructed when their recorded review and
+landing target establish the destination. Unknown destinations remain in the
+all-landings reading, never inferred from archive state. Rebuild and sync to
+enrich existing hosted records:
+
+```sh
+knit history refresh --rebuild
+knit sync push --history
+```

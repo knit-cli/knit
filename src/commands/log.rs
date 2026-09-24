@@ -31,6 +31,9 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
         let repos =
             crate::commands::history::query::intersect_repo_filters(&args.repos, view_repos);
         let mut query = build_query(args, &root, repos, limit)?;
+        if query.scope.is_none() {
+            query.scope = Some("base-and-ongoing".into());
+        }
         query.expression = crate::commands::history::query::expression(
             &root,
             Some(&project_id),
@@ -82,6 +85,7 @@ fn build_query(
     limit: Option<usize>,
 ) -> Result<HistoryQuery> {
     Ok(HistoryQuery {
+        scope: args.scope.clone(),
         repos,
         repo_match: match args.repo_match {
             HistoryRepoMatchArg::Any => RepoMatch::Any,
@@ -130,7 +134,8 @@ fn print_bundle_entries(
         return Ok(());
     }
 
-    let can_reuse_nodes = !args.oneline
+    let can_reuse_nodes = args.scope.is_none()
+        && !args.oneline
         && args.repos.is_empty()
         && args.view.is_none()
         && args.kinds.is_empty()
@@ -174,16 +179,29 @@ fn print_entries(entries: &[HistoryEntry], args: &LogArgs, bundle_context: bool)
 
 fn print_entry(entry: &HistoryEntry, oneline: bool, bundle_context: bool) {
     let bundle = entry.bundle_id.as_deref().unwrap_or("-");
+    let label = if entry.events.iter().all(|event| event.kind == "base.commit") {
+        "[base]"
+    } else if entry
+        .events
+        .iter()
+        .all(|event| event.kind == "branch.landed")
+    {
+        "[branch merge]"
+    } else {
+        "[bundle activity]"
+    };
     if bundle_context {
         println!(
-            "{}  {}  {}",
+            "{} {}  {}  {}",
+            label,
             out::node(&entry.id),
             out::repo(bundle),
             entry.message.lines().next().unwrap_or_default()
         );
     } else {
         println!(
-            "{}  {}",
+            "{} {}  {}",
+            label,
             out::node(&entry.id),
             entry.message.lines().next().unwrap_or_default()
         );
@@ -198,7 +216,23 @@ fn print_entry(entry: &HistoryEntry, oneline: bool, bundle_context: bool) {
             .as_deref()
             .map(short_sha)
             .unwrap_or_else(|| event.kind.clone());
-        println!("  {} {}", out::repo_field(repo, 10), detail);
+        let destination = if event.kind == "base.commit" {
+            format!(" [base: {}]", event.branch.as_deref().unwrap_or("?"))
+        } else if event.kind == "branch.landed" {
+            format!(
+                " -> {} (branch merge recorded)",
+                event.branch.as_deref().unwrap_or("unknown destination")
+            )
+        } else if event.kind == "bundle.landed" {
+            " (bundle landing recorded; inspect destination evidence)".to_string()
+        } else {
+            event
+                .branch
+                .as_deref()
+                .map(|branch| format!(" on {branch}"))
+                .unwrap_or_default()
+        };
+        println!("  {} {}{}", out::repo_field(repo, 10), detail, destination);
     }
 }
 

@@ -28,6 +28,8 @@ pub enum RepoMatch {
 }
 #[derive(Clone, Debug, Default)]
 pub struct HistoryQuery {
+    pub scope: Option<String>,
+    pub open_bundles: Vec<String>,
     pub expression: Option<expression::Expression>,
     pub bundle_id: Option<String>,
     pub repos: Option<Vec<String>>,
@@ -207,7 +209,37 @@ pub fn query_project_history(
     project_id: &str,
     query: &HistoryQuery,
 ) -> Result<Vec<HistoryEntry>> {
-    with_project_index(root, project_id, |db| execute(db, query, false))
+    let mut query = query.clone();
+    if matches!(query.scope.as_deref(), Some("base-and-ongoing" | "ongoing")) {
+        let dir = root.join(".knit/bundles");
+        if dir.exists() {
+            for entry in fs::read_dir(dir)? {
+                let path = entry?.path();
+                if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                    continue;
+                }
+                let bundle: ChangeGroup = crate::store::read_json(&path)?;
+                if bundle.project_id.as_deref() != Some(project_id) {
+                    continue;
+                }
+                let open = match bundle.state {
+                    Some(crate::model::BundleState::Open) => true,
+                    Some(_) => false,
+                    None => {
+                        bundle.archived_at.is_none()
+                            && !bundle
+                                .nodes
+                                .iter()
+                                .any(crate::model::is_terminal_landed_node)
+                    }
+                };
+                if open {
+                    query.open_bundles.push(bundle.id);
+                }
+            }
+        }
+    }
+    with_project_index(root, project_id, |db| execute(db, &query, false))
 }
 
 fn query_lock(root: &Path, project_id: &str, timeout: Duration) -> Result<crate::store::KnitLock> {
@@ -262,6 +294,16 @@ pub fn query_bundle_history(
         return Ok(Vec::new());
     }
     q.bundle_id = Some(bundle.id.clone());
+    if matches!(bundle.state, Some(crate::model::BundleState::Open))
+        || (bundle.state.is_none()
+            && bundle.archived_at.is_none()
+            && !bundle
+                .nodes
+                .iter()
+                .any(crate::model::is_terminal_landed_node))
+    {
+        q.open_bundles.push(bundle.id.clone());
+    }
     let mut db = Connection::open_in_memory()?;
     schema(&db)?;
     let tx = db.transaction()?;
@@ -364,6 +406,25 @@ fn query_sql(
         HistoryGrouping::Event => "seq",
         HistoryGrouping::Commit => "commit_key",
         HistoryGrouping::Bundle => "bundle_key",
+    };
+    let base = "(kind = 'base.commit' OR (kind = 'branch.landed' AND json_extract(payload, '$.branch') != '' AND json_extract(payload, '$.branch') = json_extract(payload, '$.baseBranch')))";
+    let ongoing_ids = q
+        .open_bundles
+        .iter()
+        .map(|id| bind(id.clone().into()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let ongoing = if ongoing_ids.is_empty() {
+        "0".to_string()
+    } else {
+        format!("bundle IN ({ongoing_ids}) AND kind NOT IN ('base.commit','branch.landed','bundle.landed')")
+    };
+    let scope = match q.scope.as_deref() {
+        Some("base") => base.to_string(),
+        Some("base-and-ongoing") => format!("({base} OR ({ongoing}))"),
+        Some("ongoing") => ongoing,
+        Some("landings") => "(kind = 'branch.landed' OR (kind = 'bundle.landed' AND COALESCE(json_extract(payload, '$.metadata.hasBranchReceipts'), 0) != 1))".to_string(),
+        _ => "1".to_string(),
     };
     let mut conditions = Vec::new();
     if let Some(bundle) = &q.bundle_id {
@@ -468,6 +529,14 @@ fn query_sql(
             filters.join(" AND ")
         }
     );
+    let sql = if matches!(q.scope.as_deref(), None | Some("activity")) {
+        sql
+    } else {
+        let sql = sql
+            .replace("FROM events", "FROM scoped_events")
+            .replace("JOIN events", "JOIN scoped_events");
+        sql.replacen("WITH selected", &format!("WITH scoped_events AS NOT MATERIALIZED (SELECT * FROM events WHERE {scope}), selected"), 1)
+    };
     Ok((sql, values))
 }
 

@@ -177,6 +177,7 @@ pub fn apply_land_from_artifact(
     let branch_merges = !terminal && (lane_name.is_some() || target_branch.is_some());
 
     let started_at = now_iso();
+    let receipt_run = format!("run-artifact-{}-{started_at}", bundle.id);
     let mut merged_repo_ids = Vec::new();
     let mut publication_urls = Vec::new();
 
@@ -217,6 +218,20 @@ pub fn apply_land_from_artifact(
                     .map(String::as_str)
                     .or(target_branch.as_deref()),
                 lane_name.as_deref(),
+            )?;
+            let destination = repo_targets
+                .get(&repo.id)
+                .cloned()
+                .or_else(|| target_branch.clone())
+                .context("branch merge has a destination")?;
+            record_receipt(
+                &mut bundle,
+                repo,
+                destination,
+                None,
+                &receipt_run,
+                lane_name.clone(),
+                out_path,
             )?;
             merged_repo_ids.push(repo.id.clone());
             if let Some(publication) = &publication {
@@ -274,6 +289,17 @@ pub fn apply_land_from_artifact(
             }
         }
         if state_is_merged(&pr) {
+            record_receipt(
+                &mut bundle,
+                repo,
+                pr.base_ref_name
+                    .clone()
+                    .unwrap_or_else(|| publication.base_branch.clone()),
+                pr.head_ref_oid.clone(),
+                &receipt_run,
+                lane_name.clone(),
+                out_path,
+            )?;
             providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
             merged_repo_ids.push(repo.id.clone());
             publication_urls.push(publication.url.clone());
@@ -312,6 +338,18 @@ pub fn apply_land_from_artifact(
             )
             .with_context(|| format!("{}: merging {}", repo.id, publication.url))?;
 
+        // The merge succeeded even if reading the updated review now fails.
+        record_receipt(
+            &mut bundle,
+            repo,
+            pr.base_ref_name
+                .clone()
+                .unwrap_or_else(|| publication.base_branch.clone()),
+            pr.head_ref_oid.clone(),
+            &receipt_run,
+            lane_name.clone(),
+            out_path,
+        )?;
         let refreshed = forge.view(&target, &publication.url)?;
         providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &refreshed);
         merged_repo_ids.push(repo.id.clone());
@@ -329,7 +367,7 @@ pub fn apply_land_from_artifact(
         node_id("land"),
         started_at,
         format!("land-{}", bundle.id),
-        format!("run-artifact-{}", bundle.id),
+        receipt_run,
         DEFAULT_LAND_PROVIDER.to_string(),
         merged_repo_ids,
         publication_urls,
@@ -364,6 +402,35 @@ pub fn apply_land_from_artifact(
             Ok(())
         }
     }
+}
+
+// Persist each completed merge when an output artifact was requested, so a
+// later failure cannot erase evidence of a partially applied landing.
+#[allow(clippy::too_many_arguments)]
+fn record_receipt(
+    bundle: &mut crate::model::ChangeGroup,
+    repo: &crate::model::RepoEntry,
+    destination: String,
+    source: Option<String>,
+    run_id: &str,
+    lane: Option<String>,
+    out_path: Option<&Path>,
+) -> Result<()> {
+    bundle.nodes.push(BundleNode::branch_landed(
+        node_id("landing"),
+        now_iso(),
+        repo.id.clone(),
+        destination,
+        source,
+        run_id.into(),
+        lane,
+    ));
+    bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());
+    bundle.updated_at = now_iso();
+    if let Some(path) = out_path {
+        write_json(path, bundle)?;
+    }
+    Ok(())
 }
 
 /// Send one repository's feature branch into its destination branch on the
