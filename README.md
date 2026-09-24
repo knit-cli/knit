@@ -93,7 +93,3 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
 - **[dist/README.md](dist/README.md)** — how releases are cut (binaries, crates.io, Homebrew/Scoop/winget).
-
-## Knit, Urdir, and Gloss
-
-Knit, Urdir, and Gloss share a simple handoff. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Urdir reads a bundle later and produces cross-repo review analysis. Gloss displays and explains that review artifact; a compatible remote can bring the three together in one page.
