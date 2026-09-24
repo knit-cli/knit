@@ -210,10 +210,7 @@ pub fn query_project_history(
     query: &HistoryQuery,
 ) -> Result<Vec<HistoryEntry>> {
     let mut query = query.clone();
-    if matches!(
-        query.scope.as_deref(),
-        Some("base-and-proposals" | "proposals")
-    ) {
+    if matches!(query.scope.as_deref(), Some("base-and-ongoing" | "ongoing")) {
         let dir = root.join(".knit/bundles");
         if dir.exists() {
             for entry in fs::read_dir(dir)? {
@@ -411,21 +408,21 @@ fn query_sql(
         HistoryGrouping::Bundle => "bundle_key",
     };
     let base = "(kind = 'base.commit' OR (kind = 'branch.landed' AND json_extract(payload, '$.branch') != '' AND json_extract(payload, '$.branch') = json_extract(payload, '$.baseBranch')))";
-    let proposal_ids = q
+    let ongoing_ids = q
         .open_bundles
         .iter()
         .map(|id| bind(id.clone().into()))
         .collect::<Vec<_>>()
         .join(",");
-    let proposals = if proposal_ids.is_empty() {
+    let ongoing = if ongoing_ids.is_empty() {
         "0".to_string()
     } else {
-        format!("bundle IN ({proposal_ids}) AND kind NOT IN ('base.commit','branch.landed','bundle.landed')")
+        format!("bundle IN ({ongoing_ids}) AND kind NOT IN ('base.commit','branch.landed','bundle.landed')")
     };
     let scope = match q.scope.as_deref() {
         Some("base") => base.to_string(),
-        Some("base-and-proposals") => format!("({base} OR ({proposals}))"),
-        Some("proposals") => proposals,
+        Some("base-and-ongoing") => format!("({base} OR ({ongoing}))"),
+        Some("ongoing") => ongoing,
         Some("landings") => "(kind = 'branch.landed' OR (kind = 'bundle.landed' AND COALESCE(json_extract(payload, '$.metadata.hasBranchReceipts'), 0) != 1))".to_string(),
         _ => "1".to_string(),
     };

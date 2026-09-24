@@ -32,7 +32,7 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
             crate::commands::history::query::intersect_repo_filters(&args.repos, view_repos);
         let mut query = build_query(args, &root, repos, limit)?;
         if query.scope.is_none() {
-            query.scope = Some("base-and-proposals".into());
+            query.scope = Some("base-and-ongoing".into());
         }
         query.expression = crate::commands::history::query::expression(
             &root,

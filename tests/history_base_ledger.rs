@@ -23,43 +23,43 @@ fn base_ledger_records_direct_commits_and_keeps_open_work_separate() {
     let base_sha = git(&backend, ["rev-parse", "HEAD"]).trim().to_string();
     knit(
         &workspace,
-        ["bundle", "proposed change", "--repo", "backend"],
+        ["bundle", "ongoing change", "--repo", "backend"],
     );
-    let checkout = workspace.join(".knit/worktrees/proposed-change/backend");
-    append_line(&checkout.join("app.txt"), "proposed change");
-    knit(&checkout, ["commit", "--all", "-m", "Proposed change"]);
-    let proposed_sha = git(&checkout, ["rev-parse", "HEAD"]).trim().to_string();
+    let checkout = workspace.join(".knit/worktrees/ongoing-change/backend");
+    append_line(&checkout.join("app.txt"), "ongoing change");
+    knit(&checkout, ["commit", "--all", "-m", "Ongoing change"]);
+    let ongoing_sha = git(&checkout, ["rev-parse", "HEAD"]).trim().to_string();
     knit(&workspace, ["history", "refresh"]);
     let base = events(&workspace, "base");
     assert!(base
         .iter()
         .any(|e| e["kind"] == "base.commit" && e["commit"] == base_sha));
-    assert!(!base.iter().any(|e| e["commit"] == proposed_sha));
-    let proposals = events(&workspace, "proposals");
-    assert!(proposals.iter().any(|e| e["commit"] == proposed_sha));
-    assert!(!proposals.iter().any(|e| e["kind"] == "base.commit"));
-    let both = events(&workspace, "base-and-proposals");
+    assert!(!base.iter().any(|e| e["commit"] == ongoing_sha));
+    let ongoing = events(&workspace, "ongoing");
+    assert!(ongoing.iter().any(|e| e["commit"] == ongoing_sha));
+    assert!(!ongoing.iter().any(|e| e["kind"] == "base.commit"));
+    let both = events(&workspace, "base-and-ongoing");
     assert!(both.iter().any(|e| e["commit"] == base_sha));
-    assert!(both.iter().any(|e| e["commit"] == proposed_sha));
+    assert!(both.iter().any(|e| e["commit"] == ongoing_sha));
     let first = fs::read(workspace.join(".knit/history/demo.history.jsonl")).unwrap();
     knit(&workspace, ["history", "refresh"]);
     assert_eq!(
         first,
         fs::read(workspace.join(".knit/history/demo.history.jsonl")).unwrap()
     );
-    // Archiving a proposal must neither turn it into base history nor leave
-    // it in the open overlay. Its authoring history remains inspectable.
+    // Archiving an ongoing bundle must neither turn it into base history nor
+    // leave it in the open overlay. Its authoring history remains inspectable.
     knit(
         &workspace,
-        ["bundle", "archive", "proposed-change", "--keep-worktrees"],
+        ["bundle", "archive", "ongoing-change", "--keep-worktrees"],
     );
-    assert!(events(&workspace, "proposals").is_empty());
+    assert!(events(&workspace, "ongoing").is_empty());
     assert!(!events(&workspace, "base")
         .iter()
-        .any(|e| e["commit"] == proposed_sha));
+        .any(|e| e["commit"] == ongoing_sha));
     assert!(events(&workspace, "activity")
         .iter()
-        .any(|e| e["commit"] == proposed_sha));
+        .any(|e| e["commit"] == ongoing_sha));
     fs::remove_dir_all(root).unwrap();
 }
 

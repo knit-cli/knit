@@ -220,14 +220,14 @@ that a merge happened. Bundle-scoped `knit log` keeps its activity reading.
 
 ```sh
 knit log --all --scope base                 # configured bases only
-knit log --all --scope proposals            # activity in currently open bundles
-knit log --all --scope base-and-proposals   # project default
+knit log --all --scope ongoing              # activity in currently open bundles
+knit log --all --scope base-and-ongoing     # project default
 knit log --all --scope landings             # recorded merges, every destination
 knit log --all --scope activity             # complete preserved activity ledger
 ```
 
 The scope applies before repository/expression selection, grouping, and paging.
-`--full-context` cannot bring proposal activity into a base-only query.
+`--full-context` cannot bring ongoing activity into a base-only query.
 Archiving a bundle does not make its work part of the base ledger. Historical
 activity from archived or deleted bundles remains available with `--scope activity`.
 An open bundle can already have some work on a base branch; the overlay labels
