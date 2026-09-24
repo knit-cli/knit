@@ -1135,6 +1135,12 @@ pub fn pull_bundle_remote_state(
             "no remote artifact".to_string(),
         ));
     };
+    super::landing::pull_plans_scoped(
+        Some(&context.project.id),
+        &context.remote_name,
+        false,
+        Some(bundle_id),
+    )?;
     // The export only carries artifact metadata. When its hash is the one this
     // artifact was last reconciled with, the remote holds nothing new and the
     // payload is never downloaded — only the checkouts are refreshed.
@@ -2062,6 +2068,8 @@ fn pull_bundle_by_slug_classified(
     // installed exact-host credential helpers carry non-public repo access.
     super::helpers::ensure_helpers_for_git(&remote_name);
     materialize_imported_bundle(&root, &bundle_id).map_err(other)?;
+    super::landing::pull_plans_scoped(Some(&project_id), &remote_name, false, Some(&bundle_id))
+        .map_err(other)?;
 
     let saved: ChangeGroup = read_json(&path).map_err(other)?;
     let repos = saved

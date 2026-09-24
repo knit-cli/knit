@@ -338,6 +338,8 @@ fn intermediate_source_merge_is_pinned_and_partial_receipt_survives_command_fail
     .unwrap();
     project["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
     project["landing"] = json!({"steps":[{"id":"verify-merged","type":"run","role":"verify","repoId":"service","needs":["merge-service"],"effect":"read_only","command":[python_executable(),"-c","import os,json,subprocess; inputs=json.loads(os.environ['KNIT_LAND_INPUTS']); assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip()==inputs['merge-service']['revision']; raise SystemExit(3)"]}]});
+    let verification = project["landing"]["steps"].take();
+    project["landing"]["targets"] = json!({"staging":{"steps":verification}});
     write(&root.join("project.json"), &project);
     write(&root.join("roots.json"), &json!({"service":service}));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_knit"));
@@ -630,4 +632,402 @@ fn unchanged_source_dependency_uses_recorded_head_despite_dirty_advanced_checkou
         fs::read_to_string(dependency.join("version")).unwrap(),
         "dirty"
     );
+}
+
+#[test]
+fn discovery_is_read_only_and_includes_saved_ad_hoc_destinations() {
+    let f = Fixture::new();
+    let mut p = read(&f.project);
+    p["landing"]["lanes"] = json!({"preview":{"terminal":false,"branches":{"service":"test"},"merge":{"enabled":false}}});
+    p["landing"]["targets"] = json!({"release":{"terminal":true}});
+    write(&f.project, &p);
+    let adhoc = json!({"schemaVersion":"0.2","kind":"KnitLandPlan","id":"saved","bundleId":"demo","targetBranch":"custom","terminal":false,"steps":[]});
+    write(&f.root.join(".knit/land-plans/authored.land.json"), &adhoc);
+    let output = f.cmd(&["land", "destinations", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result: Value = serde_json::from_slice(&output.stdout).unwrap();
+    let all = result["destinations"].as_array().unwrap();
+    assert_eq!(all.len(), 4);
+    let lane = all.iter().find(|d| d["key"] == "lane:preview").unwrap();
+    assert_eq!(lane["terminal"], false);
+    assert_eq!(lane["branches"]["service"], "test");
+    assert_eq!(lane["mergeEnabled"], false);
+    assert_eq!(lane["hasPlan"], false);
+    let saved = all.iter().find(|d| d["key"] == "target:custom").unwrap();
+    assert_eq!(saved["hasPlan"], true);
+    assert_eq!(saved["planHash"].as_str().unwrap().len(), 64);
+    assert!(Path::new(saved["planPath"].as_str().unwrap()).is_absolute());
+    assert_eq!(
+        fs::read_dir(f.root.join(".knit/land-plans"))
+            .unwrap()
+            .count(),
+        1
+    );
+    assert!(!f.root.join(".knit/land-runs").exists());
+}
+
+#[test]
+fn local_terminal_preflight_rejects_before_effects_or_receipts() {
+    for interactive in [false, true] {
+        let f = Fixture::new();
+        let mut p = read(&f.project);
+        let step = if interactive {
+            json!({"id":"prompt","type":"run","repoId":"service","interactive":true,"command":[python_executable(),"-c","raise Exception('must not execute')"],"effect":"read_only"})
+        } else {
+            json!({"id":"manual","type":"manual","repoId":"service","instructions":"Confirm synthetic status","effect":"read_only"})
+        };
+        p["landing"] = json!({"onFailure":"stop","merge":{"enabled":false},"steps":[step]});
+        write(&f.project, &p);
+        let generated = f.cmd(&["land", "plan", "--out", "plan.json", "--json"]);
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let bundle_before = fs::read(&f.bundle).unwrap();
+        let rejected = f.cmd(&[
+            "land",
+            "apply",
+            "--plan",
+            "plan.json",
+            "--no-remote",
+            "--keep-worktrees",
+        ]);
+        assert!(!rejected.status.success());
+        assert!(
+            String::from_utf8_lossy(&rejected.stderr).contains("TTY"),
+            "{}",
+            String::from_utf8_lossy(&rejected.stderr)
+        );
+        assert_eq!(fs::read(&f.bundle).unwrap(), bundle_before);
+        assert!(!f.root.join(".knit/land-runs").exists());
+        assert!(!f.root.join(".knit/landing-ownership").exists());
+    }
+}
+
+#[cfg(unix)]
+#[test]
+fn attached_terminal_accepts_real_answers_and_manual_ack_without_retaining_transcript() {
+    let f = Fixture::new();
+    let mut p = read(&f.project);
+    p["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[
+        {"id":"prompt","type":"run","repoId":"service","interactive":true,"command":[python_executable(),"-c","import os; assert os.isatty(0) and os.isatty(1); assert input('Answer: ') == 'real-user-answer'; print('synthetic-terminal-secret')"],"effect":"read_only"},
+        {"id":"confirm","type":"manual","repoId":"service","needs":["prompt"],"instructions":"Inspect synthetic result","effect":"read_only"}
+    ]});
+    write(&f.project, &p);
+    let generated = f.cmd(&["land", "plan", "--out", "plan.json", "--json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = Command::new(python_executable()).current_dir(&f.root)
+        .env_remove("KNIT_BUNDLE").env_remove("KNIT_SESSION").env("KNIT_HOME",f.root.join("home"))
+        .args(["-c", r#"
+import os,pty,select,sys,time,signal
+pid,fd=pty.fork()
+if pid==0:
+ os.execv(sys.argv[1],[sys.argv[1],'land','apply','--plan','plan.json','--keep-worktrees','--no-remote'])
+transcript=b''; answered=False; acknowledged=False; deadline=time.monotonic()+30
+try:
+ while time.monotonic()<deadline:
+  if select.select([fd],[],[],.1)[0]:
+   try: chunk=os.read(fd,4096)
+   except OSError: break
+   if not chunk: break
+   transcript=(transcript+chunk)[-65536:]
+   if b'Answer: ' in transcript and not answered:
+    os.write(fd,b'real-user-answer\n'); answered=True
+   if b'Type acknowledge' in transcript and not acknowledged:
+    os.write(fd,b'acknowledge verified synthetic result\n'); acknowledged=True
+ else: raise AssertionError('terminal timed out')
+ _,status=os.waitpid(pid,0)
+ assert os.waitstatus_to_exitcode(status)==0,transcript.decode(errors='replace')
+ assert answered and acknowledged,transcript
+finally:
+ try: os.kill(pid,signal.SIGKILL)
+ except ProcessLookupError: pass
+ os.close(fd)
+"#, env!("CARGO_BIN_EXE_knit")]).output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let paths: Vec<_> = fs::read_dir(f.root.join(".knit/land-runs"))
+        .unwrap()
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.to_string_lossy().ends_with(".run.json"))
+        .collect();
+    assert_eq!(paths.len(), 1);
+    let receipt = read(&paths[0]);
+    assert_eq!(receipt["steps"][0]["status"], "succeeded");
+    assert_eq!(receipt["steps"][1]["output"]["acknowledged"], true);
+    assert_eq!(
+        receipt["steps"][1]["output"]["notes"],
+        "verified synthetic result"
+    );
+    let text = receipt.to_string();
+    // The argv is intentionally part of the plan; only assert receipt streams are empty.
+    assert_eq!(receipt["steps"][0]["stdout"], "");
+    assert!(!text.contains("real-user-answer\\r\\n"));
+}
+
+#[cfg(unix)]
+#[test]
+fn terminal_rejection_and_command_failure_preserve_uncertain_effects() {
+    for manual in [true, false] {
+        let f = Fixture::new();
+        let mut p = read(&f.project);
+        let step = if manual {
+            json!({"id":"effect","type":"manual","instructions":"Inspect synthetic state","recovery":{"mode":"manual","reason":"Reconcile synthetic state"}})
+        } else {
+            json!({"id":"effect","type":"run","repoId":"service","interactive":true,"command":[python_executable(),"-c","assert input('Answer: ')== 'real-answer'; raise SystemExit(7)"],"recovery":{"mode":"manual","reason":"Reconcile synthetic state"}})
+        };
+        p["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[step]});
+        write(&f.project, &p);
+        let generated = f.cmd(&["land", "plan", "--out", "plan.json", "--json"]);
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let output=Command::new(python_executable()).current_dir(&f.root)
+            .env_remove("KNIT_BUNDLE").env_remove("KNIT_SESSION").env("KNIT_HOME",f.root.join("home"))
+            .args(["-c",r#"
+import os,pty,select,sys,time,signal
+pid,fd=pty.fork()
+if pid==0: os.execv(sys.argv[1],[sys.argv[1],'land','apply','--plan','plan.json','--keep-worktrees','--no-remote'])
+transcript=b''; answered=False; deadline=time.monotonic()+30
+try:
+ while time.monotonic()<deadline:
+  if select.select([fd],[],[],.1)[0]:
+   try: chunk=os.read(fd,4096)
+   except OSError: break
+   if not chunk: break
+   transcript=(transcript+chunk)[-65536:]
+   if not answered and (b'Type acknowledge' in transcript or b'Answer: ' in transcript):
+    os.write(fd,b'no\n' if b'Type acknowledge' in transcript else b'real-answer\n'); answered=True
+ else: raise AssertionError('terminal timed out')
+ _,status=os.waitpid(pid,0)
+ assert answered and os.waitstatus_to_exitcode(status)!=0,transcript.decode(errors='replace')
+finally:
+ try: os.kill(pid,signal.SIGKILL)
+ except ProcessLookupError: pass
+ os.close(fd)
+"#,env!("CARGO_BIN_EXE_knit")]).output().unwrap();
+        assert!(
+            output.status.success(),
+            "{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let path = fs::read_dir(f.root.join(".knit/land-runs"))
+            .unwrap()
+            .flatten()
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".run.json"))
+            .unwrap();
+        let run = read(&path);
+        assert_eq!(run["steps"][0]["status"], "failed");
+        assert_eq!(run["steps"][0]["attribution"], "uncertain");
+        assert_ne!(read(&f.bundle)["state"], "archived");
+        if !manual {
+            assert_eq!(run["steps"][0]["exitCode"], 7);
+        }
+        let resume = f.cmd(&["land", "resume", "--run", path.to_str().unwrap()]);
+        assert!(!resume.status.success());
+    }
+}
+
+#[test]
+fn exact_show_and_hash_guard_keep_reviewed_identity_before_any_effects() {
+    let f = Fixture::new();
+    let marker = f.root.join("must-not-exist");
+    let mut p = read(&f.project);
+    p["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{"id":"effect","type":"run","repoId":"service","command":[python_executable(),"-c","import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('ran')",marker],"recovery":{"mode":"manual","reason":"Remove synthetic marker"}}]});
+    write(&f.project, &p);
+    let path = f.root.join(".knit/land-plans/custom-authored.land.json");
+    let generated = f.cmd(&["land", "plan", "--out", path.to_str().unwrap(), "--json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let inventory = f.cmd(&["land", "destinations", "--json"]);
+    let catalog: Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let expected = catalog["destinations"][0]["planHash"].as_str().unwrap();
+    let before = fs::read(&path).unwrap();
+    let show = f.cmd(&["land", "show", "--plan", path.to_str().unwrap()]);
+    assert!(
+        show.status.success(),
+        "{}",
+        String::from_utf8_lossy(&show.stderr)
+    );
+    assert!(String::from_utf8_lossy(&show.stdout).contains(&format!("Hash: {expected}")));
+    assert_eq!(fs::read(&path).unwrap(), before);
+    let missing = f.cmd(&["land", "show", "--plan", "missing.land.json"]);
+    assert!(!missing.status.success());
+    assert!(!f.root.join("missing.land.json").exists());
+    assert!(!f.root.join(".knit/land-plans/demo.land.json").exists());
+    let mut edited = read(&path);
+    edited["steps"][0]["label"] = json!("Edited after review");
+    write(&path, &edited);
+    let bundle = fs::read(&f.bundle).unwrap();
+    for artifact in [false, true] {
+        let mut args = vec![
+            "land",
+            "apply",
+            "--plan",
+            path.to_str().unwrap(),
+            "--expected-plan-hash",
+            expected,
+        ];
+        if artifact {
+            args.extend([
+                "--from-artifact",
+                f.bundle.to_str().unwrap(),
+                "--project-file",
+                f.project.to_str().unwrap(),
+                "--run-out",
+                "rejected.run.json",
+                "--out",
+                "rejected.bundle.json",
+            ]);
+        } else {
+            args.extend(["--no-remote", "--keep-worktrees"]);
+        }
+        let refused = f.cmd(&args);
+        assert!(!refused.status.success());
+        assert!(
+            String::from_utf8_lossy(&refused.stderr).contains("changed after review"),
+            "{}",
+            String::from_utf8_lossy(&refused.stderr)
+        );
+        assert!(!marker.exists());
+        assert_eq!(fs::read(&f.bundle).unwrap(), bundle);
+        assert!(!f.root.join(".knit/land-runs").exists());
+        assert!(!f.root.join(".knit/landing-ownership").exists());
+        assert!(!f.root.join("rejected.run.json").exists());
+    }
+    let inventory = f.cmd(&["land", "destinations", "--json"]);
+    let catalog: Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let current = catalog["destinations"][0]["planHash"].as_str().unwrap();
+    let applied = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        path.to_str().unwrap(),
+        "--expected-plan-hash",
+        current,
+        "--no-remote",
+        "--keep-worktrees",
+    ]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    assert!(marker.exists());
+}
+
+#[test]
+fn saved_external_lane_discovery_uses_frozen_branches_and_terminal() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"lanes":{"preview":{"terminal":false,"branches":{"service":"reviewed-branch"},"merge":{"enabled":false},"steps":[{"id":"inspect","type":"manual","instructions":"Inspect synthetic status","effect":"read_only"}]}}});
+    write(&f.project, &project);
+    let out = f.cmd(&["land", "--lane", "preview", "plan", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["targetBranches"]["service"], "reviewed-branch");
+    project["landing"]["lanes"]["preview"]["branches"]["service"] = json!("changed-recipe-branch");
+    project["landing"]["lanes"]["preview"]["terminal"] = json!(true);
+    write(&f.project, &project);
+    fs::write(
+        f.root.join(".knit/land-plans/unrelated.land.json"),
+        b"invalid json",
+    )
+    .unwrap();
+    let inventory = f.cmd(&["land", "destinations", "--json"]);
+    assert!(
+        inventory.status.success(),
+        "{}",
+        String::from_utf8_lossy(&inventory.stderr)
+    );
+    let catalog: Value = serde_json::from_slice(&inventory.stdout).unwrap();
+    let lane = catalog["destinations"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|v| v["key"] == "lane:preview")
+        .unwrap();
+    assert_eq!(lane["branches"]["service"], "reviewed-branch");
+    assert_eq!(lane["terminal"], false);
+}
+
+#[test]
+fn review_corrections_executor_protocol_and_no_merge_display() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"steps":[{"id":"inspect","type":"manual","instructions":"Inspect synthetic status","effect":"read_only"}]});
+    write(&f.project, &project);
+    let out = f.cmd(&["land", "plan", "--out", "reviewed.json", "--json"]);
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut plan: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(plan["schemaVersion"], "0.2");
+    assert_eq!(plan["requiredExecutorVersion"], "0.3");
+    let shown = f.cmd(&["land", "show", "--plan", "reviewed.json"]);
+    assert!(
+        shown.status.success(),
+        "{}",
+        String::from_utf8_lossy(&shown.stderr)
+    );
+    let text = String::from_utf8_lossy(&shown.stdout);
+    assert!(
+        text.lines()
+            .any(|line| line.contains("Merges:") && line.contains("none")),
+        "{text}"
+    );
+    assert!(!text.contains("the recorded review objects"));
+    for step in [
+        json!({"id":"inspect","type":"manual","instructions":"Inspect synthetic status","effect":"read_only"}),
+        json!({"id":"inspect","type":"run","repoId":"service","interactive":true,"command":["false"],"effect":"read_only"}),
+    ] {
+        plan["steps"] = json!([step]);
+        for version in ["0.2", "0.3", "0.4"] {
+            plan["requiredExecutorVersion"] = json!(version);
+            write(&f.root.join("reviewed.json"), &plan);
+            let validated = f.cmd(&["land", "validate", "--plan", "reviewed.json", "--json"]);
+            assert_eq!(
+                validated.status.success(),
+                version == "0.3",
+                "{} {}",
+                String::from_utf8_lossy(&validated.stdout),
+                String::from_utf8_lossy(&validated.stderr)
+            );
+        }
+    }
+    plan["steps"][0]["interactive"] = json!(false);
+    plan["requiredExecutorVersion"] = json!("0.2");
+    write(&f.root.join("reviewed.json"), &plan);
+    let compatible = f.cmd(&["land", "validate", "--plan", "reviewed.json", "--json"]);
+    assert!(
+        compatible.status.success(),
+        "{}",
+        String::from_utf8_lossy(&compatible.stdout)
+    );
+    assert!(!f.root.join(".knit/land-runs").exists());
 }

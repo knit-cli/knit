@@ -23,6 +23,7 @@ pub(super) enum LandStepKind {
     WaitChecks,
     Run,
     Deploy,
+    Manual,
 }
 
 impl LandStepKind {
@@ -33,6 +34,7 @@ impl LandStepKind {
             LandStepKind::WaitChecks => "wait_checks",
             LandStepKind::Run => "run",
             LandStepKind::Deploy => "deploy",
+            LandStepKind::Manual => "manual",
         }
     }
 }

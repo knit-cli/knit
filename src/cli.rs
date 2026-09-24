@@ -1439,6 +1439,16 @@ pub enum TagCommand {
 
 #[derive(Subcommand)]
 pub enum LandCommand {
+    /// List configured and saved destinations without generating or executing plans.
+    Destinations {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Display an exact authored plan without generating or executing it.
+    Show {
+        #[arg(long)]
+        plan: PathBuf,
+    },
     /// Generate an editable landing plan from recorded publications.
     Plan {
         #[arg(long)]
@@ -1489,6 +1499,9 @@ pub enum LandCommand {
     },
     /// Execute a landing plan.
     Apply {
+        /// Refuse execution unless the saved plan matches this reviewed canonical hash.
+        #[arg(long)]
+        expected_plan_hash: Option<String>,
         #[arg(long)]
         project_file: Option<PathBuf>,
         #[arg(long)]

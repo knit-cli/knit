@@ -60,53 +60,89 @@ pub(super) fn run_streamed(
     command: &mut Command,
     timeout_seconds: Option<u64>,
 ) -> Result<StreamedCommandOutput> {
-    run_with_output(command, timeout_seconds, false)
+    run_with_output(command, timeout_seconds, false, false)
 }
 
 pub(super) fn run_captured(
     command: &mut Command,
     timeout_seconds: Option<u64>,
 ) -> Result<StreamedCommandOutput> {
-    run_with_output(command, timeout_seconds, true)
+    run_with_output(command, timeout_seconds, true, false)
+}
+
+pub(super) fn run_attached(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, false, true)
 }
 
 fn run_with_output(
     command: &mut Command,
     timeout_seconds: Option<u64>,
     quiet: bool,
+    attached: bool,
 ) -> Result<StreamedCommandOutput> {
     ensure_cancellation_handler()?;
-    if quiet && cancellation_requested() {
+    if (quiet || attached) && cancellation_requested() {
         anyhow::bail!("landing cancelled before spawning command");
     }
     let timeout_seconds = timeout_seconds.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS);
     #[cfg(unix)]
-    if quiet {
+    if quiet || attached {
         use std::os::unix::process::CommandExt;
         command.process_group(0);
     }
     let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
+        .stdout(if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
         .spawn()
         .context("failed to spawn command")?;
+    #[cfg(unix)]
+    let _foreground = if attached {
+        match ForegroundTerminal::attach(child.id()) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                force_terminate_process_tree(&mut child);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let active_child = ActiveChild::register(child.id());
-    let stdout = child.stdout.take().expect("piped child stdout");
-    let stderr = child.stderr.take().expect("piped child stderr");
-    let stdout_reader = thread::spawn(move || {
-        if quiet {
-            tee_and_capture(stdout, io::sink())
-        } else {
-            tee_and_capture(stdout, io::stdout())
-        }
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_reader = stdout.map(|stdout| {
+        thread::spawn(move || {
+            if quiet {
+                tee_and_capture(stdout, io::sink())
+            } else {
+                tee_and_capture(stdout, io::stdout())
+            }
+        })
     });
-    let stderr_reader = thread::spawn(move || {
-        if quiet {
-            tee_and_capture(stderr, io::sink())
-        } else {
-            tee_and_capture(stderr, io::stderr())
-        }
+    let stderr_reader = stderr.map(|stderr| {
+        thread::spawn(move || {
+            if quiet {
+                tee_and_capture(stderr, io::sink())
+            } else {
+                tee_and_capture(stderr, io::stderr())
+            }
+        })
     });
 
     let started = Instant::now();
@@ -134,7 +170,7 @@ fn run_with_output(
     // Machine adapters must quiesce descendants even when a shell exits after
     // launching background children. Their private group is never reused.
     #[cfg(unix)]
-    if quiet {
+    if quiet || attached {
         let group = -(child.id() as i32);
         unsafe {
             libc::kill(group, libc::SIGTERM);
@@ -152,15 +188,57 @@ fn run_with_output(
     // subprocess can never be left blocked on a full pipe.
     let cancelled = cancellation_requested();
     drop(active_child);
-    let stdout = join_reader(stdout_reader, "stdout");
-    let stderr = join_reader(stderr_reader, "stderr");
+    let stdout = stdout_reader.map(|r| join_reader(r, "stdout")).transpose();
+    let stderr = stderr_reader.map(|r| join_reader(r, "stderr")).transpose();
     Ok(StreamedCommandOutput {
         status: status?,
-        stdout: stdout?,
-        stderr: stderr?,
+        stdout: stdout?.unwrap_or_default(),
+        stderr: stderr?.unwrap_or_default(),
         timed_out,
         cancelled,
     })
+}
+
+// Give attached commands their own foreground group. This preserves real job
+// control while allowing descendant cleanup without signalling Knit itself.
+#[cfg(unix)]
+struct ForegroundTerminal {
+    previous: libc::pid_t,
+}
+#[cfg(unix)]
+impl ForegroundTerminal {
+    fn set(group: libc::pid_t) -> Result<()> {
+        // SAFETY: terminal operations use stdin's descriptor and an OS group ID.
+        // SIGTTOU must be suppressed while the parent restores the foreground.
+        unsafe {
+            let prior = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            let result = libc::tcsetpgrp(libc::STDIN_FILENO, group);
+            let error = std::io::Error::last_os_error();
+            libc::signal(libc::SIGTTOU, prior);
+            if result < 0 {
+                return Err(error).context("cannot attach command to foreground terminal");
+            }
+        }
+        Ok(())
+    }
+    fn attach(pid: u32) -> Result<Self> {
+        let previous = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        if previous < 0 {
+            return Err(std::io::Error::last_os_error()).context("no controlling terminal");
+        }
+        Self::set(pid as libc::pid_t)?;
+        // A fast reader may have received SIGTTIN before the foreground handoff.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGCONT);
+        }
+        Ok(Self { previous })
+    }
+}
+#[cfg(unix)]
+impl Drop for ForegroundTerminal {
+    fn drop(&mut self) {
+        let _ = Self::set(self.previous);
+    }
 }
 
 struct ActiveChild {

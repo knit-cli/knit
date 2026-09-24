@@ -363,8 +363,9 @@ Generate, inspect and execute the same document locally or on a runner:
 
 ```sh
 knit land plan --out reviewed.land.json
+knit land show --plan reviewed.land.json
 knit land validate --plan reviewed.land.json --json
-knit land apply --plan reviewed.land.json
+knit land apply --plan reviewed.land.json --expected-plan-hash <reviewed-sha256>
 
 knit land plan --from-artifact bundle.json --project-file project.json --out reviewed.land.json --json
 knit land validate --plan reviewed.land.json --from-artifact bundle.json --project-file project.json --json
@@ -377,6 +378,34 @@ knit land recover --plan reviewed.land.json --run execution.run.json --from-arti
 A plan's `workflow` is either `{ "step": "id" }`, `{ "sequence": [...] }` or `{ "parallel": [...] }`. When supplied it determines execution edges; otherwise `steps[].needs` remains authoritative. Every step must occur exactly once in a workflow. Explicit group barriers and dependency waves are retained. `maxParallel` defaults to four; checkout and resource locks may further serialize a wave. `requires` records input-producing prerequisites that workflow edits cannot remove. Builds and deployments must follow their repository's merge and consume its recorded revision. Commands use detached pinned checkouts; source checkouts are not switched. `KNIT_LAND_INPUTS` contains prerequisite receipts, and `KNIT_CHECKOUT_<repo>` names their bound checkouts.
 
 Project `landing.deployments[]` supports `build`, `verify`, `label` and `recovery`; `landing.steps[]` adds explicit command operations. Target and lane overrides support the same recipes. `whenChanged` selects a recipe, while `needs` declares execution dependencies. A consumer repository can have a deployment triggered by another repository even when the consumer is absent from the bundle; it still needs a runner binding. Generation freezes the recipe and its source fingerprint. Target/lane plans have separate `<bundle>--<destination-hash>.land.json` files; the default destination retains `<bundle>.land.json`.
+
+Discover destinations without generating or executing a plan:
+
+```sh
+knit land destinations --json
+knit land --lane preview plan
+knit land --lane preview apply
+```
+
+`knit land show --plan PATH` displays exactly that authored file and its canonical `Hash:` without regeneration; missing files fail. `apply --expected-plan-hash HASH` checks the exact document loaded for execution before effects or ownership, and rejects a file edited after review.
+
+Discovery returns `{ "destinations": [...] }`. Every entry has `key` (`default`, `lane:<name>`, or `target:<branch>`), `kind`, `name`, `label`, `terminal` (boolean or null when unresolved), `branches` (repository IDs to branches or null), and `hasPlan`. `planPath` identifies the destination's local file and `planHash` identifies saved content. `mergeEnabled` reports whether Knit owns source integration. Saved ad-hoc targets appear alongside configured destinations. An intermediate destination leaves the bundle and reviews open; a final destination archives only after all steps succeed.
+
+An explicit lane or target owns its `steps` and `deployments`: missing or empty arrays mean no commands in that scope. They never append default commands. With no explicit destination, recorded branch-target recipes replace configured-base recipes when such targets exist; non-base reviews do not inherit default commands. `onFailure`, `maxParallel`, and `merge.enabled` use defaults unless overridden in the selected scope. Saved plans retain their exact reviewed content until explicitly regenerated.
+
+Set `merge: {"enabled": false}` in `landing` or the selected lane/target when the release procedure owns integration. Knit then generates only the declared operations, without automatic merges or retargeting, and publications are not required. Dependencies must reference those declared operations. Terminal success can archive the bundle but does not claim that its reviews were merged. If recorded review bases name a target with disabled merges, a bare generation refuses and asks for that explicit target, so its integration policy cannot be bypassed.
+
+A `run` or command `deploy` step may set `interactive: true`. Local apply/resume requires stdin, stdout and stderr attached to a TTY before any effects or execution receipts. Interactive steps run alone, receive real terminal input, respect command timeouts, and retain exit status without capturing terminal output. Artifact/hosted execution refuses these steps. Commands used for capture, probes and recovery remain noninteractive machine adapters.
+
+A manual checkpoint is an explicit operation, for example:
+
+```json
+{"id":"inspect","type":"manual","instructions":"Check the synthetic service status","effect":"read_only","recovery":{"mode":"none"}}
+```
+
+The local operator must type `acknowledge`, optionally followed by a space and notes (at most 4096 bytes total). Empty input, EOF, rejection, and cancellation cannot succeed. Receipts record acknowledgement/notes or failure; uncertain external effects require reconciliation before retry. Manual external effects need recovery declarations just like commands. Command recovery also requires a repository binding.
+
+Normal `knit push --remote hosted` sends the selected bundle's authored destination plans and receipts; `knit pull` and `knit bundle pull <bundle>` import that bundle's destinations and receipts. Bundle transport also synchronizes project landing recipes through their existing shared ancestry and compare-and-swap rules, so a web recipe edit and its plan arrive together. Divergent or untracked local recipes are preserved with a remote candidate for reconciliation; they are never overwritten. Ordinary push uses the existing identity of a recipe-capable project and leaves project-shape replacement to explicit `knit project push`, preventing a metadata update from bypassing recipe CAS. Explicit `knit sync push --plans` / `knit sync pull --plans` remains project-wide. Sync never generates, overwrites divergent edits, or executes a plan; conflicts keep both the authored document and a separate remote candidate.
 
 Command specifications contain exact `command` argv, repo-relative `cwd`, nonsecret `env` values and positive `timeoutSeconds`. Secret values come from runner bindings. A deployment can declare:
 
@@ -1062,3 +1091,10 @@ helper; `knit clone --prefer-https` exposes the same transport fallback.
 Bare `knit auth` configures local per-forge-host defaults from any directory; `knit auth --project <name>` optionally chooses between those defaults and a project-only token. The defaults apply to clone, pull, and push and to forge API calls; the Svartal ledger token is separate, and `knit auth remote <name>` (or the same wizard's `r` option) sets up that sync-service token with server verification. Per-repo assignments are not required — one credential can still serve many repositories across owners, and `knit auth use shared-token --repo backend --repo frontend` remains a deliberate override. `knit auth setup` (or `knit project auth`) uses the same project wizard; `--repo` limits edits, and the final summary shows full-project coverage. `knit auth add`, `status --check`, `list`, `clear`, and `remove` support scripted setup, inspection, and rotation. `knit auth status` also activates plain-Git credential integration for existing installs (no token re-entry): ordinary `git fetch`/`pull`/`push` in tracked checkouts then use saved Knit credentials, failing closed instead of falling back to ambient helpers. Links control where Knit uses credentials, not provider permissions. See [Project-aware forge credentials](forge-auth.md) for storage, selection, and permissions. No hosted service or desktop application is required.
 
 Deployment recipes and custom steps may declare `sourceRepos: ["library", "tools"]`. Generated build, release, and verification steps retain this list and must follow every included source merge. Unchanged dependencies use the recorded bundle head, or a run-wide pinned project base for an unbundled repository. Every declared source requires a runner root binding; commands receive its isolated `KNIT_CHECKOUT_<REPO>` path even when the source checkout is dirty or has advanced.
+
+Generated landing plans retain `schemaVersion: "0.2"` and require executor protocol
+`requiredExecutorVersion: "0.3"`. The current executor accepts protocols 0.2 and
+0.3; plans containing `interactive: true` or manual checkpoints must require 0.3.
+Older executors reject that requirement before effects instead of ignoring terminal
+interaction. Ordinary initial project publication preserves the exact authored
+landing recipe JSON so recipe fingerprints and subsequent CAS synchronization agree.

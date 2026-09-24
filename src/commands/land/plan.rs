@@ -110,6 +110,9 @@ pub(super) fn build_plan_with_project(
     let merge_needs = merge.map(|m| &m.needs).unwrap_or(&empty_needs);
     let mut previous_ordered: Option<String> = None;
     for repo in &scope {
+        if merge.is_some_and(|m| m.enabled == Some(false)) {
+            continue;
+        }
         if !branch_merges && publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
@@ -197,16 +200,32 @@ pub(super) fn build_plan_with_project(
 
     // The stored lane projection covers exactly the repos this plan moves.
     let target_branches = if lane_name.is_some() {
-        steps
-            .iter()
-            .filter(|step| is_merge_step(step))
-            .filter_map(|step| step.repo_id.clone())
-            .filter_map(|repo_id| {
-                destinations
-                    .get(&repo_id)
-                    .map(|branch| (repo_id, branch.clone()))
-            })
-            .collect::<BTreeMap<_, _>>()
+        if merge.is_some_and(|m| m.enabled == Some(false)) {
+            active
+                .bundle
+                .repos
+                .iter()
+                .filter_map(
+                    |repo| match lane_destination(lane.expect("resolved lane"), &repo.id) {
+                        LaneDestination::Branch(branch) => {
+                            Some((repo.id.clone(), branch.to_owned()))
+                        }
+                        _ => None,
+                    },
+                )
+                .collect()
+        } else {
+            steps
+                .iter()
+                .filter(|step| is_merge_step(step))
+                .filter_map(|step| step.repo_id.clone())
+                .filter_map(|repo_id| {
+                    destinations
+                        .get(&repo_id)
+                        .map(|branch| (repo_id, branch.clone()))
+                })
+                .collect::<BTreeMap<_, _>>()
+        }
     } else {
         BTreeMap::new()
     };
@@ -303,7 +322,7 @@ fn ensure_terminal_plan_covers_changed_repos(
     steps: &[LandStep],
     merge: Option<&ProjectLandingMergePlan>,
 ) -> Result<()> {
-    if !terminal {
+    if !terminal || merge.is_some_and(|m| m.enabled == Some(false)) {
         return Ok(());
     }
     let merged: BTreeSet<&str> = steps
@@ -493,7 +512,7 @@ fn resolve_destinations(
 /// per lane or per branch-keyed target with `terminal`, which is how a
 /// release branch that is not a repo's configured base still ends the
 /// bundle's life.
-fn resolve_terminal(
+pub(super) fn resolve_terminal(
     active: &ActiveBundle,
     landing: Option<&ProjectLandingPlan>,
     target_branch: Option<&str>,
@@ -675,6 +694,24 @@ fn append_project_deployments(
                 Some(lane_name),
                 changed_repo_ids,
             )?;
+        }
+        return finish_deployments(&pending, steps, skipped, &merge_step_ids, &all_merge_ids);
+    }
+    // Explicit targets own their commands, including empty/missing recipes.
+    // Never inherit configured-base deployment commands into another scope.
+    if let Some(branch) = explicit_target {
+        if let Some(target) = landing.targets.get(branch) {
+            for deployment in &target.deployments {
+                push_pending_deployment(
+                    active,
+                    project,
+                    &mut pending,
+                    deployment,
+                    Some(branch),
+                    None,
+                    changed_repo_ids,
+                )?;
+            }
         }
         return finish_deployments(&pending, steps, skipped, &merge_step_ids, &all_merge_ids);
     }

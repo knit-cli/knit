@@ -776,6 +776,12 @@ fn push_active_bundle_to_remote_impl(
         save_active_bundle(active)?;
     }
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
+    super::landing::push_plans_scoped(
+        Some(&project_id),
+        remote_name,
+        false,
+        Some(&active.bundle.id),
+    )?;
     let history_result = super::history::push_project_history_events(
         remote,
         &token,
@@ -1058,7 +1064,7 @@ fn upsert_project(
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
     let project = publishable_project(root, remote, token, project_id, project)?;
-    let payload = project_payload(project_id, project.as_ref());
+    let payload = project_payload_with_raw_landing(root, project_id, project.as_ref())?;
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
     match response.status {
@@ -1086,8 +1092,32 @@ fn upsert_or_fetch_project(
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<(RemoteProject, ProjectShapePush)> {
+    // Existing recipe-capable projects own landing metadata through recipe
+    // CAS. An ordinary bundle/history push must not PATCH an older local
+    // knitProject over a web edit before that CAS runs. Explicit project push
+    // remains the operation for replacing the shared project shape.
+    let recipes = request(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project_id}/landing-recipes"),
+        None,
+    )?;
+    if recipes.status != 404 {
+        let _: Value = decode_response(recipes)?;
+        let project = request(
+            remote,
+            token,
+            "GET",
+            &format!("/projects/{project_id}"),
+            None,
+        )?;
+        if project.status != 404 {
+            return Ok((decode_response(project)?, ProjectShapePush::ReadOnly));
+        }
+    }
     let project = publishable_project(root, remote, token, project_id, project)?;
-    let payload = project_payload(project_id, project.as_ref());
+    let payload = project_payload_with_raw_landing(root, project_id, project.as_ref())?;
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
     match response.status {
@@ -1509,6 +1539,14 @@ pub fn push_all_bundles_to_remote(
             });
         match outcome {
             Ok(ArtifactPushOutcome::Pushed(_)) => {
+                if let Err(error) = super::landing::push_plans_scoped(
+                    Some(&project_id),
+                    remote_name,
+                    false,
+                    Some(&bundle.id),
+                ) {
+                    failures.push(format!("{} landing plans: {error:#}", bundle.id));
+                }
                 pushed += 1;
                 if force.is_force() {
                     println!(
@@ -1542,6 +1580,27 @@ pub fn push_all_bundles_to_remote(
         );
     }
     Ok(())
+}
+
+// Recipe fingerprints and CAS use the authored JSON, including empty arrays and
+// extension fields. Typed serialization is only suitable for the project shape.
+fn project_payload_with_raw_landing(
+    root: &Path,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<Value> {
+    let mut payload = project_payload(project_id, project);
+    let path = crate::store::project_path(root, project_id);
+    if project.is_some() && path.exists() {
+        let raw: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let shared = payload["metadata"]["knitProject"].as_object_mut().unwrap();
+        if let Some(landing) = raw.get("landing") {
+            shared.insert("landing".into(), landing.clone());
+        } else {
+            shared.remove("landing");
+        }
+    }
+    Ok(payload)
 }
 
 fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
