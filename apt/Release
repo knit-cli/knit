@@ -1,17 +1,17 @@
 Architectures: amd64 arm64
-Date: Wed, 23 Sep 2026 22:08:31 +0000
+Date: Thu, 24 Sep 2026 09:00:20 +0000
 Description: Knit Linux packages
 Label: Knit
 Origin: Knit
 MD5Sum:
- a34bd7a655c6c9a74c0b941fa50383ee             3360 Packages
- 35670407517dd794b382b3a9b230e3eb              976 Packages.gz
+ 929ecb456c5065cebcef23b067f5cf4f             4480 Packages
+ afefbac76166f7c94c5761caf4f14971             1192 Packages.gz
 SHA1:
- 93b119a90da371c929045e5958bb0732eb0e106a             3360 Packages
- a1c51f9cc0a7e7b5a10f7fb06571365778c26c60              976 Packages.gz
+ 07fff71db067ef944ae1acb7ccf75fecea0a0c85             4480 Packages
+ 08c23ccf42548cdf426a1998b8a823bb5213827a             1192 Packages.gz
 SHA256:
- c146d250b08601064cef442a9b07d9ab12c4531d5006c5a6466b9ac1e9890258             3360 Packages
- 63da86abe54dcd0bbcb68c2c69814fe09967b140a619a080bf151dd91d649eb1              976 Packages.gz
+ 4ee83b937f5ff07660aac374eec4fe3c4c941cf467e707bb595b2de268cad54b             4480 Packages
+ 0748d76090c2c09f2fa847a4cb88c14762a36e31ad53571f199d50be9cc20e48             1192 Packages.gz
 SHA512:
- 4fd0e63e5eb84e28f8a3b2e1c221b5aa2b38faa6986000d4f23f4bcc8f87aa79a45b8ff1628215d1ef537b3499a809f83a1e89f53e20d00d3fb0e3f4225c2812             3360 Packages
- cf6dca3442c4575ad8f0129b43800de968976d8f527089ae499eaa15cc2016cb2da71ecd2d6dba43ba23f95b1763bb8152ad5b8a546238df703e4f0276dd7635              976 Packages.gz
+ 0115fa405f83cca29a964c1c2f72b58a44d0b578e1bbde0270dec77aae255bd21c832a6aaf4915b5d5e449dd07807719eba02d80eaf0cece5fc611326aa19e7c             4480 Packages
+ 012887772fe24d4af8f90f8c02547ec621f85c3803dd637514f8ff52c1473848278a4e214ce7bcedcc92081c0394eb7ee00d59aa6fe3a874052201efaf9d0ea6             1192 Packages.gz
