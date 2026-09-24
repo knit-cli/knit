@@ -42,21 +42,18 @@ pub(super) fn render_knit_pr_block(
 }
 
 fn knit_block_content(bundle: &ChangeGroup, current_repo_id: Option<&str>) -> String {
-    let mut lines = Vec::new();
+    let mut lines = vec!["## Knit Bundle".to_string(), String::new()];
 
-    // The hosted bundle link leads the block so it is the first thing a
-    // reader sees. Only server-reported URLs are used; the CLI never derives
-    // a web URL from the API URL.
+    // Place hosted links immediately below the heading. Only server-reported
+    // URLs are used; the CLI never derives a web URL from the API URL.
     for url in hosted_bundle_links(bundle) {
         lines.push(format!("[{VIEW_BUNDLE_LABEL}]({url})"));
     }
-    if !lines.is_empty() {
+    if lines.len() > 2 {
         lines.push(String::new());
     }
 
     lines.extend([
-        "## Knit Bundle".to_string(),
-        String::new(),
         format!("This PR is part of Knit bundle `{}`.", bundle.id),
         String::new(),
         "See the other review objects in this bundle:".to_string(),
@@ -136,34 +133,34 @@ fn safe_link_destination(url: &str) -> Option<String> {
     }
 }
 
-/// Whether a rendered block leads with the hosted bundle link. Only rendered
-/// blocks produced by [`render_knit_pr_block`] are asked: the check looks at
-/// the first non-empty content line after the block's begin marker, so a
-/// heading or a stray label deeper in the block never triggers relocation.
-fn block_leads_with_hosted_link(block: &str) -> bool {
+/// Whether a generated block has hosted links directly below its heading.
+/// Links elsewhere in the body must not trigger relocation.
+fn block_has_hosted_link_below_heading(block: &str) -> bool {
     let content = block
         .strip_prefix(KNIT_PR_BLOCK_BEGIN)
         .or_else(|| block.strip_prefix(KNIT_PR_BLOCK_BEGIN_REFS))
         .unwrap_or(block);
-    content
+    let mut lines = content
         .lines()
         .map(str::trim)
-        .find(|line| !line.is_empty())
-        .is_some_and(|line| line.starts_with(&format!("[{VIEW_BUNDLE_LABEL}](")))
+        .filter(|line| !line.is_empty());
+    lines.next() == Some("## Knit Bundle")
+        && lines
+            .next()
+            .is_some_and(|line| line.starts_with(&format!("[{VIEW_BUNDLE_LABEL}](")))
 }
 
 pub(super) fn upsert_knit_pr_block(existing_body: &str, block: &str) -> String {
-    let hosted_link_first = block_leads_with_hosted_link(block);
+    let has_hosted_link = block_has_hosted_link_below_heading(block);
     let Some((begin, end)) = managed_block_bounds(existing_body) else {
-        return place_knit_pr_block(existing_body, block, hosted_link_first);
+        return place_knit_pr_block(existing_body, block, has_hosted_link);
     };
 
     let before = existing_body[..begin].trim_end();
     let after = existing_body[end..].trim_start();
-    if hosted_link_first {
-        // The hosted link must be the first visible content, so the managed
-        // block moves to the top; the surrounding user prose keeps its
-        // original order after it.
+    if has_hosted_link {
+        // Keep the heading and hosted link at the top; the surrounding user
+        // prose keeps its original order after the managed block.
         let mut rest = Vec::new();
         if !before.is_empty() {
             rest.push(before);
@@ -189,11 +186,11 @@ pub(super) fn upsert_knit_pr_block(existing_body: &str, block: &str) -> String {
 /// existing prose, the placement it always had. Prepending keeps the
 /// existing body verbatim — trailing whitespace included — so no user
 /// formatting is lost to the move.
-fn place_knit_pr_block(existing_body: &str, block: &str, hosted_link_first: bool) -> String {
+fn place_knit_pr_block(existing_body: &str, block: &str, has_hosted_link: bool) -> String {
     if existing_body.trim().is_empty() {
         return block.to_string();
     }
-    if hosted_link_first {
+    if has_hosted_link {
         format!("{block}\n\n{existing_body}")
     } else {
         format!("{}\n\n{}", existing_body.trim_end(), block)
