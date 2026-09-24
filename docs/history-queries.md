@@ -1,7 +1,7 @@
 # Inspect local history
 
 `knit log` inspects the current bundle. Add `--all` to inspect the current
-project's locally recorded base ledger with open bundles. Use `--scope activity`
+project's locally recorded base ledger. Use `--scope activity`
 for the complete activity ledger, including archived bundles and preserved
 events from deleted bundles. Neither command fetches from Git, contacts a sync
 remote, or regenerates the history ledger.
@@ -213,15 +213,16 @@ companions.
 
 ## Base ledger and open bundles
 
-`knit log --all` defaults to the **base ledger plus open bundle activity**.
+`knit log --all` defaults to the **base ledger only**. Open bundle activity is available
+with `--scope ongoing` or `--scope base-and-ongoing`.
 These are distinct records: base commits were observed on a configured base
 branch; an open bundle's commits are authoring activity and do not establish
 that a merge happened. Bundle-scoped `knit log` keeps its activity reading.
 
 ```sh
-knit log --all --scope base                 # configured bases only
+knit log --all --scope base                 # configured bases only (project default)
 knit log --all --scope ongoing              # activity in currently open bundles
-knit log --all --scope base-and-ongoing     # project default
+knit log --all --scope base-and-ongoing     # configured bases plus open bundles
 knit log --all --scope landings             # recorded merges, every destination
 knit log --all --scope activity             # complete preserved activity ledger
 ```

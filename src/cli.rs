@@ -51,7 +51,7 @@ pub struct LogArgs {
     /// Boolean history expression: NOT > AND > OR; adjacency means AND. Fields: repo, view, bundle, since, until.
     #[arg(long, value_name = "EXPRESSION")]
     pub query: Option<String>,
-    /// History reading: base ledger with open bundles (project default), base only, ongoing, landings, or all activity.
+    /// History reading: base ledger (project default), base with ongoing work, ongoing, landings, or all activity.
     #[arg(long, value_parser = ["base", "base-and-ongoing", "ongoing", "landings", "activity"], value_name = "SCOPE")]
     pub scope: Option<String>,
     /// Inspect every locally recorded bundle in the selected project.
