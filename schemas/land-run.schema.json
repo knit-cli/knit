@@ -219,6 +219,9 @@
     "plan": {
       "type": "object"
     },
+    "sourceProject": {
+      "type": "object"
+    },
     "sourceBundle": {
       "type": "object"
     },

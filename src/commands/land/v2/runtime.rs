@@ -1655,7 +1655,13 @@ fn execute(
         }
     }
     let journal = Journal {
-        value: Mutex::new(existing.unwrap_or_else(|| new_run(plan, plan_path, &bundle))),
+        value: Mutex::new(existing.unwrap_or_else(|| {
+            let mut run = new_run(plan, plan_path, &bundle);
+            if let Some(project) = project {
+                run["sourceProject"] = project.clone();
+            }
+            run
+        })),
         path: absolute(run_out)?,
         bundle: Mutex::new(bundle.clone()),
         bundle_out: absolute(out)?,
