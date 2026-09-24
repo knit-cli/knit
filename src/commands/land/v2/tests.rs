@@ -1,3 +1,23 @@
+fn python_executable() -> &'static str {
+    static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PYTHON.get_or_init(|| {
+        for name in ["python3", "python", "py"] {
+            if let Ok(output) = std::process::Command::new(name)
+                .args([
+                    "-c",
+                    "import sys; assert sys.version_info.major == 3; print(sys.executable)",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    return String::from_utf8(output.stdout).unwrap().trim().to_owned();
+                }
+            }
+        }
+        panic!("landing execution tests require a working Python 3 interpreter");
+    })
+}
+
 use super::{generate, graph::*, runtime};
 use serde_json::{json, Value};
 use std::{fs, path::PathBuf};
@@ -58,7 +78,7 @@ impl Drop for Fixture {
     }
 }
 fn python(code: &str) -> Value {
-    json!({"command":["python3","-c",code],"timeoutSeconds":10})
+    json!({"command":[python_executable(),"-c",code],"timeoutSeconds":10})
 }
 fn deploy(id: &str, code: &str) -> Value {
     let mut s = python(code);
@@ -107,7 +127,7 @@ fn recovery_retry_preserves_capture_and_skips_finished_restorations() {
         "release",
         "import pathlib; pathlib.Path('state').write_text('bad'); raise SystemExit(2)",
     );
-    a["recovery"]["command"]=json!(["python3","-c","import pathlib,os,json; assert not pathlib.Path('block').exists(); pathlib.Path('state').write_text(json.loads(os.environ['KNIT_LAND_CAPTURE'])['version'])"]);
+    a["recovery"]["command"]=json!([python_executable(),"-c","import pathlib,os,json; assert not pathlib.Path('block').exists(); pathlib.Path('state').write_text(json.loads(os.environ['KNIT_LAND_CAPTURE'])['version'])"]);
     f.plan["steps"] = json!([a]);
     assert!(f.apply(false).is_err());
     assert_eq!(f.run()["recoveryStatus"], "failed");
@@ -384,7 +404,7 @@ fn failed_dependent_restore_blocks_prerequisite_inverse() {
     );
     let mut b = deploy("app", "raise SystemExit(9)");
     b["needs"] = json!(["database"]);
-    b["recovery"]["command"] = json!(["python3", "-c", "raise SystemExit(8)"]);
+    b["recovery"]["command"] = json!([python_executable(), "-c", "raise SystemExit(8)"]);
     f.plan["steps"] = json!([a, b]);
     assert!(f.apply(false).is_err());
     assert_eq!(f.run()["steps"][0]["recovery"]["status"], "blocked");
@@ -405,7 +425,7 @@ fn superseded_recovery_refuses_before_restoring_old_state() {
     f.apply(false).unwrap();
     let mut next = f.plan.clone();
     next["steps"][0]["command"] = json!([
-        "python3",
+        python_executable(),
         "-c",
         "import pathlib; pathlib.Path('state').write_text('second')"
     ]);
@@ -666,4 +686,89 @@ fn declared_sources_require_merge_ancestors_and_known_pins() {
     assert_eq!(validation(&f.plan, None, None)["valid"], false);
     f.plan["steps"][1]["sourceRepos"] = json!([7]);
     assert_eq!(validation(&f.plan, None, None)["valid"], false);
+}
+
+#[test]
+fn executable_preflight_matches_native_path_search_and_explicit_paths() {
+    let f = Fixture::new();
+    let bin = f.dir.join("tools with spaces");
+    fs::create_dir(&bin).unwrap();
+    let name = format!("synthetic-tool{}", std::env::consts::EXE_SUFFIX);
+    let program = bin.join(&name);
+    fs::copy(std::env::current_exe().unwrap(), &program).unwrap();
+    let step = json!({"command":["synthetic-tool"],"env":{"PATH":bin}});
+    let resolved = runtime::command_path(&step, &step, &f.dir).unwrap();
+    assert_eq!(resolved, program);
+    // Exercise the real native Command resolver with the same child PATH.
+    let native = std::process::Command::new("synthetic-tool")
+        .arg("--list")
+        .env("PATH", &bin)
+        .current_dir(&f.dir)
+        .output()
+        .unwrap();
+    assert!(native.status.success());
+    for path in [
+        format!("tools with spaces/{name}"),
+        "tools with spaces/synthetic-tool".into(),
+    ] {
+        let spec = json!({"command":[path]});
+        let resolved = runtime::command_path(&spec, &spec, &f.dir).unwrap();
+        assert!(std::process::Command::new(resolved)
+            .arg("--list")
+            .output()
+            .unwrap()
+            .status
+            .success());
+    }
+    let missing = json!({"command":["synthetic-no-such-tool"],"env":{"PATH":bin}});
+    assert!(runtime::command_path(&missing, &missing, &f.dir).is_err());
+    let overridden = json!({"command":["synthetic-tool"],"env":{"PATH":f.dir.join("absent")}});
+    assert!(runtime::command_path(&step, &overridden, &f.dir).is_err());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_preflight_accepts_exe_and_explicit_cmd_without_pathext_inference() {
+    let f = Fixture::new();
+    let script = f.dir.join("synthetic-script.cmd");
+    fs::write(&script, "@echo off\r\necho synthetic-ok\r\n").unwrap();
+    let step =
+        json!({"command":["synthetic-script.cmd"],"env":{"PATH":f.dir,"PATHEXT":".CMD;.EXE"}});
+    let path = runtime::command_path(&step, &step, &f.dir).unwrap();
+    let output = std::process::Command::new(path).output().unwrap();
+    assert!(output.status.success());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("synthetic-ok"));
+    let bare = json!({"command":["synthetic-script"],"env":step["env"]});
+    assert!(runtime::command_path(&bare, &bare, &f.dir).is_err());
+    assert!(std::process::Command::new("synthetic-script")
+        .env("PATH", &f.dir)
+        .env("PATHEXT", ".CMD;.EXE")
+        .output()
+        .is_err());
+    let relative = json!({"command":[".\\synthetic-script.cmd"]});
+    assert!(runtime::command_path(&relative, &relative, &f.dir).is_ok());
+}
+
+#[test]
+fn durable_receipts_replace_existing_files_and_preserve_destination_on_failure() {
+    let f = Fixture::new();
+    let path = f.dir.join("receipt.json");
+    for revision in 0..16 {
+        let value = json!({"revision":revision,"payload":"synthetic"});
+        runtime::durable(&path, &value).unwrap();
+        assert_eq!(crate::store::read_json::<Value>(&path).unwrap(), value);
+    }
+    let destination = f.dir.join("directory.json");
+    fs::create_dir(&destination).unwrap();
+    fs::write(destination.join("keep"), "retained").unwrap();
+    assert!(runtime::durable(&destination, &json!({"replacement":true})).is_err());
+    assert_eq!(
+        fs::read_to_string(destination.join("keep")).unwrap(),
+        "retained"
+    );
+    assert!(!fs::read_dir(&f.dir).unwrap().any(|entry| entry
+        .unwrap()
+        .path()
+        .extension()
+        .is_some_and(|s| s == "tmp")));
 }

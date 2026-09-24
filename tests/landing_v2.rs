@@ -1,3 +1,23 @@
+fn python_executable() -> &'static str {
+    static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PYTHON.get_or_init(|| {
+        for name in ["python3", "python", "py"] {
+            if let Ok(output) = std::process::Command::new(name)
+                .args([
+                    "-c",
+                    "import sys; assert sys.version_info.major == 3; print(sys.executable)",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    return String::from_utf8(output.stdout).unwrap().trim().to_owned();
+                }
+            }
+        }
+        panic!("landing execution tests require a working Python 3 interpreter");
+    })
+}
+
 mod common;
 use common::*;
 use serde_json::{json, Value};
@@ -59,7 +79,7 @@ elif sys.argv[1]=='verify': assert state.read_text()==json.loads(os.environ['KNI
         ))
         .unwrap();
         p["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
-        p["landing"] = json!({"onFailure":"recover","steps":[{"id":"deploy","type":"run","repoId":"service","effect":"deployment","env":{"STATE":root.join("state")},"command":["python3","release.py","deploy"],"recovery":{"mode":"command","idempotent":true,"capture":{"command":["python3","release.py","capture"]},"command":["python3","release.py","restore"],"verify":{"command":["python3","release.py","verify"]}}}]});
+        p["landing"] = json!({"onFailure":"recover","steps":[{"id":"deploy","type":"run","repoId":"service","effect":"deployment","env":{"STATE":root.join("state")},"command":[python_executable(),"release.py","deploy"],"recovery":{"mode":"command","idempotent":true,"capture":{"command":[python_executable(),"release.py","capture"]},"command":[python_executable(),"release.py","restore"],"verify":{"command":[python_executable(),"release.py","verify"]}}}]});
         let project = root.join(format!(".knit/projects/{project_id}.project.json"));
         write(&project, &p);
         write(&root.join("roots.json"), &json!({"service":service}));
@@ -240,7 +260,7 @@ fn cancellation_quiesces_forward_commands_and_requires_explicit_recovery() {
     let generated = f.cmd(&["land", "plan", "--out", "plan.json"]);
     assert!(generated.status.success());
     let mut plan = read(&f.root.join("plan.json"));
-    plan["steps"][0]["command"]=json!(["python3","-c","import pathlib,os,signal,time; pathlib.Path(os.environ['STATE']).write_text('partial'); os.kill(os.getppid(),signal.SIGTERM); time.sleep(20)"]);
+    plan["steps"][0]["command"]=json!([python_executable(),"-c","import pathlib,os,signal,time; pathlib.Path(os.environ['STATE']).write_text('partial'); os.kill(os.getppid(),signal.SIGTERM); time.sleep(20)"]);
     write(&f.root.join("plan.json"), &plan);
     let failed = f.cmd(&[
         "land",
@@ -317,7 +337,7 @@ fn intermediate_source_merge_is_pinned_and_partial_receipt_survives_command_fail
     ))
     .unwrap();
     project["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
-    project["landing"] = json!({"steps":[{"id":"verify-merged","type":"run","role":"verify","repoId":"service","needs":["merge-service"],"effect":"read_only","command":["python3","-c","import os,json,subprocess; inputs=json.loads(os.environ['KNIT_LAND_INPUTS']); assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip()==inputs['merge-service']['revision']; raise SystemExit(3)"]}]});
+    project["landing"] = json!({"steps":[{"id":"verify-merged","type":"run","role":"verify","repoId":"service","needs":["merge-service"],"effect":"read_only","command":[python_executable(),"-c","import os,json,subprocess; inputs=json.loads(os.environ['KNIT_LAND_INPUTS']); assert subprocess.check_output(['git','rev-parse','HEAD']).decode().strip()==inputs['merge-service']['revision']; raise SystemExit(3)"]}]});
     write(&root.join("project.json"), &project);
     write(&root.join("roots.json"), &json!({"service":service}));
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_knit"));
@@ -389,10 +409,10 @@ fn build_outputs_are_available_to_deployment_in_the_shared_pinned_checkout() {
     let generated = f.cmd(&["land", "plan", "--out", "plan.json"]);
     assert!(generated.status.success());
     let mut plan = read(&f.root.join("plan.json"));
-    let build = json!({"id":"build","type":"run","role":"build","repoId":"service","effect":"read_only","command":["python3","-c","import pathlib; pathlib.Path('build.bin').write_text('artifact')"]});
+    let build = json!({"id":"build","type":"run","role":"build","repoId":"service","effect":"read_only","command":[python_executable(),"-c","import pathlib; pathlib.Path('build.bin').write_text('artifact')"]});
     let mut deploy = plan["steps"][0].clone();
     deploy["needs"] = json!(["build"]);
-    deploy["command"]=json!(["python3","-c","import pathlib,os; assert pathlib.Path('build.bin').read_text()=='artifact'; assert pathlib.Path(os.environ['KNIT_CHECKOUT_SERVICE'])==pathlib.Path.cwd(); pathlib.Path(os.environ['STATE']).write_text('released')"]);
+    deploy["command"]=json!([python_executable(),"-c","import pathlib,os; assert pathlib.Path('build.bin').read_text()=='artifact'; assert pathlib.Path(os.environ['KNIT_CHECKOUT_SERVICE']).samefile(pathlib.Path.cwd()); pathlib.Path(os.environ['STATE']).write_text('released')"]);
     plan["steps"] = json!([build, deploy]);
     write(&f.root.join("plan.json"), &plan);
     let result = f.cmd(&[
@@ -488,8 +508,8 @@ fn unbundled_consumer_retains_build_revision_when_remote_base_moves() {
         .unwrap()
         .push(json!({"id":"consumer","path":consumer,"baseBranch":"main"}));
     project["landing"] = json!({"steps":[
-        {"id":"build","type":"run","repoId":"service","sourceRepos":["consumer"],"effect":"read_only","env":{"CONSUMER_SOURCE":consumer},"command":["python3","-c","import pathlib,os,subprocess; (pathlib.Path(os.environ['KNIT_CHECKOUT_CONSUMER'])/'build.bin').write_text('artifact'); src=os.environ['CONSUMER_SOURCE']; subprocess.run(['git','-C',src,'commit','--allow-empty','-m','Advance synthetic base'],check=True); subprocess.run(['git','-C',src,'push','origin','main'],check=True)"]},
-        {"id":"consume","type":"run","repoId":"service","sourceRepos":["consumer"],"effect":"read_only","needs":["build"],"command":["python3","-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_CONSUMER'])/'build.bin').read_text()=='artifact'"]}
+        {"id":"build","type":"run","repoId":"service","sourceRepos":["consumer"],"effect":"read_only","env":{"CONSUMER_SOURCE":consumer},"command":[python_executable(),"-c","import pathlib,os,subprocess; (pathlib.Path(os.environ['KNIT_CHECKOUT_CONSUMER'])/'build.bin').write_text('artifact'); src=os.environ['CONSUMER_SOURCE']; subprocess.run(['git','-C',src,'commit','--allow-empty','-m','Advance synthetic base'],check=True); subprocess.run(['git','-C',src,'push','origin','main'],check=True)"]},
+        {"id":"consume","type":"run","repoId":"service","sourceRepos":["consumer"],"effect":"read_only","needs":["build"],"command":[python_executable(),"-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_CONSUMER'])/'build.bin').read_text()=='artifact'"]}
     ]});
     write(&f.project, &project);
     write(
@@ -548,7 +568,7 @@ fn unchanged_source_dependency_uses_recorded_head_despite_dirty_advanced_checkou
         .as_array_mut()
         .unwrap()
         .push(json!({"id":"dependency","path":dependency,"baseBranch":"main"}));
-    project["landing"] = json!({"deployments":[{"id":"release","repoId":"service","sourceRepos":["dependency"],"command":["python3","-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_DEPENDENCY'])/'version').read_text()=='recorded'"],"build":{"command":["python3","-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_DEPENDENCY'])/'version').read_text()=='recorded'"]},"verify":{"command":["true"]}}]});
+    project["landing"] = json!({"deployments":[{"id":"release","repoId":"service","sourceRepos":["dependency"],"command":[python_executable(),"-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_DEPENDENCY'])/'version').read_text()=='recorded'"],"build":{"command":[python_executable(),"-c","import pathlib,os; assert (pathlib.Path(os.environ['KNIT_CHECKOUT_DEPENDENCY'])/'version').read_text()=='recorded'"]},"verify":{"command":[python_executable(),"-c","pass"]}}]});
     write(&f.project, &project);
     let result = f.cmd(&["land", "plan", "--out", "plan.json"]);
     assert!(

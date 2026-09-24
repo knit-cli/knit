@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/provider_fixture.rs"]
+mod provider_fixture;
 
 use common::{
     append_line, git, init_remote_repo, knit, knit_with_fake_forge, unique_temp_dir, write_fake_tea,
@@ -173,8 +175,8 @@ fn forgejo_cli_workspace_publish_and_land_loop() {
         Value::String("https://codeberg.org/acme/backend.git".to_string());
     fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
 
-    let fake_bin = root.join("fake-bin");
-    let fake_dir = root.join("fake-forge");
+    let fake_bin = root.join("fake bin");
+    let fake_dir = root.join("fake forge");
     write_fake_tea(&fake_bin, &fake_dir);
     let publish = knit_with_fake_forge(
         &workspace,
@@ -216,6 +218,11 @@ fn forgejo_cli_workspace_publish_and_land_loop() {
         &env,
     );
     assert!(fake_dir.join("tea-merged").exists());
+    let calls = fs::read_to_string(fake_dir.join("tea-landing.calls")).unwrap();
+    assert!(
+        calls.contains("api --method GET repos/{owner}/{repo}/pulls/4"),
+        "{calls}"
+    );
     let archived: Value = serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
     assert_eq!(archived["state"], "archived");
     assert_eq!(archived["publications"][0]["state"], "MERGED");
@@ -282,6 +289,11 @@ fn configure_landing_fixture(
         ],
     );
     assert_ne!(head.trim(), merged.trim());
+    let parents = git(feature, ["rev-list", "--parents", "-n", "1", merged.trim()]);
+    assert_eq!(
+        parents.split_whitespace().collect::<Vec<_>>(),
+        [merged.trim(), base.trim(), head.trim()]
+    );
     merged.trim().to_owned()
 }
 
@@ -298,37 +310,5 @@ fn configure_cli_landing(bin: &std::path::Path, state: &std::path::Path) {
         )
         .unwrap();
     }
-    let script = bin.join("tea");
-    let original = fs::read_to_string(&script).unwrap();
-    let script_text = original
-        .replace("[ \"$1\" = \"pr\" ]", r#"if [ "$1" = api ]; then
-  [ "$*" = 'api --method GET repos/{owner}/{repo}/pulls/4' ] || exit 23
-  state=open
-  [ ! -f "$FORGE_FAKE_DIR/tea-merged" ] || state=merged
-  cat "$FORGE_FAKE_DIR/review-$state.json"
-  exit 0
-fi
-[ "$1" = "pr" ]"#)
-        .replace(": >\"$FORGE_FAKE_DIR/tea-merged\"", "git --git-dir=\"$(cat \"$FORGE_FAKE_DIR/remote-path\")\" update-ref refs/heads/main \"$(cat \"$FORGE_FAKE_DIR/merge-sha\")\"\n    : >\"$FORGE_FAKE_DIR/tea-merged\"");
-    fs::write(script, script_text).unwrap();
-    write_checkout_git(bin);
-}
-
-fn write_checkout_git(bin: &std::path::Path) {
-    let real = std::process::Command::new("git")
-        .args(["--exec-path"])
-        .output()
-        .unwrap();
-    assert!(real.status.success());
-    let real = std::path::PathBuf::from(String::from_utf8(real.stdout).unwrap().trim()).join("git");
-    let quoted = format!("'{}'", real.to_string_lossy().replace('\'', "'\\''"));
-    let script = bin.join("git");
-    fs::write(&script, format!("#!/bin/sh\nif [ \"$*\" = 'remote get-url origin' ]; then\n  exec {quoted} config --get remote.origin.url\nfi\nexec {quoted} \"$@\"\n")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    #[cfg(windows)]
-    fs::write(script.with_extension("cmd"), "@sh \"%~dp0git\" %*\r\n").unwrap();
+    provider_fixture::install(bin, Some("tea"));
 }

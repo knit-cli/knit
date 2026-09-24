@@ -1,4 +1,6 @@
 mod common;
+#[path = "common/provider_fixture.rs"]
+mod provider_fixture;
 
 use common::{
     append_line, git, init_remote_repo, knit, knit_with_env, knit_with_fake_gh_env,
@@ -238,9 +240,9 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
     );
     assert!(status.contains("#101"), "{status}");
     let merged = configure_landing_fixture(&state, &feature, &remote);
-    let bin = root.join("landing-bin");
+    let bin = root.join("landing bin");
     fs::create_dir_all(&bin).unwrap();
-    write_checkout_git(&bin);
+    provider_fixture::install(&bin, None);
     let path = std::env::join_paths(std::iter::once(bin).chain(std::env::split_paths(
         &std::env::var_os("PATH").unwrap_or_default(),
     )))
@@ -678,24 +680,10 @@ fn configure_landing_fixture(
         ],
     );
     assert_ne!(head.trim(), merged.trim());
+    let parents = git(feature, ["rev-list", "--parents", "-n", "1", merged.trim()]);
+    assert_eq!(
+        parents.split_whitespace().collect::<Vec<_>>(),
+        [merged.trim(), base.trim(), head.trim()]
+    );
     merged.trim().to_owned()
-}
-
-fn write_checkout_git(bin: &std::path::Path) {
-    let real = std::process::Command::new("git")
-        .args(["--exec-path"])
-        .output()
-        .unwrap();
-    assert!(real.status.success());
-    let real = std::path::PathBuf::from(String::from_utf8(real.stdout).unwrap().trim()).join("git");
-    let quoted = format!("'{}'", real.to_string_lossy().replace('\'', "'\\''"));
-    let script = bin.join("git");
-    fs::write(&script, format!("#!/bin/sh\nif [ \"$*\" = 'remote get-url origin' ]; then\n  exec {quoted} config --get remote.origin.url\nfi\nexec {quoted} \"$@\"\n")).unwrap();
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&script, fs::Permissions::from_mode(0o755)).unwrap();
-    }
-    #[cfg(windows)]
-    fs::write(script.with_extension("cmd"), "@sh \"%~dp0git\" %*\r\n").unwrap();
 }

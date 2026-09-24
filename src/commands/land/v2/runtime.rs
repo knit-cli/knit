@@ -64,7 +64,14 @@ pub(super) fn durable(path: &Path, value: &Value) -> Result<()> {
     serde_json::to_writer_pretty(&mut file, value)?;
     file.write_all(b"\n")?;
     file.sync_all()?;
-    fs::rename(&temp, path)?;
+    // Close our writer before Windows replaces the destination. std::fs::rename
+    // uses MoveFileExW(REPLACE_EXISTING); never delete the durable old receipt.
+    drop(file);
+    if let Err(error) = fs::rename(&temp, path) {
+        let _ = fs::remove_file(&temp);
+        return Err(error)
+            .with_context(|| format!("failed to replace landing receipt {}", path.display()));
+    }
     #[cfg(unix)]
     fs::File::open(parent)?.sync_all()?;
     Ok(())
@@ -176,45 +183,101 @@ fn cwd(step: &Value, spec: &Value, roots: &Roots) -> Result<PathBuf> {
         .get(repo)
         .with_context(|| format!("missing repo-root binding for {repo}"))?;
     let sub = spec["cwd"].as_str().or(step["cwd"].as_str()).unwrap_or(".");
-    let result = root
-        .join(sub)
-        .canonicalize()
+    let result = dunce::canonicalize(root.join(sub))
         .with_context(|| format!("cwd unavailable for {}", step["id"]))?;
-    if !result.starts_with(root.canonicalize()?) {
+    if !result.starts_with(dunce::canonicalize(root)?) {
         bail!("cwd escapes runner checkout");
     }
     Ok(result)
 }
-fn executable(spec: &Value, dir: &Path) -> Result<()> {
+pub(super) fn command_path(step: &Value, spec: &Value, dir: &Path) -> Result<PathBuf> {
     let name = spec["command"][0]
         .as_str()
         .context("command argv required")?;
-    let found = if name.contains(std::path::MAIN_SEPARATOR) {
-        dir.join(name).is_file()
+    let child_path = [&spec["env"], &step["env"]].into_iter().find_map(|env| {
+        env.as_object()?
+            .iter()
+            .find(|(key, _)| {
+                if cfg!(windows) {
+                    key.eq_ignore_ascii_case("PATH")
+                } else {
+                    key.as_str() == "PATH"
+                }
+            })
+            .and_then(|(_, value)| value.as_str())
+            .map(std::ffi::OsString::from)
+    });
+    let parent_path = std::env::var_os("PATH").unwrap_or_default();
+    let explicit =
+        name.contains('/') || cfg!(windows) && (name.contains('\\') || name.contains(':'));
+    let mut candidates = Vec::new();
+    if explicit {
+        let path = dir.join(name);
+        #[cfg(windows)]
+        if !name.to_ascii_lowercase().ends_with(".exe") {
+            let mut exe = path.as_os_str().to_owned();
+            exe.push(".exe");
+            candidates.push(PathBuf::from(exe));
+        }
+        candidates.push(path);
     } else {
-        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-            .any(|p| p.join(name).is_file())
-    };
-    #[cfg(unix)]
-    let found = found && {
-        use std::os::unix::fs::PermissionsExt;
-        let paths: Vec<PathBuf> = if name.contains(std::path::MAIN_SEPARATOR) {
-            vec![dir.join(name)]
-        } else {
-            std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default())
-                .map(|p| p.join(name))
-                .collect()
-        };
-        paths.iter().any(|p| {
-            p.metadata()
-                .is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
-        })
-    };
-    if !found {
-        bail!("runner missing executable {name} in {}", dir.display());
+        let mut directories = Vec::new();
+        #[cfg(windows)]
+        {
+            // Rust Command searches child PATH, application/system directories,
+            // then parent PATH. Only .exe is inferred (not shell PATHEXT).
+            if let Some(path) = &child_path {
+                directories
+                    .extend(std::env::split_paths(path).filter(|p| !p.as_os_str().is_empty()));
+            }
+            if let Some(parent) = std::env::current_exe()
+                .ok()
+                .and_then(|p| p.parent().map(Path::to_path_buf))
+            {
+                directories.push(parent);
+            }
+            if let Some(windows) = std::env::var_os("SystemRoot") {
+                let windows = PathBuf::from(windows);
+                directories.push(windows.join("System32"));
+                directories.push(windows);
+            }
+            directories
+                .extend(std::env::split_paths(&parent_path).filter(|p| !p.as_os_str().is_empty()));
+        }
+        #[cfg(not(windows))]
+        directories.extend(std::env::split_paths(
+            child_path.as_ref().unwrap_or(&parent_path),
+        ));
+        for directory in directories {
+            let candidate = dir.join(directory).join(name);
+            #[cfg(windows)]
+            let candidate = if name.contains('.') {
+                candidate
+            } else {
+                candidate.with_extension("exe")
+            };
+            candidates.push(candidate);
+        }
     }
-    Ok(())
+    for path in candidates {
+        if !path.is_file() {
+            continue;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            if path.metadata()?.permissions().mode() & 0o111 == 0 {
+                continue;
+            }
+        }
+        return Ok(path);
+    }
+    bail!("runner missing executable {name} in {}", dir.display())
 }
+fn executable(step: &Value, spec: &Value, dir: &Path) -> Result<()> {
+    command_path(step, spec, dir).map(|_| ())
+}
+
 fn preflight(
     plan: &Value,
     steps: &[Value],
@@ -290,14 +353,14 @@ fn preflight(
         if matches!(step["type"].as_str(), Some("run" | "deploy"))
             && step["deploymentMode"] != "push"
         {
-            executable(step, &cwd(step, step, roots)?)?;
+            executable(step, step, &cwd(step, step, roots)?)?;
             let r = recovery(step);
             if r["mode"] == "command" {
                 for spec in [&r["capture"], &r, &r["verify"]] {
-                    executable(spec, &cwd(step, spec, roots)?)?;
+                    executable(step, spec, &cwd(step, spec, roots)?)?;
                 }
                 if let Some(p) = r.get("probe") {
-                    executable(p, &cwd(step, p, roots)?)?;
+                    executable(step, p, &cwd(step, p, roots)?)?;
                 }
             }
         } else if matches!(step["type"].as_str(), Some("merge_pr" | "wait_checks")) {
@@ -467,7 +530,7 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         if git(&checkout, &["rev-parse", "HEAD"])? != rev {
             bail!("pinned checkout changed outside the runner");
         }
-        bound.insert(repo, checkout);
+        bound.insert(repo, dunce::canonicalize(checkout)?);
     }
     Ok(bound)
 }
@@ -500,7 +563,7 @@ fn run_command(
         durable(&capture_file, capture)?;
     }
     let bound_roots = pinned_roots(step, roots, journal, phase)?;
-    let mut cmd = Command::new(spec["command"][0].as_str().context("command required")?);
+    let mut cmd = Command::new(command_path(step, spec, &cwd(step, spec, &bound_roots)?)?);
     cmd.args(strings(&spec["command"]).into_iter().skip(1))
         .current_dir(cwd(step, spec, &bound_roots)?);
     for env in [&step["env"], &spec["env"]] {
@@ -1547,7 +1610,7 @@ fn execute(
             }) && r["mode"] == "command"
             {
                 for spec in [&r, &r["verify"]] {
-                    executable(spec, &cwd(step, spec, &roots)?)?;
+                    executable(step, spec, &cwd(step, spec, &roots)?)?;
                 }
             }
         }
@@ -1797,7 +1860,7 @@ pub(crate) fn local_apply(
         .repos
         .iter()
         .filter_map(|r| crate::checkout::checkout_dir(active, r).map(|p| (r, p)))
-        .map(|(r, p)| Ok((r.id.clone(), p.canonicalize()?)))
+        .map(|(r, p)| Ok((r.id.clone(), dunce::canonicalize(p)?)))
         .collect::<Result<_>>()?;
     if let Some(repos) = project["repos"].as_array() {
         for r in repos {
@@ -1810,7 +1873,7 @@ pub(crate) fn local_apply(
                         active.root.join(path)
                     };
                     if path.is_dir() {
-                        roots.insert(id.into(), path.canonicalize()?);
+                        roots.insert(id.into(), dunce::canonicalize(path)?);
                     }
                 }
             }
