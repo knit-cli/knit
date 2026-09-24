@@ -24,6 +24,10 @@ struct PlanRecord {
     #[serde(default)]
     parent_hash: Option<String>,
     plan: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    bundle_snapshot: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    project_snapshot: Option<Value>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -254,12 +258,40 @@ fn belongs_to_project(root: &Path, bundle: &str, project: &str) -> Result<bool> 
     Ok(value.get("projectId").and_then(Value::as_str) == Some(project))
 }
 
+fn record_path(root: &Path, record: &PlanRecord) -> PathBuf {
+    root.join(".knit/land-plans/revisions")
+        .join(&record.bundle_slug)
+        .join(format!("{}.record.json", record.hash))
+}
+
+fn retain_record(root: &Path, record: &PlanRecord) -> Result<()> {
+    let path = record_path(root, record);
+    let mut retained = record.clone();
+    if path.exists() {
+        let old: PlanRecord = read_json(&path)?;
+        if old.hash != record.hash
+            || old.plan != record.plan
+            || old.revision != record.revision
+            || old.parent_hash != record.parent_hash
+            || old.bundle_slug != record.bundle_slug
+        {
+            bail!(
+                "Remote rewrote immutable landing revision {}",
+                record.revision
+            );
+        }
+        retained.bundle_snapshot = retained.bundle_snapshot.or(old.bundle_snapshot);
+        retained.project_snapshot = retained.project_snapshot.or(old.project_snapshot);
+    }
+    private_save(&path, &serde_json::to_value(retained)?)
+}
+
 fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
     let mut result = Artifacts::default();
-    let mut slots = BTreeMap::new();
+    let mut authored: BTreeMap<String, Value> = BTreeMap::new();
     for path in json_files(&root.join(".knit/land-plans"), ".land.json")? {
         let plan: Value = read_json(&path)?;
-        if plan.get("schemaVersion").and_then(Value::as_str) != Some("0.2") {
+        if plan["schemaVersion"] != "0.2" {
             continue;
         }
         let bundle = text(&plan, "bundleId")?;
@@ -267,29 +299,23 @@ fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
             continue;
         }
         let key = plan_key(&plan)?;
-        let hash = document_hash(&plan);
-        if let Some(previous) = slots.insert(key.clone(), hash.clone()) {
-            if previous != hash {
+        if let Some(previous) = authored.insert(key, plan.clone()) {
+            if previous != plan {
                 bail!("Multiple edited landing plans for {bundle} have the same destination; select one before syncing.");
             }
-            continue;
         }
-        let cursor = index.plans.get(&key);
-        if cursor.is_some_and(|c| c.hash == hash) {
-            continue;
-        }
-        result.plans.push(PlanRecord {
-            bundle_slug: bundle.into(),
-            revision: cursor.map_or(1, |c| c.revision + 1),
-            hash,
-            parent_hash: cursor.map(|c| c.hash.clone()),
-            plan,
-        });
     }
+    type ExecutedPlan = (
+        Value,
+        Value,
+        chrono::DateTime<chrono::FixedOffset>,
+        Option<Value>,
+    );
+    let mut histories: BTreeMap<String, BTreeMap<String, ExecutedPlan>> = BTreeMap::new();
     let mut run_hashes = BTreeMap::new();
     for path in json_files(&root.join(".knit/land-runs"), ".run.json")? {
         let run: Value = read_json(&path)?;
-        if run.get("schemaVersion").and_then(Value::as_str) != Some("0.2") {
+        if run["schemaVersion"] != "0.2" {
             continue;
         }
         let bundle = text(&run, "bundleId")?;
@@ -304,18 +330,201 @@ fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
             }
             continue;
         }
-        if index.runs.get(id) == Some(&hash) {
+        if run["status"] == "running" {
             continue;
         }
-        // Running state belongs to its owning runner; it must not be replayed
-        // from another machine's stale copy through ordinary sync.
-        if run.get("status").and_then(Value::as_str) == Some("running") {
-            continue;
+        let plan = &run["plan"];
+        if run["kind"] != "KnitLandRun"
+            || plan["kind"] != "KnitLandPlan"
+            || plan["schemaVersion"] != "0.2"
+            || plan["bundleId"] != bundle
+            || run["planHash"] != document_hash(plan)
+            || plan["sourceProjectId"] != index.project
+            || run["sourceBundle"]["id"] != bundle
+            || run["sourceBundle"]["projectId"] != index.project
+        {
+            bail!("Landing run {id} has an invalid embedded plan hash or source scope");
         }
-        result.runs.push(RunRecord {
-            bundle_slug: bundle.into(),
-            run,
-        });
+        if let Some(project) = run.get("sourceProject") {
+            let source =
+                crate::commands::land::v2::validation(plan, Some(&run["sourceBundle"]), None);
+            if source["valid"] != true {
+                bail!("Invalid historical landing source: {}", source["errors"]);
+            }
+            if project["id"] != index.project
+                || crate::commands::land::v2::validation(
+                    plan,
+                    Some(&run["sourceBundle"]),
+                    Some(project),
+                )["valid"]
+                    != true
+            {
+                bail!("Invalid historical landing project snapshot for run {id}");
+            }
+        }
+        let key = plan_key(plan)?;
+        let plan_hash = document_hash(plan);
+        let known = index.plan_versions.get(&plan_hash);
+        if known.is_some_and(|known_key| known_key != &key) {
+            bail!("Known landing hash belongs to a different destination");
+        }
+        if known.is_none() && index.plans.get(&key).is_none_or(|c| c.hash != plan_hash) {
+            let created = chrono::DateTime::parse_from_rfc3339(text(&run, "createdAt")?)
+                .context("Historical landing run needs a valid creation time")?;
+            let entry = histories
+                .entry(key)
+                .or_default()
+                .entry(plan_hash)
+                .or_insert_with(|| {
+                    (
+                        plan.clone(),
+                        run["sourceBundle"].clone(),
+                        created,
+                        run.get("sourceProject").cloned(),
+                    )
+                });
+            let project_snapshot = run
+                .get("sourceProject")
+                .cloned()
+                .or_else(|| entry.3.clone());
+            if created < entry.2 {
+                *entry = (
+                    plan.clone(),
+                    run["sourceBundle"].clone(),
+                    created,
+                    run.get("sourceProject").cloned(),
+                );
+            }
+            entry.3 = project_snapshot;
+        }
+        if index.runs.get(id) != Some(&hash) {
+            result.runs.push(RunRecord {
+                bundle_slug: bundle.into(),
+                run,
+            });
+        }
+    }
+    let keys: std::collections::BTreeSet<_> =
+        authored.keys().chain(histories.keys()).cloned().collect();
+    for key in keys {
+        let mut history: Vec<_> = histories
+            .remove(&key)
+            .unwrap_or_default()
+            .into_values()
+            .map(|(plan, bundle, executed, project)| {
+                let authored = chrono::DateTime::parse_from_rfc3339(text(&plan, "createdAt")?)
+                    .context("Historical landing plan needs a valid creation time")?;
+                Ok((authored, executed, plan, bundle, project))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        history.sort_by_key(|(authored, executed, _, _, _)| (*authored, *executed));
+        if history
+            .windows(2)
+            .any(|pair| (pair[0].0, pair[0].1) == (pair[1].0, pair[1].1))
+        {
+            bail!("Historical landing revisions have ambiguous creation order; reconcile before syncing");
+        }
+        let mut cursor = index.plans.get(&key).cloned();
+        let mut candidates: Vec<(Value, Option<Value>, Option<Value>)> = history
+            .into_iter()
+            .map(|(_, _, p, b, project)| (p, Some(b), project))
+            .collect();
+        if let Some(plan) = authored.remove(&key) {
+            // The authored slot is not rewritten, including when it names an older known revision.
+            if !candidates.iter().any(|(p, _, _)| *p == plan) {
+                candidates.push((plan, None, None));
+            }
+        }
+        let mut emitted = BTreeMap::new();
+        for (plan, bundle_snapshot, project_snapshot) in candidates {
+            let hash = document_hash(&plan);
+            if let Some(known_key) = index.plan_versions.get(&hash) {
+                if known_key != &key {
+                    bail!("Known landing hash belongs to a different destination");
+                }
+                continue;
+            }
+            if cursor.as_ref().is_some_and(|c| c.hash == hash)
+                || emitted.insert(hash.clone(), ()).is_some()
+            {
+                continue;
+            }
+            let bundle = text(&plan, "bundleId")?.to_owned();
+            let mut record = PlanRecord {
+                bundle_slug: bundle,
+                revision: cursor.as_ref().map_or(1, |c| c.revision + 1),
+                hash,
+                parent_hash: cursor.as_ref().map(|c| c.hash.clone()),
+                plan,
+                bundle_snapshot,
+                project_snapshot,
+            };
+            let cached_path = record_path(root, &record);
+            if cached_path.exists() {
+                let cached: PlanRecord = read_json(&cached_path)?;
+                if cached.hash != record.hash
+                    || cached.plan != record.plan
+                    || cached.bundle_slug != record.bundle_slug
+                    || cached.revision != record.revision
+                    || cached.parent_hash != record.parent_hash
+                {
+                    bail!("Historical landing revision has different known ancestry; pull and reconcile before syncing");
+                }
+                record.project_snapshot = record.project_snapshot.or(cached.project_snapshot);
+                if record.bundle_snapshot.is_none() {
+                    record.bundle_snapshot = cached.bundle_snapshot;
+                }
+            } else if record.bundle_snapshot.is_some() {
+                if let Some(base) = index.plans.get(&key) {
+                    let base_path = root
+                        .join(".knit/land-plans/revisions")
+                        .join(&base.bundle_slug)
+                        .join(format!("{}.land.json", base.hash));
+                    let base_plan: Value = read_json(&base_path).context(
+                        "Cannot establish historical landing ancestry; pull plans first",
+                    )?;
+                    let previous =
+                        chrono::DateTime::parse_from_rfc3339(text(&base_plan, "createdAt")?)?;
+                    let created =
+                        chrono::DateTime::parse_from_rfc3339(text(&record.plan, "createdAt")?)?;
+                    if created < previous {
+                        bail!("Untracked historical landing predates the known cursor; cannot fabricate immutable ancestry");
+                    }
+                }
+            }
+            if let Some(bundle) = &record.bundle_snapshot {
+                let validation =
+                    crate::commands::land::v2::validation(&record.plan, Some(bundle), None);
+                if validation["valid"] != true {
+                    bail!(
+                        "Invalid historical landing source: {}",
+                        validation["errors"]
+                    );
+                }
+                if record.project_snapshot.is_none() {
+                    let (project, _) = local_recipes(root, &index.project)?;
+                    record.project_snapshot = Some(project);
+                }
+                let project = record.project_snapshot.as_ref().unwrap();
+                if project["id"] != index.project
+                    || crate::commands::land::v2::validation(
+                        &record.plan,
+                        Some(bundle),
+                        Some(project),
+                    )["valid"]
+                        != true
+                {
+                    bail!("No compatible historical project snapshot for landing plan {}; preserve the original sourceProject or import its immutable snapshot before syncing", record.hash);
+                }
+            }
+            cursor = Some(PlanCursor {
+                file: plan_file(&record.plan)?,
+                hash: record.hash.clone(),
+                revision: record.revision,
+                bundle_slug: record.bundle_slug.clone(),
+            });
+            result.plans.push(record);
+        }
     }
     Ok(result)
 }
@@ -344,6 +553,7 @@ fn install_plan(root: &Path, index: &mut SyncIndex, record: &PlanRecord) -> Resu
             record.revision
         );
     }
+    retain_record(root, record)?;
     let history = root
         .join(".knit/land-plans/revisions")
         .join(&record.bundle_slug)
@@ -456,6 +666,7 @@ pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: boo
     // The server commits the import atomically. Only record ancestry after it
     // accepts; a lost response is safe to retry by immutable content hash.
     for record in &payload.plans {
+        retain_record(&root, record)?;
         let key = plan_key(&record.plan)?;
         save(
             &root
@@ -758,10 +969,15 @@ pub(crate) fn finish_for_plan(
 mod tests {
     use super::*;
     fn temp() -> PathBuf {
+        static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
-            "knit-plan-sync-{}-{}",
+            "knit-plan-sync-{}-{}-{}",
             std::process::id(),
-            crate::ids::node_id("test")
+            SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
         ));
         fs::create_dir_all(&p).unwrap();
         p
@@ -774,6 +990,8 @@ mod tests {
             hash: document_hash(&plan),
             parent_hash: None,
             plan,
+            bundle_snapshot: None,
+            project_snapshot: None,
         }
     }
     #[test]
@@ -925,6 +1143,30 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn pulled_snapshots_survive_omitted_envelopes_and_known_ancestry_cannot_change() {
+        let root = temp();
+        let mut index = SyncIndex::default();
+        let mut first = record(1, "original");
+        first.bundle_snapshot = Some(json!({"id":"demo","projectId":"demo"}));
+        first.project_snapshot = Some(json!({"id":"demo","landing":{}}));
+        install_plan(&root, &mut index, &first).unwrap();
+        let mut omitted = first.clone();
+        omitted.bundle_snapshot = None;
+        omitted.project_snapshot = None;
+        install_plan(&root, &mut index, &omitted).unwrap();
+        let retained: PlanRecord = read_json(&record_path(&root, &first)).unwrap();
+        assert_eq!(retained.bundle_snapshot, first.bundle_snapshot);
+        assert_eq!(retained.project_snapshot, first.project_snapshot);
+        let mut rewrite = first.clone();
+        rewrite.revision = 9;
+        rewrite.parent_hash = Some("different".into());
+        assert!(install_plan(&root, &mut index, &rewrite)
+            .unwrap_err()
+            .to_string()
+            .contains("immutable"));
         fs::remove_dir_all(root).unwrap();
     }
 }
