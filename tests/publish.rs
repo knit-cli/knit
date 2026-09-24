@@ -1223,12 +1223,11 @@ fn hosted_url_is_learned_before_pr_create_and_final_artifact_records_publication
         "{create}"
     );
 
-    // The initial PR body leads with the generic hosted link, ahead of the
-    // managed heading.
+    // The initial PR body places the generic hosted link just below the heading.
     let body = fs::read_to_string(fake_dir.join("create-backend.md")).unwrap();
     let link = format!("[View bundle]({hosted_url})");
     assert!(
-        body.find(&link).unwrap() < body.find("## Knit Bundle").unwrap(),
+        body.contains(&format!("## Knit Bundle\n\n{link}\n\nThis PR")),
         "{body}"
     );
 
@@ -1443,7 +1442,7 @@ fn artifact_publish_uses_the_persisted_web_url_without_remote_calls() {
     let body = payload["body"].as_str().unwrap();
     let link = format!("[View bundle]({hosted_url})");
     assert!(
-        body.find(&link).unwrap() < body.find("## Knit Bundle").unwrap(),
+        body.contains(&format!("## Knit Bundle\n\n{link}\n\nThis PR")),
         "{body}"
     );
 

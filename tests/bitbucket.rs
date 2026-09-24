@@ -415,11 +415,10 @@ fn artifact_publish_leads_bitbucket_descriptions_with_the_hosted_link() {
         serde_json::from_str(&fs::read_to_string(state.join("bitbucket-create.json")).unwrap())
             .unwrap();
     let created_description = create["description"].as_str().unwrap();
-    // The invisible reference-definition markers stay, the hosted link is the
-    // first visible content, and no HTML comment is written.
+    // The invisible markers stay; the heading appears before the hosted link.
     assert!(
         created_description.starts_with(&format!(
-            "[knit-bundle-begin]: #\n\n{link}\n\n## Knit Bundle"
+            "[knit-bundle-begin]: #\n\n## Knit Bundle\n\n{link}"
         )),
         "{created_description}"
     );
@@ -435,7 +434,7 @@ fn artifact_publish_leads_bitbucket_descriptions_with_the_hosted_link() {
     let edited_description = edit["description"].as_str().unwrap();
     assert!(
         edited_description.starts_with(&format!(
-            "[knit-bundle-begin]: #\n\n{link}\n\n## Knit Bundle"
+            "[knit-bundle-begin]: #\n\n## Knit Bundle\n\n{link}"
         )),
         "{edited_description}"
     );

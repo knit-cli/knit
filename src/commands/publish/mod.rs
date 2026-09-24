@@ -724,7 +724,7 @@ mod tests {
     }
 
     #[test]
-    fn hosted_link_leads_the_managed_block() {
+    fn hosted_link_follows_the_managed_heading() {
         let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
         let block = render_knit_pr_block(&bundle, Some("backend"), "github");
         let content = block
@@ -735,15 +735,15 @@ mod tests {
             .trim_start_matches('\n');
         assert!(
             content.starts_with(
-                "[View bundle](https://app.example.test/bundles/rb-venue-capacity)\n\n## Knit Bundle"
+                "## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"
             ),
             "{content}"
         );
-        // The link is the first visible content of a fresh PR body too.
+        // A fresh PR body starts with the heading, then the link.
         let body = initial_pr_body(&bundle, "backend", "github");
         assert!(
             body.starts_with(&format!(
-                "{KNIT_PR_BLOCK_BEGIN}\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"
+                "{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"
             )),
             "{body}"
         );
@@ -916,12 +916,12 @@ mod tests {
     }
 
     #[test]
-    fn bitbucket_linked_block_stays_ref_fenced_with_the_link_first_visible() {
+    fn bitbucket_linked_block_stays_ref_fenced_with_the_heading_first() {
         let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
         let block = render_knit_pr_block(&bundle, Some("backend"), "bitbucket");
         assert!(
             block.starts_with(&format!(
-                "{KNIT_PR_BLOCK_BEGIN_REFS}\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)\n\n## Knit Bundle"
+                "{KNIT_PR_BLOCK_BEGIN_REFS}\n\n## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"
             )),
             "{block}"
         );
@@ -941,13 +941,30 @@ mod tests {
 
     #[test]
     fn a_stray_label_deeper_in_the_block_does_not_relocate_it() {
-        // A crafted block whose first content line is a heading and whose
-        // label appears later must not count as leading with the hosted link.
-        let stray = format!("{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/1)\n{KNIT_PR_BLOCK_END}");
-        let previous = format!("Intro\n\n{stray}");
+        let stray = format!("{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\nDescription before link.\n\n[View bundle](https://app.example.test/bundles/1)\n{KNIT_PR_BLOCK_END}");
         assert_eq!(
-            upsert_knit_pr_block(&previous, "replacement"),
-            "Intro\n\nreplacement"
+            upsert_knit_pr_block("Intro", &stray),
+            format!("Intro\n\n{stray}")
         );
+    }
+
+    #[test]
+    fn sync_moves_legacy_link_below_heading_and_preserves_prose() {
+        let bundle = hosted_bundle("https://app.example.test/bundles/rb-venue-capacity");
+        for (provider, begin, end) in [
+            ("github", KNIT_PR_BLOCK_BEGIN, KNIT_PR_BLOCK_END),
+            (
+                "bitbucket",
+                KNIT_PR_BLOCK_BEGIN_REFS,
+                KNIT_PR_BLOCK_END_REFS,
+            ),
+        ] {
+            let old = format!("Intro\n\n{begin}\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)\n\n## Knit Bundle\n\nOld section\n\n{end}\n\nTail");
+            let block = render_knit_pr_block(&bundle, Some("backend"), provider);
+            let updated = upsert_knit_pr_block(&old, &block);
+            assert_eq!(updated, format!("{block}\n\nIntro\n\nTail"));
+            assert_eq!(updated.matches("[View bundle](").count(), 1);
+            assert_eq!(upsert_knit_pr_block(&updated, &block), updated);
+        }
     }
 }
