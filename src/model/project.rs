@@ -468,6 +468,9 @@ pub struct ProjectLandingMergePlan {
     /// False delegates source integration to the declared release procedure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub enabled: Option<bool>,
+    /// Per-repository exceptions to the scope's source integration policy.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repositories: BTreeMap<String, ProjectLandingRepositoryMerge>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
@@ -488,6 +491,56 @@ pub struct ProjectLandingMergePlan {
     pub timeout_seconds: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub interval_seconds: Option<u64>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLandingRepositoryMerge {
+    #[serde(
+        default,
+        deserialize_with = "deserialize_merge_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub enabled: Option<bool>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_merge_override",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub mode: Option<ProjectLandingMergeMode>,
+}
+
+// Missing fields inherit via serde(default); present fields must not be null.
+fn deserialize_merge_override<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLandingMergeMode {
+    Destination,
+    Review,
+}
+
+impl ProjectLandingMergePlan {
+    pub fn enabled_for(&self, repo_id: &str) -> bool {
+        self.repositories
+            .get(repo_id)
+            .and_then(|policy| policy.enabled)
+            .or(self.enabled)
+            .unwrap_or(true)
+    }
+
+    pub fn review_for(&self, repo_id: &str) -> bool {
+        self.repositories
+            .get(repo_id)
+            .and_then(|policy| policy.mode)
+            == Some(ProjectLandingMergeMode::Review)
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

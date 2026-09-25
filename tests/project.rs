@@ -1926,17 +1926,15 @@ fn project_schema_accepts_terminal_on_lanes_and_targets() {
             Some("boolean"),
             "{section} is missing `terminal`: {entry}"
         );
-        // The section rejects unknown keys, so an omitted property is not a
-        // documentation gap but a project JSON that fails validation.
-        assert_eq!(entry["additionalProperties"].as_bool(), Some(false));
+        // Versioned recipe extensions remain portable through project edits.
+        assert_eq!(entry["additionalProperties"].as_bool(), Some(true));
     }
 
     fs::remove_dir_all(root).unwrap();
 }
 
 /// A lane branch may be null, which is how a project says a repository has no
-/// such environment. The same `additionalProperties: false` that made a
-/// missing `terminal` a validation failure applies here.
+/// such environment. The branch value schema must explicitly allow null.
 #[test]
 fn project_schema_accepts_a_null_lane_branch() {
     let root = unique_temp_dir();

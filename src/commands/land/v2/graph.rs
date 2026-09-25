@@ -310,6 +310,8 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
         let (steps, compiled) = compile(plan)?;
         waves = compiled;
         let v2 = plan["schemaVersion"] == "0.2";
+        let merge_policy: crate::model::ProjectLandingMergePlan =
+            serde_json::from_value(plan.get("merge").cloned().unwrap_or(json!({})))?;
         if v2 {
             super::super::ensure_provider(plan["provider"].as_str().context("provider required")?)?;
             if plan.get("terminal").is_some() && !plan["terminal"].is_boolean() {
@@ -334,12 +336,27 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 if !enabled.is_boolean() {
                     bail!("merge.enabled must be boolean");
                 }
-                if enabled == false
-                    && steps
-                        .iter()
-                        .any(|s| matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch")))
-                {
-                    bail!("merge.enabled false cannot contain source merge operations");
+            }
+            for repo_id in merge_policy.repositories.keys() {
+                let project_repos = project.and_then(|p| p["repos"].as_array());
+                let declared = project_repos.or_else(|| bundle.and_then(|b| b["repos"].as_array()));
+                if let Some(repos) = declared {
+                    let recipe_binding =
+                        project_repos.is_none() && strings(&plan["recipeRepos"]).contains(repo_id);
+                    if !repos.iter().any(|repo| repo["id"] == *repo_id) && !recipe_binding {
+                        bail!("merge.repositories names unknown repository {repo_id}");
+                    }
+                }
+            }
+            for step in &steps {
+                if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch")) {
+                    let repo_id = step["repoId"].as_str().context("merge repo required")?;
+                    if !merge_policy.enabled_for(repo_id) {
+                        bail!("merge.enabled false cannot contain source merge operations for {repo_id} without an enabled repository override");
+                    }
+                    if merge_policy.review_for(repo_id) && step["type"] != "merge_pr" {
+                        bail!("merge mode review requires merge_pr for {repo_id}");
+                    }
                 }
             }
             for key in ["id", "bundleId", "bundleFingerprint", "projectFingerprint"] {
@@ -542,8 +559,11 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 .filter(|s| matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch")))
                 .filter_map(|s| s["repoId"].as_str())
                 .collect();
-            if plan["terminal"] != false && plan["merge"]["enabled"] != false {
+            if plan["terminal"] != false {
                 for id in &changed {
+                    if !merge_policy.enabled_for(id) {
+                        continue;
+                    }
                     if !merged.contains(id.as_str()) {
                         bail!("terminal plan omits changed repository {id}");
                     }

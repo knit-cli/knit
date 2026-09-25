@@ -1978,6 +1978,7 @@ pub fn recover(
     )
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn local_apply(
     active: &mut crate::store::ActiveBundle,
     plan_path: &Path,

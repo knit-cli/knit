@@ -52,6 +52,13 @@ pub(super) fn build_plan_with_project(
         .unwrap_or_else(|| inferred_plan_provider(active));
     ensure_provider(&provider)?;
     let merge = landing.map(|landing| &landing.merge);
+    if let (Some(project), Some(merge)) = (project.as_ref(), merge) {
+        for repo_id in merge.repositories.keys() {
+            if !project.repos.iter().any(|repo| repo.id == *repo_id) {
+                bail!("merge.repositories names unknown project repository `{repo_id}`");
+            }
+        }
+    }
 
     // Every repo this bundle actually changed, in the project's merge order.
     // Review merges narrow this to the repos that have a review recorded;
@@ -110,10 +117,22 @@ pub(super) fn build_plan_with_project(
     let merge_needs = merge.map(|m| &m.needs).unwrap_or(&empty_needs);
     let mut previous_ordered: Option<String> = None;
     for repo in &scope {
-        if merge.is_some_and(|m| m.enabled == Some(false)) {
+        if merge.is_some_and(|m| !m.enabled_for(&repo.id)) {
             continue;
         }
-        if !branch_merges && publication_for_repo(&active.bundle, &repo.id).is_none() {
+        // An explicit merge policy does not give a lane-absent repo a destination.
+        if lane_absent.contains(&repo.id) {
+            continue;
+        }
+        let review_merge = merge.is_some_and(|m| m.review_for(&repo.id));
+        let branch_merge = branch_merges && !review_merge;
+        if review_merge && publication_for_repo(&active.bundle, &repo.id).is_none() {
+            bail!(
+                "{}: merge mode review requires a recorded review publication",
+                repo.id
+            );
+        }
+        if !branch_merge && publication_for_repo(&active.bundle, &repo.id).is_none() {
             continue;
         }
         let id = format!("merge-{}", repo.id);
@@ -125,11 +144,6 @@ pub(super) fn build_plan_with_project(
             Vec::new()
         };
         if let Some(lane_name) = lane_name {
-            // Declared absent: this repository has no place in this
-            // environment, so it keeps its work for the terminal landing.
-            if lane_absent.contains(&repo.id) {
-                continue;
-            }
             if !destinations.contains_key(&repo.id) {
                 bail!(
                     "Landing lane `{lane_name}` has no branch for repository `{}`. Add landing.lanes.{lane_name}.branches.{} or defaultBranch. If `{}` has no {lane_name} environment at all, declare it absent with `\"{}\": null`.",
@@ -140,7 +154,7 @@ pub(super) fn build_plan_with_project(
                 );
             }
         }
-        let step = if branch_merges {
+        let step = if branch_merge {
             let destination = destinations
                 .get(&repo.id)
                 .cloned()
@@ -322,7 +336,7 @@ fn ensure_terminal_plan_covers_changed_repos(
     steps: &[LandStep],
     merge: Option<&ProjectLandingMergePlan>,
 ) -> Result<()> {
-    if !terminal || merge.is_some_and(|m| m.enabled == Some(false)) {
+    if !terminal {
         return Ok(());
     }
     let merged: BTreeSet<&str> = steps
@@ -335,6 +349,9 @@ fn ensure_terminal_plan_covers_changed_repos(
     let mut unpublished = Vec::new();
     let mut excluded = Vec::new();
     for repo_id in changed_repo_ids {
+        if merge.is_some_and(|m| !m.enabled_for(repo_id)) {
+            continue;
+        }
         if merged.contains(repo_id.as_str()) {
             continue;
         }

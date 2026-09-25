@@ -377,6 +377,26 @@
         "enabled": {
           "type": "boolean",
           "default": true
+        },
+        "repositories": {
+          "type": "object",
+          "description": "Per-repository merge policy. Scope overrides inherit individual fields from the root policy. Only changed repositories generate merge operations.",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "enabled": {
+                "type": "boolean"
+              },
+              "mode": {
+                "enum": [
+                  "destination",
+                  "review"
+                ],
+                "description": "destination follows normal terminal/intermediate behavior; review explicitly merges the recorded review, including at an intermediate destination."
+              }
+            },
+            "additionalProperties": false
+          }
         }
       }
     }

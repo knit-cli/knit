@@ -1517,8 +1517,8 @@ pub fn spawn_fake_remote_export(bundle_slug: &str, lifecycle_state: &str) -> Str
     ))
 }
 
-/// Spawn a fake remote API that answers every request with the given JSON
-/// body, e.g. a full project export including bundle artifact payloads.
+/// Spawn a fake remote API with a fixed JSON body. Project exports also serve
+/// their landing recipes and an empty landing-artifact collection on those routes.
 pub fn spawn_fake_remote_with_body(body: String) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1651,6 +1651,45 @@ fn handle_fake_remote_bundle_request(
     stream.flush()
 }
 
+fn fake_recipe_record(landing: serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&landing).unwrap())
+    );
+    serde_json::json!({"data":{"landing":landing,"hash":hash}}).to_string()
+}
+
+fn fake_recipe_request(
+    dir: &Path,
+    method: &str,
+    payload: &serde_json::Value,
+) -> std::io::Result<(u16, String)> {
+    let file = dir.join("landing-recipes.json");
+    let mut landing = match fs::read(&file) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error),
+    };
+    if method == "PUT" {
+        let record: serde_json::Value = serde_json::from_str(&fake_recipe_record(landing.clone()))?;
+        if payload["expectedHash"] != record["data"]["hash"] {
+            return Ok((
+                409,
+                serde_json::json!({"error":{"message":"recipe conflict"}}).to_string(),
+            ));
+        }
+        landing = payload
+            .get("landing")
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing landing recipe")
+            })?
+            .clone();
+        fs::write(file, landing.to_string())?;
+    }
+    Ok((200, fake_recipe_record(landing)))
+}
+
 fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Read, Write};
 
@@ -1675,11 +1714,35 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
         let mut sink = vec![0u8; content_length];
         reader.read_exact(&mut sink)?;
     }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+    let export: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let response = if method == "GET" && export["data"]["project"].is_object() {
+        if path.starts_with("/api/v1/projects/") && path.ends_with("/landing-recipes") {
+            let landing = export["data"]["knitProject"]["landing"]
+                .as_object()
+                .map(|value| serde_json::Value::Object(value.clone()))
+                .unwrap_or_else(|| serde_json::json!({}));
+            fake_recipe_record(landing)
+        } else if path.starts_with("/api/v1/projects/") && path.ends_with("/landing-artifacts") {
+            serde_json::json!({"data":{"plans":[],"runs":[]}}).to_string()
+        } else {
+            body.to_owned()
+        }
+    } else {
+        body.to_owned()
+    };
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
+        response.len(),
+        response
     )?;
     stream.flush()
 }
@@ -1765,6 +1828,9 @@ fn handle_fake_remote_push_request(
         fs::write(record, existing)?;
     }
     let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET" | "PUT", ["api", "v1", "projects", _, "landing-recipes"]) => {
+            fake_recipe_request(dir, &method, &body)?
+        }
         ("GET", ["api", "v1", "me", "access-token"]) => (
             200,
             r#"{"data":{"scopes":["bundle:push","bundle:read"]}}"#.to_string(),
@@ -2110,22 +2176,10 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
         }
 
         ("GET" | "PUT", path) if path.ends_with("/landing-recipes") && dir.join("landing-artifacts.json").exists() => {
-            use sha2::{Digest, Sha256};
-            let file = dir.join("landing-recipes.json");
-            let mut landing: serde_json::Value = fs::read(&file).ok().map(|b| serde_json::from_slice(&b).unwrap()).unwrap_or(serde_json::json!({}));
-            let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&landing).unwrap()));
-            let payload: serde_json::Value = serde_json::from_str(&body).unwrap_or(serde_json::Value::Null);
-            if method == "PUT" && payload["expectedHash"] != hash {
-                (409, "{\"error\":{\"message\":\"recipe conflict\"}}".to_string())
-            } else {
-                if method == "PUT" {
-                    landing = payload["landing"].clone();
-                    fs::write(file, landing.to_string())?;
-                }
-                let hash = format!("{:x}", Sha256::digest(serde_json::to_vec(&landing).unwrap()));
-                (200, serde_json::json!({"data":{"landing":landing,"hash":hash}}).to_string())
-            }
+            let payload = if body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&body)? };
+            fake_recipe_request(dir, &method, &payload)?
         }
+
         ("GET", path) if path == "/api/v1/projects/demo" && dir.join("landing-artifacts.json").exists() => {
             (200, "{\"data\":{\"id\":\"p-1\",\"slug\":\"demo\"}}".to_string())
         }
@@ -2191,10 +2245,14 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fs::write(dir.join("views-puts.jsonl"), log).unwrap();
             (200, "{\"data\":{}}".to_string())
         }
+        ("POST", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/bundles") => {
+            let payload: serde_json::Value = serde_json::from_str(&body)?;
+            let slug = payload["slug"].as_str().unwrap_or("unknown");
+            (201, serde_json::json!({"data":{"id":format!("rb-{slug}"),"slug":slug}}).to_string())
+        }
         ("PATCH", path) | ("POST", path)
-            if path.starts_with("/api/v1/projects")
-                && !path.contains("/repositories")
-                && !path.ends_with("/view") =>
+            if matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(),
+                ["api", "v1", "projects"] | ["api", "v1", "projects", _]) =>
         {
             if dir.join("initial-project.json").exists() {
                 let payload: serde_json::Value = serde_json::from_str(&body)?;
