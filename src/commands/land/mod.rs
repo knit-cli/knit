@@ -277,9 +277,6 @@ pub fn apply_land_plan(
     if expected_plan_hash.is_some() {
         bail!("--expected-plan-hash requires a saved schema 0.2 plan");
     }
-    ensure_no_executor04_semantics_on_legacy(&read_json::<serde_json::Value>(
-        &resolve_land_plan_path(&active, plan_path)?,
-    )?)?;
     let mut active = load_active_bundle_for_update()?;
     let target_branch = normalize_target_branch(target_branch)?;
     let lane_name = normalize_lane_name(lane_name)?;
@@ -290,6 +287,7 @@ pub fn apply_land_plan(
             path.display()
         );
     }
+    ensure_no_executor04_semantics_on_legacy(&read_json::<serde_json::Value>(&path)?)?;
     let plan: LandPlan = read_json(&path)?;
     ensure_requested_selection_matches_plan(
         &active,

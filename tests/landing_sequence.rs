@@ -375,7 +375,13 @@ fn repository_sequence_compiles_explicit_order_and_pins_the_run_environment() {
         "{}",
         String::from_utf8_lossy(&applied.stderr)
     );
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
     let run = read(&f.root.join("run.json"));
     for repo in ["alpha", "beta"] {
         let merge = run["steps"]
@@ -515,8 +521,11 @@ fn target_drift_is_rejected_and_resume_rechecks_pending_work() {
     );
     assert!(text.to_lowercase().contains("drift"), "{text}");
     assert_eq!(
-        fs::read_to_string(f.trace_path()).unwrap(),
-        "alpha\n",
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha"],
         "alpha completed; beta never ran"
     );
     let api_after = f.remote_tip("alpha", "staging");
@@ -528,7 +537,13 @@ fn target_drift_is_rejected_and_resume_rechecks_pending_work() {
         String::from_utf8_lossy(&resumed.stdout),
         String::from_utf8_lossy(&resumed.stderr)
     );
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
     assert_eq!(f.remote_tip("alpha", "staging"), api_after);
     let run = read(&f.root.join("run.json"));
     assert_eq!(run["status"], "succeeded");
@@ -711,7 +726,13 @@ fn resume_skips_completed_steps() {
 
     let first = f.apply("plan.json", false);
     assert!(!first.status.success());
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
 
     fs::write(f.root.join("gate"), "ready\n").unwrap();
     let resumed = f.apply("plan.json", true);
@@ -722,8 +743,11 @@ fn resume_skips_completed_steps() {
         String::from_utf8_lossy(&resumed.stderr)
     );
     assert_eq!(
-        fs::read_to_string(f.trace_path()).unwrap(),
-        "alpha\nbeta\n",
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"],
         "completed steps must not re-run"
     );
     let run = read(&f.root.join("run.json"));
@@ -785,6 +809,47 @@ fn scoped_null_disables_and_absent_scope_inherits_the_root_policy() {
     assert!(plan.get("execution").is_none(), "explicit null disables");
     assert!(plan.get("preflight").is_none());
     assert_eq!(plan["requiredExecutorVersion"], "0.3");
+}
+
+#[test]
+fn local_apply_reports_missing_plans_and_still_rejects_legacy_semantics() {
+    let local = LocalFixture::new(false);
+    let f = &local.fixture;
+    for args in [
+        vec!["land", "apply"],
+        vec!["land", "apply", "--plan", "missing.json"],
+    ] {
+        let applied = f.cmd(&args);
+        assert!(!applied.status.success());
+        let error = String::from_utf8_lossy(&applied.stderr);
+        assert!(error.contains("No land plan found"), "{error}");
+        assert!(error.contains("knit land plan"), "{error}");
+    }
+    for (key, value) in [
+        (
+            "execution",
+            json!({"mode": "repository_sequence", "repoOrder": ["alpha"]}),
+        ),
+        ("preflight", json!({"mergeability": "all"})),
+        (
+            "integrationSources",
+            json!({"alpha": {"branch": "compatibility", "sha": f.repos[0].4}}),
+        ),
+        ("requiredExecutorVersion", json!("0.4")),
+    ] {
+        let mut plan = json!({"schemaVersion": "0.1"});
+        plan[key] = value;
+        write(&f.root.join("legacy.json"), &plan);
+        let applied = f.cmd(&["land", "apply", "--plan", "legacy.json"]);
+        assert!(!applied.status.success());
+        let error = String::from_utf8_lossy(&applied.stderr);
+        assert!(
+            error.contains(key) && error.contains("schema 0.2"),
+            "{error}"
+        );
+    }
+    assert!(!f.trace_path().exists());
+    assert!(!f.root.join(".knit/land-runs").exists());
 }
 
 #[test]
@@ -953,7 +1018,13 @@ fn deleted_target_refuses_the_merge_and_resume_completes_after_restore() {
         String::from_utf8_lossy(&applied.stderr)
     );
     assert!(text.contains("missing from origin"), "{text}");
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
 
     // The operator restores the deleted target to the planned tip.
     run_git(
@@ -967,7 +1038,13 @@ fn deleted_target_refuses_the_merge_and_resume_completes_after_restore() {
         String::from_utf8_lossy(&resumed.stdout),
         String::from_utf8_lossy(&resumed.stderr)
     );
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
 }
 
 // Inject a transport outage after alpha deployed: beta's first lookup is
@@ -1035,7 +1112,13 @@ raise SystemExit(subprocess.call(['git','upload-pack']+sys.argv[1:]))
         fail_on.to_string()
     );
     assert_eq!(f.remote_tip("beta", "staging"), beta_before);
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha"]
+    );
     let alpha_after = f.remote_tip("alpha", "staging");
 
     run_git(
@@ -1049,7 +1132,13 @@ raise SystemExit(subprocess.call(['git','upload-pack']+sys.argv[1:]))
         String::from_utf8_lossy(&resumed.stdout),
         String::from_utf8_lossy(&resumed.stderr)
     );
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
     assert_eq!(f.remote_tip("alpha", "staging"), alpha_after);
     assert_eq!(read(&f.root.join("run.json"))["status"], "succeeded");
 }
@@ -1213,8 +1302,11 @@ fn required_checks_evaluate_integration_heads(in_place: bool) {
         String::from_utf8_lossy(&applied.stderr)
     );
     assert_eq!(
-        fs::read_to_string(f.fixture.trace_path()).unwrap(),
-        "alpha\nbeta\n"
+        fs::read_to_string(f.fixture.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
     );
     let runs = fs::read_dir(f.fixture.root.join(".knit/land-runs")).unwrap();
     for entry in runs {

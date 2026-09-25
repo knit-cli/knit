@@ -1244,8 +1244,11 @@ fn simulation_preserves_mixed_case_driver_and_common_info_attributes() {
     sim_git(&worktree, &["merge", "--no-ff", "--no-commit", &side]);
     assert!(sim_git(&worktree, &["diff", "--name-only", "--diff-filter=U"]).is_empty());
     assert_eq!(
-        std::fs::read_to_string(worktree.join("f.txt")).unwrap(),
-        "target\n"
+        std::fs::read_to_string(worktree.join("f.txt"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["target"]
     );
     sim_git(&worktree, &["merge", "--abort"]);
     std::fs::remove_dir_all(dir).unwrap();
