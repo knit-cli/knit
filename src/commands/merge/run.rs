@@ -430,20 +430,65 @@ fn prepare_merge_step(
 /// half of a merge run, exposed for callers that own their own run record —
 /// landing a bundle into an environment merges branches this way instead of
 /// spending the bundle's review objects on a stop it only passes through.
+///
+/// `expected_target` optionally pins the tip the merge was planned against
+/// (the landing mergeability preflight records one). With a pin the fetched
+/// target must equal it exactly — a drifted or rewound branch is refused,
+/// never overwritten — and the push becomes a conditional update
+/// (`--force-with-lease=<branch>:<expected>`), permitted only after the merge
+/// result has been asserted to descend from the expected tip, so the update
+/// strictly extends history. Without a pin the behavior is unchanged.
 pub(crate) fn merge_branch_into_target(
     root: &Path,
     repo: &RepoEntry,
     source_ref: &str,
     branch: &str,
     push: bool,
+    expected_target: Option<&str>,
 ) -> Result<BranchMergeOutcome> {
     let repo_root = PathBuf::from(&repo.path);
     // Refresh from origin when the destination lives there. A destination that
     // exists only locally still merges; one that exists nowhere is a
-    // configuration mistake worth naming.
-    let on_origin = crate::git::remote_ref_sha(&repo_root, "origin", branch)
-        .unwrap_or(None)
-        .is_some();
+    // configuration mistake worth naming. With an expected tip the remote is
+    // mandatory and its answer authoritative: a missing or unreachable remote
+    // branch must fail, never fall back to a local branch that could silently
+    // recreate a deleted remote. Without a pin the historical best-effort
+    // behavior is unchanged.
+    let expected_target = match expected_target {
+        Some(expected) => {
+            let tip =
+                crate::git::remote_ref_sha(&repo_root, "origin", &format!("refs/heads/{branch}"))
+                    .map_err(|error| crate::commands::land::v2::KnownNoEffect(format!(
+                        "{}: failed to read target origin/{branch} before merging: {error:#}. Reconcile the remote, then resume the landing run.",
+                        repo.id
+                    )))?;
+            let Some(tip) = tip else {
+                return Err(crate::commands::land::v2::KnownNoEffect(format!(
+                    "{}: target branch {} is missing from origin; the landing preflight pinned {expected} there. Reconcile the remote, then resume the landing run.",
+                    repo.id,
+                    out::branch(branch)
+                ))
+                .into());
+            };
+            if tip != expected {
+                return Err(crate::commands::land::v2::KnownNoEffect(format!(
+                    "{}: target branch {} drifted since the landing preflight (expected {expected}, found {tip}); refusing to overwrite intervening work. Reconcile the branch, then resume the landing run.",
+                    repo.id,
+                    out::branch(branch)
+                ))
+                .into());
+            }
+            Some(expected)
+        }
+        None => None,
+    };
+    let on_origin = if expected_target.is_some() {
+        true
+    } else {
+        crate::git::remote_ref_sha(&repo_root, "origin", branch)
+            .unwrap_or(None)
+            .is_some()
+    };
     if !on_origin && !branch_exists(&repo_root, branch) {
         bail!(
             "{}: destination branch {} does not exist locally or on origin. Create it before landing there, for example `git branch {branch} origin/{}` and `git push -u origin {branch}`.",
@@ -452,7 +497,44 @@ pub(crate) fn merge_branch_into_target(
             repo.base_branch
         );
     }
-    let checkout = prepare_branch_checkout(root, repo, branch, on_origin)?;
+    // No source merge or push has happened while preparing the checkout.
+    // Guarded runs can safely retry a failed target fetch on resume.
+    let checkout = prepare_branch_checkout(root, repo, branch, on_origin).map_err(|error| {
+        if expected_target.is_some() {
+            crate::commands::land::v2::KnownNoEffect(format!(
+                "{}: failed to prepare target origin/{branch} before merging: {error:#}. Reconcile the remote or checkout, then resume the landing run.",
+                repo.id
+            )).into()
+        } else {
+            error
+        }
+    })?;
+    // Expected-target guard: immediately after the fetch and before any
+    // local mutation, the fresh tip must still be the tip this merge was
+    // planned against.
+    if let Some(expected) = expected_target {
+        let fetched = if on_origin {
+            crate::git::ref_commit_sha(&repo_root, &format!("refs/remotes/origin/{branch}"))?
+        } else {
+            crate::git::ref_commit_sha(&repo_root, &format!("refs/heads/{branch}"))?
+        };
+        let Some(fetched) = fetched else {
+            return Err(crate::commands::land::v2::KnownNoEffect(format!(
+                "{}: target branch {} vanished from origin while landing",
+                repo.id,
+                out::branch(branch)
+            ))
+            .into());
+        };
+        if fetched != expected {
+            return Err(crate::commands::land::v2::KnownNoEffect(format!(
+                "{}: target branch {} drifted since the landing preflight (expected {expected}, found {fetched}); refusing to overwrite intervening work. Reconcile the branch, then resume the landing run.",
+                repo.id,
+                out::branch(branch)
+            ))
+            .into());
+        }
+    }
     ensure_ref_exists(&checkout, source_ref)
         .with_context(|| format!("{}: source ref {source_ref} was not found", repo.id))?;
     let status = git_output(&checkout, ["status", "--porcelain"])?;
@@ -498,15 +580,25 @@ pub(crate) fn merge_branch_into_target(
 
     if push {
         // The managed checkout is detached, so the merge is pushed from HEAD
-        // straight to the branch on origin.
-        let push_result = git_output(
-            &checkout,
-            [
-                OsString::from("push"),
-                OsString::from("origin"),
-                OsString::from(format!("HEAD:refs/heads/{branch}")),
-            ],
-        );
+        // straight to the branch on origin. With an expected tip the push is
+        // a conditional update: only after asserting the merge result
+        // descends from that tip, so the lease can never rewrite history.
+        let mut push_args = vec![OsString::from("push")];
+        if let Some(expected) = expected_target {
+            if !is_ancestor(&checkout, expected, &after_sha) {
+                bail!(
+                    "{}: merge result {after_sha} is not a descendant of the expected target {expected} of {}; refusing the conditional update",
+                    repo.id,
+                    out::branch(branch)
+                );
+            }
+            push_args.push(OsString::from(format!(
+                "--force-with-lease=refs/heads/{branch}:{expected}"
+            )));
+        }
+        push_args.push(OsString::from("origin"));
+        push_args.push(OsString::from(format!("HEAD:refs/heads/{branch}")));
+        let push_result = git_output(&checkout, push_args);
         if let Err(error) = push_result {
             // Undo the local merge. Leaving it in place would make the next
             // attempt's fast-forward from origin/<branch> refuse the checkout

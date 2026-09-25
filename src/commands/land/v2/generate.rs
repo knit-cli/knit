@@ -342,6 +342,64 @@ pub(super) fn build(
         step["effect"] = json!(effect(step));
     }
     plan["steps"] = json!(steps);
+    // Opt-in repository-sequence execution: compile the per-repository groups
+    // into an explicit workflow, honoring every declared dependency. A scoped
+    // (lane/target) block that omits the key inherits the project root; one
+    // that sets it to null disables the root's mode for that scope.
+    let execution = if lane.is_some() || target.is_some() {
+        if override_config.get("execution").is_some() {
+            override_config["execution"].clone()
+        } else {
+            project["landing"]["execution"].clone()
+        }
+    } else {
+        project["landing"]["execution"].clone()
+    };
+    if let Some(order) = super::sequence::parse_execution(
+        &execution,
+        &lane
+            .map(|l| format!("landing.lanes.{l}"))
+            .or_else(|| target.map(|t| format!("landing.targets.{t}")))
+            .unwrap_or_else(|| "landing".to_owned()),
+    )? {
+        let workflow = super::sequence::compile_workflow(&steps, &order)?;
+        plan["execution"] = json!({"mode": super::sequence::MODE, "repoOrder": order});
+        plan["workflow"] = workflow;
+    }
+    // Opt-in mergeability preflight policy, copied verbatim into the plan.
+    // Scope semantics match execution: absent key inherits the root policy,
+    // an explicit null disables it for that scope.
+    let preflight = if lane.is_some() || target.is_some() {
+        if override_config.get("preflight").is_some() {
+            override_config["preflight"].clone()
+        } else {
+            project["landing"]["preflight"].clone()
+        }
+    } else {
+        project["landing"]["preflight"].clone()
+    };
+    if !preflight.is_null() {
+        super::mergeability::validate_plan_preflight(&json!({"preflight": preflight}))
+            .map_err(|e| anyhow::anyhow!("landing preflight policy invalid: {e:#}"))?;
+        plan["preflight"] = preflight;
+    }
+    if plan.get("execution").is_some() || plan.get("preflight").is_some() {
+        plan["requiredExecutorVersion"] = json!("0.4");
+        let mut capabilities = super::graph::strings(&plan["requiredCapabilities"]);
+        if plan.get("execution").is_some()
+            && !capabilities.contains(&super::sequence::CAPABILITY.to_owned())
+        {
+            capabilities.push(super::sequence::CAPABILITY.to_owned());
+        }
+        if plan.get("preflight").is_some()
+            && !capabilities.contains(&super::mergeability::CAPABILITY.to_owned())
+        {
+            capabilities.push(super::mergeability::CAPABILITY.to_owned());
+        }
+        capabilities.sort();
+        capabilities.dedup();
+        plan["requiredCapabilities"] = json!(capabilities);
+    }
     let result = validation(&plan, Some(bundle), Some(project));
     if result["valid"] != true {
         bail!("{}", result["errors"]);

@@ -1011,9 +1011,11 @@ fn review_corrections_executor_protocol_and_no_merge_display() {
             plan["requiredExecutorVersion"] = json!(version);
             write(&f.root.join("reviewed.json"), &plan);
             let validated = f.cmd(&["land", "validate", "--plan", "reviewed.json", "--json"]);
+            // Interactive and manual operations need executor 0.3 features;
+            // 0.4 is a later executor that still has them, 0.2 does not.
             assert_eq!(
                 validated.status.success(),
-                version == "0.3",
+                version != "0.2",
                 "{} {}",
                 String::from_utf8_lossy(&validated.stdout),
                 String::from_utf8_lossy(&validated.stderr)

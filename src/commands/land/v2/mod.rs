@@ -4,7 +4,14 @@ mod destinations;
 mod generate;
 pub use destinations::destinations;
 mod graph;
+mod mergeability;
+pub(crate) use mergeability::KnownNoEffect;
+mod preflight;
+pub use preflight::preflight;
 mod runtime;
+mod sequence;
+mod source;
+pub use source::source;
 #[cfg(test)]
 mod tests;
 use crate::store::read_json;

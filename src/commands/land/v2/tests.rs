@@ -1143,3 +1143,199 @@ fn repository_merge_review_exceptions_preserve_refusals_and_terminal_coverage() 
         .to_string()
         .contains("base of its recorded review"));
 }
+
+fn sim_git(dir: &std::path::Path, args: &[&str]) -> String {
+    let output = std::process::Command::new("git")
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap().trim().to_owned()
+}
+
+fn sim_repo(dir: &std::path::Path) {
+    sim_git(dir, &["init", "--quiet", "--initial-branch=main"]);
+    sim_git(dir, &["config", "user.name", "Synthetic"]);
+    sim_git(dir, &["config", "user.email", "synthetic@example.invalid"]);
+    std::fs::write(dir.join("f.txt"), "base\n").unwrap();
+    sim_git(dir, &["add", "."]);
+    sim_git(dir, &["commit", "--quiet", "-m", "base"]);
+}
+
+fn sim_commit(dir: &std::path::Path, content: &str) -> String {
+    std::fs::write(dir.join("f.txt"), content).unwrap();
+    sim_git(dir, &["commit", "--quiet", "-am", "change"]);
+    sim_git(dir, &["rev-parse", "HEAD"])
+}
+
+#[test]
+fn simulation_reports_verified_conflicts_only() {
+    let temp = std::env::temp_dir().join(runtime::unique_id("sim-regression"));
+    std::fs::create_dir_all(&temp).unwrap();
+    let dir = temp.as_path();
+    sim_repo(dir);
+    let base = sim_git(dir, &["rev-parse", "HEAD"]);
+    sim_git(dir, &["checkout", "--quiet", "-b", "side"]);
+    let side = sim_commit(dir, "side\n");
+    sim_git(dir, &["checkout", "--quiet", "-b", "target", &base]);
+    let tip = sim_commit(dir, "target\n");
+    let result =
+        super::mergeability::simulate_merge(dir, "repo", None, &side, "target", &tip).unwrap();
+    assert_eq!(result.conflicts, vec!["f.txt".to_owned()]);
+    sim_git(dir, &["checkout", "--quiet", "-b", "clean", &base]);
+    std::fs::write(dir.join("distinct.txt"), "clean\n").unwrap();
+    sim_git(dir, &["add", "."]);
+    sim_git(dir, &["commit", "--quiet", "-m", "clean"]);
+    let clean = sim_git(dir, &["rev-parse", "HEAD"]);
+    sim_git(dir, &["checkout", "--quiet", "target"]);
+    let result =
+        super::mergeability::simulate_merge(dir, "repo", None, &clean, "target", &tip).unwrap();
+    assert!(result.conflicts.is_empty());
+    assert!(!result.contained);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn simulation_preserves_mixed_case_driver_and_common_info_attributes() {
+    let temp = std::env::temp_dir().join(runtime::unique_id("sim-regression"));
+    std::fs::create_dir_all(&temp).unwrap();
+    let dir = temp.as_path();
+    sim_repo(dir);
+    let base = sim_git(dir, &["rev-parse", "HEAD"]);
+    sim_git(dir, &["checkout", "--quiet", "-b", "side"]);
+    let side = sim_commit(dir, "side\n");
+    sim_git(dir, &["checkout", "--quiet", "-b", "target", &base]);
+    let tip = sim_commit(dir, "target\n");
+    let worktree = dir.join("linked");
+    sim_git(
+        dir,
+        &[
+            "worktree",
+            "add",
+            "--quiet",
+            "--detach",
+            worktree.to_str().unwrap(),
+            &tip,
+        ],
+    );
+    // First prove the fixture conflicts without the untracked attributes.
+    let conflict =
+        super::mergeability::simulate_merge(&worktree, "repo", None, &side, "target", &tip)
+            .unwrap();
+    assert_eq!(conflict.conflicts, vec!["f.txt"]);
+    sim_git(dir, &["config", "merge.KeepTarget.driver", "true"]);
+    let attributes = sim_git(&worktree, &["rev-parse", "--git-path", "info/attributes"]);
+    let attributes = worktree.join(attributes);
+    std::fs::create_dir_all(attributes.parent().unwrap()).unwrap();
+    std::fs::write(attributes, "f.txt merge=KeepTarget\n").unwrap();
+    let result =
+        super::mergeability::simulate_merge(&worktree, "repo", None, &side, "target", &tip)
+            .unwrap();
+    assert!(result.conflicts.is_empty());
+    assert!(!result.contained);
+    assert_eq!(sim_git(&worktree, &["rev-parse", "HEAD"]), tip);
+    assert!(sim_git(&worktree, &["status", "--porcelain"]).is_empty());
+    // The actual linked-worktree merge must agree with the isolated probe.
+    sim_git(&worktree, &["merge", "--no-ff", "--no-commit", &side]);
+    assert!(sim_git(&worktree, &["diff", "--name-only", "--diff-filter=U"]).is_empty());
+    assert_eq!(
+        std::fs::read_to_string(worktree.join("f.txt"))
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["target"]
+    );
+    sim_git(&worktree, &["merge", "--abort"]);
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn simulation_fails_closed_on_unrelated_histories() {
+    let temp = std::env::temp_dir().join(runtime::unique_id("sim-regression"));
+    std::fs::create_dir_all(&temp).unwrap();
+    let dir = temp.as_path();
+    sim_repo(dir);
+    let source = sim_git(dir, &["rev-parse", "HEAD"]);
+    sim_git(dir, &["checkout", "--quiet", "--orphan", "orphan"]);
+    sim_git(dir, &["rm", "--cached", "-r", "."]);
+    std::fs::write(dir.join("orphan.txt"), "orphan\n").unwrap();
+    sim_git(dir, &["add", "."]);
+    sim_git(dir, &["commit", "--quiet", "-m", "orphan"]);
+    let orphan = sim_git(dir, &["rev-parse", "HEAD"]);
+    let error = super::mergeability::simulate_merge(dir, "repo", None, &source, "orphan", &orphan)
+        .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("refusing to merge unrelated histories")
+            || message.contains("without reportable conflicts"),
+        "{message}"
+    );
+    std::fs::remove_dir_all(dir).unwrap();
+}
+
+#[test]
+fn simulation_fails_closed_on_missing_source() {
+    let dir = std::env::temp_dir().join(runtime::unique_id("sim-missing"));
+    std::fs::create_dir_all(&dir).unwrap();
+    sim_repo(&dir);
+    let tip = sim_commit(&dir, "tip\n");
+    // A repository with no origin cannot produce the requested object: the
+    // fetch fails and the simulation must not call the merge clean.
+    let error = super::mergeability::simulate_merge(
+        &dir,
+        "repo",
+        None,
+        "0000000000000000000000000000000000000001",
+        "master",
+        &tip,
+    )
+    .unwrap_err();
+    let message = format!("{error:#}");
+    assert!(
+        message.contains("fetch") || message.contains("source"),
+        "{message}"
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
+fn effective_required_checks_bundle_pins_integration_heads() {
+    let bundle = json!({"repos": [
+        {"id": "a", "headSha": "1111111111111111111111111111111111111111", "worktreePath": "/tmp/a", "checkoutMode": "worktree"},
+        {"id": "b", "headSha": "2222222222222222222222222222222222222222", "worktreePath": null, "checkoutMode": "inPlace"}
+    ]});
+    let plan = json!({"integrationSources": {"a": {"branch": "compat", "sha": "3333333333333333333333333333333333333333"}}});
+    let effective = super::mergeability::effective_required_checks_bundle(&plan, &bundle);
+    assert_eq!(
+        effective["repos"][0]["headSha"],
+        "3333333333333333333333333333333333333333"
+    );
+    assert!(effective["repos"][0]["worktreePath"].is_null());
+    assert_eq!(effective["repos"][0]["checkoutMode"], "worktree");
+    // Untouched repositories keep their recorded state.
+    assert_eq!(
+        effective["repos"][1]["headSha"],
+        "2222222222222222222222222222222222222222"
+    );
+    assert_eq!(effective["repos"][1]["checkoutMode"], "inPlace");
+}
+
+#[test]
+fn execution_validation_rejects_undeclared_repositories() {
+    let mut f = Fixture::new();
+    f.plan["requiredExecutorVersion"] = json!("0.4");
+    f.plan["requiredCapabilities"] = json!(["repository-sequence"]);
+    f.plan["execution"] = json!({"mode": "repository_sequence", "repoOrder": ["other"]});
+    f.plan["workflow"] = json!({"sequence": [{"step": "deploy"}]});
+    f.plan["steps"] = json!([deploy("deploy", "pass")]);
+    let result = super::graph::validation(&f.plan, None, None);
+    assert!(result["valid"] != true);
+    assert!(result["errors"]
+        .to_string()
+        .contains("does not declare repository service"));
+}

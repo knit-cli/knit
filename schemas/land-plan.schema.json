@@ -368,7 +368,8 @@
     "requiredExecutorVersion": {
       "enum": [
         "0.2",
-        "0.3"
+        "0.3",
+        "0.4"
       ]
     },
     "merge": {
@@ -398,6 +399,71 @@
             "additionalProperties": false
           }
         }
+      }
+    },
+    "execution": {
+      "description": "Opt-in execution policy copied from the project or lane/target scope into the plan.",
+      "type": "object",
+      "properties": {
+        "mode": {
+          "const": "repository_sequence",
+          "description": "Compile each repository's merge/build/deploy/verify into an explicit per-repository workflow sequence."
+        },
+        "repoOrder": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "Repository IDs in execution order; every step's repository must be declared."
+        }
+      },
+      "required": [
+        "mode",
+        "repoOrder"
+      ],
+      "additionalProperties": false
+    },
+    "preflight": {
+      "description": "Opt-in preflight policies copied verbatim from the project or lane/target scope.",
+      "type": "object",
+      "properties": {
+        "mergeability": {
+          "const": "all",
+          "description": "Before any remote ref moves or effectful command runs, simulate every pending branch merge against a freshly resolved target tip; any conflict fails the whole preflight."
+        }
+      },
+      "required": [
+        "mergeability"
+      ],
+      "additionalProperties": false
+    },
+    "integrationSources": {
+      "description": "Per-repository explicit integration sources, separate from bundleHeads; the bundle fingerprint and pins stay untouched.",
+      "type": "object",
+      "minProperties": 1,
+      "additionalProperties": {
+        "description": "Explicit integration source for one repository: merged instead of the bundle head, only for merge_branch steps; provenance (tip equals pin, contains reviewed head) is verified independently of review state.",
+        "type": "object",
+        "properties": {
+          "branch": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Branch name usable as refs/heads/<branch>."
+          },
+          "sha": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{40}$|^[0-9a-f]{64}$",
+            "description": "Full lowercase commit SHA."
+          }
+        },
+        "required": [
+          "branch",
+          "sha"
+        ],
+        "additionalProperties": false
       }
     }
   },
@@ -649,7 +715,121 @@
         ],
         "properties": {
           "requiredExecutorVersion": {
-            "const": "0.3"
+            "enum": [
+              "0.3",
+              "0.4"
+            ]
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "anyOf": [
+          {
+            "required": [
+              "execution"
+            ]
+          },
+          {
+            "required": [
+              "preflight"
+            ]
+          },
+          {
+            "required": [
+              "integrationSources"
+            ]
+          }
+        ]
+      },
+      "then": {
+        "required": [
+          "schemaVersion",
+          "requiredExecutorVersion"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
+          },
+          "requiredExecutorVersion": {
+            "const": "0.4"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "execution"
+        ]
+      },
+      "then": {
+        "required": [
+          "requiredCapabilities"
+        ],
+        "properties": {
+          "requiredCapabilities": {
+            "contains": {
+              "const": "repository-sequence"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "preflight"
+        ]
+      },
+      "then": {
+        "required": [
+          "requiredCapabilities"
+        ],
+        "properties": {
+          "requiredCapabilities": {
+            "contains": {
+              "const": "mergeability-preflight"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "integrationSources"
+        ]
+      },
+      "then": {
+        "required": [
+          "requiredCapabilities"
+        ],
+        "properties": {
+          "requiredCapabilities": {
+            "contains": {
+              "const": "integration-sources"
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "requiredExecutorVersion"
+        ],
+        "properties": {
+          "requiredExecutorVersion": {
+            "const": "0.4"
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
           }
         }
       }

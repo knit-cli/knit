@@ -192,6 +192,40 @@ fn published_schemas_describe_the_artifacts_knit_writes() {
     let plan_schema = schema(&workspace, "land-plan");
     let plan_path = workspace.join(".knit/land-plans/schema-parity.land.json");
 
+    // Check real opt-in generation, including the emitted capability markers,
+    // against the same published schema used for ordinary and legacy plans.
+    let mut release_project = project.clone();
+    release_project["landing"]["execution"] =
+        json!({"mode": "repository_sequence", "repoOrder": ["backend", "frontend"]});
+    release_project["landing"]["preflight"] = json!({"mergeability": "all"});
+    fs::write(
+        &project_path,
+        serde_json::to_vec_pretty(&release_project).unwrap(),
+    )
+    .unwrap();
+    assert_valid(
+        &project_schema,
+        &release_project,
+        "the opt-in project artifact",
+    );
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--lane", "staging"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let release_plan_path = only_file(&workspace.join(".knit/land-plans"));
+    let release_plan = read(&release_plan_path);
+    assert_eq!(release_plan["requiredExecutorVersion"], "0.4");
+    assert_eq!(release_plan["preflight"]["mergeability"], "all");
+    assert_valid(
+        &plan_schema,
+        &release_plan,
+        "the generated repository-sequence plan",
+    );
+    fs::write(&project_path, serde_json::to_vec_pretty(&project).unwrap()).unwrap();
+    fs::remove_file(&release_plan_path).unwrap();
+
     // Explicitly retain legacy provider fixtures; v0.2 generated plans/runs are
     // schema-checked by landing_v2 and the executor tests.
     // An intermediate lane plan: merge_branch steps, targetBranches, laneAbsent.
@@ -400,4 +434,544 @@ fn runtime_bindings_schema_rejects_broken_selections() {
         })),
         "a binding with target.port 0",
     );
+}
+
+fn schema_file(name: &str) -> Value {
+    serde_json::from_str(
+        &fs::read_to_string(format!("schemas/{name}.schema.json"))
+            .expect("run from the repository root"),
+    )
+    .unwrap()
+}
+
+/// A deterministic full lowercase SHA-256-shaped pin.
+fn fingerprint(byte: u8) -> String {
+    let digit = char::from(b'a' + (byte % 6));
+    (0..64).map(|_| digit).collect()
+}
+
+/// A minimal complete schema 0.2 plan over synthetic repositories, with no
+/// executor-0.4 features: exactly what generation emits by default today.
+fn base_plan() -> Value {
+    json!({
+        "schemaVersion": "0.2",
+        "kind": "KnitLandPlan",
+        "id": "synthetic-land",
+        "provider": "github",
+        "bundleId": "synthetic-bundle",
+        "bundleFingerprint": fingerprint(1),
+        "projectFingerprint": fingerprint(2),
+        "onFailure": "stop",
+        "requiredExecutorVersion": "0.3",
+        "steps": [
+            {
+                "id": "merge-api",
+                "type": "merge_branch",
+                "repoId": "api",
+                "targetBranch": "staging",
+                "effect": "source"
+            }
+        ]
+    })
+}
+
+fn with_feature_capabilities(plan: &mut Value) {
+    plan["requiredCapabilities"] = json!([
+        "repository-sequence",
+        "mergeability-preflight",
+        "integration-sources"
+    ]);
+}
+
+fn with_executor(plan: &mut Value, version: Value) {
+    if version.is_null() {
+        plan.as_object_mut()
+            .unwrap()
+            .remove("requiredExecutorVersion");
+    } else {
+        plan["requiredExecutorVersion"] = version;
+    }
+}
+
+/// Interactive and manual operations need executor 0.3 features. 0.4 is a
+/// later executor that still has them, 0.2 does not — the schema's
+/// conditional must accept both 0.3 and 0.4 and nothing else.
+#[test]
+fn interactive_and_manual_steps_accept_executor_03_and_04() {
+    let schema = schema_file("land-plan");
+    fn interactive(plan: &mut Value) {
+        plan["steps"] = json!([
+            plan["steps"][0].clone(),
+            {
+                "id": "attach",
+                "type": "run",
+                "repoId": "api",
+                "command": ["./release", "observe"],
+                "interactive": true,
+                "effect": "read_only"
+            }
+        ]);
+    }
+    fn manual(plan: &mut Value) {
+        plan["steps"] = json!([
+            plan["steps"][0].clone(),
+            {
+                "id": "inspect",
+                "type": "manual",
+                "instructions": "Check the synthetic service status",
+                "effect": "read_only"
+            }
+        ]);
+    }
+    for attach in [interactive, manual] {
+        let mut plan = base_plan();
+        attach(&mut plan);
+        with_executor(&mut plan, json!("0.3"));
+        assert_valid(&schema, &plan, "an interactive/manual plan on executor 0.3");
+        with_executor(&mut plan, json!("0.4"));
+        assert_valid(&schema, &plan, "an interactive/manual plan on executor 0.4");
+        with_executor(&mut plan, json!("0.2"));
+        assert_invalid(&schema, &plan, "an interactive/manual plan on executor 0.2");
+        with_executor(&mut plan, Value::Null);
+        assert_invalid(
+            &schema,
+            &plan,
+            "an interactive/manual plan with no executor version",
+        );
+    }
+}
+
+/// The executor-0.4 plan features are opt-in but not free-form: any plan
+/// carrying one of them must declare schema 0.2 and executor 0.4, because a
+/// legacy executor would silently discard the key while running the plan.
+#[test]
+fn executor_04_plan_features_require_schema_02_and_executor_04() {
+    let schema = schema_file("land-plan");
+    let feature = |plan: &mut Value, key: &str| match key {
+        "execution" => {
+            plan["execution"] = json!({"mode": "repository_sequence", "repoOrder": ["api"]});
+        }
+        "preflight" => {
+            plan["preflight"] = json!({"mergeability": "all"});
+        }
+        "integrationSources" => {
+            plan["integrationSources"] =
+                json!({"api": {"branch": "compatibility", "sha": fingerprint(3)}});
+        }
+        other => panic!("unknown feature {other}"),
+    };
+    for key in ["execution", "preflight", "integrationSources"] {
+        let mut plan = base_plan();
+        feature(&mut plan, key);
+        with_feature_capabilities(&mut plan);
+        with_executor(&mut plan, json!("0.4"));
+        assert_valid(
+            &schema,
+            &plan,
+            &format!("a plan with {key} on executor 0.4"),
+        );
+
+        let mut legacy = base_plan();
+        legacy["schemaVersion"] = json!("0.1");
+        legacy.as_object_mut().unwrap().remove("bundleFingerprint");
+        legacy.as_object_mut().unwrap().remove("projectFingerprint");
+        legacy["onFailure"] = json!("resume");
+        assert_valid(&schema, &legacy, "the legacy baseline without new fields");
+        feature(&mut legacy, key);
+        assert_invalid(
+            &schema,
+            &legacy,
+            &format!("a schema 0.1 plan carrying {key}"),
+        );
+
+        let mut stale = base_plan();
+        feature(&mut stale, key);
+        with_executor(&mut stale, json!("0.3"));
+        assert_invalid(
+            &schema,
+            &stale,
+            &format!("a plan with {key} on executor 0.3"),
+        );
+
+        let mut unversioned = base_plan();
+        feature(&mut unversioned, key);
+        with_executor(&mut unversioned, Value::Null);
+        assert_invalid(
+            &schema,
+            &unversioned,
+            &format!("a plan with {key} and no executor version"),
+        );
+    }
+}
+
+/// The declared repository order is load-bearing, so the schema rejects the
+/// shapes that could never mean anything: repeats and empty names in both the
+/// plan and the project recipes.
+#[test]
+fn repo_order_entries_must_be_unique_and_nonempty() {
+    let plan = schema_file("land-plan");
+    let project = schema_file("project");
+    let with_order = |order: Value| {
+        let mut plan = base_plan();
+        with_feature_capabilities(&mut plan);
+        with_executor(&mut plan, json!("0.4"));
+        plan["execution"] = json!({"mode": "repository_sequence", "repoOrder": order});
+        plan
+    };
+    assert_valid(
+        &plan,
+        &with_order(json!(["api", "web"])),
+        "a plan with a well-formed repository order",
+    );
+    assert_invalid(
+        &plan,
+        &with_order(json!(["api", "api"])),
+        "a plan whose repository order repeats a repository",
+    );
+    assert_invalid(
+        &plan,
+        &with_order(json!(["api", ""])),
+        "a plan whose repository order contains an empty name",
+    );
+    assert_invalid(
+        &plan,
+        &with_order(json!([])),
+        "a plan whose repository order is empty",
+    );
+
+    let project_with_order = |order: Value| {
+        json!({
+            "schemaVersion": "0.1",
+            "kind": "KnitProject",
+            "id": "demo",
+            "createdAt": "2026-09-25T00:00:00Z",
+            "updatedAt": "2026-09-25T00:00:00Z",
+            "repos": [],
+            "landing": {
+                "execution": {"mode": "repository_sequence", "repoOrder": order}
+            }
+        })
+    };
+    assert_invalid(
+        &project,
+        &project_with_order(json!(["api", "api"])),
+        "a project recipe whose root repository order repeats a repository",
+    );
+    assert_invalid(
+        &project,
+        &project_with_order(json!(["api", ""])),
+        "a project recipe whose root repository order contains an empty name",
+    );
+    let lane_with_order = |order: Value| {
+        json!({
+            "schemaVersion": "0.1",
+            "kind": "KnitProject",
+            "id": "demo",
+            "createdAt": "2026-09-25T00:00:00Z",
+            "updatedAt": "2026-09-25T00:00:00Z",
+            "repos": [],
+            "landing": {
+                "lanes": {
+                    "staging": {
+                        "branches": {"api": "staging"},
+                        "execution": {"mode": "repository_sequence", "repoOrder": order}
+                    }
+                }
+            }
+        })
+    };
+    assert_invalid(
+        &project,
+        &lane_with_order(json!(["api", "api"])),
+        "a lane recipe whose repository order repeats a repository",
+    );
+}
+
+/// An integration source pin names one exact commit: full, lowercase, 40 or
+/// 64 hex digits, with a branch, and nothing else.
+#[test]
+fn integration_source_pins_require_full_lowercase_shas() {
+    let schema = schema_file("land-plan");
+    let pinned = |pin: Value| {
+        let mut plan = base_plan();
+        with_feature_capabilities(&mut plan);
+        with_executor(&mut plan, json!("0.4"));
+        plan["integrationSources"] = json!({"api": pin});
+        plan
+    };
+    assert_valid(
+        &schema,
+        &pinned(json!({"branch": "compatibility", "sha": fingerprint(3)})),
+        "a 64-hex lowercase pin",
+    );
+    assert_invalid(
+        &schema,
+        &pinned(json!({"branch": "", "sha": fingerprint(3)})),
+        "a pin with an empty branch",
+    );
+    let forty = json!({"branch": "compatibility", "sha": "a".repeat(40)});
+    assert_valid(&schema, &pinned(forty), "a 40-hex lowercase pin");
+    for (sha, label) in [
+        (fingerprint(3).to_uppercase(), "an uppercase pin"),
+        ("a".repeat(12), "an abbreviated pin"),
+        ("a".repeat(63), "a truncated 63-hex pin"),
+        ("a".repeat(65), "an overlong pin"),
+        ("g".repeat(40), "a non-hex pin"),
+        ("".to_owned(), "an empty pin"),
+    ] {
+        assert_invalid(
+            &schema,
+            &pinned(json!({"branch": "compatibility", "sha": sha})),
+            label,
+        );
+    }
+    assert_invalid(
+        &schema,
+        &pinned(json!({"sha": fingerprint(3)})),
+        "a pin with no branch",
+    );
+    assert_invalid(
+        &schema,
+        &pinned(json!({"branch": "compatibility"})),
+        "a pin with no sha",
+    );
+    assert_invalid(
+        &schema,
+        &pinned(json!({"branch": "compatibility", "sha": fingerprint(3), "remote": "origin"})),
+        "a pin with an unrecognized field",
+    );
+}
+
+/// Scope semantics for the opt-in recipes: an explicit `null` in a lane or
+/// target explicitly disables the project root policy for that scope, and the
+/// object form stays valid everywhere the key is allowed.
+#[test]
+fn scoped_null_execution_and_preflight_are_valid_recipes() {
+    let schema = schema_file("project");
+    let project_with = |landing: Value| {
+        json!({
+            "schemaVersion": "0.1",
+            "kind": "KnitProject",
+            "id": "demo",
+            "createdAt": "2026-09-25T00:00:00Z",
+            "updatedAt": "2026-09-25T00:00:00Z",
+            "repos": [],
+            "landing": landing
+        })
+    };
+    let root_and_scopes = json!({
+        "execution": {"mode": "repository_sequence", "repoOrder": ["api", "web"]},
+        "preflight": {"mergeability": "all"},
+        "lanes": {
+            "staging": {
+                "branches": {"api": "staging", "web": null},
+                "execution": null,
+                "preflight": null
+            },
+            "preview": {
+                "branches": {"api": "preview", "web": "preview"},
+                "execution": {"mode": "repository_sequence", "repoOrder": ["web", "api"]},
+                "preflight": {"mergeability": "all"}
+            }
+        },
+        "targets": {
+            "release": {
+                "terminal": true,
+                "execution": null,
+                "preflight": null
+            }
+        }
+    });
+    assert_valid(
+        &schema,
+        &project_with(root_and_scopes),
+        "root policies with null-disabled and object-overriding scopes",
+    );
+
+    // A scope that simply omits the keys (inheritance by absence) and a bare
+    // null at the root are both well-formed.
+    assert_valid(
+        &schema,
+        &project_with(json!({
+            "execution": null,
+            "preflight": null,
+            "lanes": {"staging": {"branches": {"api": "staging"}}}
+        })),
+        "a null root policy with an inheriting lane",
+    );
+
+    // Every other shape is refused: a bare string is neither null nor object,
+    // and a policy object must be exactly the policy it claims to be.
+    assert_invalid(
+        &schema,
+        &project_with(json!({"preflight": "all"})),
+        "a string preflight policy",
+    );
+    assert_invalid(
+        &schema,
+        &project_with(json!({"execution": {"mode": "repository_sequence"}})),
+        "an execution policy with no repository order",
+    );
+    assert_invalid(
+        &schema,
+        &project_with(json!({"preflight": {"mergeability": "quick"}})),
+        "an unsupported mergeability policy",
+    );
+    assert_invalid(
+        &schema,
+        &project_with(json!({
+            "lanes": {"staging": {"branches": {"api": "staging"}, "preflight": {"unknown": true}}}
+        })),
+        "an unrecognized preflight policy in a lane",
+    );
+}
+
+#[test]
+fn release_policies_require_their_own_capability_markers() {
+    let schema = schema_file("land-plan");
+    let root = unique_temp_dir();
+    let plan_path = root.join("synthetic.land.json");
+    let write_plan = |plan: &Value| {
+        fs::write(&plan_path, serde_json::to_vec_pretty(plan).unwrap()).unwrap();
+    };
+    let validate_args = [
+        "land",
+        "validate",
+        "--plan",
+        plan_path.to_str().unwrap(),
+        "--json",
+    ];
+
+    for (key, policy, capability) in [
+        (
+            "execution",
+            json!({"mode": "repository_sequence", "repoOrder": ["api"]}),
+            "repository-sequence",
+        ),
+        (
+            "preflight",
+            json!({"mergeability": "all"}),
+            "mergeability-preflight",
+        ),
+        (
+            "integrationSources",
+            json!({"api": {"branch": "compatibility", "sha": "a".repeat(40)}}),
+            "integration-sources",
+        ),
+    ] {
+        let mut plan = base_plan();
+        plan["requiredExecutorVersion"] = json!("0.4");
+        plan[key] = policy;
+        plan["workflow"] = json!({"sequence": [{"step": "merge-api"}]});
+        for invalid in [
+            None,
+            Some(Value::Null),
+            Some(json!([])),
+            Some(json!(["unrelated"])),
+            Some(json!(capability)),
+        ] {
+            if let Some(invalid) = invalid {
+                plan["requiredCapabilities"] = invalid;
+            } else {
+                plan.as_object_mut().unwrap().remove("requiredCapabilities");
+            }
+            assert_invalid(
+                &schema,
+                &plan,
+                &format!("{key} without its capability marker"),
+            );
+            write_plan(&plan);
+            let error = knit_fails(&root, validate_args);
+            assert!(
+                error.contains("requiredCapabilities") && error.contains(capability),
+                "{key}: runtime must name the missing marker: {error}"
+            );
+        }
+        plan["requiredCapabilities"] = json!([capability]);
+        assert_valid(&schema, &plan, &format!("{key} with its own capability"));
+        write_plan(&plan);
+        let report: Value = serde_json::from_str(&knit(&root, validate_args)).unwrap();
+        assert_eq!(report["valid"], true, "{key}: {report}");
+        plan[key] = Value::Null;
+        assert_invalid(&schema, &plan, &format!("null {key} in a saved plan"));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn ordinary_plan_versions_remain_valid_without_release_policies() {
+    let schema = schema_file("land-plan");
+    for version in [Value::Null, json!("0.2"), json!("0.3"), json!("0.4")] {
+        let mut plan = base_plan();
+        with_executor(&mut plan, version);
+        assert_valid(&schema, &plan, "an ordinary plan with no release policies");
+    }
+    let mut legacy = base_plan();
+    legacy["schemaVersion"] = json!("0.1");
+    legacy["onFailure"] = json!("resume");
+    legacy["requiredExecutorVersion"] = json!("0.4");
+    assert_invalid(&schema, &legacy, "executor 0.4 on a legacy plan");
+}
+
+#[test]
+fn release_policy_shapes_match_across_root_lane_and_target() {
+    let schema = schema_file("project");
+    for scope in ["root", "lane", "target"] {
+        for (key, valid, invalids) in [
+            (
+                "execution",
+                json!({"mode": "repository_sequence", "repoOrder": ["api"]}),
+                vec![
+                    json!({"mode": "repository_sequence", "repoOrder": []}),
+                    json!({"mode": "repository_sequence", "repoOrder": ["api", "api"]}),
+                    json!({"mode": "repository_sequence", "repoOrder": [""]}),
+                    json!({"mode": "parallel", "repoOrder": ["api"]}),
+                    json!({"mode": "repository_sequence", "repoOrder": ["api"], "extra": true}),
+                ],
+            ),
+            (
+                "preflight",
+                json!({"mergeability": "all"}),
+                vec![
+                    json!({}),
+                    json!({"mergeability": "quick"}),
+                    json!({"mergeability": "all", "extra": true}),
+                    json!("all"),
+                ],
+            ),
+        ] {
+            let project_with = |policy: Value| {
+                let mut config = json!({});
+                config[key] = policy;
+                let landing = match scope {
+                    "root" => config,
+                    "lane" => {
+                        config["branches"] = json!({"api": "staging"});
+                        json!({"lanes": {"staging": config}})
+                    }
+                    _ => json!({"targets": {"staging": config}}),
+                };
+                json!({"schemaVersion": "0.1", "kind": "KnitProject", "id": "synthetic",
+                    "createdAt": "2026-09-25T00:00:00Z", "updatedAt": "2026-09-25T00:00:00Z",
+                    "repos": [], "landing": landing})
+            };
+            assert_valid(
+                &schema,
+                &project_with(valid),
+                &format!("{scope} {key} object"),
+            );
+            assert_valid(
+                &schema,
+                &project_with(Value::Null),
+                &format!("{scope} {key} null"),
+            );
+            for invalid in invalids {
+                assert_invalid(
+                    &schema,
+                    &project_with(invalid),
+                    &format!("invalid {scope} {key}"),
+                );
+            }
+        }
+    }
 }

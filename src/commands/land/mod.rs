@@ -287,6 +287,7 @@ pub fn apply_land_plan(
             path.display()
         );
     }
+    ensure_no_executor04_semantics_on_legacy(&read_json::<serde_json::Value>(&path)?)?;
     let plan: LandPlan = read_json(&path)?;
     ensure_requested_selection_matches_plan(
         &active,
@@ -698,6 +699,7 @@ pub fn resume_land_run(
             None,
         );
     }
+    ensure_no_executor04_semantics_on_legacy(&raw)?;
     let mut run: LandRun = read_json(&path)?;
     if run.status == LandStatus::Succeeded && run.finalized {
         println!(
@@ -714,6 +716,7 @@ pub fn resume_land_run(
         );
     }
     let plan_path = resolve_stored_path(&active.root, &run.plan_path);
+    ensure_no_executor04_semantics_on_legacy(&read_json::<serde_json::Value>(&plan_path)?)?;
     let plan: LandPlan = read_json(&plan_path)?;
     ensure_run_matches_plan(&run, &plan)?;
     if run.status == LandStatus::Succeeded {
@@ -794,6 +797,24 @@ fn ensure_run_matches_plan(run: &LandRun, plan: &LandPlan) -> Result<()> {
         "This run was recorded against a different plan: {}. The plan was regenerated after the run started, so the run cannot continue. Start a new landing with `knit land apply`; steps whose reviews already merged are recognised as already landed.",
         detail.join("; ")
     );
+}
+
+/// Legacy schema 0.1 execution deserializes into the typed plan and discards
+/// unknown fields, so executor-0.4 semantics would silently not apply. The
+/// executors refuse such plans before doing anything with them.
+fn ensure_no_executor04_semantics_on_legacy(raw: &serde_json::Value) -> Result<()> {
+    if raw["schemaVersion"] == "0.2" {
+        return Ok(());
+    }
+    for key in ["execution", "preflight", "integrationSources"] {
+        if raw.get(key).is_some() {
+            bail!("landing plan field {key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; this plan would silently discard it");
+        }
+    }
+    if raw["requiredExecutorVersion"] == "0.4" {
+        bail!("requiredExecutorVersion 0.4 requires a schema 0.2 plan");
+    }
+    Ok(())
 }
 
 pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {

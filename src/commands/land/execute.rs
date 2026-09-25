@@ -482,6 +482,7 @@ fn execute_merge_branch(active: &ActiveBundle, step: &LandStep) -> Result<StepOu
         feature_branch,
         branch,
         true,
+        None,
     )?;
     let detail = if outcome.merged {
         format!(
