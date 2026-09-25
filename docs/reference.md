@@ -131,6 +131,8 @@ knit land apply [--plan <path>] [--from-artifact <path>] [--out <path>] [--skip-
 knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
 knit land rollback [--run <path>] [--apply]
 knit land status [--run <path>]
+knit land source --plan <path> --repo <repo-id> --branch <branch> [--sha <sha>] [--repo-root <path>] --out <new-plan>
+knit land preflight --plan <path> [--from-artifact <path>] [--project-file <path>] [--repo-roots <path>] [--json]
 knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--fetch] [--push] [--set-upstream] [--manual]
 knit merge status [--run <id-or-path>]
 knit merge show [--run <id-or-path>]
@@ -408,6 +410,30 @@ A manual checkpoint is an explicit operation, for example:
 ```
 
 The local operator must type `acknowledge`, optionally followed by a space and notes (at most 4096 bytes total). Empty input, EOF, rejection, and cancellation cannot succeed. Receipts record acknowledgement/notes or failure; uncertain external effects require reconciliation before retry. Manual external effects need recovery declarations just like commands. Command recovery also requires a repository binding.
+
+#### Opt-in repository release policies (executor 0.4)
+
+Three optional keys — `execution`, `preflight`, and `integrationSources` — extend schema 0.2 landing plans. A plan carrying any of them must declare `requiredExecutorVersion: "0.4"`, and generation, validation, and the executor all refuse the combination anywhere else: a legacy 0.1 plan that names one of these keys is rejected by name instead of silently discarding it, because legacy execution would drop the unknown field and run without it. Projects declare `execution` and `preflight` under `landing`, and a lane or target scope may override them: an absent key inherits the project root, and an explicit `null` disables the root policy for that scope. Generation copies the resolved policy into the plan. The matching `requiredCapabilities` markers are `repository-sequence` for `execution`, `mergeability-preflight` for `preflight`, and `integration-sources` for `integrationSources`. Plans without these keys generate exactly as before; saved revisions stay immutable, so adopting or changing a policy means generating and reviewing a new plan.
+
+`landing.execution = {"mode": "repository_sequence", "repoOrder": ["api", "web"]}` compiles every repository's merge, build, deploy, and verify into one explicit workflow sequence: all of `api`'s steps, then all of `web`'s, with the steps inside a repository ordered by their declared needs. Every step's repository must be declared in `repoOrder` (nonempty names, no repeats), and the declared order must satisfy every declared dependency: a step needing a later repository, an undeclared repository, a dependency cycle, or a parallel cross-repository workflow posing as a sequence is a named error at generation or validation, never a silent reorder. The declaration is enforced, not decorative — the plan's workflow must really serialize the repositories it names.
+
+`landing.preflight = {"mergeability": "all"}` turns on the mergeability preflight. `knit land apply` — and `resume`, which revalidates the still-pending work while succeeded steps keep their receipts — then simulates every pending `merge_branch` against a freshly resolved `origin/<target>` tip inside an isolated temporary checkout (the source checkout is never touched) before any remote ref moves, any hosted execution ownership is claimed, or any effectful command runs. One conflict anywhere fails the whole preflight, so a later repository's conflict can never leave an earlier repository already merged. The ordering — with both policies enabled, all preflight first, then each repository's merge, build, deploy, and configured verify — is what this plan opted into, not universal deployment behavior. Without the policy there is no global mergeability scan or added deployment check; explicit integration sources still require provenance verification.
+
+Each simulation records the target tip it planned against on the run receipt as `expectedTarget`. The real merge re-fetches the target, requires it to still be exactly that SHA (a missing or unreachable branch refuses before any effect, and the step is recorded as safely retryable), asserts the merge result descends from it, and publishes as a conditional `--force-with-lease=<branch>:<expected>` update — an atomic compare-and-swap that can extend the branch but never rewrite it. A target that moved or was rewound since the preflight is refused instead of overwritten; reconcile the branch, then resume the existing run so completed merges and deployments keep their receipts. Resume rechecks pending merges against fresh target tips. If the selected source pin must change, author a new plan and start a new run instead. Plans without the policy keep the historical best-effort merge behavior unchanged.
+
+`integrationSources` names, per repository, an explicit `{branch, sha}` pair merged instead of that repository's reviewed bundle head. Source selection is independent of the destination. It applies only to `merge_branch` steps — a repository whose plan merges its recorded review refuses an integration source by name — and it never touches the bundle fingerprint, the recorded pins, or the review objects. Provenance is verified independently of review state at authoring, at preflight, and again at execution: the branch's live tip must equal the pinned full lowercase SHA (40 or 64 hex digits), and the pin must contain the reviewed bundle head as an ancestor. A drifted source refuses the run before any effect. Required checks speak for the source actually being integrated: with a pin, freshness is evaluated against the pinned SHA, so a verdict recorded at the reviewed feature head reads as stale, never as green for code that will not run.
+
+Author a pin with `knit land source`; the original plan is never modified and a new file is always written:
+
+```sh
+knit land source --plan reviewed.land.json --repo api --branch compatibility --repo-root /generic/path --out selected.land.json
+```
+
+The command resolves `origin/compatibility` to its exact current SHA (`--sha` refuses authoring when it moved), verifies the branch contains the reviewed bundle head, and writes a new plan carrying `integrationSources.api = {branch, sha}` plus `requiredExecutorVersion: "0.4"`. `--out` must not already exist, must differ from the input plan, and must not be a plan revision; saved revisions and run snapshots stay immutable, so selecting a different source authors another new plan. An existing run keeps its original plan hash and source pin. Conflicts between the integration branch and its target are not Knit's to merge away: the operator resolves them in their own compatibility flow — merging the destination into the compatibility branch or rebuilding it — re-authors the pin, and lands again. Landing never merges anything into a repository's feature branch to clear the way.
+
+`knit land preflight --plan selected.land.json --json` reports both halves of readiness without mutating anything: `structural` is the shared graph validation, deliberately distinct from the `live` half — fresh target tips, integration-source provenance, and, only when the plan opted into `preflight.mergeability: "all"`, the full conflict simulation. Without the policy every pending branch merge is still listed informationally; explicit integration sources still require provenance verification. The JSON report is `{valid, planHash, bundleId, structural, live, checks[], errors[], handoff}`, each check shaped `{repoId, sourceBranch, sourceSha, targetBranch, targetSha, status, conflicts[]}`; the exit status follows `valid`.
+
+Executor 0.4 plans give commands an authoritative environment contract: `KNIT_LAND_ENVIRONMENT` names the environment being landed into (the lane name or the target branch), `KNIT_SOURCE_SHA` is the selected integration input — the pinned integration SHA, or the reviewed bundle head when no pin exists; distinct from the merge output — `KNIT_TARGET_BRANCH` is the repository's resolved merge destination for this plan, and `KNIT_REV` is the exact merged revision the step's checkout runs from. Recipe-provided values are applied first, so a recipe can supplement the environment but never rewrite the landing's own pins. The contract is authoritative for executor-0.4 plans only: older plans retain their previous handling of these four variables. `KNIT_DEPLOY_CHECKOUT` remains the actual command working directory resolved from the pinned checkout and recipe `cwd`; it already applies to older plans as well.
 
 Normal `knit push --remote hosted` sends the selected bundle's authored destination plans and receipts; `knit pull` and `knit bundle pull <bundle>` import that bundle's destinations and receipts. Bundle transport also synchronizes project landing recipes through their existing shared ancestry and compare-and-swap rules, so a web recipe edit and its plan arrive together. Divergent or untracked local recipes are preserved with a remote candidate for reconciliation; they are never overwritten. Ordinary push uses the existing identity of a recipe-capable project and leaves project-shape replacement to explicit `knit project push`, preventing a metadata update from bypassing recipe CAS. Explicit `knit sync push --plans` / `knit sync pull --plans` remains project-wide. Sync never generates, overwrites divergent edits, or executes a plan; conflicts keep both the authored document and a separate remote candidate.
 
@@ -867,10 +893,12 @@ Do not merge the host review objects directly (for example `gh pr merge`) for Kn
 knit land plan
 knit land check
 knit land update --push
+knit land preflight --plan <path>
 knit land apply
 knit land status
 knit land resume
 knit land rollback
+knit land source --plan <path> --repo <repo-id> --branch <branch> --out <new-plan>
 ```
 
 `knit land check` is a read-only preflight: it fetches each recorded PR once and prints a readiness table (state, mergeable, checks, review decision, and a verdict) so you can see whether `knit land apply` will succeed and why not. A `conflict` verdict points you at `knit land update`; an already-merged PR shows `already landed`. `knit publish status --live` shows the same live columns alongside the recorded review objects. Both are non-mutating.

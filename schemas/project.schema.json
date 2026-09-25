@@ -536,6 +536,56 @@
                   "stop",
                   "recover"
                 ]
+              },
+              "execution": {
+                "description": "Opt-in execution policy. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "repository_sequence"
+                      },
+                      "repoOrder": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "repoOrder"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "preflight": {
+                "description": "Opt-in preflight policies. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mergeability": {
+                        "const": "all"
+                      }
+                    },
+                    "required": [
+                      "mergeability"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
               }
             },
             "additionalProperties": true
@@ -654,6 +704,56 @@
                   "stop",
                   "recover"
                 ]
+              },
+              "execution": {
+                "description": "Opt-in execution policy. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mode": {
+                        "const": "repository_sequence"
+                      },
+                      "repoOrder": {
+                        "type": "array",
+                        "minItems": 1,
+                        "uniqueItems": true,
+                        "items": {
+                          "type": "string",
+                          "minLength": 1
+                        }
+                      }
+                    },
+                    "required": [
+                      "mode",
+                      "repoOrder"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
+              },
+              "preflight": {
+                "description": "Opt-in preflight policies. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+                "oneOf": [
+                  {
+                    "type": "null"
+                  },
+                  {
+                    "type": "object",
+                    "properties": {
+                      "mergeability": {
+                        "const": "all"
+                      }
+                    },
+                    "required": [
+                      "mergeability"
+                    ],
+                    "additionalProperties": false
+                  }
+                ]
               }
             },
             "additionalProperties": true
@@ -735,6 +835,56 @@
               }
             ]
           }
+        },
+        "execution": {
+          "description": "Opt-in execution policy. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mode": {
+                  "const": "repository_sequence"
+                },
+                "repoOrder": {
+                  "type": "array",
+                  "minItems": 1,
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string",
+                    "minLength": 1
+                  }
+                }
+              },
+              "required": [
+                "mode",
+                "repoOrder"
+              ],
+              "additionalProperties": false
+            }
+          ]
+        },
+        "preflight": {
+          "description": "Opt-in preflight policies. Absent inherits the project root (when declared on a lane/target); explicit null disables the root policy for that scope.",
+          "oneOf": [
+            {
+              "type": "null"
+            },
+            {
+              "type": "object",
+              "properties": {
+                "mergeability": {
+                  "const": "all"
+                }
+              },
+              "required": [
+                "mergeability"
+              ],
+              "additionalProperties": false
+            }
+          ]
         }
       },
       "additionalProperties": false

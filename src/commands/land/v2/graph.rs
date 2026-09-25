@@ -307,6 +307,19 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
         if !matches!(plan["schemaVersion"].as_str(), Some("0.1" | "0.2")) {
             bail!("unsupported plan schemaVersion");
         }
+        // Legacy schema 0.1 deserialization discards unknown fields, so the
+        // new semantics would be executed as if absent. Reject them loudly
+        // instead of silently running a different plan than was authored.
+        if plan["schemaVersion"] != "0.2" {
+            for key in ["execution", "preflight", "integrationSources"] {
+                if plan.get(key).is_some() {
+                    bail!("{key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; a schema 0.1 plan would silently discard it");
+                }
+            }
+            if plan["requiredExecutorVersion"] == "0.4" {
+                bail!("requiredExecutorVersion 0.4 requires a schema 0.2 plan");
+            }
+        }
         let (steps, compiled) = compile(plan)?;
         waves = compiled;
         let v2 = plan["schemaVersion"] == "0.2";
@@ -321,17 +334,52 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 bail!("targetBranch and lane are mutually exclusive");
             }
             if let Some(version) = plan.get("requiredExecutorVersion") {
-                if version != "0.2" && version != "0.3" {
+                if version != "0.2" && version != "0.3" && version != "0.4" {
                     bail!("unsupported requiredExecutorVersion");
                 }
             }
             if steps
                 .iter()
                 .any(|step| step["interactive"] == true || step["type"] == "manual")
-                && plan["requiredExecutorVersion"] != "0.3"
+                && !matches!(
+                    plan["requiredExecutorVersion"].as_str(),
+                    Some("0.3" | "0.4")
+                )
             {
                 bail!("interactive and manual operations require requiredExecutorVersion 0.3");
             }
+            // New execution semantics are feature-gated behind executor 0.4
+            // and matching capabilities; older plans stay exactly as valid as
+            // they were.
+            let mut required_04: Vec<&str> = vec![];
+            if plan.get("execution").is_some() {
+                required_04.push(super::sequence::CAPABILITY);
+            }
+            if plan.get("preflight").is_some() {
+                required_04.push(super::mergeability::CAPABILITY);
+            }
+            if plan.get("integrationSources").is_some() {
+                required_04.push(super::mergeability::CAPABILITY_SOURCES);
+            }
+            if !required_04.is_empty() && plan["requiredExecutorVersion"] != "0.4" {
+                bail!(
+                    "execution/preflight/integrationSources semantics require requiredExecutorVersion 0.4 with capabilities {}",
+                    required_04.join(", ")
+                );
+            }
+            for capability in required_04 {
+                if !plan["requiredCapabilities"]
+                    .as_array()
+                    .is_some_and(|caps| caps.iter().any(|cap| cap.as_str() == Some(capability)))
+                {
+                    bail!(
+                        "requiredCapabilities must include {capability} for its declared feature"
+                    );
+                }
+            }
+            super::sequence::validate_plan_execution(plan)?;
+            super::mergeability::validate_plan_preflight(plan)?;
+            super::mergeability::validate_plan_integration_sources(plan, bundle)?;
             if let Some(enabled) = plan["merge"].get("enabled") {
                 if !enabled.is_boolean() {
                     bail!("merge.enabled must be boolean");
@@ -583,6 +631,34 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                     {
                         bail!("unknown repository {id}");
                     }
+                }
+            }
+            // A branch merge into the repository's own feature branch would
+            // integrate the branch with itself; landing never merges into a
+            // feature branch automatically.
+            for s in &steps {
+                if s["type"] == "merge_branch" {
+                    if let (Some(id), Some(target)) =
+                        (s["repoId"].as_str(), s["targetBranch"].as_str())
+                    {
+                        if let Some(repo) = typed.repos.iter().find(|r| r.id == id) {
+                            if repo.feature_branch.as_deref() == Some(target) {
+                                bail!(
+                                    "{}: merge_branch destination {target} is {id}'s own feature branch; land into a destination branch instead",
+                                    s["id"]
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+            for repo in plan["integrationSources"]
+                .as_object()
+                .into_iter()
+                .flat_map(|sources| sources.keys())
+            {
+                if !typed.repos.iter().any(|r| r.id == *repo) {
+                    bail!("integrationSources names unknown repository {repo}");
                 }
             }
         }

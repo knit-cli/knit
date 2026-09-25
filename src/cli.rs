@@ -1478,6 +1478,40 @@ pub enum LandCommand {
         #[arg(long)]
         json: bool,
     },
+    /// Pin an integration source branch into a newly authored plan file.
+    Source {
+        /// Saved plan to derive from. Never modified; a new file is authored.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Repository whose merge_branch step integrates the source branch.
+        #[arg(long)]
+        repo: String,
+        /// Branch to resolve to its exact SHA and pin.
+        #[arg(long)]
+        branch: String,
+        /// Refuse the authoring unless the branch resolves to this SHA.
+        #[arg(long)]
+        sha: Option<String>,
+        /// Repository checkout to resolve from; defaults to the workspace.
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        /// New plan file to write. Must not exist and must not be a plan revision.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read-only structural and live readiness preflight for a saved plan.
+    Preflight {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     /// Restore captured deployment state for an immutable run.
     Recover {
         #[arg(long)]

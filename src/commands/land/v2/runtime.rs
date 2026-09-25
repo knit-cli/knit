@@ -285,10 +285,13 @@ fn preflight(
     bundle: &Value,
     skip_checks: bool,
 ) -> Result<()> {
+    // Required checks must speak for the sources actually being integrated;
+    // see effective_required_checks_bundle.
+    let effective_bundle = super::mergeability::effective_required_checks_bundle(plan, bundle);
     let check_bundle = crate::store::ActiveBundle::unlocked(
         std::env::current_dir()?,
         PathBuf::new(),
-        serde_json::from_value(bundle.clone())?,
+        serde_json::from_value(effective_bundle)?,
     );
     if !skip_checks {
         super::super::validate::preflight_required_checks(
@@ -335,6 +338,9 @@ fn preflight(
                 "workflow",
                 "wave-v1",
                 "source-merges",
+                "repository-sequence",
+                "mergeability-preflight",
+                "integration-sources",
             ]
             .contains(&cap.as_str())
             {
@@ -583,6 +589,45 @@ fn run_command(
             }
         }
     }
+    // Authoritative run contract, gated behind executor 0.4 so older plans'
+    // recipe environments are untouched. Applied after recipe env so a recipe
+    // can supplement the environment but never rewrite the landing's own
+    // pins: the environment being landed into (the lane or target name), the
+    // selected integration input (the override SHA or the reviewed bundle
+    // head — distinct from the merge output), the revision the checkout
+    // actually runs from (the merged revision), and the resolved target
+    // branch (the repository's own merge destination for this plan).
+    if snapshot["plan"]["requiredExecutorVersion"] == "0.4" {
+        if let Some(repo) = step["repoId"].as_str() {
+            let resolved = journal.step(id);
+            let input_source = snapshot["plan"]["integrationSources"][repo]["sha"]
+                .as_str()
+                .or_else(|| snapshot["plan"]["bundleHeads"][repo].as_str());
+            if let Some(source) = input_source {
+                cmd.env("KNIT_SOURCE_SHA", source);
+            }
+            let revision = resolved["sourceRevisions"][repo].as_str();
+            if let Some(revision) = revision {
+                cmd.env("KNIT_REV", revision);
+            }
+            let environment = snapshot["plan"]["lane"]
+                .as_str()
+                .or_else(|| snapshot["plan"]["targetBranch"].as_str())
+                .unwrap_or("");
+            cmd.env("KNIT_LAND_ENVIRONMENT", environment);
+            let repo_target = snapshot["plan"]["steps"].as_array().and_then(|steps| {
+                steps
+                    .iter()
+                    .find(|s| s["type"] == "merge_branch" && s["repoId"].as_str() == Some(repo))
+            });
+            let target = step["targetBranch"]
+                .as_str()
+                .or_else(|| repo_target.and_then(|s| s["targetBranch"].as_str()))
+                .or_else(|| snapshot["plan"]["targetBranches"][repo].as_str())
+                .or_else(|| snapshot["plan"]["targetBranch"].as_str());
+            cmd.env("KNIT_TARGET_BRANCH", target.unwrap_or(""));
+        }
+    }
     cmd.env("KNIT_LAND_OPERATION_ID", &operation)
         .env("KNIT_LAND_ATTEMPT_ID", &attempt)
         .env("KNIT_LAND_RUN_FILE", &journal.path)
@@ -717,8 +762,21 @@ fn provider_step(
             })
             .context("source destination required")?;
         if let Some(root) = roots.get(id) {
-            let before = crate::git::remote_ref_sha(root, "origin", branch)?
-                .context("destination branch missing from origin")?;
+            // Read-only pre-mutation state. A target that disappeared or a
+            // transport that cannot answer refused the step before any
+            // effect: a known no-effect failure, not an uncertain one.
+            let before =
+                crate::git::remote_ref_sha(root, "origin", &format!("refs/heads/{branch}"))
+                    .map_err(|e| {
+                        super::mergeability::KnownNoEffect(format!(
+                            "{id}: reading target branch {branch} from origin failed: {e:#}"
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        super::mergeability::KnownNoEffect(format!(
+                    "{id}: target branch {branch} is missing from origin; nothing was merged"
+                ))
+                    })?;
             journal.edit_step(sid, |s| {
                 s["before"] = json!({"targetBranch":branch,"revision":before})
             })?;
@@ -734,24 +792,61 @@ fn provider_step(
                 bail!("branch merge would close review; use terminal review merge");
             }
         }
-        let head = plan["bundleHeads"][id]
-            .as_str()
-            .or(repo.head_sha.as_deref())
-            .context("pinned source SHA required")?;
+        // The integrated source is the plan's pinned integration source when
+        // present, otherwise the reviewed bundle head. Integration sources
+        // never change the recorded bundle pins.
+        let Some((source_branch, head)) = super::mergeability::merge_source(plan, bundle, id)
+        else {
+            bail!("{id}: pinned source SHA required");
+        };
+        let integration = plan["integrationSources"][id].as_object().is_some();
         if let Some(root) = roots.get(id) {
+            // An integration source is certified by its own provenance check,
+            // never by the original review's green checks. A provenance
+            // failure refuses before any effect: record it as safely
+            // retryable, not uncertain.
+            if integration {
+                if let Some(reviewed) = plan["bundleHeads"][id].as_str() {
+                    let branch = source_branch
+                        .as_deref()
+                        .context("integration source branch required")?;
+                    super::mergeability::verify_integration_source(
+                        root, id, branch, &head, reviewed,
+                    )
+                    .map_err(|e| super::mergeability::KnownNoEffect(format!("{e:#}")))?;
+                }
+            }
+            // Expected-target contract: when the mergeability preflight
+            // recorded the tip this merge was planned against, the merge
+            // fetches the target, requires it to be exactly that tip, and
+            // publishes with a conditional (force-with-lease) update, so
+            // intervening work is refused rather than overwritten.
+            let expected = journal
+                .step(sid)
+                .get("expectedTarget")
+                .cloned()
+                .unwrap_or(Value::Null);
+            let expected_sha = expected["sha"]
+                .as_str()
+                .filter(|_| expected["branch"].as_str() == Some(branch));
             let mut bound = repo.clone();
             bound.path = root.to_string_lossy().into();
             let workspace = journal.path.parent().context("run parent required")?;
             let outcome = crate::commands::merge::merge_branch_into_target(
-                workspace, &bound, head, branch, true,
+                workspace,
+                &bound,
+                &head,
+                branch,
+                true,
+                expected_sha,
             )?;
             return Ok(
-                json!({"attribution":if outcome.merged {"performed"}else{"already_satisfied"},"source":head,"revision":outcome.after_sha,"targetBranch":branch}),
+                json!({"attribution":if outcome.merged {"performed"}else{"already_satisfied"},"source":head,"sourceBranch":source_branch,"revision":outcome.after_sha,"targetBranch":branch}),
             );
         }
-        let status = forge.merge_branch(&target, branch, head)?;
+        let status = forge.merge_branch(&target, branch, &head)?;
         return Ok(
-            json!({"attribution":if matches!(status,crate::providers::BranchMergeStatus::Merged){"performed"}else{"already_satisfied"},"source":head,"targetBranch":branch}),
+            json!({"attribution":if matches!(status,crate::providers::BranchMergeStatus::Merged){"performed"}else{"already_satisfied"},"source":head,"sourceBranch":source_branch,"targetBranch":branch}),
         );
     }
     if step["type"] == "deploy" && step["deploymentMode"] == "push" {
@@ -1076,10 +1171,23 @@ fn forward_step(
             })
         }
         Err(e) => {
+            // A typed no-effect refusal (target drift guard, integration
+            // source provenance) happened before anything the step did: it is
+            // safely retryable, so it must not linger as an uncertain,
+            // unquiesced effect that only a recovery probe could clear.
+            let known_no_effect = e
+                .downcast_ref::<super::mergeability::KnownNoEffect>()
+                .is_some();
             journal.edit_step(id, |s| {
                 s["status"] = json!("failed");
                 s["error"] = json!(format!("{e:#}"));
                 s["finishedAt"] = json!(now_iso());
+                if known_no_effect {
+                    if let Some(record) = s.as_object_mut() {
+                        record.remove("attribution");
+                    }
+                    s["quiesced"] = json!(true);
+                }
             })?;
             Err(e)
         }
@@ -1679,7 +1787,13 @@ fn execute(
     );
     let mut comparable = bundle.clone();
     if let Some(run) = &existing {
-        if let Some(publications) = comparable["publications"].as_array_mut() {
+        // get_mut, not index: indexing a bundle without a publications key
+        // would insert `null`, and the typed round-trip inside the
+        // fingerprint would then fail and silently change the scope.
+        if let Some(publications) = comparable
+            .get_mut("publications")
+            .and_then(Value::as_array_mut)
+        {
             for publication in publications {
                 if let Some(receipt) = run["steps"].as_array().and_then(|a| {
                     a.iter().find(|s| {
@@ -1725,6 +1839,7 @@ fn execute(
             .as_array()
             .is_some_and(|a| a.iter().all(|s| s["status"] == "succeeded"))
     });
+    let mut pending_expectations: Vec<super::mergeability::MergeCheck> = Vec::new();
     if recovering {
         for step in &steps {
             let r = recovery(step);
@@ -1742,6 +1857,41 @@ fn execute(
             }
         }
     } else if !forward_complete {
+        // Mergeability preflight runs first, before any remote ref is read for
+        // mutation, any lock is claimed, or any effectful command executes:
+        // every pending branch merge is simulated against a freshly resolved
+        // target tip in an isolated temp checkout. On resume the still-pending
+        // merges are revalidated; successful steps keep their receipts, and a
+        // durably performed merge (receipt persisted, status not yet marked
+        // succeeded) is reconciled by the executor from its recorded revision
+        // rather than replayed against the tip its own merge moved.
+        let done = |id: &str| {
+            existing
+                .as_ref()
+                .and_then(|r| r["steps"].as_array())
+                .and_then(|a| a.iter().find(|s| s["id"] == id))
+                .is_some_and(|s| {
+                    s["status"] == "succeeded"
+                        || (matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch"))
+                            && s["attribution"] == "performed"
+                            && s["output"]["revision"].is_string())
+                })
+        };
+        let (checks, errors) = super::mergeability::mergeability_checks(
+            plan,
+            &roots,
+            &bundle,
+            &done,
+            super::mergeability::CheckMode::Apply,
+        );
+        if !errors.is_empty() {
+            bail!(
+                "landing mergeability preflight failed:\n{}\n{}",
+                errors.join("\n"),
+                serde_json::to_string(&super::mergeability::checks_to_json(&checks))?
+            );
+        }
+        pending_expectations = checks;
         preflight(plan, &steps, &roots, &bundle, skip_checks)?;
     }
     let _locks = lock_resources(plan, &roots)?;
@@ -1800,6 +1950,20 @@ fn execute(
             r["checksSkipped"] = json!(true);
         }
     })?;
+    // Pin the tips the mergeability preflight planned against onto the run's
+    // step receipts, durably, before the first merge executes. The drift
+    // guard re-checks them immediately before each actual merge/push.
+    for check in &pending_expectations {
+        if let Some(sha) = &check.target_sha {
+            let step_id = check.step_id.clone();
+            let branch = check.target_branch.clone();
+            let pinned = sha.clone();
+            journal.edit_step(&step_id, |s| {
+                s["expectedTarget"] =
+                    json!({"branch": branch, "sha": pinned, "source": check.source_sha});
+            })?;
+        }
+    }
     durable(
         &generation,
         &json!({"runId":journal.snapshot()["id"],"planHash":canonical_hash(plan),"quiescent":false}),
@@ -2030,11 +2194,31 @@ pub(crate) fn local_apply(
         if !unrecorded.is_empty() {
             bail!("worktree heads changed; run knit sync and regenerate the plan");
         }
-        super::super::validate::preflight_required_checks(
-            active,
-            &strings(&plan["requireChecks"]),
-            skip_checks,
-        )?;
+        // Required checks are evaluated against the same effective heads the
+        // executor uses: with an integration source, freshness speaks for the
+        // pinned source, not the reviewed feature head.
+        if super::mergeability::has_integration_sources(&plan) {
+            let effective = super::mergeability::effective_required_checks_bundle(
+                &plan,
+                &serde_json::to_value(&active.bundle)?,
+            );
+            let check = crate::store::ActiveBundle::unlocked(
+                active.root.clone(),
+                active.bundle_path.clone(),
+                serde_json::from_value(effective)?,
+            );
+            super::super::validate::preflight_required_checks(
+                &check,
+                &strings(&plan["requireChecks"]),
+                skip_checks,
+            )?;
+        } else {
+            super::super::validate::preflight_required_checks(
+                active,
+                &strings(&plan["requireChecks"]),
+                skip_checks,
+            )?;
+        }
     }
     if options.is_some_and(|o| o.tag.is_some()) && plan["terminal"] == false {
         bail!("tag requires a terminal destination");
