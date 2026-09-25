@@ -577,7 +577,10 @@ fn handoff_preserves_project_membership_without_reshaping_the_remote() {
     );
     f.ok(&f.source, &["handoff", "out", "--json"], "laptop");
     f.stage_export(&f.source);
-    fs::remove_file(f.api.join("project-shape-writes.jsonl")).unwrap();
+    // Handoff no longer writes project metadata on its outgoing path either.
+    if let Err(error) = fs::remove_file(f.api.join("project-shape-writes.jsonl")) {
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
     f.accept(&f.target, "vps");
     let project: Value = serde_json::from_str(
         &fs::read_to_string(f.target.join(".knit/projects/demo.project.json")).unwrap(),

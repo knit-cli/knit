@@ -5,7 +5,7 @@ use super::client::{
     effective_workspace_config, request, request_json, resolve_project_id, resolve_remote,
     resolve_token,
 };
-use crate::model::KnitRemote;
+use crate::model::{KnitConfig, KnitRemote};
 use crate::store::{read_json, write_json};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
@@ -692,12 +692,24 @@ pub(super) fn push_plans_scoped(
     bundle_slug: Option<&str>,
 ) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
-    let _lock = crate::store::acquire_named_lock(&root, "landing-sync")?;
-    let project = resolve_project_id(&root, &config, project)?;
-    let mut index = load_index(&root, &project, remote_name)?;
+    push_plans_scoped_at(&root, &config, project, remote_name, required, bundle_slug)
+}
+
+/// Bundle callers may resolve a workspace independently of the process cwd.
+pub(super) fn push_plans_scoped_at(
+    root: &Path,
+    config: &KnitConfig,
+    project: Option<&str>,
+    remote_name: &str,
+    required: bool,
+    bundle_slug: Option<&str>,
+) -> Result<()> {
+    let _lock = crate::store::acquire_named_lock(root, "landing-sync")?;
+    let project = resolve_project_id(root, config, project)?;
+    let mut index = load_index(root, &project, remote_name)?;
     let payload = match bundle_slug {
-        Some(_) => outgoing_scoped(&root, &index, bundle_slug)?,
-        None => outgoing(&root, &index)?,
+        Some(_) => outgoing_scoped(root, &index, bundle_slug)?,
+        None => outgoing(root, &index)?,
     };
     if bundle_slug.is_none()
         && !required
@@ -707,10 +719,10 @@ pub(super) fn push_plans_scoped(
     {
         return Ok(());
     }
-    let remote = resolve_remote(&config, remote_name)?;
+    let remote = resolve_remote(config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
-    push_recipes(&root, &mut index, remote, &token)?;
-    save(&index_path(&root, &project, remote_name), &index)?;
+    push_recipes(root, &mut index, remote, &token)?;
+    save(&index_path(root, &project, remote_name), &index)?;
     if payload.plans.is_empty() && payload.runs.is_empty() {
         return Ok(());
     }
@@ -728,7 +740,7 @@ pub(super) fn push_plans_scoped(
     // The server commits the import atomically. Only record ancestry after it
     // accepts; a lost response is safe to retry by immutable content hash.
     for record in &payload.plans {
-        retain_record(&root, record)?;
+        retain_record(root, record)?;
         let key = plan_key(&record.plan)?;
         save(
             &root
@@ -753,7 +765,7 @@ pub(super) fn push_plans_scoped(
             .runs
             .insert(text(&record.run, "id")?.into(), document_hash(&record.run));
     }
-    save(&index_path(&root, &project, remote_name), &index)?;
+    save(&index_path(root, &project, remote_name), &index)?;
     crate::human!(
         "Pushed {} landing plan(s), {} run(s) to {remote_name}",
         payload.plans.len(),

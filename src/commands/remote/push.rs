@@ -776,7 +776,9 @@ fn push_active_bundle_to_remote_impl(
         save_active_bundle(active)?;
     }
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
-    super::landing::push_plans_scoped(
+    super::landing::push_plans_scoped_at(
+        &active.root,
+        &config,
         Some(&project_id),
         remote_name,
         false,
