@@ -856,3 +856,290 @@ fn recorded_non_base_review_uses_target_commands_without_default_inheritance() {
     assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
     assert_eq!(plan["steps"][0]["type"], "merge_pr");
 }
+
+fn repository_merge_fixture(app_changed: bool) -> (Fixture, Value) {
+    let mut f = Fixture::new();
+    f.bundle["repos"] = json!([
+        {"id":"tools","path":"tools","baseBranch":"main","remote":null,"featureBranch":"feature","worktreePath":null},
+        {"id":"app","path":"app","baseBranch":"main","remote":null,"featureBranch":"feature","worktreePath":null}
+    ]);
+    let mut commits = vec![json!({"repoId":"tools","sha":"synthetic-tools"})];
+    if app_changed {
+        commits.push(json!({"repoId":"app","sha":"synthetic-app"}));
+    }
+    f.bundle["commitGroups"] = json!([{"id":"change","message":"Synthetic source change","createdAt":crate::time::now_iso(),"commits":commits}]);
+    f.bundle["publications"] = json!([{"repoId":"tools","provider":"github","kind":"pull_request","number":1,"url":"https://example.test/tools/pull/1","baseBranch":"main","headBranch":"feature","state":"OPEN","updatedAt":crate::time::now_iso()}]);
+    let mut project = serde_json::to_value(crate::model::KnitProject::new(
+        "synthetic".into(),
+        crate::time::now_iso(),
+    ))
+    .unwrap();
+    project["repos"] = json!([
+        {"id":"tools","path":"tools","baseBranch":"main"},
+        {"id":"app","path":"app","baseBranch":"main"}
+    ]);
+    project["landing"] = json!({
+        "merge":{"enabled":false,"repositories":{"tools":{"enabled":true,"mode":"review"}}},
+        "lanes":{
+            "staging":{"terminal":false,"branches":{"tools":"main","app":"staging"}},
+            "production":{"terminal":true,"branches":{"tools":"main","app":"main"}}
+        }
+    });
+    (f, project)
+}
+
+fn repository_merge_plan(f: &Fixture, project: &Value, lane: &str) -> anyhow::Result<Value> {
+    let active = crate::store::ActiveBundle::unlocked(
+        f.dir.clone(),
+        f.dir.join("bundle.json"),
+        serde_json::from_value(f.bundle.clone())?,
+    );
+    generate::build(&active, &f.bundle, project, None, None, Some(lane))
+}
+
+#[test]
+fn repository_merge_review_exception_leaves_unchanged_context_without_operations() {
+    let (f, project) = repository_merge_fixture(false);
+    for lane in ["staging", "production"] {
+        let plan = repository_merge_plan(&f, &project, lane).unwrap();
+        let steps = plan["steps"].as_array().unwrap();
+        assert_eq!(steps.len(), 1);
+        assert_eq!(steps[0]["type"], "merge_pr");
+        assert_eq!(steps[0]["repoId"], "tools");
+        assert_eq!(plan["targetBranches"]["tools"], "main");
+        assert_eq!(plan["changedRepos"], json!(["tools"]));
+        assert_eq!(plan["terminal"], lane == "production");
+        assert_eq!(plan["merge"], project["landing"]["merge"]);
+        assert_eq!(
+            validation(&plan, Some(&f.bundle), Some(&project))["valid"],
+            true
+        );
+        // Portable project round trips and both public schemas retain the policy.
+        let typed: crate::model::KnitProject = serde_json::from_value(project.clone()).unwrap();
+        assert_eq!(
+            serde_json::to_value(typed).unwrap()["landing"]["merge"],
+            project["landing"]["merge"]
+        );
+        for (schema, value) in [
+            (
+                include_str!("../../../../schemas/project.schema.json"),
+                &project,
+            ),
+            (
+                include_str!("../../../../schemas/land-plan.schema.json"),
+                &plan,
+            ),
+        ] {
+            let schema: Value = serde_json::from_str(schema).unwrap();
+            let validator = jsonschema::validator_for(&schema).unwrap();
+            let errors: Vec<_> = validator
+                .iter_errors(value)
+                .map(|e| e.to_string())
+                .collect();
+            assert!(errors.is_empty(), "{}", errors.join("\n"));
+        }
+    }
+    // Enabling the context repo does not turn it into changed work.
+    let mut project = project;
+    project["landing"]["merge"]["repositories"]["app"] = json!({"enabled":true});
+    assert_eq!(
+        repository_merge_plan(&f, &project, "staging").unwrap()["steps"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    // The same holds when app context is available only through the project.
+    let mut f = f;
+    f.bundle["repos"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|repo| repo["id"] != "app");
+    let plan = repository_merge_plan(&f, &project, "staging").unwrap();
+    assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["changedRepos"], json!(["tools"]));
+    assert_eq!(f.bundle["repos"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn repository_merge_mixes_staging_branches_and_reviews_but_delegates_production_apps() {
+    let (f, mut project) = repository_merge_fixture(true);
+    project["landing"]["lanes"]["staging"]["merge"] = json!({"enabled":true});
+    let staging = repository_merge_plan(&f, &project, "staging").unwrap();
+    let steps = staging["steps"].as_array().unwrap();
+    assert_eq!(steps.len(), 2);
+    assert!(steps
+        .iter()
+        .any(|s| s["repoId"] == "tools" && s["type"] == "merge_pr"));
+    assert!(steps.iter().any(|s| s["repoId"] == "app"
+        && s["type"] == "merge_branch"
+        && s["targetBranch"] == "staging"));
+    assert_eq!(staging["terminal"], false);
+    let production = repository_merge_plan(&f, &project, "production").unwrap();
+    assert_eq!(production["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(production["steps"][0]["repoId"], "tools");
+    assert_eq!(production["steps"][0]["type"], "merge_pr");
+    assert_eq!(production["terminal"], true);
+    assert_eq!(production["changedRepos"], json!(["app", "tools"]));
+    // An already merged review is retained for the executor's idempotent check.
+    let mut f = f;
+    f.bundle["publications"][0]["state"] = json!("MERGED");
+    assert_eq!(
+        repository_merge_plan(&f, &project, "production").unwrap()["steps"][0]["type"],
+        "merge_pr"
+    );
+}
+
+#[test]
+fn repository_merge_scope_overrides_inherit_fields_and_can_restore_destination_mode() {
+    let (f, mut project) = repository_merge_fixture(true);
+    project["landing"]["merge"]["repositories"]["tools"]["enabled"] = json!(false);
+    project["landing"]["lanes"]["staging"]["merge"] =
+        json!({"repositories":{"tools":{"enabled":true}}});
+    let plan = repository_merge_plan(&f, &project, "staging").unwrap();
+    assert_eq!(
+        plan["merge"]["repositories"]["tools"],
+        json!({"enabled":true,"mode":"review"})
+    );
+    project["landing"]["lanes"]["staging"]["branches"]["tools"] = json!("staging");
+    project["landing"]["lanes"]["staging"]["merge"]["repositories"]["tools"]["mode"] =
+        json!("destination");
+    let plan = repository_merge_plan(&f, &project, "staging").unwrap();
+    assert_eq!(plan["steps"][0]["type"], "merge_branch");
+    // Per-repo disable wins over the scope default, without losing other entries.
+    project["landing"]["lanes"]["staging"]["merge"] = json!({"enabled":true,"repositories":{"tools":{"enabled":false},"app":{"mode":"destination"}}});
+    let plan = repository_merge_plan(&f, &project, "staging").unwrap();
+    assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(plan["steps"][0]["repoId"], "app");
+    assert_eq!(plan["merge"]["repositories"]["tools"]["mode"], "review");
+    // Branch-keyed targets use the same field inheritance as named lanes.
+    project["landing"]["targets"] =
+        json!({"main":{"terminal":true,"merge":{"repositories":{"tools":{"enabled":true}}}}});
+    let active = crate::store::ActiveBundle::unlocked(
+        f.dir.clone(),
+        f.dir.join("bundle.json"),
+        serde_json::from_value(f.bundle.clone()).unwrap(),
+    );
+    let plan = generate::build(&active, &f.bundle, &project, None, Some("main"), None).unwrap();
+    assert_eq!(plan["steps"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        plan["merge"]["repositories"]["tools"],
+        json!({"enabled":true,"mode":"review"})
+    );
+}
+
+#[test]
+fn repository_merge_rejects_unknown_ids_modes_and_policy_fields() {
+    let inherited: crate::model::ProjectLandingRepositoryMerge =
+        serde_json::from_value(json!({})).unwrap();
+    assert!(inherited.enabled.is_none());
+    assert!(inherited.mode.is_none());
+    let (f, project) = repository_merge_fixture(false);
+    for (repositories, expected) in [
+        (
+            json!({"typo":{"enabled":true}}),
+            "unknown project repository",
+        ),
+        (json!({"tools":{"mode":"typo"}}), "unknown variant"),
+        (json!({"tools":{"enable":true}}), "unknown field"),
+        (json!({"tools":{"enabled":null}}), "invalid type: null"),
+        (json!({"tools":{"mode":null}}), "invalid type: null"),
+        (json!({"tools":{"enabled":"true"}}), "invalid type"),
+    ] {
+        for scoped in [false, true] {
+            let mut project = project.clone();
+            if scoped {
+                project["landing"]["lanes"]["staging"]["merge"] =
+                    json!({"repositories":repositories});
+            } else {
+                project["landing"]["merge"]["repositories"] = repositories.clone();
+            }
+            let error = repository_merge_plan(&f, &project, "staging")
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains(expected), "{error}");
+        }
+    }
+    let plan = repository_merge_plan(&f, &project, "staging").unwrap();
+    for (policy, expected) in [
+        (json!({"typo":{"enabled":true}}), "unknown repository"),
+        (json!({"tools":{"mode":"typo"}}), "unknown variant"),
+        (json!({"tools":{"enable":true}}), "unknown field"),
+        (json!({"tools":{"enabled":null}}), "invalid type: null"),
+        (json!({"tools":{"mode":null}}), "invalid type: null"),
+    ] {
+        let mut edited = plan.clone();
+        edited["merge"]["repositories"] = policy;
+        let result = validation(&edited, Some(&f.bundle), Some(&project));
+        assert_eq!(result["valid"], false);
+        assert!(result["errors"].to_string().contains(expected), "{result}");
+    }
+}
+
+#[test]
+fn repository_merge_review_exceptions_preserve_refusals_and_terminal_coverage() {
+    let (mut f, mut project) = repository_merge_fixture(true);
+    let production = repository_merge_plan(&f, &project, "production").unwrap();
+    let mut omitted = production.clone();
+    omitted["steps"] = json!([{"id":"inspect","repoId":"app","type":"run","command":["true"],"effect":"read_only"}]);
+    let result = validation(&omitted, Some(&f.bundle), Some(&project));
+    assert_eq!(result["valid"], false);
+    assert!(result["errors"]
+        .to_string()
+        .contains("terminal plan omits changed repository tools"));
+    let mut disabled = production.clone();
+    disabled["merge"]["repositories"]["tools"]["enabled"] = json!(false);
+    assert!(
+        validation(&disabled, Some(&f.bundle), Some(&project))["errors"]
+            .to_string()
+            .contains("merge.enabled false")
+    );
+    let mut wrong_mode = production;
+    wrong_mode["steps"][0]["type"] = json!("merge_branch");
+    assert!(
+        validation(&wrong_mode, Some(&f.bundle), Some(&project))["errors"]
+            .to_string()
+            .contains("requires merge_pr")
+    );
+    project["landing"]["merge"]["includeUnlisted"] = json!(false);
+    assert!(repository_merge_plan(&f, &project, "production")
+        .unwrap_err()
+        .to_string()
+        .contains("excluded"));
+    project["landing"]["merge"]
+        .as_object_mut()
+        .unwrap()
+        .remove("includeUnlisted");
+    f.bundle["publications"] = json!([]);
+    for lane in ["staging", "production"] {
+        assert!(repository_merge_plan(&f, &project, lane)
+            .unwrap_err()
+            .to_string()
+            .contains("requires a recorded review"));
+    }
+    let (f, mut project) = repository_merge_fixture(false);
+    project["landing"]["lanes"]["staging"]["branches"]["tools"] = Value::Null;
+    assert!(repository_merge_plan(&f, &project, "staging")
+        .unwrap_err()
+        .to_string()
+        .contains("carries none"));
+    project["landing"]["lanes"]["production"]["branches"]["tools"] = Value::Null;
+    assert!(repository_merge_plan(&f, &project, "production")
+        .unwrap_err()
+        .to_string()
+        .contains("declared terminal but skips"));
+    let mut disabled = project.clone();
+    disabled["landing"]["lanes"]["staging"]["branches"]["tools"] = json!("main");
+    disabled["landing"]["merge"]["repositories"]["tools"]["enabled"] = json!(false);
+    assert!(repository_merge_plan(&f, &disabled, "staging")
+        .unwrap_err()
+        .to_string()
+        .contains("No PR publications or project landing deployments"));
+    // The accidental review-base collision remains refused without review mode.
+    project["landing"]["lanes"]["staging"]["branches"]["tools"] = json!("main");
+    project["landing"]["merge"]["repositories"]["tools"]["mode"] = json!("destination");
+    assert!(repository_merge_plan(&f, &project, "staging")
+        .unwrap_err()
+        .to_string()
+        .contains("base of its recorded review"));
+}

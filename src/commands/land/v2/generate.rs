@@ -73,7 +73,12 @@ pub(super) fn build(
 ) -> Result<Value> {
     if target.is_none() && lane.is_none() {
         for publication in &active.bundle.publications {
-            if project["landing"]["targets"][&publication.base_branch]["merge"]["enabled"] == false
+            let recorded_target = &project["landing"]["targets"][&publication.base_branch];
+            if (recorded_target["merge"]["enabled"] == false
+                || recorded_target["merge"]["repositories"][&publication.repo_id]["enabled"]
+                    == false)
+                && !effective_merge_policy(project, recorded_target)?
+                    .enabled_for(&publication.repo_id)
             {
                 bail!("Recorded target {} delegates integration to its procedure; select it explicitly with --target {} before generating a plan", publication.base_branch, publication.base_branch);
             }
@@ -86,18 +91,10 @@ pub(super) fn build(
     } else {
         &Value::Null
     };
-    let merge_enabled = override_config["merge"]
-        .get("enabled")
-        .or_else(|| project["landing"]["merge"].get("enabled"))
-        .map(|v| {
-            v.as_bool()
-                .ok_or_else(|| anyhow::anyhow!("merge.enabled must be boolean"))
-        })
-        .transpose()?
-        .unwrap_or(true);
+    let merge_policy = effective_merge_policy(project, override_config)?;
     let mut compatible = project.clone();
     if compatible["landing"].is_object() {
-        compatible["landing"]["merge"]["enabled"] = json!(merge_enabled);
+        compatible["landing"]["merge"] = serde_json::to_value(&merge_policy)?;
         if lane.is_some() || target.is_some() {
             compatible["landing"]["steps"] = override_config["steps"]
                 .as_array()
@@ -144,7 +141,10 @@ pub(super) fn build(
     )?;
     let mut plan = serde_json::to_value(base)?;
     plan["schemaVersion"] = json!("0.2");
-    plan["merge"] = json!({"enabled":merge_enabled});
+    plan["merge"] = json!({"enabled":merge_policy.enabled.unwrap_or(true)});
+    if !merge_policy.repositories.is_empty() {
+        plan["merge"]["repositories"] = serde_json::to_value(&merge_policy.repositories)?;
+    }
     plan["requiredExecutorVersion"] = json!("0.3");
     plan["recipeRepos"] = json!(project["repos"]
         .as_array()
@@ -349,6 +349,41 @@ pub(super) fn build(
     Ok(plan)
 }
 
+/// Scope overrides inherit each repository's fields independently.
+fn effective_merge_policy(
+    project: &Value,
+    scope: &Value,
+) -> Result<crate::model::ProjectLandingMergePlan> {
+    fn parse(value: Option<&Value>) -> Result<crate::model::ProjectLandingMergePlan> {
+        match value {
+            Some(value) => {
+                if let Some(enabled) = value.get("enabled") {
+                    if !enabled.is_boolean() {
+                        bail!("merge.enabled must be boolean");
+                    }
+                }
+                Ok(serde_json::from_value(value.clone())?)
+            }
+            None => Ok(Default::default()),
+        }
+    }
+    let mut policy = parse(project["landing"].get("merge"))?;
+    let overrides = parse(scope.get("merge"))?;
+    if overrides.enabled.is_some() {
+        policy.enabled = overrides.enabled;
+    }
+    for (id, override_policy) in overrides.repositories {
+        let inherited = policy.repositories.entry(id).or_default();
+        if override_policy.enabled.is_some() {
+            inherited.enabled = override_policy.enabled;
+        }
+        if override_policy.mode.is_some() {
+            inherited.mode = override_policy.mode;
+        }
+    }
+    Ok(policy)
+}
+
 pub(crate) fn destination_path(
     active: &ActiveBundle,
     target: Option<&str>,
@@ -395,7 +430,16 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
     super::super::display::print_plan(active, &display, path);
     println!("Hash: {}", canonical_hash(plan));
     if plan["merge"]["enabled"] == false {
-        println!("Source integration: declared procedure (automatic merges disabled)");
+        if plan["merge"]["repositories"]
+            .as_object()
+            .is_some_and(|repos| repos.values().any(|policy| policy["enabled"] == true))
+        {
+            println!(
+                "Source integration: declared procedure with explicit repository merge exceptions"
+            );
+        } else {
+            println!("Source integration: declared procedure (automatic merges disabled)");
+        }
     }
     println!(
         "Maximum parallel commands: {} (checkout and resource locks can serialize them)",
