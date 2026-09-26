@@ -149,6 +149,12 @@ pub fn show_related_history(
     }
 
     let events = load_history_events(&root, &project_id)?;
+    // Direct ledger join: obsolete base.commit rows never surface here, the
+    // same exclusion the indexed queries apply.
+    let events: Vec<_> = events
+        .into_iter()
+        .filter(|event| !crate::history::is_obsolete_base_commit(event))
+        .collect();
     let mut instances = related_instances(&events, &target.repo_id, &commit_set);
     if instances.is_empty() {
         println!(

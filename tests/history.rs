@@ -236,12 +236,13 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
     )
     .unwrap();
 
-    // Plain refresh is append-only: it adds the three configured base roots
-    // and leaves the existing bundle events exactly as they are.
+    // Plain refresh is append-only: every event id is still recorded, so it
+    // appends nothing (base branch roots are never imported) and leaves the
+    // rewritten bundle events exactly as they are.
     let refreshed = knit(&workspace, ["history", "refresh"]);
-    assert!(refreshed.contains("3 new event(s)"), "{refreshed}");
+    assert!(refreshed.contains("0 new event(s)"), "{refreshed}");
     let after_refresh = history_events(&workspace);
-    assert_eq!(after_refresh.len(), recorded + 3);
+    assert_eq!(after_refresh.len(), recorded);
     assert!(event_of_kind(&after_refresh, "commit.observed")["message"].is_null());
 
     let rebuilt = knit(&workspace, ["history", "refresh", "--rebuild"]);
@@ -249,7 +250,7 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
     assert!(rebuilt.contains("1 preserved event(s)"), "{rebuilt}");
 
     let after_rebuild = history_events(&workspace);
-    assert_eq!(after_rebuild.len(), recorded + 3);
+    assert_eq!(after_rebuild.len(), recorded);
     let observed = event_of_kind(&after_rebuild, "commit.observed");
     assert_eq!(observed["message"].as_str(), Some("Fix seat map rounding"));
     assert!(observed["occurredAt"]

@@ -30,6 +30,7 @@ pub enum RepoMatch {
 pub struct HistoryQuery {
     pub scope: Option<String>,
     pub open_bundles: Vec<String>,
+    pub completed_bundles: Vec<String>,
     pub expression: Option<expression::Expression>,
     pub bundle_id: Option<String>,
     pub repos: Option<Vec<String>>,
@@ -58,7 +59,9 @@ pub struct HistoryEntry {
     pub message: String,
     pub events: Vec<HistoryEvent>,
 }
-const VERSION: i64 = 1;
+// v2: obsolete `base.commit` rows are never indexed, so every cache written
+// by v1 — which may contain them — is discarded and rebuilt from the ledger.
+const VERSION: i64 = 2;
 
 /// Hash the project identifier so even unusual identifiers cannot escape the cache.
 pub fn index_path(root: &Path, project_id: &str) -> PathBuf {
@@ -74,7 +77,7 @@ fn validate_project(project: &str) -> Result<()> {
     Ok(())
 }
 fn schema(db: &Connection) -> Result<()> {
-    db.execute_batch("CREATE TABLE events (
+    db.execute_batch(&format!("CREATE TABLE events (
         seq INTEGER PRIMARY KEY, event_id TEXT NOT NULL, bundle TEXT, title TEXT,
         repo TEXT, kind TEXT NOT NULL, at TEXT NOT NULL, message TEXT NOT NULL,
         commit_key TEXT NOT NULL, bundle_key TEXT NOT NULL, selector TEXT NOT NULL,
@@ -84,7 +87,7 @@ fn schema(db: &Connection) -> Result<()> {
         CREATE INDEX events_time ON events(at DESC,event_id);
         CREATE INDEX events_repo ON events(repo);
         CREATE TABLE source (singleton INTEGER PRIMARY KEY CHECK(singleton=1), size INTEGER NOT NULL, digest BLOB NOT NULL);
-        PRAGMA user_version=1;")?;
+        PRAGMA user_version={VERSION};"))?;
     Ok(())
 }
 fn open_index(path: &Path) -> Result<Connection> {
@@ -136,6 +139,12 @@ fn normalized(value: &str) -> Result<String> {
         .to_rfc3339_opts(SecondsFormat::Nanos, true))
 }
 fn insert(db: &Connection, event: &HistoryEvent, payload: &str) -> Result<()> {
+    // Obsolete base.commit rows are excluded before anything else — before
+    // filtering, grouping, pagination, and display options — by never
+    // entering the index at all.
+    if crate::history::is_obsolete_base_commit(event) {
+        return Ok(());
+    }
     let at = normalized(event.occurred_at.as_deref().unwrap_or(&event.recorded_at))?;
     let selector = event
         .node_id
@@ -210,36 +219,43 @@ pub fn query_project_history(
     query: &HistoryQuery,
 ) -> Result<Vec<HistoryEntry>> {
     let mut query = query.clone();
-    if matches!(query.scope.as_deref(), Some("base-and-ongoing" | "ongoing")) {
-        let dir = root.join(".knit/bundles");
-        if dir.exists() {
-            for entry in fs::read_dir(dir)? {
-                let path = entry?.path();
-                if path.extension().and_then(|s| s.to_str()) != Some("json") {
-                    continue;
-                }
-                let bundle: ChangeGroup = crate::store::read_json(&path)?;
-                if bundle.project_id.as_deref() != Some(project_id) {
-                    continue;
-                }
-                let open = match bundle.state {
-                    Some(crate::model::BundleState::Open) => true,
-                    Some(_) => false,
-                    None => {
-                        bundle.archived_at.is_none()
-                            && !bundle
-                                .nodes
-                                .iter()
-                                .any(crate::model::is_terminal_landed_node)
-                    }
-                };
-                if open {
-                    query.open_bundles.push(bundle.id);
-                }
+    if matches!(
+        query.scope.as_deref(),
+        Some("base" | "base-and-ongoing" | "ongoing")
+    ) {
+        let (open, completed) = lifecycle_bundle_ids(root, project_id)?;
+        query.open_bundles = open;
+        query.completed_bundles = completed;
+    }
+    with_project_index(root, project_id, |db| execute(db, &query, false))
+}
+
+/// Split the project's bundle artifacts into open and completed lifecycle
+/// sets through the shared [`crate::model::history_lifecycle`] classifier.
+/// Deleted bundles join neither set: their preserved rows stay in the
+/// all-activity reading only.
+fn lifecycle_bundle_ids(root: &Path, project_id: &str) -> Result<(Vec<String>, Vec<String>)> {
+    let mut open = Vec::new();
+    let mut completed = Vec::new();
+    let dir = root.join(".knit/bundles");
+    if dir.exists() {
+        for entry in fs::read_dir(dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let bundle: ChangeGroup = crate::store::read_json(&path)?;
+            if bundle.project_id.as_deref() != Some(project_id) {
+                continue;
+            }
+            match crate::model::history_lifecycle(&bundle) {
+                crate::model::HistoryLifecycle::Open => open.push(bundle.id),
+                crate::model::HistoryLifecycle::Completed => completed.push(bundle.id),
+                crate::model::HistoryLifecycle::Preserved => {}
             }
         }
     }
-    with_project_index(root, project_id, |db| execute(db, &query, false))
+    Ok((open, completed))
 }
 
 fn query_lock(root: &Path, project_id: &str, timeout: Duration) -> Result<crate::store::KnitLock> {
@@ -294,15 +310,10 @@ pub fn query_bundle_history(
         return Ok(Vec::new());
     }
     q.bundle_id = Some(bundle.id.clone());
-    if matches!(bundle.state, Some(crate::model::BundleState::Open))
-        || (bundle.state.is_none()
-            && bundle.archived_at.is_none()
-            && !bundle
-                .nodes
-                .iter()
-                .any(crate::model::is_terminal_landed_node))
-    {
-        q.open_bundles.push(bundle.id.clone());
+    match crate::model::history_lifecycle(bundle) {
+        crate::model::HistoryLifecycle::Open => q.open_bundles.push(bundle.id.clone()),
+        crate::model::HistoryLifecycle::Completed => q.completed_bundles.push(bundle.id.clone()),
+        crate::model::HistoryLifecycle::Preserved => {}
     }
     let mut db = Connection::open_in_memory()?;
     schema(&db)?;
@@ -407,7 +418,21 @@ fn query_sql(
         HistoryGrouping::Commit => "commit_key",
         HistoryGrouping::Bundle => "bundle_key",
     };
-    let base = "(kind = 'base.commit' OR (kind = 'branch.landed' AND json_extract(payload, '$.branch') != '' AND json_extract(payload, '$.branch') = json_extract(payload, '$.baseBranch')))";
+    // Lifecycle scopes select whole bundles — every recorded event of the
+    // chosen bundles, shown as they were recorded — never standalone commits.
+    // Rows without a bundle (obsolete base.commit aside, deleted-bundle rows
+    // keep their bundle id) belong to no lifecycle set and match no scope.
+    let completed_ids = q
+        .completed_bundles
+        .iter()
+        .map(|id| bind(id.clone().into()))
+        .collect::<Vec<_>>()
+        .join(",");
+    let completed = if completed_ids.is_empty() {
+        "0".to_string()
+    } else {
+        format!("bundle IN ({completed_ids})")
+    };
     let ongoing_ids = q
         .open_bundles
         .iter()
@@ -417,11 +442,11 @@ fn query_sql(
     let ongoing = if ongoing_ids.is_empty() {
         "0".to_string()
     } else {
-        format!("bundle IN ({ongoing_ids}) AND kind NOT IN ('base.commit','branch.landed','bundle.landed')")
+        format!("bundle IN ({ongoing_ids})")
     };
     let scope = match q.scope.as_deref() {
-        Some("base") => base.to_string(),
-        Some("base-and-ongoing") => format!("({base} OR ({ongoing}))"),
+        Some("base") => completed,
+        Some("base-and-ongoing") => format!("({completed} OR ({ongoing}))"),
         Some("ongoing") => ongoing,
         Some("landings") => "(kind = 'branch.landed' OR (kind = 'bundle.landed' AND COALESCE(json_extract(payload, '$.metadata.hasBranchReceipts'), 0) != 1))".to_string(),
         _ => "1".to_string(),
@@ -1514,5 +1539,363 @@ mod tests {
             "node-observed"
         );
         assert_eq!(before, fs::read(f.ledger()).unwrap());
+    }
+
+    fn scoped_event(id: &str, node: &str, bundle: &str, kind: &str, at: &str) -> HistoryEvent {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion":"1","eventId":id,"projectId":"demo","kind":kind,
+            "bundleId":bundle,"bundleTitle":format!("{bundle} work"),"repoId":"backend",
+            "nodeId":node,"occurredAt":at,"recordedAt":"2026-01-01T00:00:00Z","recordedBy":"test",
+            "message":format!("{bundle} {kind}")
+        }))
+        .unwrap()
+    }
+
+    fn obsolete_base_commit_row(id: &str, at: &str) -> HistoryEvent {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion":"1","eventId":id,"projectId":"demo","kind":"base.commit",
+            "repoId":"backend","branch":"main","commit":format!("{id}c0ffee"),
+            "occurredAt":at,"recordedAt":"2026-01-01T00:00:00Z","recordedBy":"test",
+            "message":"Direct base change"
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn obsolete_base_commit_rows_never_enter_indexes_pages_or_scopes() {
+        let f = Fixture::new();
+        f.write(&[
+            obsolete_base_commit_row("stale-1", "2026-02-03T12:00:00Z"),
+            obsolete_base_commit_row("stale-2", "2026-02-02T12:00:00Z"),
+            event("live-1", "node-a", "backend", "2026-01-01T12:00:00Z"),
+            event("live-2", "node-b", "frontend", "2026-01-02T12:00:00Z"),
+        ]);
+        // The ledger keeps its recorded rows; exclusion happens at read time.
+        assert!(fs::read_to_string(f.ledger())
+            .unwrap()
+            .contains("base.commit"));
+
+        for scope in [
+            None,
+            Some("activity"),
+            Some("base"),
+            Some("ongoing"),
+            Some("base-and-ongoing"),
+            Some("landings"),
+        ] {
+            for grouping in [
+                HistoryGrouping::Event,
+                HistoryGrouping::Commit,
+                HistoryGrouping::Bundle,
+            ] {
+                for skip in 0..3 {
+                    let entries = f.query(&HistoryQuery {
+                        scope: scope.map(ToString::to_string),
+                        grouping,
+                        limit: Some(1),
+                        skip,
+                        full_context: true,
+                        ..Default::default()
+                    });
+                    for entry in entries {
+                        assert!(
+                            !entry.events.iter().any(|e| e.kind == "base.commit"),
+                            "scope {scope:?} leaked a base.commit row"
+                        );
+                    }
+                }
+            }
+        }
+        // Unpaged reads are equally clean, and the index holds no such row.
+        for scope in [None, Some("activity")] {
+            let entries = f.query(&HistoryQuery {
+                scope: scope.map(ToString::to_string),
+                full_context: true,
+                ..Default::default()
+            });
+            assert_eq!(entries.len(), 2, "scope {scope:?}");
+        }
+        let db = Connection::open(index_path(&f.0, "demo")).unwrap();
+        let indexed: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='base.commit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(indexed, 0);
+    }
+
+    #[test]
+    fn stale_index_holding_base_commit_rows_is_discarded_and_rebuilt() {
+        let f = Fixture::new();
+        f.write(&[a()]);
+        assert_eq!(count(&f), 1); // builds the current index
+        let cache = index_path(&f.0, "demo");
+        {
+            // Simulate a v1-era cache: an older writer's index that still
+            // contains an obsolete base.commit row.
+            let db = Connection::open(&cache).unwrap();
+            db.execute(
+                "INSERT INTO events(event_id,bundle,title,repo,kind,at,message,commit_key,bundle_key,selector,payload)
+                 VALUES('stale-base',NULL,NULL,'backend','base.commit','2026-01-05T12:00:00.000000000Z','Direct base change','k','k','k','{}')",
+                [],
+            )
+            .unwrap();
+            db.execute_batch("PRAGMA user_version=1").unwrap();
+        }
+        assert_eq!(count(&f), 1);
+        let db = Connection::open(&cache).unwrap();
+        let version: i64 = db
+            .query_row("PRAGMA user_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, VERSION);
+        let stale: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE kind='base.commit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(stale, 0);
+    }
+
+    fn write_bundle_artifact(f: &Fixture, bundle: &ChangeGroup) {
+        let dir = f.0.join(".knit/bundles");
+        fs::create_dir_all(&dir).unwrap();
+        crate::store::write_json(&dir.join(format!("{}.bundle.json", bundle.id)), bundle).unwrap();
+    }
+
+    fn lifecycle_bundle(
+        id: &str,
+        state: Option<crate::model::BundleState>,
+        archived_at: Option<&str>,
+        nodes: Vec<crate::model::BundleNode>,
+    ) -> ChangeGroup {
+        let mut bundle = ChangeGroup::new(
+            id.to_string(),
+            format!("{id} work"),
+            "2026-01-01T00:00:00Z".to_string(),
+        );
+        bundle.project_id = Some("demo".to_string());
+        bundle.state = state;
+        bundle.archived_at = archived_at.map(ToString::to_string);
+        bundle.nodes.extend(nodes);
+        bundle
+    }
+
+    /// The lifecycle classification shared by project and bundle queries:
+    /// explicit states win, deleted stays activity-only, legacy artifacts
+    /// need terminal evidence, and branch receipts never complete a bundle.
+    #[test]
+    fn lifecycle_scopes_select_whole_bundles_by_recorded_lifecycle() {
+        use crate::model::{BundleNode, BundleState, HistoryLifecycle};
+        let f = Fixture::new();
+
+        // Open by explicit state, despite an old landing node and a live
+        // branch receipt from an intermediate (staging) landing.
+        let open = lifecycle_bundle(
+            "open-work",
+            Some(BundleState::Open),
+            None,
+            vec![
+                BundleNode::feature_landed(
+                    "open-landed".into(),
+                    "2026-01-03T00:00:00Z".into(),
+                    "plan".into(),
+                    "run".into(),
+                    "github".into(),
+                    vec!["backend".into()],
+                    Vec::new(),
+                    None,
+                ),
+                BundleNode::branch_landed(
+                    "open-receipt".into(),
+                    "2026-01-04T00:00:00Z".into(),
+                    "backend".into(),
+                    "staging".into(),
+                    Some("source-head".into()),
+                    "run".into(),
+                    Some("preview".into()),
+                ),
+            ],
+        );
+        assert_eq!(
+            crate::model::history_lifecycle(&open),
+            HistoryLifecycle::Open
+        );
+
+        // Archived without any landing receipts: completed, and its base
+        // reading still shows the original authoring commits.
+        let archived = lifecycle_bundle(
+            "archived-work",
+            Some(BundleState::Archived),
+            Some("2026-01-05T00:00:00Z"),
+            vec![],
+        );
+        assert_eq!(
+            crate::model::history_lifecycle(&archived),
+            HistoryLifecycle::Completed
+        );
+
+        // Legacy artifact with no state: only the archive time completes it.
+        let legacy = lifecycle_bundle("legacy-work", None, Some("2026-01-06T00:00:00Z"), vec![]);
+        assert_eq!(
+            crate::model::history_lifecycle(&legacy),
+            HistoryLifecycle::Completed
+        );
+        let legacy_open = lifecycle_bundle("legacy-open", None, None, vec![]);
+        assert_eq!(
+            crate::model::history_lifecycle(&legacy_open),
+            HistoryLifecycle::Open
+        );
+
+        // Deleted: preserved history, claimed by no lifecycle scope.
+        let deleted = lifecycle_bundle("deleted-work", Some(BundleState::Deleted), None, vec![]);
+        assert_eq!(
+            crate::model::history_lifecycle(&deleted),
+            HistoryLifecycle::Preserved
+        );
+
+        write_bundle_artifact(&f, &open);
+        write_bundle_artifact(&f, &archived);
+        write_bundle_artifact(&f, &legacy);
+        write_bundle_artifact(&f, &deleted);
+
+        f.write(&[
+            scoped_event(
+                "o-1",
+                "open-commit",
+                "open-work",
+                "commit.recorded",
+                "2026-01-02T12:00:00Z",
+            ),
+            scoped_event(
+                "o-2",
+                "open-receipt",
+                "open-work",
+                "branch.landed",
+                "2026-01-04T12:00:00Z",
+            ),
+            scoped_event(
+                "a-1",
+                "archived-commit",
+                "archived-work",
+                "commit.recorded",
+                "2026-01-03T12:00:00Z",
+            ),
+            scoped_event(
+                "a-2",
+                "archived-node",
+                "archived-work",
+                "bundle.archived",
+                "2026-01-05T12:00:00Z",
+            ),
+            scoped_event(
+                "l-1",
+                "legacy-commit",
+                "legacy-work",
+                "commit.recorded",
+                "2026-01-06T12:00:00Z",
+            ),
+            scoped_event(
+                "d-1",
+                "deleted-commit",
+                "deleted-work",
+                "commit.recorded",
+                "2026-01-07T12:00:00Z",
+            ),
+        ]);
+
+        let ids = |scope: Option<&str>| {
+            f.query(&HistoryQuery {
+                scope: scope.map(ToString::to_string),
+                grouping: HistoryGrouping::Event,
+                full_context: true,
+                ..Default::default()
+            })
+            .into_iter()
+            .flat_map(|entry| entry.events)
+            .map(|event| (event.bundle_id.unwrap(), event.kind))
+            .collect::<std::collections::BTreeSet<_>>()
+        };
+
+        let base = ids(Some("base"));
+        assert_eq!(
+            base,
+            [
+                ("archived-work".into(), "commit.recorded".to_string()),
+                ("archived-work".into(), "bundle.archived".to_string()),
+                ("legacy-work".into(), "commit.recorded".to_string()),
+            ]
+            .into()
+        );
+        let ongoing = ids(Some("ongoing"));
+        assert_eq!(
+            ongoing,
+            [
+                ("open-work".into(), "commit.recorded".to_string()),
+                ("open-work".into(), "branch.landed".to_string()),
+            ]
+            .into()
+        );
+        let both = ids(Some("base-and-ongoing"));
+        assert_eq!(both.len(), 5, "{both:?}");
+        assert!(!both.contains(&("deleted-work".to_string(), "commit.recorded".to_string())));
+        let activity = ids(None);
+        assert_eq!(activity.len(), 6, "{activity:?}");
+        assert_eq!(ids(Some("activity")), activity);
+
+        // Bundle grouping selects the whole recorded bundle, all its events.
+        let grouped = f.query(&HistoryQuery {
+            scope: Some("base".into()),
+            grouping: HistoryGrouping::Bundle,
+            full_context: true,
+            ..Default::default()
+        });
+        assert_eq!(grouped.len(), 2);
+        assert!(grouped
+            .iter()
+            .any(|entry| entry.bundle_id.as_deref() == Some("archived-work")
+                && entry.events.len() == 2));
+
+        // The single-bundle reading classifies through the same rules. It
+        // unions the live artifact's snapshot with recorded rows, so assert
+        // on which bundle's events are selectable, not on snapshot details.
+        let direct_events = |bundle: &ChangeGroup, scope: Option<&str>| {
+            query_bundle_history(
+                &f.0,
+                bundle,
+                &HistoryQuery {
+                    scope: scope.map(ToString::to_string),
+                    grouping: HistoryGrouping::Event,
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+            .into_iter()
+            .flat_map(|entry| entry.events)
+            .map(|event| (event.bundle_id, event.kind))
+            .collect::<std::collections::BTreeSet<_>>()
+        };
+        assert!(direct_events(&open, Some("base")).is_empty());
+        let ongoing_events = direct_events(&open, Some("ongoing"));
+        assert!(ongoing_events.contains(&(Some("open-work".into()), "commit.recorded".to_string())));
+        // The intermediate-landing receipt stays part of the open reading.
+        assert!(ongoing_events.contains(&(Some("open-work".into()), "branch.landed".to_string())));
+        let base_events = direct_events(&archived, Some("base"));
+        assert!(
+            base_events.contains(&(Some("archived-work".into()), "commit.recorded".to_string()))
+        );
+        assert!(
+            base_events.contains(&(Some("archived-work".into()), "bundle.archived".to_string()))
+        );
+        assert!(direct_events(&deleted, Some("base")).is_empty());
+        assert!(direct_events(&deleted, Some("ongoing")).is_empty());
+        assert!(
+            direct_events(&deleted, None)
+                .contains(&(Some("deleted-work".into()), "commit.recorded".to_string())),
+            "activity keeps deleted history"
+        );
     }
 }

@@ -594,6 +594,43 @@ pub fn is_terminal_landed_node(node: &BundleNode) -> bool {
         && node.landing.as_ref().is_none_or(|landing| landing.terminal)
 }
 
+/// How a bundle artifact classifies for history lifecycle scopes. One shared
+/// classifier serves project-wide and single-bundle queries, so the two
+/// readings can never disagree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HistoryLifecycle {
+    /// Explicitly open (or a legacy artifact with no completion markers):
+    /// its full recorded activity matches the ongoing reading. An explicit
+    /// open state outranks old landing nodes, and branch receipts alone
+    /// never complete a bundle.
+    Open,
+    /// Closed or archived, or a legacy artifact with a recorded archive time
+    /// or terminal landing node: its full recorded activity matches the
+    /// base (completed) reading, as it was recorded.
+    Completed,
+    /// Deleted: no lifecycle scope claims it; its preserved rows remain
+    /// available in the all-activity reading only.
+    Preserved,
+}
+
+/// Classify a bundle artifact for the history lifecycle scopes. Archive state
+/// alone never proves a landing, and landing receipts (`branch.landed`) never
+/// complete a bundle; only terminal lifecycle evidence does.
+pub fn history_lifecycle(bundle: &ChangeGroup) -> HistoryLifecycle {
+    match bundle.state {
+        Some(BundleState::Open) => HistoryLifecycle::Open,
+        Some(BundleState::Closed | BundleState::Archived) => HistoryLifecycle::Completed,
+        Some(BundleState::Deleted) => HistoryLifecycle::Preserved,
+        None => {
+            if bundle.archived_at.is_some() || bundle.nodes.iter().any(is_terminal_landed_node) {
+                HistoryLifecycle::Completed
+            } else {
+                HistoryLifecycle::Open
+            }
+        }
+    }
+}
+
 /// Machine attribution is advisory; environment ids are stable host identities when available.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]

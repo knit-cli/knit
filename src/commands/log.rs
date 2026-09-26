@@ -31,9 +31,6 @@ pub fn show_log(args: &LogArgs, global_bundle: Option<&str>) -> Result<()> {
         let repos =
             crate::commands::history::query::intersect_repo_filters(&args.repos, view_repos);
         let mut query = build_query(args, &root, repos, limit)?;
-        if query.scope.is_none() {
-            query.scope = Some("base".into());
-        }
         query.expression = crate::commands::history::query::expression(
             &root,
             Some(&project_id),
@@ -179,9 +176,7 @@ fn print_entries(entries: &[HistoryEntry], args: &LogArgs, bundle_context: bool)
 
 fn print_entry(entry: &HistoryEntry, oneline: bool, bundle_context: bool) {
     let bundle = entry.bundle_id.as_deref().unwrap_or("-");
-    let label = if entry.events.iter().all(|event| event.kind == "base.commit") {
-        "[base]"
-    } else if entry
+    let label = if entry
         .events
         .iter()
         .all(|event| event.kind == "branch.landed")
@@ -216,9 +211,7 @@ fn print_entry(entry: &HistoryEntry, oneline: bool, bundle_context: bool) {
             .as_deref()
             .map(short_sha)
             .unwrap_or_else(|| event.kind.clone());
-        let destination = if event.kind == "base.commit" {
-            format!(" [base: {}]", event.branch.as_deref().unwrap_or("?"))
-        } else if event.kind == "branch.landed" {
+        let destination = if event.kind == "branch.landed" {
             format!(
                 " -> {} (branch merge recorded)",
                 event.branch.as_deref().unwrap_or("unknown destination")
