@@ -16,6 +16,7 @@ mod artifact;
 mod check;
 mod display;
 mod execute;
+pub(crate) mod git_progress;
 pub(crate) mod lanes;
 mod plan;
 mod process;

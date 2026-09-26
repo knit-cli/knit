@@ -2,6 +2,12 @@
 
 Implementation target for the complete editable landing/recovery feature. This refines `landing-and-recovery-design.md`; examples use synthetic repositories only. The same saved document must execute locally and on a hosted runner.
 
+## Command output
+
+Executing a command prints its step, phase, and executable, then streams stdout and stderr as they arrive. Output does not require `interactive: true`. Noninteractive command receipts retain bounded output, including failures; interactive commands keep their direct terminal connection and do not record terminal transcripts. Capture-adapter stdout remains private JSON; its diagnostic stderr is live. In `--json` mode, live output goes to stderr so stdout remains one machine-readable result.
+
+Landing's Git fetch, merge, push, and checkout operations also stream output and record command receipts under the step's `attempts`. Credential values are redacted across pipe-read boundaries. Git plumbing queries remain quiet, and commands outside landing keep their existing output behavior. Command labels omit argv and environment values; the full authored recipe is available in the saved plan.
+
 ## Plan format
 
 New plans use `schemaVersion: "0.2"`, `kind: "KnitLandPlan"`. Preserve legacy `0.1` reading and semantics; never silently reinterpret legacy rollback. The existing plan fields remain: id, bundleId, sourceProjectId, createdAt, provider, targetBranch/lane/targetBranches, terminal, changedRepos, bundleHeads, requireChecks, steps. Add:

@@ -106,6 +106,135 @@ impl Drop for Fixture {
         let _ = fs::remove_dir_all(&self.root);
     }
 }
+
+#[test]
+fn ordinary_commands_stream_before_exit_and_keep_receipts_in_both_output_modes() {
+    use std::io::Read;
+    use std::process::Stdio;
+    use std::sync::mpsc;
+    use std::time::{Duration, Instant};
+    for json_mode in [false, true] {
+        let f = Fixture::new();
+        let gate = f.root.join("continue-command");
+        let mut project = read(&f.project);
+        project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{
+            "id":"observe", "type":"run", "repoId":"service", "effect":"read_only", "timeoutSeconds":8,
+            "env":{"GATE":gate}, "command":[python_executable(),"-u","-c",
+                "import os,pathlib,sys,time; print('LIVE-STDOUT',flush=True); print('LIVE-STDERR',file=sys.stderr,flush=True)\nwhile not pathlib.Path(os.environ['GATE']).exists(): time.sleep(.02)"]
+        }]});
+        write(&f.project, &project);
+        let generated = f.cmd(&["land", "plan", "--out", "stream.json"]);
+        assert!(
+            generated.status.success(),
+            "{}",
+            String::from_utf8_lossy(&generated.stderr)
+        );
+        let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+        command
+            .current_dir(&f.root)
+            .env_remove("KNIT_BUNDLE")
+            .env_remove("KNIT_SESSION")
+            .env("KNIT_HOME", f.root.join("home"))
+            .args([
+                "land",
+                "apply",
+                "--plan",
+                "stream.json",
+                "--from-artifact",
+                f.bundle.to_str().unwrap(),
+                "--project-file",
+                f.project.to_str().unwrap(),
+                "--repo-roots",
+                "roots.json",
+                "--run-out",
+                "stream.run.json",
+                "--out",
+                "stream.bundle.json",
+            ])
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        if json_mode {
+            command.arg("--json");
+        }
+        let mut child = command.spawn().unwrap();
+        let (send, receive) = mpsc::channel();
+        let mut readers = Vec::new();
+        let pipes: Vec<(bool, Box<dyn Read + Send>)> = vec![
+            (false, Box::new(child.stdout.take().unwrap())),
+            (true, Box::new(child.stderr.take().unwrap())),
+        ];
+        for (stderr, mut pipe) in pipes {
+            let send = send.clone();
+            readers.push(std::thread::spawn(move || {
+                let mut bytes = [0; 4096];
+                loop {
+                    let n = pipe.read(&mut bytes).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    if send.send((stderr, bytes[..n].to_vec())).is_err() {
+                        break;
+                    }
+                }
+            }));
+        }
+        drop(send);
+        let mut stdout = Vec::new();
+        let mut stderr = Vec::new();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !(String::from_utf8_lossy(if json_mode { &stderr } else { &stdout })
+            .contains("LIVE-STDOUT")
+            && String::from_utf8_lossy(&stderr).contains("LIVE-STDERR"))
+        {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let Ok((err, bytes)) = receive.recv_timeout(remaining) else {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!(
+                    "no live output before command completion; stdout={} stderr={}",
+                    String::from_utf8_lossy(&stdout),
+                    String::from_utf8_lossy(&stderr)
+                );
+            };
+            if err {
+                stderr.extend(bytes);
+            } else {
+                stdout.extend(bytes);
+            }
+        }
+        assert!(
+            child.try_wait().unwrap().is_none(),
+            "command finished before gate opened"
+        );
+        fs::write(gate, "continue").unwrap();
+        let status = child.wait().unwrap();
+        for (err, bytes) in receive {
+            if err {
+                stderr.extend(bytes);
+            } else {
+                stdout.extend(bytes);
+            }
+        }
+        for reader in readers {
+            reader.join().unwrap();
+        }
+        assert!(status.success(), "{}", String::from_utf8_lossy(&stderr));
+        assert!(String::from_utf8_lossy(&stderr).contains("[observe/forward] $"));
+        if json_mode {
+            serde_json::from_slice::<Value>(&stdout).unwrap();
+        }
+        let run = read(&f.root.join("stream.run.json"));
+        assert!(run["steps"][0]["stdout"]
+            .as_str()
+            .unwrap()
+            .contains("LIVE-STDOUT"));
+        assert!(run["steps"][0]["stderr"]
+            .as_str()
+            .unwrap()
+            .contains("LIVE-STDERR"));
+        assert_eq!(run["steps"][0]["attempts"][0]["status"], "succeeded");
+    }
+}
 #[test]
 fn default_generation_matches_artifact_and_json_failure_restores_real_state() {
     let f = Fixture::new();

@@ -375,6 +375,18 @@ fn repository_sequence_compiles_explicit_order_and_pins_the_run_environment() {
         "{}",
         String::from_utf8_lossy(&applied.stderr)
     );
+    // Progress must not corrupt the JSON result, and every remote mutation
+    // must remain visible and have its own recorded command output.
+    serde_json::from_slice::<Value>(&applied.stdout).unwrap();
+    let progress = String::from_utf8_lossy(&applied.stderr);
+    for repo in ["alpha", "beta"] {
+        for operation in ["fetch", "merge", "push"] {
+            assert!(
+                progress.contains(&format!("[merge-{repo}/forward] $ git {operation}")),
+                "{progress}"
+            );
+        }
+    }
     assert_eq!(
         fs::read_to_string(f.trace_path())
             .unwrap()
@@ -391,6 +403,13 @@ fn repository_sequence_compiles_explicit_order_and_pins_the_run_environment() {
             .find(|s| s["id"] == json!(format!("merge-{repo}")))
             .unwrap();
         assert_eq!(merge["status"], "succeeded");
+        let commands = merge["attempts"].as_array().unwrap();
+        let pushed = commands
+            .iter()
+            .find(|c| c["command"] == "git push")
+            .unwrap();
+        assert_eq!(pushed["status"], "succeeded");
+        assert!(!pushed["stderr"].as_str().unwrap().is_empty());
         let tip = f.remote_tip(repo, "staging");
         assert_eq!(merge["output"]["revision"], tip);
         let record: Value = read(&f.root.join(format!("record-{repo}.json")));

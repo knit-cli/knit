@@ -374,11 +374,13 @@ fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Re
             return Err(error);
         }
     };
-    let output = command
-        .args(&args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    command.args(&args).current_dir(cwd);
+    let output = if crate::commands::land::git_progress::active(&args) {
+        crate::commands::land::git_progress::run(&mut command, &args, &credentials)
+    } else {
+        command.output().map_err(anyhow::Error::from)
+    }
+    .with_context(|| format!("failed to run git in {}", cwd.display()))?;
 
     if output.status.success() {
         return Ok(crate::auth_git::redact(
