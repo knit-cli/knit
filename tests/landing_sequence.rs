@@ -333,6 +333,207 @@ fn assert_success(output: &std::process::Output) {
     );
 }
 
+fn advance_features(f: &Fixture) -> Vec<String> {
+    f.repos
+        .iter()
+        .map(|(id, ..)| {
+            let feature = f.root.join(format!("feature-{id}"));
+            run_git(
+                &feature,
+                &[
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    "Exercise another branch landing",
+                ],
+            );
+            run_git(&feature, &["push", "origin", "feature"]);
+            head(&feature, "HEAD")
+        })
+        .collect()
+}
+
+#[test]
+fn branch_checkout_reuses_exact_plan_after_both_feature_branches_advance() {
+    for sync_bundle in [false, true] {
+        let f = branch_fixture();
+        let plan = f.plan();
+        let authored = fs::read(f.root.join("plan.json")).unwrap();
+        assert_success(&f.apply("plan.json", false));
+        let new_heads = advance_features(&f);
+        if sync_bundle {
+            assert_success(&f.cmd(&["--bundle", "demo", "sync"]));
+        }
+        assert_success(&f.cmd(&[
+            "land",
+            "validate",
+            "--plan",
+            "plan.json",
+            "--from-artifact",
+            f.bundle.to_str().unwrap(),
+            "--project-file",
+            f.project.to_str().unwrap(),
+            "--json",
+        ]));
+        let preflight = f.cmd(&[
+            "land",
+            "preflight",
+            "--plan",
+            "plan.json",
+            "--from-artifact",
+            f.bundle.to_str().unwrap(),
+            "--project-file",
+            f.project.to_str().unwrap(),
+            "--repo-roots",
+            "roots.json",
+            "--json",
+        ]);
+        assert_success(&preflight);
+        let report: Value = serde_json::from_slice(&preflight.stdout).unwrap();
+        for (i, (id, ..)) in f.repos.iter().enumerate() {
+            let check = report["checks"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|c| c["repoId"] == *id)
+                .unwrap();
+            assert_eq!(check["sourceSha"], new_heads[i]);
+        }
+        assert_success(&f.cmd(&[
+            "land",
+            "apply",
+            "--plan",
+            "plan.json",
+            "--from-artifact",
+            f.bundle.to_str().unwrap(),
+            "--project-file",
+            f.project.to_str().unwrap(),
+            "--repo-roots",
+            "roots.json",
+            "--run-out",
+            "second.json",
+            "--out",
+            "second-out.json",
+            "--json",
+        ]));
+        let first = read(&f.root.join("run.json"));
+        let second = read(&f.root.join("second.json"));
+        assert_eq!(first["planHash"], second["planHash"]);
+        assert_eq!(second["plan"], plan);
+        assert_eq!(fs::read(f.root.join("plan.json")).unwrap(), authored);
+        for (i, (id, repo, ..)) in f.repos.iter().enumerate() {
+            let merge = second["steps"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|s| s["id"] == format!("merge-{id}"))
+                .unwrap();
+            assert_eq!(merge["output"]["source"], new_heads[i]);
+            assert_eq!(head(repo, "HEAD^2"), new_heads[i]);
+            assert_eq!(f.remote_tip(id, "staging"), head(repo, "HEAD"));
+            assert_eq!(
+                run_git(repo, &["show", "-s", "--format=%s", "HEAD"]),
+                "Merge branch 'feature' into staging"
+            );
+            assert_eq!(
+                head(&f.root.join(format!("feature-{id}")), "HEAD"),
+                new_heads[i]
+            );
+            let source = second["sourceBundle"]["repos"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["id"] == *id)
+                .unwrap();
+            assert_eq!(source["headSha"], new_heads[i]);
+        }
+        assert_eq!(
+            fs::read_to_string(f.trace_path())
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            ["alpha", "beta", "alpha", "beta"]
+        );
+    }
+}
+
+#[test]
+fn branch_checkout_local_reapply_accepts_unrecorded_feature_heads() {
+    let f = branch_fixture();
+    f.plan();
+    let args = [
+        "--bundle",
+        "demo",
+        "land",
+        "--lane",
+        "preview",
+        "apply",
+        "--plan",
+        "plan.json",
+        "--no-tag",
+        "--no-remote",
+    ];
+    assert_success(&f.cmd(&args));
+    let new_heads = advance_features(&f);
+    assert_success(&f.cmd(&args));
+    for (i, (_, repo, ..)) in f.repos.iter().enumerate() {
+        assert_eq!(head(repo, "HEAD^2"), new_heads[i]);
+    }
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta", "alpha", "beta"]
+    );
+}
+
+#[test]
+fn branch_checkout_reuse_keeps_branch_identity_and_other_plan_pins() {
+    let f = branch_fixture();
+    f.plan();
+    let original = read(&f.bundle);
+    for key in ["featureBranch", "remote", "baseBranch", "baseSha"] {
+        let mut changed = original.clone();
+        changed["repos"][0][key] = json!("different");
+        write(&f.root.join("changed.json"), &changed);
+        let result = f.cmd(&[
+            "land",
+            "validate",
+            "--plan",
+            "plan.json",
+            "--from-artifact",
+            "changed.json",
+            "--json",
+        ]);
+        assert!(!result.status.success(), "accepted changed {key}");
+    }
+    run_git(&f.repos[1].2, &["update-ref", "-d", "refs/heads/feature"]);
+    assert!(!f.apply("plan.json", false).status.success());
+    for (id, _, _, base, _) in &f.repos {
+        assert_eq!(&f.remote_tip(id, "staging"), base);
+    }
+    assert!(!f.trace_path().exists());
+    let pinned = Fixture::new();
+    pinned.plan();
+    let mut changed = read(&pinned.bundle);
+    changed["repos"][0]["headSha"] = json!("a".repeat(40));
+    write(&pinned.root.join("changed.json"), &changed);
+    let result = pinned.cmd(&[
+        "land",
+        "validate",
+        "--plan",
+        "plan.json",
+        "--from-artifact",
+        "changed.json",
+        "--json",
+    ]);
+    assert!(
+        !result.status.success(),
+        "ordinary pinned plan accepted changed source"
+    );
+}
+
 #[test]
 fn branch_checkout_merges_pushes_and_runs_in_source_without_touching_feature() {
     let f = branch_fixture();
@@ -573,6 +774,7 @@ fn branch_checkout_resume_uses_current_remote_head_without_remerging() {
         repo,
         &["push", "origin", &format!("{newer}:refs/heads/staging")],
     );
+    let advanced = advance_features(&f);
     fs::write(gate, "ready").unwrap();
     assert_success(&f.apply("plan.json", true));
     let final_run = read(&f.root.join("run.json"));
@@ -587,6 +789,9 @@ fn branch_checkout_resume_uses_current_remote_head_without_remerging() {
     );
     assert_eq!(f.remote_tip("alpha", "staging"), newer);
     assert_eq!(head(repo, "HEAD"), newer);
+    let beta = steps.iter().find(|s| s["id"] == "merge-beta").unwrap();
+    assert_eq!(beta["output"]["source"], f.repos[1].4);
+    assert_ne!(beta["output"]["source"], advanced[1]);
 }
 
 fn run_git(dir: &Path, args: &[&str]) -> String {
