@@ -1907,7 +1907,12 @@ fn execute(
             }
         }
     }
-    if super::graph::bundle_fingerprint(&comparable) != super::graph::bundle_fingerprint(source) {
+    if super::graph::bundle_fingerprint(&super::branch_checkout::reviewed_identity(
+        plan,
+        &comparable,
+    )) != super::graph::bundle_fingerprint(&super::branch_checkout::reviewed_identity(
+        plan, source,
+    )) {
         bail!("bundle changed since this run started");
     }
     if validation["valid"] != true {
@@ -1916,6 +1921,8 @@ fn execute(
     if plan["schemaVersion"] != "0.2" {
         bail!("exact-plan artifact execution requires v0.2");
     }
+    let (execution_plan, resolved_sources) =
+        super::branch_checkout::execution_sources(plan, source, &roots, existing.as_ref())?;
     let (steps, _) = compile(plan)?;
     for step in &steps {
         for repo in strings(&step["sourceRepos"]) {
@@ -1968,7 +1975,7 @@ fn execute(
                 })
         };
         let (checks, errors) = super::mergeability::mergeability_checks(
-            plan,
+            &execution_plan,
             &roots,
             &bundle,
             &done,
@@ -1982,7 +1989,7 @@ fn execute(
             );
         }
         pending_expectations = checks;
-        preflight(plan, &steps, &roots, &bundle, skip_checks)?;
+        preflight(&execution_plan, &steps, &roots, &bundle, skip_checks)?;
     }
     let _locks = lock_resources(plan, &roots)?;
     let current = std::env::current_dir()?;
@@ -2023,7 +2030,8 @@ fn execute(
     }
     let journal = Journal {
         value: Mutex::new(existing.unwrap_or_else(|| {
-            let mut run = new_run(plan, plan_path, &bundle);
+            let snapshot = super::branch_checkout::source_snapshot(&bundle, &resolved_sources);
+            let mut run = new_run(plan, plan_path, &snapshot);
             if let Some(project) = project {
                 run["sourceProject"] = project.clone();
             }
@@ -2060,10 +2068,10 @@ fn execute(
     )?;
     super::super::process::begin_execution()?;
     let result = if recovering {
-        compensation(plan, &bundle, &roots, &journal)
+        compensation(&execution_plan, &bundle, &roots, &journal)
     } else {
         journal.edit(|r| r["status"] = json!("running"))?;
-        let forward_result = forward(plan, &bundle, &roots, &journal);
+        let forward_result = forward(&execution_plan, &bundle, &roots, &journal);
         match forward_result {
             Ok(()) => finalize(plan, &mut bundle, &journal, out),
             Err(e) => {
@@ -2075,7 +2083,7 @@ fn execute(
                 if plan["onFailure"] == "recover"
                     && !super::super::process::cancellation_requested()
                 {
-                    let _ = compensation(plan, &bundle, &roots, &journal);
+                    let _ = compensation(&execution_plan, &bundle, &roots, &journal);
                 }
                 Err(e)
             }
@@ -2281,14 +2289,18 @@ pub(crate) fn local_apply(
                 .is_some_and(|steps| steps.iter().all(|s| s["status"] == "succeeded"))
         });
     if !recovering && !finalization_only {
-        let unrecorded = crate::tracking::detect_unrecorded_changes(active)?;
+        let live = super::branch_checkout::live_sources(&plan);
+        let unrecorded: Vec<_> = crate::tracking::detect_unrecorded_changes(active)?
+            .into_iter()
+            .filter(|change| !live.contains(&change.repo_id))
+            .collect();
         if !unrecorded.is_empty() {
             bail!("worktree heads changed; run knit sync and regenerate the plan");
         }
         // Required checks are evaluated against the same effective heads the
         // executor uses: with an integration source, freshness speaks for the
         // pinned source, not the reviewed feature head.
-        if super::mergeability::has_integration_sources(&plan) {
+        if live.is_empty() && super::mergeability::has_integration_sources(&plan) {
             let effective = super::mergeability::effective_required_checks_bundle(
                 &plan,
                 &serde_json::to_value(&active.bundle)?,
@@ -2303,7 +2315,7 @@ pub(crate) fn local_apply(
                 &strings(&plan["requireChecks"]),
                 skip_checks,
             )?;
-        } else {
+        } else if live.is_empty() {
             super::super::validate::preflight_required_checks(
                 active,
                 &strings(&plan["requireChecks"]),

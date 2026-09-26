@@ -72,13 +72,22 @@ pub fn preflight(
     // every pending branch merge, but without a declared policy the entries
     // are informational — no simulation, no requirements.
     let is_done = |_: &str| false;
+    let (execution_plan, source_errors) = if structural["valid"] == true {
+        match super::branch_checkout::execution_sources(&plan, &bundle, &roots, None) {
+            Ok((execution, _)) => (execution, vec![]),
+            Err(error) => (plan.clone(), vec![format!("{error:#}")]),
+        }
+    } else {
+        (plan.clone(), vec![])
+    };
     let (checks, mut live_errors) = super::mergeability::mergeability_checks(
-        &plan,
+        &execution_plan,
         &roots,
         &bundle,
         &is_done,
         super::mergeability::CheckMode::Report,
     );
+    live_errors.extend(source_errors);
     if structural["valid"] == true {
         let (steps, _) = super::graph::compile(&plan)?;
         if let Err(error) = super::branch_checkout::preflight(&steps, &roots, &bundle) {

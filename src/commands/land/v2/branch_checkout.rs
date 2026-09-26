@@ -11,6 +11,97 @@ pub(super) fn enabled(step: &Value) -> bool {
     step["checkout"]["mode"] == "branch"
 }
 
+/// An attached branch merge is a reusable branch workflow. Explicit integration
+/// sources and other checkout modes retain their reviewed source pins.
+pub(super) fn live_sources(plan: &Value) -> std::collections::BTreeSet<String> {
+    plan["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|s| enabled(s) && s["type"] == "merge_branch")
+        .filter_map(|s| s["repoId"].as_str())
+        .filter(|id| !plan["integrationSources"][*id].is_object())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Compare the stable source identity using the original heads only for live
+/// branch sources. Repository, branch, review, base and scope changes still fail.
+pub(super) fn reviewed_identity(plan: &Value, bundle: &Value) -> Value {
+    let live = live_sources(plan);
+    let mut result = bundle.clone();
+    if let Some(repos) = result["repos"].as_array_mut() {
+        for repo in repos {
+            if let Some(id) = repo["id"].as_str().filter(|id| live.contains(*id)) {
+                let original = plan["bundleHeads"][id].clone();
+                repo["headSha"] = original;
+            }
+        }
+    }
+    result
+}
+
+/// Resolve branch tips once for each fresh application. The authored plan is
+/// unchanged; the execution copy and receipt carry what this run actually uses.
+/// Continuations use their recorded sources, never newly fetched feature work.
+pub(super) fn execution_sources(
+    plan: &Value,
+    bundle: &Value,
+    roots: &Roots,
+    prior: Option<&Value>,
+) -> Result<(Value, Value)> {
+    let mut execution = plan.clone();
+    let mut sources = serde_json::Map::new();
+    for id in live_sources(plan) {
+        let branch = bundle["repos"]
+            .as_array()
+            .and_then(|repos| repos.iter().find(|r| r["id"] == id))
+            .and_then(|r| r["featureBranch"].as_str())
+            .context("branch merge requires a feature branch")?;
+        let root = roots
+            .get(&id)
+            .context("branch source requires a repo-root binding")?;
+        git(root, &["check-ref-format", &format!("refs/heads/{branch}")])?;
+        let sha = if let Some(run) = prior {
+            run["sourceBundle"]["repos"]
+                .as_array()
+                .and_then(|repos| repos.iter().find(|r| r["id"] == id))
+                .and_then(|repo| repo["headSha"].as_str())
+                .context("recorded source revision missing")?
+                .to_owned()
+        } else {
+            git(
+                root,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    "origin",
+                    &format!("refs/heads/{branch}"),
+                ],
+            )?;
+            git(root, &["rev-parse", "FETCH_HEAD^{commit}"])?
+        };
+        execution["bundleHeads"][&id] = json!(sha);
+        sources.insert(id, json!({"branch":branch,"sha":sha}));
+    }
+    Ok((execution, Value::Object(sources)))
+}
+
+pub(super) fn source_snapshot(bundle: &Value, sources: &Value) -> Value {
+    let mut snapshot = bundle.clone();
+    if let Some(repos) = snapshot["repos"].as_array_mut() {
+        for repo in repos {
+            if let Some(sha) = repo["id"]
+                .as_str()
+                .and_then(|id| sources[id]["sha"].as_str())
+            {
+                repo["headSha"] = json!(sha);
+            }
+        }
+    }
+    snapshot
+}
+
 fn git(root: &Path, args: &[&str]) -> Result<String> {
     Ok(crate::git::git_output(root, args)?.trim().to_owned())
 }

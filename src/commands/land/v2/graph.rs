@@ -594,10 +594,11 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             if plan["bundleId"] != bundle["id"] {
                 bail!("plan belongs to a different bundle");
             }
-            if v2 && plan["bundleFingerprint"] != bundle_fingerprint(bundle) {
+            let reviewed_identity = super::branch_checkout::reviewed_identity(plan, bundle);
+            if v2 && plan["bundleFingerprint"] != bundle_fingerprint(&reviewed_identity) {
                 bail!("stale bundle fingerprint");
             }
-            let typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
+            let typed: crate::model::ChangeGroup = serde_json::from_value(reviewed_identity)?;
             if v2 {
                 let expected: BTreeMap<String, String> = typed
                     .repos

@@ -108,7 +108,14 @@ pub(crate) fn has_integration_sources(plan: &Value) -> bool {
 /// Returns an ephemeral copy; the original artifact is never modified.
 pub(crate) fn effective_required_checks_bundle(plan: &Value, bundle: &Value) -> Value {
     let mut effective = bundle.clone();
-    for (repo, pin) in plan["integrationSources"].as_object().into_iter().flatten() {
+    let mut sources = plan["integrationSources"]
+        .as_object()
+        .cloned()
+        .unwrap_or_default();
+    for repo in super::branch_checkout::live_sources(plan) {
+        sources.insert(repo.clone(), json!({"sha":plan["bundleHeads"][&repo]}));
+    }
+    for (repo, pin) in &sources {
         if let Some(sha) = pin["sha"].as_str() {
             if let Some(entry) = effective["repos"]
                 .as_array_mut()
