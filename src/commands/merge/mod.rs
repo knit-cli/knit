@@ -8,7 +8,7 @@
 mod report;
 mod run;
 
-pub(crate) use run::merge_branch_into_target;
+pub(crate) use run::{merge_branch_into_target, BranchMergeOutcome};
 
 use crate::checkout::is_in_place;
 use crate::git::{

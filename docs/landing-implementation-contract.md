@@ -61,6 +61,10 @@ For executor-0.4 plans the command environment is authoritative: `KNIT_LAND_ENVI
 
 ## CLI and machine interface
 
+An explicit recipe `checkout: {"mode":"branch","branch":"integration","remote":"origin","update":"pull"}` selects execution in the registered project source checkout (or the runner's explicit `--repo-roots` binding). Generation applies that same checkout contract to the repository's prerequisite `merge_branch` step. The executor switches to the target branch, creates it from the remote if absent locally, fast-forwards it, merges the feature input, pushes the target, then runs the recipe in that attached checkout. Merge subjects use Git's branch-name formatter. Feature worktrees remain on their feature branches. The configured branch is refreshed before each forward command; its observed HEAD is recorded as `KNIT_REV` without forcing the deployment tool to use a pinned revision.
+
+This mode requires executor `0.5` and the `branch-checkout` capability. Older executors reject the saved plan; local and hosted executors must be upgraded before generating or saving such plans through them. Omitted `checkout.mode` preserves isolated execution. Branch-mode steps sharing a repository must use the same checkout configuration and be ordered; commands must follow their branch merge. All selected source checkouts are checked before any push: dirty files, unfinished Git operations, local commits absent from the destination, a target held in another checkout, and a feature checkout used as the source binding are refused. Merge or push failures preserve the source checkout for inspection instead of resetting user files. Recovery never refreshes or rewinds the branch automatically and refuses a changed branch/revision. Existing saved runs keep their original checkout contract; selecting this mode requires a new reviewed plan.
+
 The CLI owner implements the following (additional explicit flags are fine, breaking renames require coordination):
 
 - `knit land plan --from-artifact BUNDLE --project-file PROJECT --out PLAN [--json]` generates the same v0.2 plan as local `knit land`. Global `--target`/`--lane` apply.

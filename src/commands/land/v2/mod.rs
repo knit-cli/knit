@@ -1,5 +1,6 @@
 //! Versioned saved-plan entry points. The JSON document is the execution identity;
 //! workflow compilation never mutates that document or its hash.
+mod branch_checkout;
 mod destinations;
 mod generate;
 pub use destinations::destinations;

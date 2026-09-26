@@ -341,6 +341,7 @@ fn preflight(
                 "repository-sequence",
                 "mergeability-preflight",
                 "integration-sources",
+                super::branch_checkout::CAPABILITY,
             ]
             .contains(&cap.as_str())
             {
@@ -348,6 +349,7 @@ fn preflight(
             }
         }
     }
+    super::branch_checkout::preflight(steps, roots, bundle)?;
     for step in steps {
         if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch"))
             && !step["repoId"]
@@ -409,8 +411,8 @@ fn git(root: &Path, args: &[&str]) -> Result<String> {
     crate::git::git_output(root, args).map(|output| output.trim().into())
 }
 
-/// Commands run from immutable merge revisions. Mutable user/source checkouts
-/// are never switched. A checkout is created once and reused by compensation.
+/// Isolated commands use immutable revisions. Explicit branch commands use
+/// the registered checkout and record its observed HEAD without pinning it.
 fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> Result<Roots> {
     let id = step["id"].as_str().unwrap();
     let _pin_guard = journal.pins.lock().unwrap();
@@ -439,6 +441,16 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         for ancestor in ancestors {
             let producer = steps.iter().find(|s| s["id"] == ancestor).unwrap();
             if matches!(producer["type"].as_str(), Some("merge_pr" | "merge_branch")) {
+                // Sequence ordering alone does not make another repository
+                // an input to a command running in its own branch checkout.
+                if super::branch_checkout::enabled(step)
+                    && producer["repoId"] != step["repoId"]
+                    && !strings(&step["sourceRepos"])
+                        .iter()
+                        .any(|r| producer["repoId"] == *r)
+                {
+                    continue;
+                }
                 let prior = journal.step(&ancestor);
                 let revision = prior["output"]["revision"].as_str().context(
                     "required merge did not produce a pinned revision; supply repo roots",
@@ -511,9 +523,28 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         }
         journal.edit_step(id, |s| s["sourceRevisions"] = json!(revisions))?;
     }
-    let _ = phase;
+    let branch_repo = if super::branch_checkout::enabled(step) {
+        let repo = step["repoId"]
+            .as_str()
+            .context("branch checkout repo required")?;
+        let root = roots.get(repo).context("branch checkout binding missing")?;
+        let revision = super::branch_checkout::command_revision(
+            root,
+            step,
+            phase,
+            record["sourceRevisions"][repo].as_str(),
+        )?;
+        revisions.insert(repo.into(), json!(revision));
+        journal.edit_step(id, |s| s["sourceRevisions"] = json!(revisions))?;
+        Some(repo)
+    } else {
+        None
+    };
     let mut bound = roots.clone();
     for (repo, rev) in revisions {
+        if branch_repo == Some(repo.as_str()) {
+            continue;
+        }
         let root = roots
             .get(&repo)
             .context("pinned checkout binding missing")?;
@@ -619,7 +650,10 @@ fn run_command_inner(
     // head — distinct from the merge output), the revision the checkout
     // actually runs from (the merged revision), and the resolved target
     // branch (the repository's own merge destination for this plan).
-    if snapshot["plan"]["requiredExecutorVersion"] == "0.4" {
+    if matches!(
+        snapshot["plan"]["requiredExecutorVersion"].as_str(),
+        Some("0.4" | "0.5")
+    ) {
         if let Some(repo) = step["repoId"].as_str() {
             let resolved = journal.step(id);
             let input_source = snapshot["plan"]["integrationSources"][repo]["sha"]
@@ -859,14 +893,25 @@ fn provider_step(
             let mut bound = repo.clone();
             bound.path = root.to_string_lossy().into();
             let workspace = journal.path.parent().context("run parent required")?;
-            let outcome = crate::commands::merge::merge_branch_into_target(
-                workspace,
-                &bound,
-                &head,
-                branch,
-                true,
-                expected_sha,
-            )?;
+            let outcome = if super::branch_checkout::enabled(step) {
+                super::branch_checkout::merge(
+                    root,
+                    step,
+                    &head,
+                    source_branch.as_deref(),
+                    expected_sha,
+                )?
+            } else {
+                crate::commands::merge::merge_branch_into_target(
+                    workspace,
+                    &bound,
+                    &head,
+                    source_branch.as_deref(),
+                    branch,
+                    true,
+                    expected_sha,
+                )?
+            };
             return Ok(
                 json!({"attribution":if outcome.merged {"performed"}else{"already_satisfied"},"source":head,"sourceBranch":source_branch,"revision":outcome.after_sha,"targetBranch":branch}),
             );
@@ -2225,6 +2270,7 @@ pub(crate) fn local_apply(
             }
         }
     }
+    super::branch_checkout::local_roots(&plan, &project, active, &mut roots)?;
     let finalization_only = run_path
         .filter(|p| p.exists())
         .map(read_json::<Value>)

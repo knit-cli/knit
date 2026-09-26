@@ -61,19 +61,30 @@ pub fn preflight(
         .filter_map(Value::as_str)
         .map(str::to_owned)
         .collect();
-    let roots = resolve_roots(local, roots_file, &bundle, project.as_ref())?;
+    let mut roots = resolve_roots(local, roots_file, &bundle, project.as_ref())?;
+    if roots_file.is_none() {
+        if let (Some(active), Some(project)) = (&active, &project) {
+            super::branch_checkout::local_roots(&plan, project, active, &mut roots)?;
+        }
+    }
     // Live readiness: pending branch merges only; already-merged work keeps
     // its receipts and is not the preflight's business. Report mode lists
     // every pending branch merge, but without a declared policy the entries
     // are informational — no simulation, no requirements.
     let is_done = |_: &str| false;
-    let (checks, live_errors) = super::mergeability::mergeability_checks(
+    let (checks, mut live_errors) = super::mergeability::mergeability_checks(
         &plan,
         &roots,
         &bundle,
         &is_done,
         super::mergeability::CheckMode::Report,
     );
+    if structural["valid"] == true {
+        let (steps, _) = super::graph::compile(&plan)?;
+        if let Err(error) = super::branch_checkout::preflight(&steps, &roots, &bundle) {
+            live_errors.push(format!("{error:#}"));
+        }
+    }
     errors.extend(live_errors.iter().cloned());
     let live_valid = live_errors.is_empty();
     let valid = structural["valid"] == true && live_valid;

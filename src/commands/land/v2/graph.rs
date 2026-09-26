@@ -316,11 +316,15 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                     bail!("{key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; a schema 0.1 plan would silently discard it");
                 }
             }
-            if plan["requiredExecutorVersion"] == "0.4" {
-                bail!("requiredExecutorVersion 0.4 requires a schema 0.2 plan");
+            if matches!(
+                plan["requiredExecutorVersion"].as_str(),
+                Some("0.4" | "0.5")
+            ) {
+                bail!("requiredExecutorVersion 0.4 or later requires a schema 0.2 plan");
             }
         }
         let (steps, compiled) = compile(plan)?;
+        super::branch_checkout::validate(plan, &steps)?;
         waves = compiled;
         let v2 = plan["schemaVersion"] == "0.2";
         let merge_policy: crate::model::ProjectLandingMergePlan =
@@ -334,7 +338,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 bail!("targetBranch and lane are mutually exclusive");
             }
             if let Some(version) = plan.get("requiredExecutorVersion") {
-                if version != "0.2" && version != "0.3" && version != "0.4" {
+                if version != "0.2" && version != "0.3" && version != "0.4" && version != "0.5" {
                     bail!("unsupported requiredExecutorVersion");
                 }
             }
@@ -343,7 +347,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 .any(|step| step["interactive"] == true || step["type"] == "manual")
                 && !matches!(
                     plan["requiredExecutorVersion"].as_str(),
-                    Some("0.3" | "0.4")
+                    Some("0.3" | "0.4" | "0.5")
                 )
             {
                 bail!("interactive and manual operations require requiredExecutorVersion 0.3");
@@ -361,7 +365,12 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             if plan.get("integrationSources").is_some() {
                 required_04.push(super::mergeability::CAPABILITY_SOURCES);
             }
-            if !required_04.is_empty() && plan["requiredExecutorVersion"] != "0.4" {
+            if !required_04.is_empty()
+                && !matches!(
+                    plan["requiredExecutorVersion"].as_str(),
+                    Some("0.4" | "0.5")
+                )
+            {
                 bail!(
                     "execution/preflight/integrationSources semantics require requiredExecutorVersion 0.4 with capabilities {}",
                     required_04.join(", ")

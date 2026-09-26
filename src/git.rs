@@ -196,6 +196,40 @@ pub fn rev_parse(cwd: &Path, reference: &str) -> Result<String> {
         .to_string())
 }
 
+/// Preserve Git's ordinary branch merge subject even when the actual input
+/// is an exact reviewed commit and the executor uses an isolated checkout.
+pub(crate) fn branch_merge_message(
+    root: &Path,
+    source: &str,
+    name: &str,
+    target: &str,
+) -> Result<String> {
+    use std::io::Write;
+    git_output(root, ["check-ref-format", &format!("refs/heads/{name}")])?;
+    let sha = rev_parse(root, &format!("{source}^{{commit}}"))?;
+    let mut child = Command::new("git")
+        .args(["fmt-merge-msg", "--into-name", target])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to format branch merge message")?;
+    child
+        .stdin
+        .take()
+        .context("merge message input unavailable")?
+        .write_all(format!("{sha}\t\tbranch '{name}' of .\n").as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!(
+            "git fmt-merge-msg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
 /// Reads the recorded Git author (name + email) of a commit. Reads the actual
 /// commit, so it reflects per-repo `user.name`/`user.email` rather than guessing.
 pub fn commit_author(cwd: &Path, sha: &str) -> Result<CommitAuthor> {

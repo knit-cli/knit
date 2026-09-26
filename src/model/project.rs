@@ -583,6 +583,8 @@ pub struct ProjectLandingDeployment {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingCheckout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     pub branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub remote: Option<String>,

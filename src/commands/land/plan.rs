@@ -993,6 +993,7 @@ fn deployment_step(
         deployment.needs.clone()
     };
     let checkout = deployment.checkout.as_ref().map(|checkout| LandCheckout {
+        mode: checkout.mode.clone(),
         branch: checkout.branch.clone(),
         remote: checkout.remote.clone(),
         update: checkout.update,

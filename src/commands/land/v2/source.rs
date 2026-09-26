@@ -127,7 +127,7 @@ pub fn source(
     // unknown future requirement is rejected, and only older or absent
     // versions are upgraded.
     match plan["requiredExecutorVersion"].as_str() {
-        Some("0.4") => {}
+        Some("0.4" | "0.5") => {}
         Some("0.2" | "0.3") | None => plan["requiredExecutorVersion"] = json!("0.4"),
         Some(other) => bail!(
             "plan requires executor version {other}, which this authoring does not know; refusing to downgrade or rewrite it"
