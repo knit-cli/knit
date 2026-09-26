@@ -379,7 +379,13 @@ fn branch_checkout_merges_pushes_and_runs_in_source_without_touching_feature() {
             .unwrap();
         assert_eq!(command["sourceRevisions"][id], revision);
     }
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
     assert!(!f.root.join("run.checkouts").exists());
     // A fresh application of the same sources does not create another merge.
     let tips: Vec<_> = f
@@ -425,7 +431,13 @@ fn branch_checkout_local_apply_uses_registered_source_not_bundle_worktree() {
         "--no-tag",
         "--no-remote",
     ]));
-    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert_eq!(
+        fs::read_to_string(f.trace_path())
+            .unwrap()
+            .lines()
+            .collect::<Vec<_>>(),
+        ["alpha", "beta"]
+    );
 }
 
 #[test]
