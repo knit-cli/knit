@@ -400,6 +400,7 @@ pub(super) fn build(
         capabilities.dedup();
         plan["requiredCapabilities"] = json!(capabilities);
     }
+    super::branch_checkout::configure(&mut plan)?;
     let result = validation(&plan, Some(bundle), Some(project));
     if result["valid"] != true {
         bail!("{}", result["errors"]);
@@ -470,7 +471,7 @@ fn command_inherit(command: &Value, parent: &Value) -> Value {
     if !env.is_empty() {
         result["env"] = json!(env);
     }
-    for key in ["cwd", "timeoutSeconds"] {
+    for key in ["cwd", "timeoutSeconds", "checkout"] {
         if result.get(key).is_none() {
             if let Some(value) = parent.get(key) {
                 result[key] = value.clone();

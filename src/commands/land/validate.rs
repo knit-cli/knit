@@ -14,6 +14,13 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()> {
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.checkout.as_ref().is_some_and(|c| c.mode.is_some()))
+    {
+        bail!("checkout.mode requires a schema 0.2 landing plan");
+    }
     if plan.schema_version != SCHEMA_VERSION {
         bail!(
             "Land plan schemaVersion must be `{SCHEMA_VERSION}`, found `{}`.",

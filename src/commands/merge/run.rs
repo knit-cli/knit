@@ -442,6 +442,7 @@ pub(crate) fn merge_branch_into_target(
     root: &Path,
     repo: &RepoEntry,
     source_ref: &str,
+    source_branch: Option<&str>,
     branch: &str,
     push: bool,
     expected_target: Option<&str>,
@@ -555,15 +556,19 @@ pub(crate) fn merge_branch_into_target(
         });
     }
 
-    let merge_result = git_output(
-        &checkout,
-        [
-            OsString::from("merge"),
-            OsString::from("--no-ff"),
-            OsString::from("--no-edit"),
-            OsString::from(source_ref),
-        ],
-    );
+    let mut merge_args = vec![
+        OsString::from("merge"),
+        OsString::from("--no-ff"),
+        OsString::from("--no-edit"),
+    ];
+    if let Some(name) = source_branch {
+        merge_args.push(OsString::from("--message"));
+        merge_args.push(OsString::from(crate::git::branch_merge_message(
+            &checkout, source_ref, name, branch,
+        )?));
+    }
+    merge_args.push(OsString::from(source_ref));
+    let merge_result = git_output(&checkout, merge_args);
     if let Err(error) = merge_result {
         let conflicted = merge_in_progress(&checkout) || has_unmerged_paths(&checkout);
         abort_merge_if_needed(&checkout);

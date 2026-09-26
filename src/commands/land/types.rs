@@ -179,6 +179,8 @@ pub(super) struct LandStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandCheckout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) mode: Option<String>,
     pub(super) branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) remote: Option<String>,

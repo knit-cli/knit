@@ -812,8 +812,14 @@ fn ensure_no_executor04_semantics_on_legacy(raw: &serde_json::Value) -> Result<(
             bail!("landing plan field {key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; this plan would silently discard it");
         }
     }
-    if raw["requiredExecutorVersion"] == "0.4" {
-        bail!("requiredExecutorVersion 0.4 requires a schema 0.2 plan");
+    if matches!(raw["requiredExecutorVersion"].as_str(), Some("0.4" | "0.5")) {
+        bail!("requiredExecutorVersion 0.4 or later requires a schema 0.2 plan");
+    }
+    if raw["steps"]
+        .as_array()
+        .is_some_and(|steps| steps.iter().any(|s| s["checkout"].get("mode").is_some()))
+    {
+        bail!("checkout.mode requires a schema 0.2 landing plan");
     }
     Ok(())
 }

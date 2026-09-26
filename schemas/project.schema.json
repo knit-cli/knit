@@ -1037,6 +1037,10 @@
                 "pull",
                 "none"
               ]
+            },
+            "mode": {
+              "const": "branch",
+              "description": "Use the registered source or runner checkout on this branch. Omit for isolated execution."
             }
           },
           "additionalProperties": false

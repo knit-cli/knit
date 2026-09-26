@@ -480,6 +480,7 @@ fn execute_merge_branch(active: &ActiveBundle, step: &LandStep) -> Result<StepOu
         &active.root,
         &repo,
         feature_branch,
+        Some(feature_branch),
         branch,
         true,
         None,

@@ -276,6 +276,307 @@ impl Drop for Fixture {
     }
 }
 
+/// A clone with only its default local branch; feature work belongs to a
+/// separate checkout and the environment branch initially exists only remotely.
+fn branch_fixture() -> Fixture {
+    let f = Fixture::new();
+    let mut bundle = read(&f.bundle);
+    for (id, repo, _, _, _) in &f.repos {
+        run_git(repo, &["checkout", "main"]);
+        run_git(repo, &["branch", "-D", "staging"]);
+        let feature = f.root.join(format!("feature-{id}"));
+        run_git(
+            repo,
+            &["worktree", "add", feature.to_str().unwrap(), "feature"],
+        );
+        bundle["repos"]
+            .as_array_mut()
+            .unwrap()
+            .iter_mut()
+            .find(|r| r["id"] == *id)
+            .unwrap()["worktreePath"] = json!(feature);
+    }
+    write(&f.bundle, &bundle);
+    let deployments: Vec<Value> = f
+        .repos
+        .iter()
+        .map(|(id, repo, _, _, _)| {
+            json!({
+                "id":format!("deploy-{id}"), "repoId":id, "whenChanged":[id], "mode":"command",
+                "checkout":{"mode":"branch","branch":"staging","remote":"origin","update":"pull"},
+                "command":[python_executable(),"-c",r#"
+import json,os,pathlib,subprocess
+def git(*args): return subprocess.check_output(['git',*args],text=True).strip()
+assert pathlib.Path.cwd().resolve() == pathlib.Path(os.environ['EXPECTED_ROOT']).resolve()
+assert git('symbolic-ref','--short','HEAD') == 'staging'
+assert git('show','staging:app.txt') == 'feature'
+revision=git('rev-parse','HEAD')
+assert git('ls-remote','origin','refs/heads/staging').split()[0] == revision
+assert os.environ['KNIT_REV'] == revision
+pathlib.Path(os.environ['TRACE']).open('a').write(os.environ['KNIT_REPO']+'\n')
+"#],
+                "env":{"EXPECTED_ROOT":repo,"TRACE":f.trace_path()},
+                "effect":"read_only","recovery":{"mode":"none"}
+            })
+        })
+        .collect();
+    f.lane(json!({"deployments":deployments,"execution":{"mode":"repository_sequence","repoOrder":["alpha","beta"]},"preflight":{"mergeability":"all"}}));
+    f
+}
+
+fn assert_success(output: &std::process::Output) {
+    assert!(
+        output.status.success(),
+        "{}\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+#[test]
+fn branch_checkout_merges_pushes_and_runs_in_source_without_touching_feature() {
+    let f = branch_fixture();
+    let plan = f.plan();
+    assert_eq!(plan["requiredExecutorVersion"], "0.5");
+    for step in plan["steps"].as_array().unwrap() {
+        assert_eq!(step["checkout"]["mode"], "branch");
+    }
+    assert_success(&f.apply("plan.json", false));
+    let run = read(&f.root.join("run.json"));
+    for (id, repo, _, _, source) in &f.repos {
+        assert_eq!(
+            run_git(repo, &["symbolic-ref", "--short", "HEAD"]),
+            "staging"
+        );
+        assert_eq!(
+            run_git(repo, &["config", "branch.staging.remote"]),
+            "origin"
+        );
+        assert_eq!(
+            run_git(repo, &["config", "branch.staging.merge"]),
+            "refs/heads/staging"
+        );
+        let revision = head(repo, "HEAD");
+        assert_eq!(f.remote_tip(id, "staging"), revision);
+        assert_ne!(&revision, source);
+        assert_eq!(
+            run_git(repo, &["show", "-s", "--format=%s", "HEAD"]),
+            "Merge branch 'feature' into staging"
+        );
+        assert_eq!(head(&f.root.join(format!("feature-{id}")), "HEAD"), *source);
+        assert_eq!(
+            run_git(
+                &f.root.join(format!("feature-{id}")),
+                &["symbolic-ref", "--short", "HEAD"]
+            ),
+            "feature"
+        );
+        let command = run["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|s| s["id"] == format!("deploy-{id}"))
+            .unwrap();
+        assert_eq!(command["sourceRevisions"][id], revision);
+    }
+    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+    assert!(!f.root.join("run.checkouts").exists());
+    // A fresh application of the same sources does not create another merge.
+    let tips: Vec<_> = f
+        .repos
+        .iter()
+        .map(|(id, ..)| f.remote_tip(id, "staging"))
+        .collect();
+    assert_success(&f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "plan.json",
+        "--from-artifact",
+        f.bundle.to_str().unwrap(),
+        "--project-file",
+        f.project.to_str().unwrap(),
+        "--repo-roots",
+        "roots.json",
+        "--run-out",
+        "again.json",
+        "--out",
+        "again-out.json",
+        "--json",
+    ]));
+    for (index, (id, ..)) in f.repos.iter().enumerate() {
+        assert_eq!(f.remote_tip(id, "staging"), tips[index]);
+    }
+}
+
+#[test]
+fn branch_checkout_local_apply_uses_registered_source_not_bundle_worktree() {
+    let f = branch_fixture();
+    f.plan();
+    assert_success(&f.cmd(&[
+        "--bundle",
+        "demo",
+        "land",
+        "--lane",
+        "preview",
+        "apply",
+        "--plan",
+        "plan.json",
+        "--no-tag",
+        "--no-remote",
+    ]));
+    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), "alpha\nbeta\n");
+}
+
+#[test]
+fn branch_checkout_refuses_unsafe_roots_before_any_push() {
+    for problem in ["dirty", "diverged", "held", "feature"] {
+        let f = branch_fixture();
+        let repo = &f.repos[1].1;
+        match problem {
+            "dirty" => {
+                fs::write(repo.join("untracked.txt"), "keep me").unwrap();
+            }
+            "diverged" => {
+                run_git(repo, &["checkout", "-b", "staging", "origin/staging"]);
+                fs::write(repo.join("local.txt"), "keep me").unwrap();
+                run_git(repo, &["add", "."]);
+                run_git(repo, &["commit", "-m", "Unpublished local work"]);
+            }
+            "held" => {
+                run_git(
+                    repo,
+                    &[
+                        "worktree",
+                        "add",
+                        "-b",
+                        "staging",
+                        f.root.join("held").to_str().unwrap(),
+                        "origin/staging",
+                    ],
+                );
+            }
+            "feature" => {
+                let mut roots = read(&f.root.join("roots.json"));
+                roots["beta"] = json!(f.root.join("feature-beta"));
+                write(&f.root.join("roots.json"), &roots);
+            }
+            _ => unreachable!(),
+        }
+        let before = head(repo, "HEAD");
+        f.plan();
+        let output = f.apply("plan.json", false);
+        assert!(!output.status.success(), "accepted unsafe {problem}");
+        assert_eq!(head(repo, "HEAD"), before, "changed unsafe {problem}");
+        for (id, _, _, base, _) in &f.repos {
+            assert_eq!(
+                &f.remote_tip(id, "staging"),
+                base,
+                "pushed before refusing {problem}"
+            );
+        }
+        assert!(!f.trace_path().exists());
+    }
+}
+
+#[test]
+fn branch_checkout_requires_explicit_executor_and_matching_merge_target() {
+    let f = branch_fixture();
+    let plan = f.plan();
+    for problem in ["version", "capability", "target", "parallel"] {
+        let mut invalid = plan.clone();
+        match problem {
+            "version" => invalid["requiredExecutorVersion"] = json!("0.4"),
+            "capability" => invalid["requiredCapabilities"] = json!(["commands"]),
+            "target" => invalid["steps"][0]["checkout"]["branch"] = json!("other"),
+            "parallel" => {
+                invalid.as_object_mut().unwrap().remove("workflow");
+                invalid.as_object_mut().unwrap().remove("execution");
+                let deploy = invalid["steps"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|s| s["id"] == "deploy-alpha")
+                    .unwrap();
+                deploy["needs"] = json!([]);
+                deploy["requires"] = json!([]);
+            }
+            _ => unreachable!(),
+        }
+        write(&f.root.join("invalid.json"), &invalid);
+        let out = f.cmd(&["land", "validate", "--plan", "invalid.json", "--json"]);
+        assert!(!out.status.success(), "accepted {problem}");
+    }
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/land-plan.schema.json")).unwrap();
+    let validator = jsonschema::validator_for(&schema).unwrap();
+    assert!(
+        validator.is_valid(&plan),
+        "schema rejected branch plan: {:?}",
+        validator
+            .iter_errors(&plan)
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+    );
+    let mut downgraded = plan;
+    downgraded["requiredExecutorVersion"] = json!("0.4");
+    assert!(!validator.is_valid(&downgraded));
+}
+
+#[test]
+fn branch_checkout_resume_uses_current_remote_head_without_remerging() {
+    let f = branch_fixture();
+    let gate = f.root.join("ready");
+    let mut project = read(&f.project);
+    let command = &mut project["landing"]["lanes"]["preview"]["deployments"][0];
+    command["env"]["GATE"] = json!(gate);
+    let script = command["command"][2].as_str().unwrap().to_owned();
+    command["command"][2] = json!(format!("import os,pathlib\nif not pathlib.Path(os.environ['GATE']).exists(): raise SystemExit(7)\n{script}"));
+    write(&f.project, &project);
+    f.plan();
+    assert!(!f.apply("plan.json", false).status.success());
+    let first = read(&f.root.join("run.json"));
+    let merge = first["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "merge-alpha")
+        .unwrap()
+        .clone();
+    assert_eq!(merge["status"], "succeeded");
+    let repo = &f.repos[0].1;
+    let merged = f.remote_tip("alpha", "staging");
+    let newer = run_git(
+        repo,
+        &[
+            "commit-tree",
+            "HEAD^{tree}",
+            "-p",
+            &merged,
+            "-m",
+            "Later remote work",
+        ],
+    );
+    run_git(
+        repo,
+        &["push", "origin", &format!("{newer}:refs/heads/staging")],
+    );
+    fs::write(gate, "ready").unwrap();
+    assert_success(&f.apply("plan.json", true));
+    let final_run = read(&f.root.join("run.json"));
+    let steps = final_run["steps"].as_array().unwrap();
+    assert_eq!(
+        *steps.iter().find(|s| s["id"] == "merge-alpha").unwrap(),
+        merge
+    );
+    assert_eq!(
+        steps.iter().find(|s| s["id"] == "deploy-alpha").unwrap()["sourceRevisions"]["alpha"],
+        newer
+    );
+    assert_eq!(f.remote_tip("alpha", "staging"), newer);
+    assert_eq!(head(repo, "HEAD"), newer);
+}
+
 fn run_git(dir: &Path, args: &[&str]) -> String {
     let out = git_raw(dir, args);
     assert!(

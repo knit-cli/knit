@@ -207,6 +207,10 @@
                   "pull",
                   "none"
                 ]
+              },
+              "mode": {
+                "const": "branch",
+                "description": "Use the registered source or runner checkout on this branch. Omit for isolated execution."
               }
             },
             "additionalProperties": false
@@ -369,7 +373,8 @@
       "enum": [
         "0.2",
         "0.3",
-        "0.4"
+        "0.4",
+        "0.5"
       ]
     },
     "merge": {
@@ -717,7 +722,8 @@
           "requiredExecutorVersion": {
             "enum": [
               "0.3",
-              "0.4"
+              "0.4",
+              "0.5"
             ]
           }
         }
@@ -753,7 +759,10 @@
             "const": "0.2"
           },
           "requiredExecutorVersion": {
-            "const": "0.4"
+            "enum": [
+              "0.4",
+              "0.5"
+            ]
           }
         }
       }
@@ -822,7 +831,10 @@
         ],
         "properties": {
           "requiredExecutorVersion": {
-            "const": "0.4"
+            "enum": [
+              "0.4",
+              "0.5"
+            ]
           }
         }
       },
@@ -830,6 +842,54 @@
         "properties": {
           "schemaVersion": {
             "const": "0.2"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "required": [
+          "steps"
+        ],
+        "properties": {
+          "steps": {
+            "contains": {
+              "required": [
+                "checkout"
+              ],
+              "properties": {
+                "checkout": {
+                  "required": [
+                    "mode"
+                  ],
+                  "properties": {
+                    "mode": {
+                      "const": "branch"
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "then": {
+        "required": [
+          "schemaVersion",
+          "requiredExecutorVersion",
+          "requiredCapabilities"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
+          },
+          "requiredExecutorVersion": {
+            "const": "0.5"
+          },
+          "requiredCapabilities": {
+            "contains": {
+              "const": "branch-checkout"
+            }
           }
         }
       }
