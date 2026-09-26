@@ -1,10 +1,10 @@
 # Inspect local history
 
 `knit log` inspects the current bundle. Add `--all` to inspect the current
-project's locally recorded base ledger. Use `--scope activity`
-for the complete activity ledger, including archived bundles and preserved
-events from deleted bundles. Neither command fetches from Git, contacts a sync
-remote, or regenerates the history ledger.
+project's locally recorded history — the complete activity ledger by default,
+including archived bundles and preserved events from deleted bundles. Neither
+command fetches from Git, contacts a sync remote, or regenerates the history
+ledger.
 
 ```sh
 knit log
@@ -211,37 +211,46 @@ AND/OR. `context:` is not a predicate: Boolean selection keeps companions.
 For legacy CLI `--repo`/`--view` detail narrowing, use `--full-context` to include
 companions.
 
-## Base ledger and open bundles
+## Bundle lifecycle scopes
 
-`knit log --all` defaults to the **base ledger only**. Open bundle activity is available
-with `--scope ongoing` or `--scope base-and-ongoing`.
-These are distinct records: base commits were observed on a configured base
-branch; an open bundle's commits are authoring activity and do not establish
-that a merge happened. Bundle-scoped `knit log` keeps its activity reading.
+History is bundle-scoped: commits and activity enter the ledger only inside
+bundle context, exactly as they were recorded. `knit log --all` defaults to
+the complete activity reading; the lifecycle scopes select bundles by their
+recorded lifecycle state.
 
 ```sh
-knit log --all --scope base                 # configured bases only (project default)
-knit log --all --scope ongoing              # activity in currently open bundles
-knit log --all --scope base-and-ongoing     # configured bases plus open bundles
-knit log --all --scope landings             # recorded merges, every destination
-knit log --all --scope activity             # complete preserved activity ledger
+knit log --all                              # all recorded activity (default)
+knit log --all --scope base                 # completed bundles only
+knit log --all --scope ongoing              # open bundles only
+knit log --all --scope base-and-ongoing     # completed plus open bundles
+knit log --all --scope landings             # recorded landing receipts
+knit log --all --scope activity             # explicit complete activity reading
 ```
 
-The scope applies before repository/expression selection, grouping, and paging.
-`--full-context` cannot bring ongoing activity into a base-only query.
-Archiving a bundle does not make its work part of the base ledger. Historical
-activity from archived or deleted bundles remains available with `--scope activity`.
-An open bundle can already have some work on a base branch; the overlay labels
-its activity as open bundle work, not proof that every commit is still unmerged.
+A bundle is **completed** when its artifact records a terminal lifecycle:
+a closed or archived state, or — for legacy artifacts without a state — a
+recorded archive time or a terminal landing node. A deleted bundle is never
+completed: its preserved history stays in the all-activity reading only.
+An open bundle stays open even after an intermediate landing into a staging
+lane: the receipt does not finish the bundle.
 
-`knit history refresh` and history sync record `base.commit` events from each
-project repository's cached `origin/<baseBranch>` first-parent Git history.
-Repositories without a configured remote use their local configured base.
-This includes direct commits and merges outside Knit. A missing remote ref
-never falls back to unpushed local commits. Inspection and refresh do not fetch;
-refresh Git explicitly when current remote state is needed. Shallow clones can
-only contribute the history they contain. The ledger preserves observations,
-including commits subsequently reverted or removed by a branch rewrite.
+Lifecycle scopes select the *whole* recorded history of the chosen bundles —
+commits, nodes, and lifecycle events together, so an archived bundle still
+shows its original authoring commits, not just its landing. Bundle-scoped
+`knit log` keeps its activity reading.
+
+The scope applies before repository/expression selection, grouping, and paging.
+`--full-context` cannot pull other bundles' activity into a scoped query.
+Events preserved from deleted bundles have no artifact to classify, so they
+remain available in the default activity reading. An open bundle can already
+have some work merged to a base branch; the scopes describe the bundle's
+lifecycle, not proof that every commit is still unmerged.
+
+Direct Git history outside Knit is never imported: there are no standalone
+commit rows. Obsolete `base.commit` rows recorded by older versions are
+excluded from every query and every page, ignored when appended, and removed
+by `knit history refresh --rebuild`, which still preserves legitimate
+historical and deleted-bundle rows.
 
 Successful landing steps also record one `branch.landed` receipt per repository,
 with its destination and observed source head when available. Receipts survive

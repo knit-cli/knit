@@ -93,7 +93,10 @@ pub(super) fn push_project_history_events(
     remote_name: &str,
 ) -> Result<usize> {
     refresh_project_history(root, project_id)?;
-    let events = load_history_events(root, project_id)?;
+    let mut events = load_history_events(root, project_id)?;
+    // Obsolete base.commit rows are never re-synced: they stay out of the
+    // push payload, so the remote converges on bundle-scoped history only.
+    events.retain(|event| !crate::history::is_obsolete_base_commit(event));
     if events.is_empty() {
         return Ok(0);
     }
