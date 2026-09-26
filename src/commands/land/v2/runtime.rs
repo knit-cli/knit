@@ -406,15 +406,7 @@ fn preflight(
 }
 
 fn git(root: &Path, args: &[&str]) -> Result<String> {
-    let output = Command::new("git").args(args).current_dir(root).output()?;
-    if !output.status.success() {
-        bail!(
-            "git {}: {}",
-            args.join(" "),
-            String::from_utf8_lossy(&output.stderr)
-        );
-    }
-    Ok(String::from_utf8(output.stdout)?.trim().into())
+    crate::git::git_output(root, args).map(|output| output.trim().into())
 }
 
 /// Commands run from immutable merge revisions. Mutable user/source checkouts
@@ -560,6 +552,36 @@ fn run_command(
     capture: Option<&Value>,
 ) -> Result<Value> {
     let id = step["id"].as_str().unwrap();
+    let (result, records) = super::super::git_progress::scope(&format!("{id}/{phase}"), || {
+        run_command_inner(step, spec, roots, journal, phase, capture)
+    });
+    record_git_commands(journal, id, records)?;
+    result
+}
+
+fn record_git_commands(journal: &Journal, id: &str, records: Vec<Value>) -> Result<()> {
+    if records.is_empty() {
+        return Ok(());
+    }
+    journal.edit_step(id, |s| {
+        let attempts = s
+            .as_object_mut()
+            .unwrap()
+            .entry("attempts")
+            .or_insert(json!([]));
+        attempts.as_array_mut().unwrap().extend(records);
+    })
+}
+
+fn run_command_inner(
+    step: &Value,
+    spec: &Value,
+    roots: &Roots,
+    journal: &Journal,
+    phase: &str,
+    capture: Option<&Value>,
+) -> Result<Value> {
+    let id = step["id"].as_str().unwrap();
     let snapshot = journal.snapshot();
     let operation = format!("{}:{id}", snapshot["id"].as_str().unwrap());
     let attempt = unique_id("attempt");
@@ -685,10 +707,15 @@ fn run_command(
             .push(json!({"id":attempt,"phase":phase,"status":"running","startedAt":now_iso()}));
     })?;
     let timeout = Some(spec["timeoutSeconds"].as_u64().unwrap_or(1800));
+    // Identify arbitrary recipes without echoing inline scripts, secret argv,
+    // or the environment. The full authored command remains in the plan.
+    eprintln!("[{id}/{phase}] $ {}", cmd.get_program().to_string_lossy());
     let result = if phase == "forward" && step["interactive"] == true {
         super::super::process::run_attached(&mut cmd, timeout)
-    } else {
+    } else if phase == "capture" {
         super::super::process::run_captured(&mut cmd, timeout)
+    } else {
+        super::super::process::run_streamed_managed(&mut cmd, timeout)
     };
     let receipt = match result {
         Ok(o) => {
@@ -1063,6 +1090,21 @@ fn manual_checkpoint(step: &Value) -> Result<Value> {
 }
 
 fn forward_step(
+    step: &Value,
+    plan: &Value,
+    bundle: &Value,
+    roots: &Roots,
+    journal: &Journal,
+) -> Result<()> {
+    let id = step["id"].as_str().unwrap();
+    let (result, records) = super::super::git_progress::scope(&format!("{id}/forward"), || {
+        forward_step_inner(step, plan, bundle, roots, journal)
+    });
+    record_git_commands(journal, id, records)?;
+    result
+}
+
+fn forward_step_inner(
     step: &Value,
     plan: &Value,
     bundle: &Value,
@@ -1751,6 +1793,9 @@ fn execute(
     skip_checks: bool,
 ) -> Result<()> {
     terminal_preflight(plan, local.is_some())?;
+    if json_output {
+        crate::output::route_human_lines_to_stderr();
+    }
     if !resume && run_out.exists() {
         bail!("run output already exists; use --resume or a new path");
     }

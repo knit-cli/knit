@@ -137,13 +137,24 @@ pub fn configure(
 }
 
 pub fn redact(credentials: &[ResolvedCredential], text: &str) -> String {
+    redaction_patterns(credentials)
+        .iter()
+        .fold(text.to_owned(), |text, secret| {
+            text.replace(secret, "[REDACTED]")
+        })
+}
+
+pub(crate) fn redaction_patterns(credentials: &[ResolvedCredential]) -> Vec<String> {
     credentials
         .iter()
-        .fold(text.to_owned(), |text, credential| {
-            let encoded =
-                base64(format!("{}:{}", credential.git_username(), credential.token).as_bytes());
-            credential.redact(&text).replace(&encoded, "[REDACTED]")
+        .flat_map(|credential| {
+            [
+                credential.token.clone(),
+                base64(format!("{}:{}", credential.git_username(), credential.token).as_bytes()),
+            ]
         })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// The exact-URL HTTP settings Knit resets, shared by Knit-launched
