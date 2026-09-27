@@ -354,6 +354,70 @@ fn advance_features(f: &Fixture) -> Vec<String> {
 }
 
 #[test]
+fn branch_checkout_command_accepts_cache_and_records_its_revision() {
+    let f = branch_fixture();
+    let mut project = read(&f.project);
+    for deployment in project["landing"]["lanes"]["preview"]["deployments"]
+        .as_array_mut()
+        .unwrap()
+    {
+        deployment["cache"] = json!("unchanged");
+    }
+    write(&f.project, &project);
+    let plan = f.plan();
+    assert!(plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["type"] == "deploy")
+        .all(|s| s["cache"] == "unchanged"));
+    fs::create_dir_all(f.root.join(".knit/land-runs")).unwrap();
+    let apply = |run: &str, out: &str| {
+        f.cmd(&[
+            "land",
+            "apply",
+            "--plan",
+            "plan.json",
+            "--from-artifact",
+            f.bundle.to_str().unwrap(),
+            "--project-file",
+            f.project.to_str().unwrap(),
+            "--repo-roots",
+            "roots.json",
+            "--run-out",
+            run,
+            "--out",
+            out,
+            "--json",
+        ])
+    };
+    assert_success(&apply(".knit/land-runs/first.run.json", "first-out.json"));
+    let first = read(&f.root.join(".knit/land-runs/first.run.json"));
+    for step in first["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["type"] == "deploy")
+    {
+        assert!(step["fingerprint"].is_string());
+        assert!(step["sourceRevisions"][step["repoId"].as_str().unwrap()].is_string());
+    }
+    let trace = fs::read_to_string(f.trace_path()).unwrap();
+    assert_success(&apply(".knit/land-runs/second.run.json", "second-out.json"));
+    let second = read(&f.root.join(".knit/land-runs/second.run.json"));
+    assert_eq!(fs::read_to_string(f.trace_path()).unwrap(), trace);
+    for step in second["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|s| s["type"] == "deploy")
+    {
+        assert!(step["output"]["reused"].is_object());
+        assert_eq!(step["attribution"], "already_satisfied");
+    }
+}
+
+#[test]
 fn branch_checkout_reuses_exact_plan_after_both_feature_branches_advance() {
     for sync_bundle in [false, true] {
         let f = branch_fixture();

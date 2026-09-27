@@ -179,6 +179,9 @@
           "output": {
             "type": "object"
           },
+          "reusedOutput": {
+            "type": "object"
+          },
           "capture": {
             "type": "object"
           },
@@ -187,6 +190,14 @@
           },
           "sourceRevisions": {
             "type": "object"
+          },
+          "fingerprint": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "environmentKey": {
+            "type": "string",
+            "minLength": 1
           },
           "attribution": {
             "enum": [

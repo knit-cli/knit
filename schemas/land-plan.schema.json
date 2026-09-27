@@ -267,6 +267,10 @@
             "type": "boolean",
             "description": "Attach a local terminal; command output is not captured."
           },
+          "cache": {
+            "const": "unchanged",
+            "description": "Reuse a successful command receipt with the same pinned inputs and environment."
+          },
           "instructions": {
             "type": "string",
             "minLength": 1

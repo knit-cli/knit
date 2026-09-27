@@ -695,6 +695,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     repo_roots,
                     run_out,
                     resume,
+                    no_cache,
                     json,
                     plan,
                     from_artifact,
@@ -744,6 +745,7 @@ pub fn run(cli: Cli) -> Result<()> {
                                 json,
                                 skip_checks,
                                 expected_plan_hash.as_deref(),
+                                no_cache,
                             );
                         }
                         if expected_plan_hash.is_some() {
@@ -795,6 +797,7 @@ pub fn run(cli: Cli) -> Result<()> {
                             target.as_deref(),
                             lane.as_deref(),
                             expected_plan_hash.as_deref(),
+                            no_cache,
                         )
                     }
                 },

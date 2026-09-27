@@ -311,6 +311,12 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
         // new semantics would be executed as if absent. Reject them loudly
         // instead of silently running a different plan than was authored.
         if plan["schemaVersion"] != "0.2" {
+            if plan["steps"]
+                .as_array()
+                .is_some_and(|steps| steps.iter().any(|step| step.get("cache").is_some()))
+            {
+                bail!("cache requires a schema 0.2 plan");
+            }
             for key in ["execution", "preflight", "integrationSources"] {
                 if plan.get(key).is_some() {
                     bail!("{key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; a schema 0.1 plan would silently discard it");
@@ -406,6 +412,18 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 }
             }
             for step in &steps {
+                if let Some(cache) = step.get("cache") {
+                    if cache != "unchanged"
+                        || !matches!(step["type"].as_str(), Some("run" | "deploy"))
+                        || !step["repoId"].is_string()
+                        || step["deploymentMode"] == "push"
+                    {
+                        bail!(
+                            "{}: cache=unchanged requires a command run or deployment",
+                            step["id"]
+                        );
+                    }
+                }
                 if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch")) {
                     let repo_id = step["repoId"].as_str().context("merge repo required")?;
                     if !merge_policy.enabled_for(repo_id) {

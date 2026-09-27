@@ -230,15 +230,419 @@ fn missing_restore_tool_refuses_before_deployment() {
 }
 #[test]
 fn project_recipe_roundtrip_preserves_extensions() {
-    let raw = json!({"deployments":[{"id":"release","repoId":"service","command":["true"],"build":{"command":["true"]},"verify":{"command":["true"]},"recovery":{"mode":"manual","reason":"External approval"},"customMetadata":{"key":"value"}}],"steps":[{"id":"extra","command":["true"]}],"maxParallel":2,"onFailure":"recover"});
+    let raw = json!({"deployments":[{"id":"release","repoId":"service","command":["true"],"cache":"unchanged","build":{"command":["true"]},"verify":{"command":["true"]},"recovery":{"mode":"manual","reason":"External approval"},"customMetadata":{"key":"value"}}],"steps":[{"id":"extra","command":["true"],"cache":"unchanged"}],"maxParallel":2,"onFailure":"recover"});
     let typed: crate::model::ProjectLandingPlan = serde_json::from_value(raw.clone()).unwrap();
     let after = serde_json::to_value(typed).unwrap();
     for key in ["steps", "maxParallel", "onFailure"] {
         assert_eq!(raw[key], after[key]);
     }
-    for key in ["build", "verify", "recovery", "customMetadata"] {
+    for key in ["build", "verify", "recovery", "customMetadata", "cache"] {
         assert_eq!(raw["deployments"][0][key], after["deployments"][0][key]);
     }
+}
+
+#[test]
+fn unchanged_command_reuses_latest_successful_receipt() {
+    let mut f = Fixture::new();
+    sim_repo(&f.dir);
+    let revision = sim_git(&f.dir, &["rev-parse", "HEAD"]);
+    f.bundle["repos"][0]["headSha"] = json!(revision.clone());
+    f.plan["bundleHeads"] = json!({"service":revision});
+    f.plan["bundleFingerprint"] = json!(bundle_fingerprint(&f.bundle));
+    f.plan["lane"] = json!("staging");
+    let mut step = python("import pathlib,os; p=pathlib.Path(os.environ['COUNTER']); p.write_text(str(int(p.read_text())+1 if p.exists() else 1))");
+    step["id"] = json!("prepare");
+    step["type"] = json!("run");
+    step["repoId"] = json!("service");
+    step["effect"] = json!("read_only");
+    step["cache"] = json!("unchanged");
+    step["env"] = json!({"COUNTER":f.dir.join("count")});
+    f.plan["steps"] = json!([step]);
+    f.files();
+    let runs = f.dir.join(".knit/land-runs");
+    fs::create_dir_all(&runs).unwrap();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("first.run.json"),
+        &f.dir.join("first-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let first: Value = crate::store::read_json(&runs.join("first.run.json")).unwrap();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("second.run.json"),
+        &f.dir.join("second-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let second: Value = crate::store::read_json(&runs.join("second.run.json")).unwrap();
+    let run_schema: Value =
+        serde_json::from_str(include_str!("../../../../schemas/land-run.schema.json")).unwrap();
+    assert!(jsonschema::validator_for(&run_schema)
+        .unwrap()
+        .is_valid(&second));
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "1");
+    assert_eq!(second["steps"][0]["attribution"], "already_satisfied");
+    assert_eq!(second["steps"][0]["output"]["reused"]["runId"], first["id"]);
+    assert_eq!(second["steps"][0]["output"]["reused"]["stepId"], "prepare");
+    assert_eq!(
+        second["steps"][0]["output"]["reused"]["finishedAt"],
+        first["steps"][0]["finishedAt"]
+    );
+    assert_eq!(
+        second["steps"][0]["output"]["reused"]["fingerprint"],
+        first["steps"][0]["fingerprint"]
+    );
+    assert_eq!(
+        second["steps"][0]["output"]["reused"]
+            .as_object()
+            .unwrap()
+            .len(),
+        4
+    );
+    assert!(second["steps"][0]["startedAt"].is_string());
+    assert!(second["steps"][0]["finishedAt"].is_string());
+    assert_eq!(
+        second["steps"][0]["sourceRevisions"],
+        first["steps"][0]["sourceRevisions"]
+    );
+    assert_eq!(second["steps"][0]["quiesced"], true);
+    assert_eq!(
+        second["steps"][0]["fingerprint"],
+        first["steps"][0]["fingerprint"]
+    );
+    assert_eq!(
+        second["steps"][0]["environmentKey"],
+        first["steps"][0]["environmentKey"]
+    );
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("third.run.json"),
+        &f.dir.join("third-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let third: Value = crate::store::read_json(&runs.join("third.run.json")).unwrap();
+    assert_eq!(third["steps"][0]["output"]["reused"]["runId"], second["id"]);
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "1");
+    let mut failed = third.clone();
+    failed["id"] = json!("synthetic-later-run");
+    failed["status"] = json!("failed");
+    failed["steps"][0]["status"] = json!("failed");
+    failed["steps"][0]["startedAt"] = json!("9999-01-01T00:00:00Z");
+    runtime::durable(&runs.join("later.run.json"), &failed).unwrap();
+    fs::write(
+        runs.join("malformed.run.json"),
+        "{\"steps\":[{\"id\":\"prepare\"},",
+    )
+    .unwrap();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("after-failure.run.json"),
+        &f.dir.join("after-failure-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "2");
+    fs::remove_file(runs.join("later.run.json")).unwrap();
+    let mut restored = third.clone();
+    restored["id"] = json!("synthetic-restored-run");
+    restored["recoveryStartedAt"] = json!("9999-01-01T00:00:00Z");
+    restored["steps"][0]["recovery"] = json!({"status":"succeeded"});
+    restored["steps"][0]["startedAt"] = json!("9999-01-01T00:00:00Z");
+    runtime::durable(&runs.join("restored.run.json"), &restored).unwrap();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("after-recovery.run.json"),
+        &f.dir.join("after-recovery-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "3");
+    fs::remove_file(runs.join("restored.run.json")).unwrap();
+    runtime::apply_with_checks(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("uncached.run.json"),
+        &f.dir.join("uncached-out.json"),
+        false,
+        false,
+        false,
+        None,
+        true,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "4");
+    let uncached: Value = crate::store::read_json(&runs.join("uncached.run.json")).unwrap();
+    assert!(uncached["steps"][0]["fingerprint"].is_string());
+    f.plan["steps"][0]["env"]["RECIPE_VERSION"] = json!("changed");
+    f.files();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("changed.run.json"),
+        &f.dir.join("changed-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "5");
+    let changed: Value = crate::store::read_json(&runs.join("changed.run.json")).unwrap();
+    sim_git(
+        &f.dir,
+        &[
+            "commit",
+            "--allow-empty",
+            "--quiet",
+            "-m",
+            "Synthetic empty revision",
+        ],
+    );
+    let next_revision = sim_git(&f.dir, &["rev-parse", "HEAD"]);
+    f.bundle["repos"][0]["headSha"] = json!(next_revision.clone());
+    f.plan["bundleHeads"] = json!({"service":next_revision});
+    f.plan["bundleFingerprint"] = json!(bundle_fingerprint(&f.bundle));
+    f.files();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("new-revision.run.json"),
+        &f.dir.join("new-revision-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let next: Value = crate::store::read_json(&runs.join("new-revision.run.json")).unwrap();
+    assert_ne!(
+        next["steps"][0]["fingerprint"],
+        changed["steps"][0]["fingerprint"]
+    );
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "6");
+    f.plan["lane"] = json!("preview");
+    f.files();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("lane.run.json"),
+        &f.dir.join("lane-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    let lane: Value = crate::store::read_json(&runs.join("lane.run.json")).unwrap();
+    assert_ne!(
+        lane["steps"][0]["environmentKey"],
+        next["steps"][0]["environmentKey"]
+    );
+    assert_eq!(
+        lane["steps"][0]["fingerprint"],
+        next["steps"][0]["fingerprint"]
+    );
+    assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), "7");
+    f.plan["steps"][0].as_object_mut().unwrap().remove("cache");
+    f.files();
+    for (name, expected) in [("plain-first", "8"), ("plain-second", "9")] {
+        let path = runs.join(format!("{name}.run.json"));
+        runtime::apply(
+            &f.dir.join("plan.json"),
+            &f.dir.join("bundle.json"),
+            None,
+            Some(&f.dir.join("roots.json")),
+            &path,
+            &f.dir.join(format!("{name}-out.json")),
+            false,
+            false,
+        )
+        .unwrap();
+        let receipt: Value = crate::store::read_json(&path).unwrap();
+        assert!(receipt["steps"][0]["fingerprint"].is_string());
+        assert_eq!(fs::read_to_string(f.dir.join("count")).unwrap(), expected);
+    }
+}
+
+#[test]
+fn recovery_skips_a_reused_deployment() {
+    let mut f = Fixture::new();
+    f.plan["lane"] = json!("staging");
+    fs::write(f.dir.join("state"), "old").unwrap();
+    let mut deployment = deploy(
+        "release",
+        "import pathlib; pathlib.Path('state').write_text('new')",
+    );
+    deployment["cache"] = json!("unchanged");
+    f.plan["steps"] = json!([deployment]);
+    f.files();
+    let runs = f.dir.join(".knit/land-runs");
+    fs::create_dir_all(&runs).unwrap();
+    runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("first.run.json"),
+        &f.dir.join("first-out.json"),
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(fs::read_to_string(f.dir.join("state")).unwrap(), "new");
+
+    let mut failing = python("raise SystemExit(7)");
+    failing["id"] = json!("fail");
+    failing["type"] = json!("run");
+    failing["repoId"] = json!("service");
+    failing["effect"] = json!("read_only");
+    failing["needs"] = json!(["release"]);
+    f.plan["steps"].as_array_mut().unwrap().push(failing);
+    f.files();
+    assert!(runtime::apply(
+        &f.dir.join("plan.json"),
+        &f.dir.join("bundle.json"),
+        None,
+        Some(&f.dir.join("roots.json")),
+        &runs.join("second.run.json"),
+        &f.dir.join("second-out.json"),
+        false,
+        false,
+    )
+    .is_err());
+    let second: Value = crate::store::read_json(&runs.join("second.run.json")).unwrap();
+    assert_eq!(second["steps"][0]["attribution"], "already_satisfied");
+    assert_eq!(second["steps"][0]["recovery"]["status"], Value::Null);
+    assert_eq!(fs::read_to_string(f.dir.join("state")).unwrap(), "new");
+}
+
+#[test]
+fn cache_requires_a_safe_command_step() {
+    let f = Fixture::new();
+    let mut plan = f.plan.clone();
+    plan["steps"] = json!([{"id":"prepare","type":"run","repoId":"service","command":["true"],"cache":"invalid"}]);
+    assert_eq!(validation(&plan, None, None)["valid"], false);
+    plan["steps"][0]["cache"] = json!("unchanged");
+    plan["steps"][0]["type"] = json!("manual");
+    assert_eq!(validation(&plan, None, None)["valid"], false);
+    plan["steps"][0]["type"] = json!("run");
+    plan["schemaVersion"] = json!("0.1");
+    let result = validation(&plan, None, None);
+    assert_eq!(result["valid"], false);
+    assert!(result
+        .to_string()
+        .contains("cache requires a schema 0.2 plan"));
+}
+
+#[test]
+fn cache_fields_follow_published_schemas() {
+    let plan_schema: Value =
+        serde_json::from_str(include_str!("../../../../schemas/land-plan.schema.json")).unwrap();
+    let run_schema: Value =
+        serde_json::from_str(include_str!("../../../../schemas/land-run.schema.json")).unwrap();
+    let project_schema: Value =
+        serde_json::from_str(include_str!("../../../../schemas/project.schema.json")).unwrap();
+    let plan_validator = jsonschema::validator_for(&plan_schema).unwrap();
+    let run_validator = jsonschema::validator_for(&run_schema).unwrap();
+    let project_validator = jsonschema::validator_for(&project_schema).unwrap();
+    let f = Fixture::new();
+    let mut plan = f.plan.clone();
+    plan["steps"] = json!([{"id":"prepare","type":"run","repoId":"service","command":["true"],"cache":"unchanged"}]);
+    assert!(plan_validator.is_valid(&plan));
+    plan["steps"][0]["cache"] = json!("other");
+    assert!(!plan_validator.is_valid(&plan));
+    let mut project = serde_json::to_value(crate::model::KnitProject::new(
+        "synthetic".into(),
+        crate::time::now_iso(),
+    ))
+    .unwrap();
+    project["landing"] = json!({"deployments":[{"id":"release","repoId":"service","command":["true"],"cache":"unchanged"}],"steps":[{"id":"extra","command":["true"],"cache":"unchanged"}]});
+    assert!(project_validator.is_valid(&project));
+    project["landing"]["deployments"][0]["cache"] = json!(true);
+    assert!(!project_validator.is_valid(&project));
+    let mut run = json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":"run","planId":"plan","bundleId":"bundle","status":"succeeded","steps":[{"id":"prepare","type":"run","status":"succeeded","fingerprint":"a".repeat(64),"environmentKey":"synthetic/target:main","output":{"reused":{"runId":"prior","stepId":"prepare","finishedAt":"2026-01-01T00:00:00Z","fingerprint":"a".repeat(64)}}}]});
+    assert!(run_validator.is_valid(&run));
+    run["steps"][0]["fingerprint"] = json!("invalid");
+    assert!(!run_validator.is_valid(&run));
+}
+
+#[test]
+fn command_fingerprint_tracks_recipe_and_pinned_revision_only() {
+    let step = json!({"id":"release","repoId":"service","type":"deploy","command":["tool","run"],"env":{"MODE":"a"},"sourceRepos":[]});
+    let record = json!({"sourceRevisions":{"service":"aaaaaaaa"},"output":{"unrelated":1}});
+    let original = runtime::command_fingerprint(&step, &record);
+    let mut unrelated = step.clone();
+    unrelated["label"] = json!("different label");
+    assert_eq!(original, runtime::command_fingerprint(&unrelated, &record));
+    let mut revision = record.clone();
+    revision["sourceRevisions"]["service"] = json!("bbbbbbbb");
+    assert_ne!(original, runtime::command_fingerprint(&step, &revision));
+    let mut command = step.clone();
+    command["command"] = json!(["tool", "other"]);
+    assert_ne!(original, runtime::command_fingerprint(&command, &record));
+    let mut env = step.clone();
+    env["env"]["MODE"] = json!("b");
+    assert_ne!(original, runtime::command_fingerprint(&env, &record));
+}
+
+#[test]
+fn environment_key_resolves_lane_and_repository_destination() {
+    let step = json!({"repoId":"service","type":"run"});
+    let bundle = json!({"repos":[{"id":"service","baseBranch":"main"}]});
+    let mut plan =
+        json!({"sourceProjectId":"synthetic","steps":[],"recipeBases":{"service":"recipe"}});
+    assert_eq!(
+        runtime::environment_key(&plan, &step, &bundle).unwrap(),
+        "synthetic/target:recipe"
+    );
+    plan["targetBranches"] = json!({"service":"preview"});
+    assert_eq!(
+        runtime::environment_key(&plan, &step, &bundle).unwrap(),
+        "synthetic/target:preview"
+    );
+    plan["lane"] = json!("staging");
+    assert_eq!(
+        runtime::environment_key(&plan, &step, &bundle).unwrap(),
+        "synthetic/lane:staging"
+    );
+    plan.as_object_mut().unwrap().remove("lane");
+    plan.as_object_mut().unwrap().remove("recipeBases");
+    plan.as_object_mut().unwrap().remove("targetBranches");
+    assert_eq!(
+        runtime::environment_key(&plan, &step, &bundle).unwrap(),
+        "synthetic/target:main"
+    );
+    plan.as_object_mut().unwrap().remove("sourceProjectId");
+    plan["id"] = json!("local-plan");
+    assert_eq!(
+        runtime::environment_key(&plan, &step, &bundle).unwrap(),
+        "local-plan/target:main"
+    );
 }
 #[test]
 fn independent_steps_overlap_but_downstream_waits_for_the_wave() {
@@ -297,7 +701,7 @@ fn generator_includes_build_verify_and_custom_steps() {
     .unwrap();
     project["repos"] =
         json!([{"id":"service","path":"portable","remote":null,"baseBranch":"main"}]);
-    project["landing"] = json!({"deployments":[{"id":"release","repoId":"service","whenChanged":["*"],"command":["true"],"build":{"command":["true"]},"verify":{"command":["true"]}}],"steps":[{"id":"extra","repoId":"service","command":["true"],"effect":"read_only"}]});
+    project["landing"] = json!({"deployments":[{"id":"release","repoId":"service","whenChanged":["*"],"command":["true"],"cache":"unchanged","build":{"command":["true"]},"verify":{"command":["true"]}}],"steps":[{"id":"extra","repoId":"service","command":["true"],"effect":"read_only","cache":"unchanged"}]});
     project["landing"]["deployments"][0]["recovery"] =
         json!({"mode":"manual","reason":"main recovery"});
     project["landing"]["targets"] = json!({"staging":{"deployments":[{"id":"release","repoId":"service","command":["false"],"build":{"command":["false"]},"verify":{"command":["false"]},"recovery":{"mode":"manual","reason":"staging recovery"}}]}});
@@ -310,6 +714,9 @@ fn generator_includes_build_verify_and_custom_steps() {
     assert_eq!(plan["steps"][0]["command"], json!(["true"]));
     assert_eq!(plan["steps"][1]["recovery"]["reason"], "main recovery");
     assert_eq!(plan["steps"][2]["command"], json!(["true"]));
+    for step in plan["steps"].as_array().unwrap() {
+        assert_eq!(step["cache"], "unchanged");
+    }
     let ids: Vec<_> = plan["steps"]
         .as_array()
         .unwrap()
@@ -780,6 +1187,9 @@ fn manual_and_interactive_validate_but_artifact_execution_refuses_before_journal
         json!({"id":"ask","type":"run","repoId":"service","interactive":true,"command":["true"],"effect":"read_only","recovery":{"mode":"none"}}),
     ] {
         let mut f = Fixture::new();
+        if step["interactive"] == true {
+            step["cache"] = json!("unchanged");
+        }
         f.plan["onFailure"] = json!("stop");
         f.plan["steps"] = json!([step]);
         f.plan["requiredExecutorVersion"] = json!("0.3");

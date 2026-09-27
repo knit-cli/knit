@@ -140,6 +140,7 @@ pub fn land_default_version(
                     "Service: {}; source: {}",
                     run["serviceStatus"], run["sourceStatus"]
                 );
+                print_v2_reused_steps(&run);
             }
         }
         return v2::display_plan(&active, &raw, &candidate);
@@ -242,6 +243,7 @@ pub fn apply_land_plan(
     target_branch: Option<&str>,
     lane_name: Option<&str>,
     expected_plan_hash: Option<&str>,
+    no_cache: bool,
 ) -> Result<()> {
     let active = crate::store::load_active_bundle()?;
     let destination = v2::destination_path(&active, target_branch, lane_name);
@@ -273,6 +275,7 @@ pub fn apply_land_plan(
             skip_checks,
             false,
             expected_plan_hash,
+            no_cache,
         );
     }
     if expected_plan_hash.is_some() {
@@ -698,6 +701,7 @@ pub fn resume_land_run(
             skip_checks,
             false,
             None,
+            false,
         );
     }
     ensure_no_executor04_semantics_on_legacy(&raw)?;
@@ -829,6 +833,7 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
     if let Some(path) = resolve_land_run_path(&active, run_path)? {
         let raw: serde_json::Value = read_json(&path)?;
         if raw["schemaVersion"] == "0.2" {
+            print_v2_reused_steps(&raw);
             println!("{}", serde_json::to_string_pretty(&raw)?);
             return Ok(());
         }
@@ -857,6 +862,19 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         display::print_planned_step(&active, step);
     }
     Ok(())
+}
+
+pub(crate) fn print_v2_reused_steps(run: &serde_json::Value) {
+    if let Some(steps) = run["steps"].as_array() {
+        for step in steps {
+            if let (Some(id), Some(source)) = (
+                step["id"].as_str(),
+                step["output"]["reused"]["runId"].as_str(),
+            ) {
+                println!("{id}: reused from run {source}");
+            }
+        }
+    }
 }
 
 fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Result<usize> {

@@ -800,6 +800,9 @@
               "interactive": {
                 "type": "boolean"
               },
+              "cache": {
+                "const": "unchanged"
+              },
               "instructions": {
                 "type": "string",
                 "minLength": 1
@@ -1011,6 +1014,9 @@
             "command",
             "push"
           ]
+        },
+        "cache": {
+          "const": "unchanged"
         },
         "needs": {
           "type": "array",

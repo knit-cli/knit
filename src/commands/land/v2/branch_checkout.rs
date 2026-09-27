@@ -304,7 +304,7 @@ fn clean(root: &Path) -> Result<()> {
 }
 
 /// Fetching is allowed here; no checkout, local branch or remote is changed.
-fn inspect(root: &Path, checkout: &Value) -> Result<String> {
+pub(super) fn inspect(root: &Path, checkout: &Value) -> Result<String> {
     clean(root)?;
     let branch = checkout["branch"]
         .as_str()

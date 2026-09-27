@@ -84,6 +84,7 @@ struct Journal {
     bundle_out: PathBuf,
     workspace: PathBuf,
     pins: Mutex<()>,
+    no_cache: bool,
 }
 impl Journal {
     fn edit(&self, f: impl FnOnce(&mut Value)) -> Result<()> {
@@ -528,12 +529,20 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
             .as_str()
             .context("branch checkout repo required")?;
         let root = roots.get(repo).context("branch checkout binding missing")?;
-        let revision = super::branch_checkout::command_revision(
-            root,
-            step,
-            phase,
-            record["sourceRevisions"][repo].as_str(),
-        )?;
+        let cache_probe = phase == "forward"
+            && record["status"] == "pending"
+            && step["cache"] == "unchanged"
+            && !journal.no_cache;
+        let revision = if cache_probe {
+            super::branch_checkout::inspect(root, &step["checkout"])?
+        } else {
+            super::branch_checkout::command_revision(
+                root,
+                step,
+                phase,
+                record["sourceRevisions"][repo].as_str(),
+            )?
+        };
         revisions.insert(repo.into(), json!(revision));
         journal.edit_step(id, |s| s["sourceRevisions"] = json!(revisions))?;
         Some(repo)
@@ -582,9 +591,21 @@ fn run_command(
     phase: &str,
     capture: Option<&Value>,
 ) -> Result<Value> {
+    run_command_bound(step, spec, roots, journal, phase, capture, None)
+}
+
+fn run_command_bound(
+    step: &Value,
+    spec: &Value,
+    roots: &Roots,
+    journal: &Journal,
+    phase: &str,
+    capture: Option<&Value>,
+    bound: Option<&Roots>,
+) -> Result<Value> {
     let id = step["id"].as_str().unwrap();
     let (result, records) = super::super::git_progress::scope(&format!("{id}/{phase}"), || {
-        run_command_inner(step, spec, roots, journal, phase, capture)
+        run_command_inner(step, spec, roots, journal, phase, capture, bound)
     });
     record_git_commands(journal, id, records)?;
     result
@@ -611,6 +632,7 @@ fn run_command_inner(
     journal: &Journal,
     phase: &str,
     capture: Option<&Value>,
+    bound: Option<&Roots>,
 ) -> Result<Value> {
     let id = step["id"].as_str().unwrap();
     let snapshot = journal.snapshot();
@@ -631,10 +653,16 @@ fn run_command_inner(
     if let Some(capture) = capture {
         durable(&capture_file, capture)?;
     }
-    let bound_roots = pinned_roots(step, roots, journal, phase)?;
-    let mut cmd = Command::new(command_path(step, spec, &cwd(step, spec, &bound_roots)?)?);
+    let resolved;
+    let bound_roots = if let Some(bound) = bound {
+        bound
+    } else {
+        resolved = pinned_roots(step, roots, journal, phase)?;
+        &resolved
+    };
+    let mut cmd = Command::new(command_path(step, spec, &cwd(step, spec, bound_roots)?)?);
     cmd.args(strings(&spec["command"]).into_iter().skip(1))
-        .current_dir(cwd(step, spec, &bound_roots)?);
+        .current_dir(cwd(step, spec, bound_roots)?);
     for env in [&step["env"], &spec["env"]] {
         if let Some(env) = env.as_object() {
             for (k, v) in env {
@@ -699,13 +727,14 @@ fn run_command_inner(
         .unwrap()
         .iter()
         .filter_map(|s| {
-            s.get("output")
+            s.get("reusedOutput")
+                .or_else(|| s.get("output"))
                 .map(|o| (s["id"].as_str().unwrap().to_owned(), o.clone()))
         })
         .collect();
     cmd.env("KNIT_LAND_INPUTS", serde_json::to_string(&outputs)?);
     let mut suffixes = BTreeSet::new();
-    for (repo, root) in &bound_roots {
+    for (repo, root) in bound_roots {
         let suffix: String = repo
             .chars()
             .map(|c| {
@@ -722,7 +751,7 @@ fn run_command_inner(
         cmd.env(format!("KNIT_CHECKOUT_{suffix}"), root);
         cmd.env(format!("KNIT_CHECKOUT_{repo}"), root);
     }
-    let working = cwd(step, spec, &bound_roots)?;
+    let working = cwd(step, spec, bound_roots)?;
     cmd.env("KNIT_DEPLOY_CHECKOUT", &working)
         .env("KNIT_BUNDLE", snapshot["bundleId"].as_str().unwrap_or(""));
     if let Some(repo) = step["repoId"].as_str() {
@@ -782,6 +811,111 @@ fn require_success(receipt: &Value) -> Result<()> {
         );
     }
     Ok(())
+}
+
+pub(super) fn command_fingerprint(step: &Value, record: &Value) -> String {
+    canonical_hash(&json!({
+        "id":step["id"], "repoId":step["repoId"], "type":step["type"],
+        "deploymentMode":step["deploymentMode"], "argv":step["command"],
+        "env":step["env"], "cwd":step["cwd"], "checkout":step["checkout"],
+        "sourceRepos":step["sourceRepos"], "sourceRevisions":record["sourceRevisions"],
+    }))
+}
+
+pub(super) fn environment_key(plan: &Value, step: &Value, bundle: &Value) -> Result<String> {
+    let project = plan["sourceProjectId"]
+        .as_str()
+        .or_else(|| plan["id"].as_str())
+        .unwrap_or("local");
+    if let Some(lane) = plan["lane"].as_str() {
+        return Ok(format!("{project}/lane:{lane}"));
+    }
+    let repo = step["repoId"]
+        .as_str()
+        .context("cache environment requires repoId")?;
+    let branch = step["targetBranch"]
+        .as_str()
+        .or_else(|| {
+            plan["steps"]
+                .as_array()?
+                .iter()
+                .find(|s| s["repoId"] == repo && s["type"] == "merge_branch")?["targetBranch"]
+                .as_str()
+        })
+        .or_else(|| plan["targetBranches"][repo].as_str())
+        .or_else(|| plan["targetBranch"].as_str())
+        .or_else(|| plan["recipeBases"][repo].as_str())
+        .or_else(|| {
+            bundle["repos"]
+                .as_array()?
+                .iter()
+                .find(|r| r["id"] == repo)?["baseBranch"]
+                .as_str()
+        })
+        .context("cache environment requires a resolved target branch")?;
+    Ok(format!("{project}/target:{branch}"))
+}
+
+fn latest_environment_step(journal: &Journal, id: &str, key: &str) -> Result<Option<Value>> {
+    let directory = journal.workspace.join(".knit/land-runs");
+    let entries = match fs::read_dir(directory) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let current = journal.snapshot();
+    let project = &current["plan"]["sourceProjectId"];
+    let mut latest: Option<Value> = None;
+    let mut latest_at = String::new();
+    for entry in entries {
+        let path = entry?.path();
+        if path == journal.path
+            || !path
+                .file_name()
+                .and_then(|s| s.to_str())
+                .is_some_and(|s| s.ends_with(".run.json"))
+        {
+            continue;
+        }
+        let Ok(raw) = fs::read_to_string(&path) else {
+            continue;
+        };
+        if !raw.contains(&serde_json::to_string(id)?) {
+            continue;
+        }
+        let Ok(run) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        if run["kind"] != "KnitLandRun"
+            || run["id"] == current["id"]
+            || run["plan"]["sourceProjectId"] != *project
+        {
+            continue;
+        }
+        let Some(record) = run["steps"]
+            .as_array()
+            .and_then(|steps| steps.iter().find(|s| s["id"].as_str() == Some(id)))
+        else {
+            continue;
+        };
+        if record["environmentKey"] != key {
+            continue;
+        }
+        let Some(at) = record["startedAt"]
+            .as_str()
+            .or_else(|| record["intentAt"].as_str())
+        else {
+            continue;
+        };
+        if latest.is_none() || at > latest_at.as_str() {
+            let mut found = record.clone();
+            found["sourceRunId"] = run["id"].clone();
+            found["sourceRecoveryStarted"] = json!(run["recoveryStartedAt"].is_string());
+            latest = Some(found);
+            latest_at = at.to_owned();
+        }
+    }
+    Ok(latest)
 }
 
 fn provider_target(
@@ -1201,12 +1335,89 @@ fn forward_step_inner(
             bail!("{id}: uncertain effect cannot be retried without an authoritative probe");
         }
     }
+    let command_roots = if matches!(step["type"].as_str(), Some("run" | "deploy"))
+        && step["repoId"].is_string()
+        && step["deploymentMode"] != "push"
+    {
+        let bound = pinned_roots(step, roots, journal, "forward")?;
+        let record = journal.step(id);
+        let fingerprint = command_fingerprint(step, &record);
+        let key = environment_key(plan, step, bundle)?;
+        journal.edit_step(id, |s| {
+            s["fingerprint"] = json!(fingerprint);
+            s["environmentKey"] = json!(key);
+        })?;
+        if old["status"] == "pending" && step["cache"] == "unchanged" && !journal.no_cache {
+            if let Some(previous) = latest_environment_step(journal, id, &key)? {
+                if previous["status"] == "succeeded"
+                    && previous["fingerprint"] == fingerprint
+                    && previous["sourceRecoveryStarted"] != true
+                    && previous["recovery"]["status"].is_null()
+                {
+                    let reused = json!({"runId":previous["sourceRunId"],"stepId":id,
+                        "finishedAt":previous["finishedAt"],"fingerprint":fingerprint});
+                    let revisions = record["sourceRevisions"].clone();
+                    let short: Vec<String> = revisions
+                        .as_object()
+                        .into_iter()
+                        .flat_map(|m| m.iter())
+                        .filter_map(|(repo, sha)| {
+                            sha.as_str()
+                                .map(|sha| format!("{repo}:{}", &sha[..sha.len().min(12)]))
+                        })
+                        .collect();
+                    journal.edit_step(id, |s| {
+                        s["status"] = json!("succeeded");
+                        s["startedAt"] = json!(now_iso());
+                        s["finishedAt"] = json!(now_iso());
+                        s["attribution"] = json!("already_satisfied");
+                        s["sourceRevisions"] = revisions;
+                        s["quiesced"] = json!(true);
+                        s["reusedOutput"] = previous
+                            .get("reusedOutput")
+                            .cloned()
+                            .unwrap_or_else(|| previous["output"].clone());
+                        s["output"] = json!({"attribution":"already_satisfied","reused":reused});
+                    })?;
+                    eprintln!(
+                        "[{id}] unchanged since run {} ({}); reused",
+                        previous["sourceRunId"],
+                        short.join(", ")
+                    );
+                    return Ok(());
+                }
+            }
+        }
+        if old["status"] == "pending"
+            && step["cache"] == "unchanged"
+            && !journal.no_cache
+            && super::branch_checkout::enabled(step)
+        {
+            let repo = step["repoId"].as_str().unwrap();
+            let root = roots.get(repo).context("branch checkout binding missing")?;
+            let revision = record["sourceRevisions"][repo]
+                .as_str()
+                .context("branch checkout revision missing")?;
+            super::branch_checkout::prepare(root, &step["checkout"], Some(revision))?;
+        }
+        Some(bound)
+    } else {
+        None
+    };
     journal.edit_step(id, |s| {
         s["status"] = json!("running");
         s["startedAt"] = json!(now_iso());
     })?;
     if r["mode"] == "command" && !old["capture"].is_object() {
-        let receipt = run_command(step, &r["capture"], roots, journal, "capture", None)?;
+        let receipt = run_command_bound(
+            step,
+            &r["capture"],
+            roots,
+            journal,
+            "capture",
+            None,
+            command_roots.as_ref(),
+        )?;
         require_success(&receipt)?;
         let capture: Value = serde_json::from_str(receipt["stdout"].as_str().unwrap_or(""))?;
         if !capture.is_object() {
@@ -1232,7 +1443,15 @@ fn forward_step_inner(
         && step["deploymentMode"] != "push"
     {
         let capture = journal.step(id).get("capture").cloned();
-        let receipt = run_command(step, step, roots, journal, "forward", capture.as_ref())?;
+        let receipt = run_command_bound(
+            step,
+            step,
+            roots,
+            journal,
+            "forward",
+            capture.as_ref(),
+            command_roots.as_ref(),
+        )?;
         journal.edit_step(id, |s| {
             s["stdout"] = receipt["stdout"].clone();
             s["stderr"] = receipt["stderr"].clone();
@@ -1779,6 +1998,7 @@ pub fn apply(
         json_output,
         false,
         None,
+        false,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -1793,6 +2013,7 @@ pub fn apply_with_checks(
     json_output: bool,
     skip_checks: bool,
     expected_plan_hash: Option<&str>,
+    no_cache: bool,
 ) -> Result<()> {
     let plan: Value = read_json(plan_path)?;
     super::verify_expected_hash(&plan, expected_plan_hash)?;
@@ -1817,6 +2038,7 @@ pub fn apply_with_checks(
         json_output,
         None,
         skip_checks,
+        no_cache,
     )
 }
 #[allow(clippy::too_many_arguments)]
@@ -1836,6 +2058,7 @@ fn execute(
         Option<&super::super::FinishLandOptions<'_>>,
     )>,
     skip_checks: bool,
+    no_cache: bool,
 ) -> Result<()> {
     terminal_preflight(plan, local.is_some())?;
     if json_output {
@@ -2042,6 +2265,7 @@ fn execute(
         bundle_out: absolute(out)?,
         workspace: workspace.clone(),
         pins: Mutex::new(()),
+        no_cache,
     };
     journal.edit(|r| {
         r["finalization"]["synchronization"] = json!("pending");
@@ -2158,6 +2382,14 @@ fn execute(
             journal.snapshot()["status"],
             run_out.display()
         );
+        for step in journal.snapshot()["steps"].as_array().into_iter().flatten() {
+            if let (Some(id), Some(source)) = (
+                step["id"].as_str(),
+                step["output"]["reused"]["runId"].as_str(),
+            ) {
+                eprintln!("{id}: reused from run {source}");
+            }
+        }
     }
     result.and(completion)
 }
@@ -2229,6 +2461,7 @@ pub fn recover(
             false,
             json_output,
             None,
+            false,
         );
     }
     let out_run = run_out.unwrap_or(run_path);
@@ -2255,6 +2488,7 @@ pub fn recover(
         json_output,
         None,
         false,
+        false,
     )
 }
 
@@ -2268,6 +2502,7 @@ pub(crate) fn local_apply(
     skip_checks: bool,
     json_output: bool,
     expected_plan_hash: Option<&str>,
+    no_cache: bool,
 ) -> Result<()> {
     let plan: Value = read_json(plan_path)?;
     super::verify_expected_hash(&plan, expected_plan_hash)?;
@@ -2367,6 +2602,7 @@ pub(crate) fn local_apply(
         json_output,
         Some((active, options)),
         skip_checks,
+        no_cache,
     )
 }
 

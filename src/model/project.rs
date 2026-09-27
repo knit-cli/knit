@@ -550,6 +550,9 @@ pub struct ProjectLandingDeployment {
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
     pub id: String,
+    /// Reuse a successful command receipt when its pinned inputs and recipe match.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cache: Option<ProjectLandingCache>,
     #[serde(default, alias = "repo", skip_serializing_if = "Option::is_none")]
     pub repo_id: Option<String>,
     /// Which repositories' changes make this deployment run. A deployment
@@ -578,6 +581,12 @@ pub struct ProjectLandingDeployment {
     pub command: Vec<String>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub env: BTreeMap<String, String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProjectLandingCache {
+    Unchanged,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

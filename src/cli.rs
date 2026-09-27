@@ -1544,6 +1544,9 @@ pub enum LandCommand {
         run_out: Option<PathBuf>,
         #[arg(long)]
         resume: bool,
+        /// Execute deployment commands even when unchanged inputs could be reused.
+        #[arg(long)]
+        no_cache: bool,
         #[arg(long)]
         json: bool,
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
