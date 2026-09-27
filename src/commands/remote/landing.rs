@@ -352,7 +352,19 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
             }
             continue;
         }
-        if run["status"] == "running" {
+        // Finalization can sync the bundle (and tags) before the receipt is
+        // complete. Only the executor may publish that receipt under its
+        // ownership; an ordinary import would bind it as unowned history.
+        if run["status"] == "running"
+            || run["finalization"]["synchronization"] == "pending"
+            || run["planHash"].as_str().is_some_and(|hash| {
+                identifier(hash).is_ok()
+                    && root
+                        .join(".knit/landing-ownership")
+                        .join(format!("{hash}.json"))
+                        .exists()
+            })
+        {
             continue;
         }
         let plan = &run["plan"];
@@ -683,6 +695,35 @@ fn install_run(root: &Path, index: &mut SyncIndex, record: &RunRecord) -> Result
 
 pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: bool) -> Result<()> {
     push_plans_scoped(project, remote_name, required, None)
+}
+
+/// Publish the completed local receipt to the configured sync destinations.
+/// Ownership completion has already recorded its exact hash at the authority,
+/// so that destination is a no-op; other mirrors receive only the final receipt.
+pub(crate) fn sync_finished_run(
+    root: &Path,
+    plan: &Value,
+    remotes: &[String],
+    no_remote: bool,
+) -> Result<()> {
+    if no_remote {
+        return Ok(());
+    }
+    let config = crate::store::load_effective_config(root)?;
+    if !config.push_sync && remotes.is_empty() {
+        return Ok(());
+    }
+    for remote in super::client::resolve_sync_remote_names(&config, remotes) {
+        push_plans_scoped_at(
+            root,
+            &config,
+            Some(text(plan, "sourceProjectId")?),
+            &remote,
+            false,
+            Some(text(plan, "bundleId")?),
+        )?;
+    }
+    Ok(())
 }
 
 pub(super) fn push_plans_scoped(

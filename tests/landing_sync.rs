@@ -71,8 +71,32 @@ impl Server {
                 reader.read_exact(&mut body).unwrap();
                 let mut state = shared.lock().unwrap();
                 let mut code = 200;
+                let mut response = None;
                 let recipes = request.contains("/api/v1/projects/demo/landing-recipes ");
-                if recipes {
+                let executing = state["execution"] == true;
+                if executing && request.contains("/landing-ownership ") {
+                    let payload: Value = serde_json::from_slice(&body).unwrap();
+                    state["ownership"] = json!({"id":"lease", "token":"test-token"});
+                    state["boundRun"] = payload["runIdentity"].clone();
+                    response = Some(state["ownership"].clone());
+                } else if executing && request.starts_with("DELETE ") {
+                    assert!(
+                        state["boundRun"].is_string(),
+                        "release requires a bound receipt"
+                    );
+                    state["ownership"] = Value::Null;
+                    state["releases"] = json!(state["releases"].as_u64().unwrap_or(0) + 1);
+                    response = Some(json!({}));
+                } else if executing
+                    && (request.contains("/api/v1/projects/demo ")
+                        || request.contains("/projects/demo/bundles "))
+                {
+                    response = Some(json!({"id":"demo", "slug":"demo"}));
+                } else if executing && request.contains("/bundles/demo/artifacts ") {
+                    response = Some(json!({"id":"artifact", "artifactHash":"synthetic"}));
+                } else if executing && request.contains("/projects/demo/history-events ") {
+                    response = Some(json!({"insertedCount":0, "skippedCount":0}));
+                } else if recipes {
                     if request.starts_with("PUT ") {
                         let payload: Value = serde_json::from_slice(&body).unwrap();
                         if payload["expectedHash"] != hash(&state["landing"]) {
@@ -125,6 +149,38 @@ impl Server {
                     }
                     if code == 200 {
                         for r in payload["runs"].as_array().unwrap() {
+                            if executing {
+                                let owned = !payload["ownership"].is_null()
+                                    && payload["ownership"] == imported["ownership"];
+                                let old = imported["runs"]
+                                    .as_array()
+                                    .unwrap()
+                                    .iter()
+                                    .find(|old| old["run"]["id"] == r["run"]["id"]);
+                                // Match the host: a fresh claim cannot adopt an
+                                // already-imported unowned execution identity.
+                                if (owned && imported["boundRun"].is_null() && old.is_some())
+                                    || (!owned && old.is_some_and(|old| old != r))
+                                {
+                                    code = 409;
+                                    break;
+                                }
+                                if owned && imported["failReceiptOnce"] == true {
+                                    state["failReceiptOnce"] = json!(false);
+                                    code = 503;
+                                    break;
+                                }
+                                if owned {
+                                    imported["boundRun"] = r["run"]["id"].clone();
+                                }
+                                imported["uploads"].as_array_mut().unwrap().push(json!({
+                                    "owned":owned,"run":r["run"]
+                                }));
+                                imported["runs"]
+                                    .as_array_mut()
+                                    .unwrap()
+                                    .retain(|old| old["run"]["id"] != r["run"]["id"]);
+                            }
                             if !imported["plans"].as_array().unwrap().iter().any(|p| {
                                 p["hash"] == r["run"]["planHash"]
                                     && p["bundleSlug"] == r["bundleSlug"]
@@ -147,7 +203,9 @@ impl Server {
                     }
                 }
                 let output = if code == 200 {
-                    if recipes {
+                    if let Some(response) = response {
+                        json!({"data":response})
+                    } else if recipes {
                         json!({"data":{"landing":state["landing"],"hash":hash(&state["landing"])}})
                     } else {
                         json!({"data":*state})
@@ -716,4 +774,165 @@ fn legacy_run_without_project_snapshot_uses_compatible_current_project() {
         assert_eq!(record["projectSnapshot"], project);
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn local_finalization_publishes_only_complete_receipts_and_retries_without_execution() {
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    // Cover an already-synchronized plan and the first push of an offline plan.
+    for synchronized in [true, false] {
+        let server = Server::new();
+        // Git for Windows includes the checkout name in its admin path.
+        // Keep this fixture root short enough for the generated run checkouts.
+        let allocated = unique_temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = allocated.with_file_name(format!("ks-{nonce:x}"));
+        fs::rename(&allocated, &dir).unwrap();
+        let workspace = dir.clone();
+        setup(&workspace, &server.url);
+        let service = workspace.join("service");
+        init_repo(&service, "service");
+        let origin = dir.join("origin.git");
+        git(&workspace, ["init", "--bare", origin.to_str().unwrap()]);
+        git(
+            &service,
+            ["remote", "add", "origin", origin.to_str().unwrap()],
+        );
+        git(&service, ["checkout", "-b", "knit/demo"]);
+        git(&service, ["push", "-u", "origin", "knit/demo"]);
+        let head = git(&service, ["rev-parse", "HEAD"]).trim().to_string();
+        let mut bundle = serde_json::to_value(knit::model::ChangeGroup::new(
+            "demo".into(),
+            "Synthetic landing".into(),
+            "2026-01-01T00:00:00Z".into(),
+        ))
+        .unwrap();
+        bundle["projectId"] = json!("demo");
+        bundle["repos"] = json!([{"id":"service","path":service,"worktreePath":service,
+            "featureBranch":"knit/demo","baseBranch":"main","baseSha":head,"headSha":head}]);
+        write(&workspace.join(".knit/bundles/demo.bundle.json"), &bundle);
+        let config_path = workspace.join(".knit/config.json");
+        let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+        config["activeBundle"] = json!("demo");
+        config["pushSync"] = json!(true);
+        config["syncRemotes"] = json!(["hosted"]);
+        write(&config_path, &config);
+        let project_path = workspace.join(".knit/projects/demo.project.json");
+        let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+        project["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
+        project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{
+            "id":"verify","type":"run","repoId":"service","effect":"read_only",
+            "command":["git","rev-parse","HEAD"]
+        }]});
+        write(&project_path, &project);
+        {
+            let mut state = server.state.lock().unwrap();
+            state["execution"] = json!(true);
+            state["uploads"] = json!([]);
+            state["landing"] = project["landing"].clone();
+        }
+        let plan_path = workspace.join(".knit/land-plans/demo.land.json");
+        knit(
+            &workspace,
+            ["land", "plan", "--out", plan_path.to_str().unwrap()],
+        );
+        let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+        plan["terminal"] = json!(false);
+        write(&plan_path, &plan);
+        if synchronized {
+            knit(
+                &workspace,
+                ["sync", "push", "--plans", "--remote", "hosted"],
+            );
+        }
+        let plan_bytes = fs::read(&plan_path).unwrap();
+        let apply = [
+            "land",
+            "apply",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--no-tag",
+        ];
+        knit(&workspace, apply);
+        let runs = workspace.join(".knit/land-runs");
+        let run_path = fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".run.json"))
+            .unwrap();
+        let first: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+        assert_eq!(first["status"], "succeeded");
+        assert_eq!(first["finalized"], true);
+        {
+            let state = server.state.lock().unwrap();
+            assert_eq!(state["uploads"].as_array().unwrap().len(), 1);
+            assert_eq!(state["uploads"][0]["owned"], synchronized);
+            assert_eq!(state["uploads"][0]["run"], first);
+            assert_eq!(state["runs"][0]["run"], first);
+        }
+        knit(
+            &workspace,
+            ["sync", "push", "--plans", "--remote", "hosted"],
+        );
+        knit(
+            &workspace,
+            ["sync", "pull", "--plans", "--remote", "hosted"],
+        );
+        assert_eq!(
+            serde_json::from_slice::<Value>(&fs::read(&plan_path).unwrap()).unwrap(),
+            serde_json::from_slice::<Value>(&plan_bytes).unwrap()
+        );
+        // A fresh apply of the same plan gets a new receipt. A failed upload
+        // leaves ownership available for resume, without repeating its command.
+        server.state.lock().unwrap()["failReceiptOnce"] = json!(true);
+        let output = knit_fails(&workspace, apply);
+        assert!(output.contains("503"), "{output}");
+        let second_path = fs::read_dir(&runs)
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p != &run_path && p.to_string_lossy().ends_with(".run.json"))
+            .unwrap();
+        let failed: Value = serde_json::from_slice(&fs::read(&second_path).unwrap()).unwrap();
+        assert_eq!(failed["status"], "succeeded");
+        assert_eq!(failed["finalization"]["synchronization"], "failed");
+        // Ordinary sync cannot publish a changed receipt outside its lease.
+        knit(
+            &workspace,
+            ["sync", "push", "--plans", "--remote", "hosted"],
+        );
+        assert_eq!(
+            server.state.lock().unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        knit(
+            &workspace,
+            ["land", "resume", "--run", second_path.to_str().unwrap()],
+        );
+        let resumed: Value = serde_json::from_slice(&fs::read(&second_path).unwrap()).unwrap();
+        assert_eq!(resumed["steps"], failed["steps"]);
+        assert_eq!(resumed["finalized"], true);
+        assert_eq!(resumed["finalization"]["synchronization"], "succeeded");
+        knit(
+            &workspace,
+            ["sync", "push", "--plans", "--remote", "hosted"],
+        );
+        knit(
+            &workspace,
+            ["sync", "pull", "--plans", "--remote", "hosted"],
+        );
+        let state = server.state.lock().unwrap();
+        assert!(state["ownership"].is_null());
+        assert_eq!(state["runs"].as_array().unwrap().len(), 2);
+        assert_eq!(state["runs"][1]["run"], resumed);
+        drop(state);
+        fs::remove_dir_all(dir).unwrap();
+    }
 }
