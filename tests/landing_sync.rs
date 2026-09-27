@@ -782,8 +782,16 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
     // Cover an already-synchronized plan and the first push of an offline plan.
     for synchronized in [true, false] {
         let server = Server::new();
-        let dir = unique_temp_dir();
-        let workspace = dir.join("workspace");
+        // Git for Windows includes the checkout name in its admin path.
+        // Keep this fixture root short enough for the generated run checkouts.
+        let allocated = unique_temp_dir();
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let dir = allocated.with_file_name(format!("ks-{nonce:x}"));
+        fs::rename(&allocated, &dir).unwrap();
+        let workspace = dir.clone();
         setup(&workspace, &server.url);
         let service = workspace.join("service");
         init_repo(&service, "service");
