@@ -2044,6 +2044,7 @@ fn execute(
         pins: Mutex::new(()),
     };
     journal.edit(|r| {
+        r["finalization"]["synchronization"] = json!("pending");
         if skip_checks {
             r["checksSkipped"] = json!(true);
         }
@@ -2089,6 +2090,15 @@ fn execute(
             }
         }
     };
+    let local_sync = local.as_ref().and_then(|(active, options)| {
+        options.map(|options| {
+            (
+                active.root.clone(),
+                options.remote.to_vec(),
+                options.no_remote,
+            )
+        })
+    });
     let result = result.and_then(|()| {
         if !recovering {
             if let Some((active, options)) = local {
@@ -2131,6 +2141,14 @@ fn execute(
             r["finalization"]["syncError"] = json!(format!("{e:#}"));
         })?;
     }
+    // Once the authority accepts the final receipt, keep it immutable even if
+    // a secondary sync destination fails. Ordinary sync can retry those bytes.
+    let completion = completion.and_then(|()| {
+        if let Some((root, remotes, no_remote)) = local_sync {
+            crate::commands::remote::landing::sync_finished_run(&root, plan, &remotes, no_remote)?;
+        }
+        Ok(())
+    });
     if json_output {
         println!("{}", serde_json::to_string(&journal.snapshot())?);
     } else {
