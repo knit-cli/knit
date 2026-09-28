@@ -333,6 +333,7 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
     );
     let mut histories: BTreeMap<String, BTreeMap<String, ExecutedPlan>> = BTreeMap::new();
     let mut run_hashes = BTreeMap::new();
+    let mut deferred_authored = std::collections::BTreeSet::new();
     for path in json_files(&root.join(".knit/land-runs"), ".run.json")? {
         let run: Value = read_json(&path)?;
         if run["schemaVersion"] != "0.2" {
@@ -365,6 +366,17 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
                         .exists()
             })
         {
+            // The editable plan can be the very revision this executor owns.
+            // Wait for its completed receipt to supply the original source
+            // snapshots instead of uploading an unsnapshotted authored copy.
+            let plan = &run["plan"];
+            let plan_hash = document_hash(plan);
+            if run["planHash"] == plan_hash
+                && plan["bundleId"] == bundle
+                && plan["sourceProjectId"] == index.project
+            {
+                deferred_authored.insert(plan_hash);
+            }
             continue;
         }
         let plan = &run["plan"];
@@ -438,6 +450,7 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
             });
         }
     }
+    authored.retain(|_, plan| !deferred_authored.contains(&document_hash(plan)));
     let keys: std::collections::BTreeSet<_> =
         authored.keys().chain(histories.keys()).cloned().collect();
     for key in keys {
@@ -1131,6 +1144,40 @@ mod tests {
             bundle_snapshot: None,
             project_snapshot: None,
         }
+    }
+    #[test]
+    fn pending_run_defers_only_its_exact_authored_plan() {
+        let root = temp();
+        let index = SyncIndex {
+            project: "demo".into(),
+            ..Default::default()
+        };
+        for slug in ["alpha", "beta"] {
+            save(
+                &root.join(format!(".knit/bundles/{slug}.bundle.json")),
+                &json!({"id":slug,"projectId":"demo"}),
+            )
+            .unwrap();
+        }
+        let mut active = record(1, "active").plan;
+        active["bundleId"] = json!("alpha");
+        active["sourceProjectId"] = json!("demo");
+        let mut other = active.clone();
+        other["bundleId"] = json!("beta");
+        save(&root.join(".knit/land-plans/alpha.land.json"), &active).unwrap();
+        save(&root.join(".knit/land-plans/beta.land.json"), &other).unwrap();
+        save(
+            &root.join(".knit/land-runs/active.run.json"),
+            &json!({"schemaVersion":"0.2","id":"active","bundleId":"alpha",
+                "status":"succeeded","finalization":{"synchronization":"pending"},
+                "planHash":document_hash(&active),"plan":active}),
+        )
+        .unwrap();
+        let outgoing = outgoing(&root, &index).unwrap();
+        assert_eq!(outgoing.plans.len(), 1);
+        assert_eq!(outgoing.plans[0].bundle_slug, "beta");
+        assert!(outgoing.runs.is_empty());
+        fs::remove_dir_all(root).unwrap();
     }
     #[test]
     fn clone_serialization_restores_exact_recipe_but_preserves_real_local_edits() {
