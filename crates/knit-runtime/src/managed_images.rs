@@ -1,6 +1,6 @@
 //! Registry-only image consumption and a deliberately restricted Dockerfile grammar.
 //! Never resolve a workload's image names directly against the shared host cache.
-use anyhow::{bail, Context, Result};
+use anyhow::{Context, Result, bail};
 use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -196,7 +196,9 @@ pub(super) fn rewrite_dockerfile(
             "FROM" => {
                 let mut tokens: Vec<String> = body.split_whitespace().map(str::to_string).collect();
                 if tokens.first().is_some_and(|s| s.starts_with("--")) {
-                    bail!("Managed Dockerfile sources must use the engine's native platform; remove FROM platform options");
+                    bail!(
+                        "Managed Dockerfile sources must use the engine's native platform; remove FROM platform options"
+                    );
                 }
                 let source_index = 0;
                 if tokens.len() != source_index + 1 && tokens.len() != source_index + 3 {
@@ -314,7 +316,9 @@ pub(super) fn rewrite_dockerfile(
                         .iter()
                         .any(|part| part.contains(':') || part.starts_with('/'))
                 {
-                    bail!("Managed ADD supports only literal local context sources; fetch remote content inside a RUN step");
+                    bail!(
+                        "Managed ADD supports only literal local context sources; fetch remote content inside a RUN step"
+                    );
                 }
                 rewritten.push(line);
             }
@@ -388,12 +392,14 @@ mod tests {
                 "{source}"
             );
         }
-        assert!(rewrite_dockerfile(
-            "FROM scratch",
-            Some(&json!({"BUILDKIT_SYNTAX":"custom/frontend"})),
-            |s| Ok(s.to_string())
-        )
-        .is_err());
+        assert!(
+            rewrite_dockerfile(
+                "FROM scratch",
+                Some(&json!({"BUILDKIT_SYNTAX":"custom/frontend"})),
+                |s| Ok(s.to_string())
+            )
+            .is_err()
+        );
         assert!(registry_reference("registry.example.test/team/knit-foreign:runtime").is_err());
     }
 

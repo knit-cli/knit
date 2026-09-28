@@ -595,6 +595,20 @@ fn sanitize(mut doc: Value, ctx: &RuntimeContext, project: &str, repo: &str) -> 
     Ok(doc)
 }
 
+/// The database name a managed stack gets, named exactly as a local run names
+/// it: a bundle database follows its template (default `app_{bundleId}`), any
+/// other mode keeps the configured name.
+fn managed_database_name(db: &crate::config::ProjectRuntimeDatabase, bundle_id: &str) -> String {
+    if db.mode == DatabaseMode::Bundle {
+        db.name_template
+            .as_deref()
+            .unwrap_or("app_{bundleId}")
+            .replace("{bundleId}", bundle_id)
+    } else {
+        db.name.clone()
+    }
+}
+
 fn escape_interpolation(value: &mut Value) {
     match value {
         Value::String(s) => *s = s.replace('$', "$$"),
@@ -678,10 +692,7 @@ fn up_with_docker(
         env.insert("KNIT_DB_PORT".into(), 5432.to_string());
         env.insert(
             "KNIT_DB_NAME".into(),
-            db.name_template
-                .as_ref()
-                .map(|s| s.replace("{bundle}", &ctx.bundle_id))
-                .unwrap_or(db.name.clone()),
+            managed_database_name(db, &ctx.bundle_id),
         );
     }
     // Validate and freeze EVERY stack before the first workload mutation.
@@ -1280,6 +1291,19 @@ fn verified_ports(ctx: &RuntimeContext, container: &Value, network_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn managed_database_names_follow_the_local_template() {
+        let mut db = crate::config::ProjectRuntimeDatabase {
+            mode: DatabaseMode::Bundle,
+            ..Default::default()
+        };
+        assert_eq!(managed_database_name(&db, "demo"), "app_demo");
+        db.name_template = Some("svc_{bundleId}_test".into());
+        assert_eq!(managed_database_name(&db, "demo"), "svc_demo_test");
+        db.mode = DatabaseMode::Shared;
+        db.name = "shared_dev".into();
+        assert_eq!(managed_database_name(&db, "demo"), "shared_dev");
+    }
     fn context(root: &Path, owner: &str) -> RuntimeContext {
         RuntimeContext {
             root: root.into(),

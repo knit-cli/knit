@@ -1,7 +1,7 @@
 //! Terminal and lifecycle forwarding. The worker deliberately never calls this module.
-use super::{load_active_bundle, trimmed_env, ActiveBundle};
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use super::{ActiveBundle, load_active_bundle, trimmed_env};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 
 pub(crate) fn remote_enabled() -> bool {
     trimmed_env("SVARTAL_RUNTIME_TOKEN").is_some()
@@ -65,9 +65,21 @@ fn request(socket: &str, action: &str, body: &Value) -> Result<Value> {
     }
     let body = serde_json::to_vec(body)?;
     let mut stream = UnixStream::connect(socket).context("Cannot connect to runtime broker")?;
-    stream.set_read_timeout(Some(Duration::from_secs(900)))?;
+    // The broker's own budgets plus slack, so its answer arrives before we give
+    // up: a terminal that stops waiting first reports failure for a stack the
+    // broker goes on to start.
+    let budget = match action {
+        "up" => 20 * 60 + 30,
+        "down" => 5 * 60 + 30,
+        _ => 60 + 15,
+    };
+    stream.set_read_timeout(Some(Duration::from_secs(budget)))?;
     stream.set_write_timeout(Some(Duration::from_secs(30)))?;
-    write!(stream, "POST /v1/runtime/{action} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len())?;
+    write!(
+        stream,
+        "POST /v1/runtime/{action} HTTP/1.1\r\nHost: localhost\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+    )?;
     stream.write_all(&body)?;
     let mut response = Vec::new();
     stream.take(16 * 1024 * 1024).read_to_end(&mut response)?;
@@ -141,10 +153,12 @@ mod tests {
             .unwrap(),
             json!({})
         );
-        assert!(decode_response(b"HTTP/1.1 403 Forbidden\r\n\r\nsecret")
-            .unwrap_err()
-            .to_string()
-            .contains("403"));
+        assert!(
+            decode_response(b"HTTP/1.1 403 Forbidden\r\n\r\nsecret")
+                .unwrap_err()
+                .to_string()
+                .contains("403")
+        );
     }
     #[cfg(unix)]
     #[test]
