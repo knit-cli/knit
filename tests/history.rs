@@ -123,6 +123,23 @@ fn observed_commits_are_named_and_timed_by_the_commit_itself() {
         "{observed}"
     );
 
+    let queried: Vec<Value> = serde_json::from_str(&knit(
+        &workspace,
+        [
+            "log",
+            "--query",
+            "repo:backend AND since:2026-03-04 until:2026-03-04",
+            "--json",
+        ],
+    ))
+    .unwrap();
+    assert_eq!(queried.len(), 1);
+    assert_eq!(queried[0]["message"], "Fix seat map rounding");
+    assert_eq!(
+        queried[0]["events"][0]["occurredAt"],
+        observed["occurredAt"]
+    );
+
     let listing = knit(&workspace, ["history", "list", "-n", "50"]);
     assert!(listing.contains("Fix seat map rounding"), "{listing}");
     // The kind string is a fallback, not a message.
@@ -219,12 +236,12 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
     )
     .unwrap();
 
-    // Plain refresh is append-only: it has nothing to add and leaves the
-    // recorded events exactly as they are.
+    // Plain refresh is append-only: it adds the three configured base roots
+    // and leaves the existing bundle events exactly as they are.
     let refreshed = knit(&workspace, ["history", "refresh"]);
-    assert!(refreshed.contains("0 new event(s)"), "{refreshed}");
+    assert!(refreshed.contains("3 new event(s)"), "{refreshed}");
     let after_refresh = history_events(&workspace);
-    assert_eq!(after_refresh.len(), recorded);
+    assert_eq!(after_refresh.len(), recorded + 3);
     assert!(event_of_kind(&after_refresh, "commit.observed")["message"].is_null());
 
     let rebuilt = knit(&workspace, ["history", "refresh", "--rebuild"]);
@@ -232,7 +249,7 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
     assert!(rebuilt.contains("1 preserved event(s)"), "{rebuilt}");
 
     let after_rebuild = history_events(&workspace);
-    assert_eq!(after_rebuild.len(), recorded);
+    assert_eq!(after_rebuild.len(), recorded + 3);
     let observed = event_of_kind(&after_rebuild, "commit.observed");
     assert_eq!(observed["message"].as_str(), Some("Fix seat map rounding"));
     assert!(observed["occurredAt"]
@@ -247,6 +264,108 @@ fn rebuild_backfills_recorded_events_and_keeps_orphaned_ones() {
             .any(|event| event["eventId"].as_str() == Some("khist_ghostevent0001")),
         "{after_rebuild:#?}"
     );
+}
+
+#[test]
+fn refresh_covers_archived_bundles_preserves_orphans_and_feeds_related() {
+    let root = unique_temp_dir();
+    let workspace = workspace_with_recorded_and_observed_commits(&root);
+    knit(&workspace, ["bundle", "other work", "--repo", "frontend"]);
+
+    // A partially recorded ledger: the second bundle's events are missing,
+    // and an orphan event from a deleted bundle must survive every refresh.
+    let mut events = history_events(&workspace);
+    events.retain(|event| event["bundleId"].as_str() != Some("other-work"));
+    events.push(serde_json::json!({
+        "schemaVersion": "knit.history.event.v1",
+        "eventId": "khist_ghostevent0002",
+        "projectId": "demo",
+        "kind": "commit.recorded",
+        "bundleId": "deleted-work",
+        "message": "Work from a deleted bundle",
+        "recordedAt": "2026-08-14T09:00:00Z",
+        "recordedBy": "knit",
+    }));
+    fs::write(
+        history_path(&workspace),
+        events
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let recorded = events.len();
+
+    // `related` refreshes history itself, from a full sweep of every bundle,
+    // before joining with Git history. It must record the missing bundle and
+    // still answer from the whole ledger.
+    let checkout = workspace.join(".knit/worktrees/venue-capacity/backend");
+    let related = knit(&checkout, ["related", "app.txt"]);
+    assert!(related.contains("History refreshed:"), "{related}");
+    assert!(related.contains("venue-capacity"), "{related}");
+    assert!(related.contains("Add capacity form"), "{related}");
+    let after_related = history_events(&workspace);
+    assert!(after_related.len() > recorded);
+    assert!(
+        after_related
+            .iter()
+            .any(|event| event["bundleId"] == "other-work" && event["kind"] == "bundle.created"),
+        "{after_related:#?}"
+    );
+    assert!(
+        after_related
+            .iter()
+            .any(|event| event["eventId"] == "khist_ghostevent0002"),
+        "{after_related:#?}"
+    );
+
+    let refreshed = knit(&workspace, ["history", "refresh"]);
+    assert!(refreshed.contains("0 new event(s)"), "{refreshed}");
+    assert_eq!(history_events(&workspace).len(), after_related.len());
+
+    // Archived bundles keep their history recorded too.
+    knit(
+        &workspace,
+        ["bundle", "archive", "venue-capacity", "--keep-worktrees"],
+    );
+    // Remove a matching commit event after archiving. `related` must still
+    // recover it from the archived artifact, not just query the current ledger.
+    let mut partial = history_events(&workspace);
+    partial.retain(|event| event["kind"] != "commit.observed");
+    fs::write(
+        history_path(&workspace),
+        partial
+            .iter()
+            .map(|event| serde_json::to_string(event).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n",
+    )
+    .unwrap();
+    let recovered = knit(&checkout, ["related", "app.txt"]);
+    assert!(recovered.contains("History refreshed:"), "{recovered}");
+    assert!(recovered.contains("Fix seat map rounding"), "{recovered}");
+    let after_archive = history_events(&workspace);
+    assert!(after_archive
+        .iter()
+        .any(|event| event["kind"] == "commit.observed"));
+    assert!(
+        after_archive.iter().any(
+            |event| event["bundleId"] == "venue-capacity" && event["kind"] == "bundle.archived"
+        ),
+        "{after_archive:#?}"
+    );
+    assert!(
+        after_archive
+            .iter()
+            .any(|event| event["eventId"] == "khist_ghostevent0002"),
+        "{after_archive:#?}"
+    );
+    let again = knit(&workspace, ["history", "refresh"]);
+    assert!(again.contains("0 new event(s)"), "{again}");
+    assert_eq!(history_events(&workspace).len(), after_archive.len());
 }
 
 #[test]

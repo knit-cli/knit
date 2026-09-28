@@ -1,4 +1,5 @@
 use super::{pr_number_from_url, CheckRun, Forge, PrTarget, PullRequest, PULL_REQUEST_KIND};
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -27,6 +28,26 @@ struct BitbucketPullRequest {
     draft: Option<bool>,
     #[serde(default)]
     participants: Vec<BitbucketParticipant>,
+    #[serde(default)]
+    author: Option<BitbucketUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketUser {
+    #[serde(default)]
+    nickname: Option<String>,
+    #[serde(default)]
+    display_name: Option<String>,
+    #[serde(default)]
+    links: Option<BitbucketUserLinks>,
+}
+
+#[derive(Debug, Deserialize)]
+struct BitbucketUserLinks {
+    #[serde(default)]
+    avatar: Option<BitbucketHref>,
+    #[serde(default)]
+    html: Option<BitbucketHref>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -113,7 +134,7 @@ impl Forge for Bitbucket {
             encode_repo(&repo)?,
             encode_query_component(&query)
         );
-        let output = api_output("GET", &endpoint, None)?;
+        let output = api_output(target, "GET", &endpoint, None)?;
         let list: BitbucketList<BitbucketPullRequest> =
             serde_json::from_str(&output).context("failed to parse Bitbucket pull list JSON")?;
         Ok(list
@@ -142,6 +163,7 @@ impl Forge for Bitbucket {
         }))
         .context("failed to encode Bitbucket pull request payload")?;
         let output = api_output(
+            target,
             "POST",
             &format!("repositories/{}/pullrequests", encode_repo(&repo)?),
             Some(&payload),
@@ -156,6 +178,7 @@ impl Forge for Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         let output = api_output(
+            target,
             "GET",
             &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
             None,
@@ -163,6 +186,32 @@ impl Forge for Bitbucket {
         let pr: BitbucketPullRequest =
             serde_json::from_str(&output).context("failed to parse Bitbucket pull JSON")?;
         Ok(pr.into_pull_request())
+    }
+
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Review {
+            state: Option<String>,
+            merge_commit: Option<BitbucketCommit>,
+        }
+        let repo = resolve_repo(target)?;
+        let id = selector_id(publication_url).context("could not determine Bitbucket PR id")?;
+        let output = api_output(
+            target,
+            "GET",
+            &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
+            None,
+        )?;
+        let review: Review = serde_json::from_str(&output)
+            .context("failed to parse Bitbucket merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("MERGED") {
+            review
+                .merge_commit
+                .and_then(|c| c.hash)
+                .filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
@@ -210,6 +259,7 @@ impl Forge for Bitbucket {
         }))
         .context("failed to encode Bitbucket merge payload")?;
         api_output(
+            target,
             "POST",
             &format!(
                 "repositories/{}/pullrequests/{id}/merge",
@@ -230,6 +280,7 @@ impl Forge for Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         let output = api_output(
+            target,
             "GET",
             &format!(
                 "repositories/{}/pullrequests/{id}/statuses?pagelen=100",
@@ -249,11 +300,30 @@ impl Bitbucket {
         let id = selector_id(selector)
             .with_context(|| format!("could not determine Bitbucket PR id from `{selector}`"))?;
         api_output(
+            target,
             "PUT",
             &format!("repositories/{}/pullrequests/{id}", encode_repo(&repo)?),
             Some(payload),
         )?;
         Ok(())
+    }
+}
+
+impl BitbucketUser {
+    /// Bitbucket has no stable public login; the nickname is the closest,
+    /// and the display name stands in when it is missing.
+    fn into_author(self) -> Option<ForgeAuthor> {
+        let login = self.nickname.or_else(|| self.display_name.clone())?;
+        let links = self.links;
+        Some(ForgeAuthor {
+            login,
+            name: self.display_name,
+            avatar_url: links
+                .as_ref()
+                .and_then(|links| links.avatar.as_ref())
+                .map(|href| href.href.clone()),
+            url: links.and_then(|links| links.html).map(|href| href.href),
+        })
     }
 }
 
@@ -279,6 +349,7 @@ impl BitbucketPullRequest {
             mergeable: None,
             merge_state_status: None,
             review_decision: approved.then(|| "APPROVED".to_string()),
+            author: self.author.and_then(BitbucketUser::into_author),
         }
     }
 }
@@ -298,8 +369,8 @@ impl From<BitbucketStatus> for CheckRun {
 }
 
 pub(crate) fn commit_check_runs(target: &PrTarget, repo: &str, sha: &str) -> Result<Vec<CheckRun>> {
-    let _ = target;
     let output = api_output(
+        target,
         "GET",
         &format!(
             "repositories/{}/commit/{}/statuses/build?pagelen=100",
@@ -466,14 +537,60 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
-    let auth = auth_header()?;
+/// REST authorization for a saved Bitbucket credential, decided by its
+/// recorded token kind: an Atlassian API token authenticates as Basic with
+/// the account email, a Bitbucket repository/project/workspace access token
+/// rides the Bearer scheme. The recorded email is validated with the same
+/// shape the interactive setup accepts. An unclassified legacy credential
+/// keeps the recorded-username heuristic the Git helper also preserves, so
+/// one credential authenticates consistently everywhere.
+fn saved_authorization(credential: &crate::auth::ResolvedCredential) -> Result<String> {
+    let basic = || {
+        format!(
+            "Basic {}",
+            base64_encode(&format!("{}:{}", credential.username, credential.token))
+        )
+    };
+    match credential.token_type.as_deref() {
+        Some("access_token") => Ok(format!("Bearer {}", credential.token)),
+        Some("atlassian_api_token")
+            if crate::auth::is_bitbucket_account_email(&credential.username) =>
+        {
+            Ok(basic())
+        }
+        Some("atlassian_api_token") => bail!(
+            "Credential `{}` is recorded as an Atlassian API token but has no valid account email; run `knit auth` to update its token type and account email",
+            credential.name
+        ),
+        // Unclassified legacy credentials keep the username heuristic: any
+        // nonempty username meant Basic, anything else Bearer.
+        _ if !credential.username.is_empty() => Ok(basic()),
+        _ => Ok(format!("Bearer {}", credential.token)),
+    }
+}
+
+fn api_output(
+    target: &PrTarget,
+    method: &str,
+    endpoint: &str,
+    body: Option<&str>,
+) -> Result<String> {
+    let credential = super::target_credential(target, "bitbucket")?;
+    let auth = match &credential {
+        Some(value) => saved_authorization(value)?,
+        None => auth_header()?,
+    };
+    let base = match &credential {
+        Some(value) => super::bound_api_base(value)?,
+        None => api_base(),
+    };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
-    let url = format!("{}/{endpoint}", api_base());
+    let url = format!("{base}/{endpoint}");
     // Keep this small transport local for now. It mirrors the proven GitHub
     // transport; extracting a shared authenticated client can happen separately.
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(20))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -496,6 +613,10 @@ fn api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String
             .with_context(|| format!("failed to read Bitbucket API response for {operation}")),
         Err(ureq::Error::Status(status, response)) => {
             let detail = response.into_string().unwrap_or_default();
+            let detail = credential
+                .as_ref()
+                .map(|value| value.redact(&detail).replace(&auth, "[REDACTED]"))
+                .unwrap_or(detail);
             if status == 401 || status == 403 {
                 bail!(
                     "Bitbucket API request failed during {operation}: HTTP {status}: {}\nHint: set KNIT_BITBUCKET_ACCESS_TOKEN, or KNIT_BITBUCKET_EMAIL with KNIT_BITBUCKET_API_TOKEN, to credentials that can access this repository.",
@@ -554,6 +675,20 @@ mod tests {
     use super::*;
 
     #[test]
+    fn maps_pull_request_author() {
+        let json = r#"{"id":7,"links":{"html":{"href":"https://bitbucket.org/acme/backend/pull-requests/7"}},"source":{"branch":{"name":"knit/x"}},"destination":{"branch":{"name":"main"}},"author":{"display_name":"Dana Ruiz","nickname":"dana","links":{"avatar":{"href":"https://bitbucket.org/avatar/dana"},"html":{"href":"https://bitbucket.org/dana"}}}}"#;
+        let pr: BitbucketPullRequest = serde_json::from_str(json).unwrap();
+        let author = pr.into_pull_request().author.expect("author");
+        assert_eq!(author.login, "dana");
+        assert_eq!(author.name.as_deref(), Some("Dana Ruiz"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://bitbucket.org/avatar/dana")
+        );
+        assert_eq!(author.url.as_deref(), Some("https://bitbucket.org/dana"));
+    }
+
+    #[test]
     fn parses_full_name() {
         assert_eq!(
             full_name("https://bitbucket.org/acme/backend.git").as_deref(),
@@ -605,6 +740,65 @@ mod tests {
         assert_eq!(
             base64_encode("user@example.test:token"),
             "dXNlckBleGFtcGxlLnRlc3Q6dG9rZW4="
+        );
+    }
+
+    #[test]
+    fn saved_authorization_follows_the_recorded_token_kind() {
+        let resolved = |token_type: Option<&str>, username: &str| crate::auth::ResolvedCredential {
+            name: "synthetic-bb".into(),
+            provider: "bitbucket".into(),
+            host: "bitbucket.org".into(),
+            username: username.into(),
+            token_type: token_type.map(str::to_owned),
+            token: "synthetic-secret".into(),
+        };
+        // Atlassian API tokens use Basic email:token...
+        assert_eq!(
+            saved_authorization(&resolved(Some("atlassian_api_token"), "dev@example.org")).unwrap(),
+            format!(
+                "Basic {}",
+                base64_encode("dev@example.org:synthetic-secret")
+            )
+        );
+        // ...and never silently switch schemes when the email is missing or
+        // not an email address at all: the credential fails actionably.
+        let missing = saved_authorization(&resolved(Some("atlassian_api_token"), "")).unwrap_err();
+        assert!(
+            format!("{missing:#}").contains("no valid account email"),
+            "{missing:#}"
+        );
+        let not_email =
+            saved_authorization(&resolved(Some("atlassian_api_token"), "git-handle")).unwrap_err();
+        assert!(
+            format!("{not_email:#}").contains("no valid account email"),
+            "{not_email:#}"
+        );
+        // Access tokens ride Bearer regardless of a recorded email.
+        assert_eq!(
+            saved_authorization(&resolved(Some("access_token"), "dev@example.org")).unwrap(),
+            "Bearer synthetic-secret"
+        );
+        assert_eq!(
+            saved_authorization(&resolved(Some("access_token"), "")).unwrap(),
+            "Bearer synthetic-secret"
+        );
+        // Unclassified legacy credentials keep the username heuristic — any
+        // nonempty username, email-shaped or not, still means Basic.
+        assert_eq!(
+            saved_authorization(&resolved(None, "dev@example.org")).unwrap(),
+            format!(
+                "Basic {}",
+                base64_encode("dev@example.org:synthetic-secret")
+            )
+        );
+        assert_eq!(
+            saved_authorization(&resolved(None, "git-handle")).unwrap(),
+            format!("Basic {}", base64_encode("git-handle:synthetic-secret"))
+        );
+        assert_eq!(
+            saved_authorization(&resolved(None, "")).unwrap(),
+            "Bearer synthetic-secret"
         );
     }
 

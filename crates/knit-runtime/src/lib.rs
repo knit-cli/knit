@@ -10,12 +10,15 @@
 //! knit CLI adapts bundle state into that contract; anything else (an app
 //! embedding the runtime, a future standalone binary) can do the same.
 
+mod bindings;
 pub mod config;
+mod database;
 mod eject;
 mod engine;
 mod envfile;
 mod managed;
 mod plan;
+mod readiness;
 mod state;
 mod support;
 mod transform;

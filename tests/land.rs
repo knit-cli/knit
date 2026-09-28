@@ -5,6 +5,74 @@ use serde_json::{json, Value};
 use std::fs;
 use std::path::Path;
 
+// This suite is the v0.1 compatibility contract. New saved-plan execution is
+// covered separately; pin legacy generation instead of depending on the default.
+fn legacy_args<I, S>(args: I) -> Vec<std::ffi::OsString>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let mut args: Vec<_> = args.into_iter().map(|s| s.as_ref().to_owned()).collect();
+    if let Some(i) = args.iter().position(|s| s == "land") {
+        args.splice(i + 1..i + 1, ["--schema-version".into(), "0.1".into()]);
+    }
+    args
+}
+fn knit<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit(cwd, legacy_args(args))
+}
+fn knit_fails<I, S>(cwd: &Path, args: I) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails(cwd, legacy_args(args))
+}
+fn knit_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_with_fake_gh(cwd, legacy_args(args), fake_bin, fake_gh_dir)
+}
+fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails_with_fake_gh(cwd, legacy_args(args), fake_bin, fake_gh_dir)
+}
+fn knit_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_with_fake_gh_env(cwd, legacy_args(args), fake_bin, fake_gh_dir, env)
+}
+fn knit_fails_with_fake_gh_env<I, S>(
+    cwd: &Path,
+    args: I,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    env: &[(&str, &str)],
+) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    common::knit_fails_with_fake_gh_env(cwd, legacy_args(args), fake_bin, fake_gh_dir, env)
+}
+
 fn latest_node_of_type<'a>(bundle: &'a Value, node_type: &str) -> &'a Value {
     bundle["nodes"]
         .as_array()
@@ -126,6 +194,19 @@ fn artifact_land_apply_can_use_native_ipv4_transport() {
         .iter()
         .any(|node| node["type"].as_str() == Some("feature.landed")));
 
+    assert_eq!(landed_bundle["state"], "archived");
+    assert!(landed_bundle["archivedAt"].is_string());
+    let archive = latest_node_of_type(&landed_bundle, "feature.archived");
+    assert_eq!(archive["message"], "landed");
+    assert_eq!(landed_bundle["headNodeId"], archive["id"]);
+    let original_nodes = artifact_payload["nodes"].as_array().unwrap();
+    assert_eq!(
+        &landed_bundle["nodes"].as_array().unwrap()[..original_nodes.len()],
+        original_nodes.as_slice()
+    );
+    // Artifact landing must not dispose another machine's checkout.
+    assert!(backend_feature.join("app.txt").exists());
+
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -192,6 +273,11 @@ fn artifact_land_apply_accepts_a_server_resolved_lane_map() {
     );
     let landed_payload: Value = serde_json::from_str(&fs::read_to_string(out).unwrap()).unwrap();
     assert_eq!(landed_payload["publications"][0]["baseBranch"], "stable");
+    assert_eq!(landed_payload["state"], "archived");
+    assert_eq!(
+        latest_node_of_type(&landed_payload, "feature.archived")["message"],
+        "landed"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -1347,6 +1433,10 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
         Some("feature.landed")
     );
     assert_ne!(bundle_after_failure["state"].as_str(), Some("archived"));
+    let receipt = latest_node_of_type(&bundle_after_failure, "branch.landed");
+    assert_eq!(receipt["repoIds"], json!(["backend"]));
+    assert_eq!(receipt["landing"]["targetBranch"], "main");
+
     assert!(workspace
         .join(".knit/worktrees/venue-capacity/backend")
         .exists());
@@ -1363,6 +1453,16 @@ fn land_resume_skips_succeeded_steps_and_retries_failed_run_steps() {
     // and the local ledger said it had not.
     let landed = read_bundle(&workspace);
     assert_eq!(landed["state"].as_str(), Some("archived"));
+    assert_eq!(
+        landed["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|n| n["type"] == "branch.landed")
+            .count(),
+        1
+    );
+
     assert_eq!(
         latest_node_of_type(&landed, "feature.landed")["landing"]["terminal"].as_bool(),
         Some(true)
@@ -2750,6 +2850,13 @@ fn artifact_intermediate_lane_merges_the_branch_and_spares_the_review() {
     let landing = &landed_payload["nodes"].as_array().unwrap().last().unwrap()["landing"];
     assert_eq!(landing["terminal"], json!(false));
     assert_eq!(landing["lane"], json!("staging"));
+    assert_ne!(landed_payload["state"], "archived");
+    assert!(landed_payload["archivedAt"].is_null());
+    assert!(!landed_payload["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"] == "feature.archived"));
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -3999,7 +4106,7 @@ fn a_cross_repo_trigger_survives_branch_target_selection() {
             "create",
             "--github",
             "--no-sync",
-            "--base",
+            "--target",
             "release",
         ],
         &fake_bin,
@@ -4230,6 +4337,148 @@ fn a_terminal_target_still_merges_the_reviews() {
     let landed = latest_node_of_type(&bundle, "feature.landed");
     assert_eq!(landed["landing"]["terminal"].as_bool(), Some(true));
     assert_eq!(landed["landing"]["targetBranch"].as_str(), Some("main"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// Publish one backend review against `main` and return the workspace with
+/// the fake forge wired up, ready for `knit land`.
+fn publish_main_review_bundle(
+    root: &Path,
+    title: &str,
+) -> (std::path::PathBuf, std::path::PathBuf, std::path::PathBuf) {
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({ "provider": "github" });
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", title]);
+    let slug = title.replace(' ', "-");
+    let feature = workspace.join(format!(".knit/worktrees/{slug}/backend"));
+    append_line(&feature.join("app.txt"), "main change");
+    knit(&workspace, ["commit", "--all", "-m", "Main change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+/// A request names a destination, not a flag. A plan written bare lands every
+/// review into the base it records — `main` here — so `--target main` asks for
+/// exactly that plan. This is the resume path a one-click "land to main" takes
+/// after an earlier bare `knit land` left its plan behind: the plan step is
+/// refused as already existing, and the apply must then accept the plan
+/// rather than demand a `--force` regeneration of the same landing.
+#[test]
+fn a_target_request_accepts_a_bare_plan_that_already_lands_there() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "bare then target");
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let plan_json = read_land_plan(&workspace, "bare-then-target");
+    assert!(plan_json["targetBranch"].is_null(), "{plan_json}");
+
+    let existing = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main", "plan"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(existing.contains("Land plan already exists"), "{existing}");
+
+    // Showing the plan under the same destination is not a mismatch either.
+    let shown = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(shown.contains("backend -> main"), "{shown}");
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed bare-then-target"), "{apply}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
+    assert!(!fake_gh_dir.join("retarget-order.txt").exists());
+
+    let bundle = read_named_bundle(&workspace, "bare-then-target");
+    assert_eq!(bundle["state"].as_str(), Some("archived"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A different destination is still refused: the plan lands into `main`, and
+/// `--target release` asks for somewhere else.
+#[test]
+fn a_target_request_still_refuses_a_bare_plan_that_lands_elsewhere() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "bare then release");
+
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+    let mismatched = knit_fails_with_fake_gh(
+        &workspace,
+        ["land", "--target", "release", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        mismatched.contains("Land plan targets recorded PR bases, not `release`"),
+        "{mismatched}"
+    );
+    assert!(!fake_gh_dir.join("merged-backend").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The mirror image: a `--target main` plan whose reviews already record
+/// `main` lands into the recorded review bases, so a bare apply may use it.
+#[test]
+fn a_bare_request_accepts_a_target_plan_for_the_recorded_bases() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_main_review_bundle(&root, "target then bare");
+
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "--target", "main"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plan_json = read_land_plan(&workspace, "target-then-bare");
+    assert_eq!(plan_json["targetBranch"].as_str(), Some("main"));
+
+    let apply = knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(apply.contains("landed target-then-bare"), "{apply}");
+    assert!(fake_gh_dir.join("merged-backend").exists());
 
     fs::remove_dir_all(root).unwrap();
 }

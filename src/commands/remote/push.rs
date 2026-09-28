@@ -4,9 +4,9 @@
 
 use super::client::{
     configured_sync_remote_names, decode_response, effective_workspace_config,
-    fetch_project_export, load_project_if_present, normalize_base_url, request, request_json,
-    resolve_project_id, resolve_remote, resolve_sync_remote_names, resolve_token, token_from_env,
-    workspace_config,
+    fetch_project_export, load_project_if_present, normalize_base_url, remote_token_env_name,
+    request, request_json, resolve_project_id, resolve_remote, resolve_sync_remote_names,
+    resolve_token, token_from_env, workspace_config,
 };
 use super::{RemoteArtifact, RemoteBundle, RemoteProject};
 use crate::commands::push::PushForce;
@@ -21,10 +21,8 @@ use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-use std::io::{self, Read};
+use std::io::{self, IsTerminal};
 use std::path::Path;
-
-const MAX_STDIN_TOKEN_BYTES: u64 = 64 * 1024;
 
 pub fn add_remote(
     name: &str,
@@ -42,8 +40,6 @@ pub fn add_remote(
     if token_stdin && !use_global {
         bail!("--token-stdin requires --global so a user credential is never stored in workspace config");
     }
-    let stdin_token = token_stdin.then(read_stdin_token).transpose()?;
-    let token = token.or(stdin_token.as_deref());
     let (root, mut config) = if use_global {
         (None, load_global_config()?)
     } else {
@@ -52,6 +48,12 @@ pub fn add_remote(
         (Some(root), config)
     };
     let remote_name = slugify(name);
+    // Resolve the target config before asking for the secret, so a broken or
+    // wrong-scoped setup never collects a token it cannot save.
+    let stdin_token = token_stdin
+        .then(|| read_token_input(&token_prompt(&remote_name)))
+        .transpose()?;
+    let token = token.or(stdin_token.as_deref());
     config.remotes.insert(
         remote_name.clone(),
         KnitRemote {
@@ -59,6 +61,11 @@ pub fn add_remote(
             token: token.map(ToString::to_string),
         },
     );
+    let global_config_path = if root.is_none() {
+        Some(crate::store::global_config_path()?)
+    } else {
+        None
+    };
     if let Some(root) = root {
         save_config(&root, &config)?;
     } else {
@@ -71,43 +78,77 @@ pub fn add_remote(
         scope,
         out::repo(&remote_name)
     );
-    if !use_global && token.is_some() {
+    if let (true, Some(path)) = (use_global, global_config_path.as_deref()) {
+        if token.is_some() {
+            print_token_saved_guidance(&remote_name, path);
+        }
+    } else if token.is_some() {
         warn_workspace_scoped_token(&remote_name);
     }
     Ok(())
 }
 
-fn read_stdin_token() -> Result<String> {
-    let mut bytes = Vec::new();
-    io::stdin()
-        .take(MAX_STDIN_TOKEN_BYTES + 1)
-        .read_to_end(&mut bytes)
-        .context("failed to read remote token from stdin")?;
-    if bytes.len() as u64 > MAX_STDIN_TOKEN_BYTES {
-        bail!("remote token exceeds {MAX_STDIN_TOKEN_BYTES} bytes");
+/// The hidden-prompt text for terminal token entry. Says explicitly that
+/// Enter submits, so nobody waits on Ctrl-D (which a terminal read-to-EOF
+/// would otherwise require).
+fn token_prompt(remote_name: &str) -> String {
+    format!("Token for remote `{remote_name}` (input hidden, press Enter to submit): ")
+}
+
+/// Read a remote token from stdin through the shared token reader: at a
+/// terminal a hidden prompt that completes as soon as Enter is pressed — no
+/// Ctrl-D; piped or redirected stdin the bounded read-to-EOF contract used
+/// by secret managers (`printf '%s\n' "$TOKEN" | knit remote add …`).
+fn read_token_input(prompt: &str) -> Result<String> {
+    crate::token_entry::read_token(prompt, "remote token")
+}
+
+/// Where a just-saved token lives and how to check or replace it. Saving the
+/// token never validates it against the remote, so say so and point at
+/// `remote auth-status`; never print the token itself. When an environment
+/// override is active it wins over the stored token, so name it (no value).
+fn print_token_saved_guidance(remote_name: &str, config_path: &Path) {
+    println!(
+        "{} {}",
+        out::heading("Token saved to:"),
+        config_path.display()
+    );
+    println!("{}", out::muted("Authentication has not been checked."));
+    println!(
+        "{} knit remote auth-status {remote_name}",
+        out::heading("Verify:")
+    );
+    println!(
+        "{} knit remote token {remote_name} --global",
+        out::heading("Replace:")
+    );
+    if token_from_env(remote_name).is_some() {
+        let specific = remote_token_env_name(remote_name);
+        let active = if std::env::var(&specific)
+            .ok()
+            .filter(|value| !value.trim().is_empty())
+            .is_some()
+        {
+            specific
+        } else {
+            "KNIT_REMOTE_TOKEN".to_string()
+        };
+        println!(
+            "{}",
+            out::muted(format!(
+                "{active} overrides the stored token from the environment."
+            ))
+        );
     }
-    let token = String::from_utf8(bytes).context("remote token from stdin is not UTF-8")?;
-    let token = token.trim_end_matches(['\r', '\n']);
-    if token.is_empty() {
-        bail!("remote token from stdin is empty");
-    }
-    Ok(token.to_string())
 }
 
 /// Workspace config can end up shared (committed, templated, copied between
 /// collaborators); tokens belong in per-user storage instead.
 fn warn_workspace_scoped_token(remote_name: &str) {
     println!(
-        "{} token stored in workspace .knit/config.json. Prefer `--global` or the KNIT_REMOTE_{}_TOKEN environment variable so credentials never live in files a collaborator might receive.",
+        "{} token stored in workspace .knit/config.json. Prefer `--global` or the {} environment variable so credentials never live in files a collaborator might receive.",
         out::warn("warning:"),
-        remote_name
-            .chars()
-            .map(|ch| if ch.is_ascii_alphanumeric() {
-                ch.to_ascii_uppercase()
-            } else {
-                '_'
-            })
-            .collect::<String>()
+        remote_token_env_name(remote_name)
     );
 }
 
@@ -186,75 +227,6 @@ pub fn show_remote(name: &str, global: bool) -> Result<()> {
             "not configured"
         }
     );
-    Ok(())
-}
-
-pub fn remote_auth_status(name: &str, json_output: bool) -> Result<()> {
-    // Environment-bound credentials live only in the private user config;
-    // workspace config is repository-controlled and must not redirect token
-    // introspection to another server.
-    let config = load_global_config()?;
-    let remote_name = slugify(name);
-    let remote = resolve_remote(&config, &remote_name)?;
-    let token = resolve_token(&remote_name, remote)?;
-    let mut status: Value = request_json(remote, &token, "GET", "/me/access-token", None)?;
-    let forge_response = request(remote, &token, "GET", "/me/forge-credentials", None)?;
-    let forge_credentials: Value = if (200..300).contains(&forge_response.status) {
-        decode_response(forge_response)?
-    } else if status
-        .get("scopes")
-        .and_then(Value::as_array)
-        .is_some_and(|scopes| scopes.iter().any(|scope| scope == "forge:credential"))
-    {
-        bail!(
-            "Sync remote returned HTTP {} while checking forge credential capabilities: {}",
-            forge_response.status,
-            forge_response.body.trim()
-        );
-    } else {
-        Value::Array(Vec::new())
-    };
-    if let Some(status) = status.as_object_mut() {
-        status.insert("forgeCredentials".to_string(), forge_credentials);
-    }
-    if json_output {
-        println!("{}", serde_json::to_string_pretty(&status)?);
-        return Ok(());
-    }
-
-    let kind = status
-        .get("tokenKind")
-        .and_then(Value::as_str)
-        .unwrap_or("legacy");
-    let subject = status
-        .get("subjectUserId")
-        .and_then(Value::as_str)
-        .unwrap_or("unbound");
-    let environment = status
-        .get("environmentId")
-        .and_then(Value::as_str)
-        .unwrap_or("unbound");
-    let expiry = status
-        .get("expiresAt")
-        .and_then(Value::as_str)
-        .unwrap_or("none");
-    let scopes = status
-        .get("scopes")
-        .and_then(Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(Value::as_str)
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-    println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
-    println!("{} {kind}", out::heading("Token kind:"));
-    println!("{} {subject}", out::heading("Subject:"));
-    println!("{} {environment}", out::heading("Environment:"));
-    println!("{} {expiry}", out::heading("Expires:"));
-    println!("{} {scopes}", out::heading("Scopes:"));
     Ok(())
 }
 
@@ -371,7 +343,16 @@ fn revoke_remote_token(name: &str, remote: &KnitRemote) -> Result<()> {
     Ok(())
 }
 
-pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bool) -> Result<()> {
+pub fn set_remote_token(
+    name: &str,
+    token: Option<&str>,
+    clear: bool,
+    token_stdin: bool,
+    global: bool,
+) -> Result<()> {
+    if token_stdin && !global {
+        bail!("--token-stdin requires --global so a user credential is never stored in workspace config");
+    }
     let (root, mut config) = if global {
         (None, load_global_config()?)
     } else {
@@ -379,6 +360,7 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
         (Some(root), config)
     };
     let remote_name = slugify(name);
+    // Resolve the remote before collecting a secret, so a typo never prompts.
     let remote = config
         .remotes
         .get_mut(&remote_name)
@@ -386,20 +368,48 @@ pub fn set_remote_token(name: &str, token: Option<&str>, clear: bool, global: bo
 
     if clear {
         remote.token = None;
-        println!("{} {}", out::movement("cleared"), out::repo(&remote_name));
     } else {
-        let token = token.context("Pass a token value or use --clear.")?;
-        remote.token = Some(token.to_string());
-        println!("{} {}", out::movement("stored"), out::repo(&remote_name));
-        if !global {
-            warn_workspace_scoped_token(&remote_name);
-        }
+        // An explicit token value keeps its historical meaning (including
+        // workspace scope, with its warning). Everything hidden — prompt or
+        // stdin — is a per-user secret and requires `--global`.
+        let token = match (token, token_stdin) {
+            (Some(token), _) => token.to_string(),
+            (None, true) => read_token_input(&token_prompt(&remote_name))?,
+            (None, false) => {
+                if !io::stdin().is_terminal() || !global {
+                    bail!(
+                        "no token provided. Pass a token value, use `--clear`, or pipe one with `--token-stdin --global` (EOF ends input). At a terminal, `knit remote token {remote_name} --global` prompts for it with input hidden."
+                    );
+                }
+                read_token_input(&token_prompt(&remote_name))?
+            }
+        };
+        remote.token = Some(token);
     }
 
+    let global_config_path = if root.is_none() {
+        Some(crate::store::global_config_path()?)
+    } else {
+        None
+    };
     if let Some(root) = root {
         save_config(&root, &config)?;
     } else {
         save_global_config(&config)?;
+    }
+
+    // Report success only after the save actually succeeded, so a write
+    // failure never claims a token was stored or cleared.
+    if clear {
+        println!("{} {}", out::movement("cleared"), out::repo(&remote_name));
+    } else {
+        println!("{} {}", out::movement("stored"), out::repo(&remote_name));
+        if !global {
+            warn_workspace_scoped_token(&remote_name);
+        }
+        if let Some(path) = global_config_path {
+            print_token_saved_guidance(&remote_name, &path);
+        }
     }
     Ok(())
 }
@@ -496,6 +506,17 @@ fn push_project_to_one_remote(
     Ok(())
 }
 
+/// The `PUT /projects/:id/view` body for a local views artifact. The upload
+/// is the user's personal document only: shared admin-managed templates are
+/// cached beside it in the artifact but must never ride along — the server
+/// owns them, and re-uploading them would clobber admin edits.
+pub(super) fn views_upload_payload(views: &crate::model::KnitProjectViews) -> Value {
+    json!({
+        "defaultView": views.default_view,
+        "views": views.views,
+    })
+}
+
 /// Upload the local saved views for a project to the remote, if any exist.
 pub(super) fn upload_views(
     remote: &KnitRemote,
@@ -507,10 +528,7 @@ pub(super) fn upload_views(
     if views.views.is_empty() && views.default_view.is_none() {
         return Ok(());
     }
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         token,
@@ -528,10 +546,7 @@ pub fn push_views_to_remote(name: Option<&str>, remote_name: &str) -> Result<()>
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
     let views = crate::store::load_views(&root, &project_id)?;
-    let payload = json!({
-        "defaultView": views.default_view,
-        "views": views.views,
-    });
+    let payload = views_upload_payload(&views);
     request_json::<Value>(
         remote,
         &token,
@@ -751,13 +766,24 @@ fn push_active_bundle_to_remote_impl(
     }
 
     let pushed_bundle = upsert_bundle(remote, &token, &pushed_project.slug, &active.bundle)?;
-    if active
-        .bundle
-        .record_sync_target(remote_name, &pushed_bundle.id, &remote.url)
-    {
+    if active.bundle.record_sync_target_with_web_url(
+        remote_name,
+        &pushed_bundle.id,
+        &remote.url,
+        pushed_bundle.web_url.as_deref(),
+        None,
+    ) {
         save_active_bundle(active)?;
     }
     let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
+    super::landing::push_plans_scoped_at(
+        &active.root,
+        &config,
+        Some(&project_id),
+        remote_name,
+        false,
+        Some(&active.bundle.id),
+    )?;
     let history_result = super::history::push_project_history_events(
         remote,
         &token,
@@ -1013,9 +1039,25 @@ pub(super) fn publishable_project(
             merged.repos.push(repo.clone());
         }
     }
+    // The same asymmetry covers the auth definitions. The remote's groups are
+    // the shared whole; a scoped workspace's local copy may be stale or
+    // absent, so it must never shrink or clear hosted requirements. Publish
+    // the local definitions only when the remote carries none. Concretely:
+    // while scoped, local edits to the auth groups (including an intentional
+    // clear) are ignored — make them from a whole-project clone. (An unscoped
+    // workspace skips this merge entirely: its push is the authoritative
+    // shape, so an explicit empty `groups` clears and an absent field
+    // preserves, per the remote's compatibility contract.)
+    merged.auth = membership.auth.clone().or_else(|| project.auth.clone());
     Ok(Some(merged))
 }
 
+/// The explicit `knit project push` upsert. Reshaping a hosted project is an
+/// owner/admin action on the remote, so a 403 is the permission problem it
+/// is: reported clearly, never silently skipped (the caller asked for the
+/// shared shape to move) and never answered by POST-creating a personal
+/// duplicate of a project someone else owns. Only a 404 — the project does
+/// not exist — falls through to creation.
 fn upsert_project(
     root: &Path,
     remote: &KnitRemote,
@@ -1024,13 +1066,15 @@ fn upsert_project(
     project: Option<&KnitProject>,
 ) -> Result<RemoteProject> {
     let project = publishable_project(root, remote, token, project_id, project)?;
-    let payload = project_payload(project_id, project.as_ref());
+    let payload = project_payload_with_raw_landing(root, project_id, project.as_ref())?;
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
-    if response.status == 404 {
-        decode_response(request(remote, token, "POST", "/projects", Some(&payload))?)
-    } else {
-        decode_response(response)
+    match response.status {
+        404 => decode_response(request(remote, token, "POST", "/projects", Some(&payload))?),
+        403 => bail!(
+            "the sync remote refused to update project `{project_id}` (HTTP 403): `knit project push` requires project owner/admin permission and a token with project:write scope. Use `knit sync push` to upload bundle work and history with a writable project token."
+        ),
+        _ => decode_response(response),
     }
 }
 
@@ -1038,7 +1082,7 @@ fn upsert_project(
 /// or only address the project. Only the owner reshapes a project; a
 /// collaborator pushing a bundle must not fail on that, and must never
 /// POST-create a personal duplicate of a project someone else owns.
-enum ProjectShapePush {
+pub(super) enum ProjectShapePush {
     Pushed,
     ReadOnly,
 }
@@ -1050,8 +1094,32 @@ fn upsert_or_fetch_project(
     project_id: &str,
     project: Option<&KnitProject>,
 ) -> Result<(RemoteProject, ProjectShapePush)> {
+    // Existing recipe-capable projects own landing metadata through recipe
+    // CAS. An ordinary bundle/history push must not PATCH an older local
+    // knitProject over a web edit before that CAS runs. Explicit project push
+    // remains the operation for replacing the shared project shape.
+    let recipes = request(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project_id}/landing-recipes"),
+        None,
+    )?;
+    if recipes.status != 404 {
+        let _: Value = decode_response(recipes)?;
+        let project = request(
+            remote,
+            token,
+            "GET",
+            &format!("/projects/{project_id}"),
+            None,
+        )?;
+        if project.status != 404 {
+            return Ok((decode_response(project)?, ProjectShapePush::ReadOnly));
+        }
+    }
     let project = publishable_project(root, remote, token, project_id, project)?;
-    let payload = project_payload(project_id, project.as_ref());
+    let payload = project_payload_with_raw_landing(root, project_id, project.as_ref())?;
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
     match response.status {
@@ -1073,9 +1141,8 @@ pub(super) fn upsert_project_for_history(
     token: &str,
     project_id: &str,
     project: Option<&KnitProject>,
-) -> Result<RemoteProject> {
-    let (pushed, _shape) = upsert_or_fetch_project(root, remote, token, project_id, project)?;
-    Ok(pushed)
+) -> Result<(RemoteProject, ProjectShapePush)> {
+    upsert_or_fetch_project(root, remote, token, project_id, project)
 }
 
 /// A repository record as the sync remote lists it. `local_id` is the id the
@@ -1460,7 +1527,13 @@ pub fn push_all_bundles_to_remote(
         };
         let outcome =
             upsert_bundle(remote, &token, &project_slug, &bundle).and_then(|remote_bundle| {
-                if bundle.record_sync_target(remote_name, &remote_bundle.id, &remote.url) {
+                if bundle.record_sync_target_with_web_url(
+                    remote_name,
+                    &remote_bundle.id,
+                    &remote.url,
+                    remote_bundle.web_url.as_deref(),
+                    None,
+                ) {
                     crate::store::write_json(&path, &bundle)?;
                     crate::history::record_bundle_history(&root, &bundle)?;
                 }
@@ -1468,6 +1541,14 @@ pub fn push_all_bundles_to_remote(
             });
         match outcome {
             Ok(ArtifactPushOutcome::Pushed(_)) => {
+                if let Err(error) = super::landing::push_plans_scoped(
+                    Some(&project_id),
+                    remote_name,
+                    false,
+                    Some(&bundle.id),
+                ) {
+                    failures.push(format!("{} landing plans: {error:#}", bundle.id));
+                }
                 pushed += 1;
                 if force.is_force() {
                     println!(
@@ -1501,6 +1582,27 @@ pub fn push_all_bundles_to_remote(
         );
     }
     Ok(())
+}
+
+// Recipe fingerprints and CAS use the authored JSON, including empty arrays and
+// extension fields. Typed serialization is only suitable for the project shape.
+fn project_payload_with_raw_landing(
+    root: &Path,
+    project_id: &str,
+    project: Option<&KnitProject>,
+) -> Result<Value> {
+    let mut payload = project_payload(project_id, project);
+    let path = crate::store::project_path(root, project_id);
+    if project.is_some() && path.exists() {
+        let raw: Value = serde_json::from_slice(&std::fs::read(path)?)?;
+        let shared = payload["metadata"]["knitProject"].as_object_mut().unwrap();
+        if let Some(landing) = raw.get("landing") {
+            shared.insert("landing".into(), landing.clone());
+        } else {
+            shared.remove("landing");
+        }
+    }
+    Ok(payload)
 }
 
 fn project_payload(project_id: &str, project: Option<&KnitProject>) -> Value {
@@ -1546,7 +1648,6 @@ fn repository_payload(repo: &ProjectRepoEntry) -> Value {
         "owner": identity.owner,
         "name": identity.name,
         "full_name": identity.full_name,
-        "default_branch": repo.base_branch,
         "remote_url": repo.remote,
         "metadata": {
             "localId": repo.id,
@@ -1667,6 +1768,63 @@ mod tests {
     use super::{apply_artifact_force_fields, lease_mismatch_message, repo_identity};
     use crate::commands::push::PushForce;
     use serde_json::json;
+
+    #[test]
+    fn views_upload_payload_carries_the_personal_document_only() {
+        let mut views =
+            crate::model::KnitProjectViews::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        views.default_view = Some("backend".to_string());
+        views.views.insert(
+            "backend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::Default,
+                include: vec![],
+                exclude: vec!["frontend".to_string()],
+            },
+        );
+        views.templates.insert(
+            "all-frontend".to_string(),
+            crate::model::ProjectView {
+                base: crate::model::ViewBase::None,
+                include: vec!["frontend".to_string()],
+                exclude: vec![],
+            },
+        );
+        let payload = super::views_upload_payload(&views);
+        assert_eq!(
+            payload,
+            json!({
+                "defaultView": "backend",
+                "views": {"backend": {"exclude": ["frontend"]}},
+            })
+        );
+        // The shared template cache must never ride along in the PUT body.
+        assert!(payload.get("templates").is_none());
+    }
+
+    #[test]
+    fn repository_payload_omits_default_branch_while_project_payload_keeps_base() {
+        let entry = crate::model::ProjectRepoEntry {
+            id: "backend".to_string(),
+            path: "../backend".to_string(),
+            remote: Some("https://github.com/acme/backend.git".to_string()),
+            base_branch: "release".to_string(),
+            checkout_mode: crate::model::CheckoutMode::Worktree,
+            include_by_default: true,
+        };
+        let repository = super::repository_payload(&entry);
+        assert!(repository.get("default_branch").is_none());
+        assert_eq!(repository["metadata"]["localId"], json!("backend"));
+
+        let mut project =
+            crate::model::KnitProject::new("demo".to_string(), "2026-01-01T00:00:00Z".into());
+        project.repos.push(entry);
+        let pushed = super::project_payload("demo", Some(&project));
+        assert_eq!(
+            pushed["metadata"]["knitProject"]["repos"][0]["baseBranch"],
+            json!("release")
+        );
+    }
 
     fn base_payload() -> serde_json::Value {
         json!({"kind": "bundle", "payload": {}})

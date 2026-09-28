@@ -755,6 +755,9 @@ api_pr_json() {
   pr_repo="$1"
   number="$2"
   base="main"
+  if [ -f "$GH_FAKE_DIR/api-$pr_repo.base" ]; then
+    base="$(cat "$GH_FAKE_DIR/api-$pr_repo.base")"
+  fi
   head="knit/artifact-publish"
   if [ -f "$GH_FAKE_DIR/api-$pr_repo.head" ]; then
     head="$(cat "$GH_FAKE_DIR/api-$pr_repo.head")"
@@ -841,6 +844,7 @@ if [ "$1" = "api" ]; then
         if [ "$input" = "-" ]; then
           cat > "$GH_FAKE_DIR/api-$pr_repo.json"
           sed -n 's/.*"head":"\([^"]*\)".*/\1/p' "$GH_FAKE_DIR/api-$pr_repo.json" > "$GH_FAKE_DIR/api-$pr_repo.head"
+          sed -n 's/.*"base":"\([^"]*\)".*/\1/p' "$GH_FAKE_DIR/api-$pr_repo.json" > "$GH_FAKE_DIR/api-$pr_repo.base"
         else
           : > "$GH_FAKE_DIR/api-$pr_repo.json"
         fi
@@ -923,6 +927,7 @@ case "$sub" in
     printf '%s\n' "$args" > "$GH_FAKE_DIR/create-$repo.args"
     cat > "$GH_FAKE_DIR/create-$repo.md"
     printf 'x\n' >> "$GH_FAKE_DIR/create-attempts-$repo"
+    printf 'pr-create-%s\n' "$repo" >> "$GH_FAKE_DIR/order-log.txt"
     touch "$GH_FAKE_DIR/create-attempted-$repo"
     if [ -f "$GH_FAKE_DIR/create-gate-$repo" ]; then
       sh "$GH_FAKE_DIR/create-gate-$repo"
@@ -1512,8 +1517,8 @@ pub fn spawn_fake_remote_export(bundle_slug: &str, lifecycle_state: &str) -> Str
     ))
 }
 
-/// Spawn a fake remote API that answers every request with the given JSON
-/// body, e.g. a full project export including bundle artifact payloads.
+/// Spawn a fake remote API with a fixed JSON body. Project exports also serve
+/// their landing recipes and an empty landing-artifact collection on those routes.
 pub fn spawn_fake_remote_with_body(body: String) -> String {
     let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
@@ -1605,7 +1610,12 @@ fn handle_fake_remote_bundle_request(
         .to_string();
     let segments: Vec<&str> = path.split('/').collect();
     let (status, response) = match (method.as_str(), segments.as_slice()) {
-        ("GET", ["api", "v1", "projects", _, "export"]) => {
+        ("GET", ["api", "v1", "projects", project_id, "export"]) => {
+            let mut record = fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("project-export-fetches.txt"))?;
+            writeln!(record, "{project_id}")?;
             match fs::read_to_string(dir.join("export.json")) {
                 Ok(body) => (200, body),
                 Err(_) => (
@@ -1641,6 +1651,45 @@ fn handle_fake_remote_bundle_request(
     stream.flush()
 }
 
+fn fake_recipe_record(landing: serde_json::Value) -> String {
+    use sha2::{Digest, Sha256};
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(serde_json::to_vec(&landing).unwrap())
+    );
+    serde_json::json!({"data":{"landing":landing,"hash":hash}}).to_string()
+}
+
+fn fake_recipe_request(
+    dir: &Path,
+    method: &str,
+    payload: &serde_json::Value,
+) -> std::io::Result<(u16, String)> {
+    let file = dir.join("landing-recipes.json");
+    let mut landing = match fs::read(&file) {
+        Ok(bytes) => serde_json::from_slice(&bytes)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::json!({}),
+        Err(error) => return Err(error),
+    };
+    if method == "PUT" {
+        let record: serde_json::Value = serde_json::from_str(&fake_recipe_record(landing.clone()))?;
+        if payload["expectedHash"] != record["data"]["hash"] {
+            return Ok((
+                409,
+                serde_json::json!({"error":{"message":"recipe conflict"}}).to_string(),
+            ));
+        }
+        landing = payload
+            .get("landing")
+            .ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::InvalidData, "missing landing recipe")
+            })?
+            .clone();
+        fs::write(file, landing.to_string())?;
+    }
+    Ok((200, fake_recipe_record(landing)))
+}
+
 fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::Result<()> {
     use std::io::{BufRead, BufReader, Read, Write};
 
@@ -1665,11 +1714,35 @@ fn respond_with_json(stream: &mut std::net::TcpStream, body: &str) -> std::io::R
         let mut sink = vec![0u8; content_length];
         reader.read_exact(&mut sink)?;
     }
+    let mut parts = request_line.split_whitespace();
+    let method = parts.next().unwrap_or_default();
+    let path = parts
+        .next()
+        .unwrap_or_default()
+        .split('?')
+        .next()
+        .unwrap_or_default();
+    let export: serde_json::Value = serde_json::from_str(body).unwrap_or(serde_json::Value::Null);
+    let response = if method == "GET" && export["data"]["project"].is_object() {
+        if path.starts_with("/api/v1/projects/") && path.ends_with("/landing-recipes") {
+            let landing = export["data"]["knitProject"]["landing"]
+                .as_object()
+                .map(|value| serde_json::Value::Object(value.clone()))
+                .unwrap_or_else(|| serde_json::json!({}));
+            fake_recipe_record(landing)
+        } else if path.starts_with("/api/v1/projects/") && path.ends_with("/landing-artifacts") {
+            serde_json::json!({"data":{"plans":[],"runs":[]}}).to_string()
+        } else {
+            body.to_owned()
+        }
+    } else {
+        body.to_owned()
+    };
     write!(
         stream,
         "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{}",
-        body.len(),
-        body
+        response.len(),
+        response
     )?;
     stream.flush()
 }
@@ -1755,6 +1828,9 @@ fn handle_fake_remote_push_request(
         fs::write(record, existing)?;
     }
     let (status, response) = match (method.as_str(), segments.as_slice()) {
+        ("GET" | "PUT", ["api", "v1", "projects", _, "landing-recipes"]) => {
+            fake_recipe_request(dir, &method, &body)?
+        }
         ("GET", ["api", "v1", "me", "access-token"]) => (
             200,
             r#"{"data":{"scopes":["bundle:push","bundle:read"]}}"#.to_string(),
@@ -1798,6 +1874,12 @@ fn handle_fake_remote_push_request(
                 200,
                 format!("{{\"data\":{{\"id\":\"{bundle_id}\",\"slug\":\"{slug}\"}}}}"),
             )
+        }
+        // Stage `project-shape-missing` to play a project that genuinely does
+        // not exist yet: PATCH answers 404, so the client's upsert falls
+        // through to POST-creating it — the genuine-new-project path.
+        ("PATCH", ["api", "v1", "projects", _]) if dir.join("project-shape-missing").exists() => {
+            (404, "{\"errors\":{\"detail\":\"Not Found\"}}".to_string())
         }
         // Stage `project-shape-forbidden` to play a project the caller can
         // read and push bundles into but not reshape (a collaborator, not
@@ -1859,9 +1941,23 @@ fn handle_fake_remote_push_request(
         }
         ("POST", ["api", "v1", "projects", _, "bundles"]) => {
             let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
+            // The staged order log records when the bundle upsert landed, so
+            // a test sharing this directory with the fake forge can prove the
+            // hosted sync ran before (or after) a review-object create.
+            let order = dir.join("order-log.txt");
+            let mut existing = fs::read_to_string(&order).unwrap_or_default();
+            existing.push_str("bundle-upsert\n");
+            fs::write(&order, existing).unwrap();
+            // Stage `bundle-web-url` to answer with the canonical browser URL
+            // the hosted server derives; without it the response carries none,
+            // the shape an older server still sends.
+            let web_url = match fs::read_to_string(dir.join("bundle-web-url")) {
+                Ok(url) => format!(",\"webUrl\":\"{}\"", url.trim()),
+                Err(_) => String::new(),
+            };
             (
                 201,
-                format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"}}}}"),
+                format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"{web_url}}}}}"),
             )
         }
         ("GET", ["api", "v1", "bundles", _, "artifacts"]) => {
@@ -2073,6 +2169,33 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
     }
 
     let (status, response) = match (method.as_str(), path.as_str()) {
+        ("GET" | "PATCH", path) if dir.join("initial-project.json").exists()
+            && !dir.join("landing-recipes.json").exists()
+            && (path.ends_with("/landing-recipes") || path == "/api/v1/projects/demo") => {
+            (404, "{\"error\":{\"message\":\"project not found\"}}".into())
+        }
+
+        ("GET" | "PUT", path) if path.ends_with("/landing-recipes") && dir.join("landing-artifacts.json").exists() => {
+            let payload = if body.is_empty() { serde_json::Value::Null } else { serde_json::from_str(&body)? };
+            fake_recipe_request(dir, &method, &payload)?
+        }
+
+        ("GET", path) if path == "/api/v1/projects/demo" && dir.join("landing-artifacts.json").exists() => {
+            (200, "{\"data\":{\"id\":\"p-1\",\"slug\":\"demo\"}}".to_string())
+        }
+
+        ("GET", path) if path.ends_with("/landing-artifacts") && dir.join("landing-artifacts.json").exists() => {
+            writeln!(fs::OpenOptions::new().create(true).append(true).open(dir.join("landing-gets.txt"))?, "{target}")?;
+            (200, fs::read_to_string(dir.join("landing-artifacts.json"))?)
+        }
+        ("POST", path) if path.ends_with("/landing-artifacts") && dir.join("landing-artifacts.json").exists() => {
+            writeln!(fs::OpenOptions::new().create(true).append(true).open(dir.join("landing-posts.jsonl"))?, "{body}")?;
+            (200, "{\"data\":{}}".to_string())
+        }
+        ("POST", path) if path.starts_with("/api/v1/bundles/") && path.ends_with("/artifacts") && dir.join("landing-artifacts.json").exists() => {
+            (200, "{\"data\":{\"id\":\"artifact-synthetic\",\"artifactHash\":\"synthetic-hash\"}}".to_string())
+        }
+
         ("GET", "/api/v1/me/forge-credentials") => (
             200,
             "{\"data\":[{\"forge\":\"test-forge\",\"hosts\":[\"code.example.test\"],\"connected\":true},{\"forge\":\"other\",\"hosts\":[\"off.example.test\"],\"connected\":false}]}"
@@ -2103,6 +2226,12 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             (200, export)
         }
         ("GET", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/view") => {
+            // Record which project id the views document was requested for,
+            // so tests can assert owner-qualified resolution.
+            let mut log = fs::read_to_string(dir.join("view-gets.txt")).unwrap_or_default();
+            log.push_str(path);
+            log.push('\n');
+            fs::write(dir.join("view-gets.txt"), log).unwrap();
             // Tests stage `<dir>/views.json` to serve a user's saved views.
             let views = fs::read_to_string(dir.join("views.json"))
                 .unwrap_or_else(|_| "{\"data\":{\"views\":{}}}".to_string());
@@ -2116,11 +2245,21 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fs::write(dir.join("views-puts.jsonl"), log).unwrap();
             (200, "{\"data\":{}}".to_string())
         }
+        ("POST", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/bundles") => {
+            let payload: serde_json::Value = serde_json::from_str(&body)?;
+            let slug = payload["slug"].as_str().unwrap_or("unknown");
+            (201, serde_json::json!({"data":{"id":format!("rb-{slug}"),"slug":slug}}).to_string())
+        }
         ("PATCH", path) | ("POST", path)
-            if path.starts_with("/api/v1/projects")
-                && !path.contains("/repositories")
-                && !path.ends_with("/view") =>
+            if matches!(path.trim_start_matches('/').split('/').collect::<Vec<_>>().as_slice(),
+                ["api", "v1", "projects"] | ["api", "v1", "projects", _]) =>
         {
+            if dir.join("initial-project.json").exists() {
+                let payload: serde_json::Value = serde_json::from_str(&body)?;
+                if let Some(landing) = payload["metadata"]["knitProject"].get("landing") {
+                    fs::write(dir.join("landing-recipes.json"), landing.to_string())?;
+                }
+            }
             // Project upserts: record the payload (its `metadata.knitProject`
             // is the shared membership every collaborator reconciles against).
             let mut log =
@@ -2169,6 +2308,16 @@ pub fn recorded_views_puts(dir: &Path) -> Vec<serde_json::Value> {
         .collect()
 }
 
+/// The `/view` GET paths `spawn_fake_remote_api` served, one per line, so
+/// tests can assert which project id the views document was requested for.
+pub fn recorded_view_gets(dir: &Path) -> Vec<String> {
+    fs::read_to_string(dir.join("view-gets.txt"))
+        .unwrap_or_default()
+        .lines()
+        .map(|line| line.to_string())
+        .collect()
+}
+
 /// The history pushes the fake push remote received: one entry per request,
 /// each the list of event ids that request carried.
 pub fn recorded_history_pushes(dir: &Path) -> Vec<Vec<String>> {
@@ -2190,3 +2339,5 @@ pub fn recorded_history_pushes(dir: &Path) -> Vec<Vec<String>> {
         })
         .collect()
 }
+
+pub mod project_auth;

@@ -1,3 +1,5 @@
+mod base;
+
 use crate::ids::short_sha;
 use crate::model::{
     BundleNode, ChangeGroup, CommitDetail, HistoryEvent, RepoChange, RepoEntry,
@@ -11,6 +13,100 @@ use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+/// Read a bundle's effective node sequence, including unmigrated legacy groups.
+/// Native node order is authoritative; missing groups are inserted by date.
+pub fn bundle_history_nodes(bundle: &ChangeGroup) -> Vec<BundleNode> {
+    let mut nodes = bundle.nodes.clone();
+    for group in &bundle.commit_groups {
+        if nodes.iter().any(|node| {
+            node.id == group.id
+                || (matches!(node.node_type.as_str(), "commit.group" | "revert.group")
+                    && node.commit_group_id.as_deref() == Some(group.id.as_str()))
+        }) {
+            continue;
+        }
+        let position = nodes
+            .iter()
+            .position(|node| {
+                crate::selectors::is_loggable_node(node)
+                    && match (
+                        chrono::DateTime::parse_from_rfc3339(&node.created_at),
+                        chrono::DateTime::parse_from_rfc3339(&group.created_at),
+                    ) {
+                        (Ok(node_time), Ok(group_time)) => node_time > group_time,
+                        _ => node.created_at > group.created_at,
+                    }
+            })
+            .unwrap_or(nodes.len());
+        nodes.insert(
+            position,
+            BundleNode::commit_group(
+                group.id.clone(),
+                group.created_at.clone(),
+                group.message.clone(),
+                group.commits.clone(),
+                Vec::new(),
+            ),
+        );
+    }
+    nodes
+}
+
+/// Derive a local snapshot using only portable recorded detail, without Git or writes.
+pub fn bundle_history_snapshot(bundle: &ChangeGroup) -> Vec<HistoryEvent> {
+    let mut snapshot = bundle.clone();
+    snapshot.nodes = bundle_history_nodes(bundle);
+    let mut lookup = CommitLookup::new(Path::new(""));
+    lookup.allow_git = false;
+    let project_id = bundle.project_id.as_deref().unwrap_or("");
+    let mut events = events_for_bundle(project_id, &snapshot, &mut lookup, None);
+    let represented = events
+        .iter()
+        .filter_map(|event| event.node_id.clone())
+        .collect::<BTreeSet<_>>();
+    // Some loggable nodes (handoffs and unpinned checkpoints, for example)
+    // have no commit/lifecycle event projection. They remain inspectable.
+    for node in &snapshot.nodes {
+        if represented.contains(&node.id) || !crate::selectors::is_loggable_node(node) {
+            continue;
+        }
+        let repo_ids = node.repo_ids.clone().unwrap_or_default();
+        let targets = if repo_ids.is_empty() {
+            vec![None]
+        } else {
+            repo_ids.iter().map(|id| Some(id.as_str())).collect()
+        };
+        for repo_id in targets {
+            let id = history_event_id(&[
+                project_id,
+                &bundle.id,
+                repo_id.unwrap_or(""),
+                &node.id,
+                &node.node_type,
+                &node.node_type,
+                "",
+            ]);
+            events.push(history_event(
+                project_id,
+                bundle,
+                repo_id.and_then(|id| bundle.repos.iter().find(|repo| repo.id == id)),
+                id,
+                &node.node_type,
+                repo_id,
+                None,
+                None,
+                &node.id,
+                &node.node_type,
+                node.commit_group_id.as_deref(),
+                node.title.as_deref(),
+                node.message.as_deref().or(node.title.as_deref()),
+                &node.created_at,
+            ));
+        }
+    }
+    events
+}
+
 pub fn record_bundle_history(root: &Path, bundle: &ChangeGroup) -> Result<usize> {
     let Some(project_id) = history_project_id(root, bundle)? else {
         return Ok(0);
@@ -22,15 +118,32 @@ pub fn record_bundle_history(root: &Path, bundle: &ChangeGroup) -> Result<usize>
     append_history_events(root, &project_id, &events)
 }
 
+/// Record missing events from every bundle artifact in the project, including
+/// archived and landed ones. The sweep reads the ledger once up front,
+/// generates events for all bundles into one batch, drops the ids that are
+/// already recorded, and appends the rest through a single
+/// [`append_history_events`] call — which rereads the ledger under its lock to
+/// dedupe against concurrent writers. Appending per bundle instead would
+/// reread and reparse the whole ledger once per bundle, which stalls any
+/// project with a large ledger.
 pub fn refresh_project_history(root: &Path, project_id: &str) -> Result<usize> {
+    let bundles = project_bundles(root, project_id)?;
     let recorded = recorded_event_ids(root, project_id)?;
     let mut lookup = CommitLookup::new(root);
-    let mut appended = 0;
-    for (_, bundle) in project_bundles(root, project_id)? {
-        let events = events_for_bundle(project_id, &bundle, &mut lookup, Some(&recorded));
-        appended += append_history_events(root, project_id, &events)?;
+    let mut generated = base::events(root, project_id)?;
+    for (_, bundle) in bundles {
+        generated.extend(events_for_bundle(
+            project_id,
+            &bundle,
+            &mut lookup,
+            Some(&recorded),
+        ));
     }
-    Ok(appended)
+    let fresh = generated
+        .into_iter()
+        .filter(|event| !recorded.contains(&event.event_id))
+        .collect::<Vec<_>>();
+    append_history_events(root, project_id, &fresh)
 }
 
 /// Outcome of a rebuild: how many recorded events were rewritten with fresher
@@ -52,7 +165,7 @@ pub struct RebuildSummary {
 pub fn rebuild_project_history(root: &Path, project_id: &str) -> Result<RebuildSummary> {
     let bundles = project_bundles(root, project_id)?;
     let mut lookup = CommitLookup::new(root);
-    let mut generated = Vec::new();
+    let mut generated = base::events(root, project_id)?;
     for (_, bundle) in &bundles {
         generated.extend(events_for_bundle(project_id, bundle, &mut lookup, None));
     }
@@ -171,7 +284,16 @@ pub fn format_history_event(event: &HistoryEvent) -> String {
     // One event is one line: a commit's body belongs to `git show`, not to a
     // history listing that repeats the same message once per repo.
     let message = message.lines().next().unwrap_or_default().trim_end();
-    format!("{when}  {repo:<18} {sha:<8} {bundle:<18} {message}")
+    let label = match event.kind.as_str() {
+        "base.commit" => format!("base: {}", event.branch.as_deref().unwrap_or("?")),
+        "branch.landed" => format!(
+            "branch merge: {}",
+            event.branch.as_deref().unwrap_or("unknown destination")
+        ),
+        "bundle.landed" => "bundle landing recorded".to_string(),
+        _ => "bundle activity".to_string(),
+    };
+    format!("{when}  [{label}] {repo:<18} {sha:<8} {bundle:<18} {message}")
 }
 
 /// Rewrite the ledger in one atomic step. A rebuild replaces recorded lines
@@ -252,6 +374,7 @@ fn history_project_id(root: &Path, bundle: &ChangeGroup) -> Result<Option<String
 /// `commitDetails` answer first; anything older falls back to the repo's
 /// checkout, batched and cached so a sweep costs at most one git call per repo.
 struct CommitLookup {
+    allow_git: bool,
     root: PathBuf,
     checkouts: BTreeMap<String, Option<PathBuf>>,
     details: BTreeMap<(String, String), Option<CommitDetail>>,
@@ -260,6 +383,7 @@ struct CommitLookup {
 impl CommitLookup {
     fn new(root: &Path) -> Self {
         Self {
+            allow_git: true,
             root: root.to_path_buf(),
             checkouts: BTreeMap::new(),
             details: BTreeMap::new(),
@@ -291,6 +415,9 @@ impl CommitLookup {
     }
 
     fn prefetch(&mut self, repo: Option<&RepoEntry>, shas: &BTreeSet<String>) {
+        if !self.allow_git {
+            return;
+        }
         let Some(repo) = repo else {
             return;
         };
@@ -391,6 +518,96 @@ fn events_for_bundle(
     let mut events = Vec::new();
 
     for node in &bundle.nodes {
+        // A branch receipt records a successful merge, even if another repo or
+        // a later deployment failed. Its timestamp is the receipt time, never
+        // the source commit's author date.
+        if node.node_type == "branch.landed" {
+            for repo_id in node.repo_ids.as_deref().unwrap_or_default() {
+                let repo = repos.get(repo_id.as_str()).copied();
+                let mut event = history_event(
+                    project_id,
+                    bundle,
+                    repo,
+                    history_event_id(&[project_id, &bundle.id, &node.id, repo_id, "branch.landed"]),
+                    "branch.landed",
+                    Some(repo_id),
+                    None,
+                    None,
+                    &node.id,
+                    &node.node_type,
+                    None,
+                    None,
+                    node.message.as_deref(),
+                    &node.created_at,
+                );
+                event.branch = node.landing.as_ref().and_then(|l| l.target_branch.clone());
+                event.metadata = Some(serde_json::json!({
+                    "landing": node.landing,
+                    "sourceCommit": node.source_commit,
+                }));
+                events.push(event);
+            }
+            continue;
+        }
+        // Recover completed historical landings only where a matching recorded
+        // review establishes the destination. Archive state alone proves nothing.
+        if node.node_type == "feature.landed" {
+            for repo_id in node.repo_ids.as_deref().unwrap_or_default() {
+                if bundle.nodes.iter().any(|receipt| {
+                    receipt.node_type == "branch.landed"
+                        && receipt.run_id == node.run_id
+                        && receipt
+                            .repo_ids
+                            .as_ref()
+                            .is_some_and(|ids| ids.contains(repo_id))
+                }) {
+                    continue;
+                }
+                let Some(repo) = repos.get(repo_id.as_str()).copied() else {
+                    continue;
+                };
+                let Some(publication) = bundle
+                    .publications
+                    .iter()
+                    .find(|p| &p.repo_id == repo_id && node.publication_urls.contains(&p.url))
+                else {
+                    continue;
+                };
+                let target = node
+                    .landing
+                    .as_ref()
+                    .and_then(|l| l.target_branch.clone())
+                    .or_else(|| {
+                        let terminal = node.landing.as_ref().is_none_or(|l| l.terminal);
+                        (terminal && publication.state.eq_ignore_ascii_case("merged"))
+                            .then(|| publication.base_branch.clone())
+                    });
+                let Some(target) = target.filter(|target| !target.is_empty()) else {
+                    continue;
+                };
+                let mut event = history_event(
+                    project_id,
+                    bundle,
+                    Some(repo),
+                    history_event_id(&[project_id, &bundle.id, &node.id, repo_id, "branch.landed"]),
+                    "branch.landed",
+                    Some(repo_id),
+                    None,
+                    None,
+                    &node.id,
+                    "branch.landed",
+                    None,
+                    None,
+                    Some(&format!("Landed into {target}")),
+                    &node.created_at,
+                );
+                event.branch = Some(target);
+                event.metadata = Some(
+                    serde_json::json!({ "landing": node.landing, "evidence": "completed-run" }),
+                );
+                events.push(event);
+            }
+        }
         let pins = node_records_pins(&node.node_type);
         let node_message_wins = matches!(node.node_type.as_str(), "commit.group" | "revert.group");
         let mut candidates: Vec<CommitEvent> = Vec::new();
@@ -540,7 +757,7 @@ fn events_for_bundle(
                 kind,
                 "",
             ]);
-            events.push(history_event(
+            let mut event = history_event(
                 project_id,
                 bundle,
                 repo_id
@@ -557,7 +774,17 @@ fn events_for_bundle(
                 node.title.as_deref(),
                 Some(&message),
                 &node.created_at,
-            ));
+            );
+            if node.node_type == "feature.landed" {
+                event.metadata = Some(serde_json::json!({
+                    "landing": node.landing,
+                    "hasBranchReceipts": events.iter().any(|event| event.kind == "branch.landed" &&
+                        (event.node_id.as_deref() == Some(node.id.as_str()) || bundle.nodes.iter().any(|receipt|
+                            receipt.node_type == "branch.landed" && receipt.run_id == node.run_id &&
+                            event.node_id.as_deref() == Some(receipt.id.as_str()))))
+                }));
+            }
+            events.push(event);
         }
     }
 
@@ -669,7 +896,298 @@ fn history_event_id(parts: &[&str]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{BundleNode, CommitRef, Movement};
+    use crate::model::{BundleNode, BundleState, CommitRef, Movement};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    static NEXT_REFRESH_FIXTURE: AtomicUsize = AtomicUsize::new(0);
+
+    /// A synthetic workspace for refresh sweeps: a project marker, a bundle
+    /// directory, and the project ledger. All names are synthetic; no real
+    /// workspace data is copied in.
+    struct RefreshWorkspace(PathBuf);
+
+    impl RefreshWorkspace {
+        fn new() -> Self {
+            let root = std::env::temp_dir().join(format!(
+                "knit-history-refresh-{}-{}",
+                std::process::id(),
+                NEXT_REFRESH_FIXTURE.fetch_add(1, Ordering::Relaxed)
+            ));
+            fs::create_dir_all(root.join(".knit/projects")).unwrap();
+            fs::create_dir_all(root.join(".knit/bundles")).unwrap();
+            fs::write(root.join(".knit/projects/demo.project.json"),
+                r#"{"schemaVersion":"0.1","kind":"KnitProject","id":"demo","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z","repos":[]}"#).unwrap();
+            Self(root)
+        }
+
+        fn root(&self) -> &Path {
+            &self.0
+        }
+
+        fn add_bundle(&self, bundle: &ChangeGroup) {
+            crate::store::write_json(
+                &self
+                    .0
+                    .join(".knit/bundles")
+                    .join(format!("{}.bundle.json", bundle.id)),
+                bundle,
+            )
+            .unwrap();
+        }
+
+        fn ledger(&self) -> PathBuf {
+            history_path(&self.0, "demo")
+        }
+
+        fn ledger_text(&self) -> String {
+            fs::read_to_string(self.ledger()).unwrap()
+        }
+    }
+
+    impl Drop for RefreshWorkspace {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    fn project_bundle(slug: &str, state: BundleState, nodes: Vec<BundleNode>) -> ChangeGroup {
+        let mut bundle = ChangeGroup::new(
+            slug.to_string(),
+            format!("{} work", slug.replace('-', " ")),
+            "2026-08-01T10:00:00Z".to_string(),
+        );
+        bundle.project_id = Some("demo".to_string());
+        bundle.state = Some(state);
+        bundle.nodes.extend(nodes);
+        bundle
+    }
+
+    fn archived_bundle(slug: &str, shas: &[&str]) -> ChangeGroup {
+        let mut bundle = project_bundle(
+            slug,
+            BundleState::Archived,
+            vec![
+                commit_group_node(slug, shas),
+                BundleNode::feature_archived(
+                    format!("{slug}-archived"),
+                    "2026-08-15T12:05:00Z".to_string(),
+                    Some("landed".to_string()),
+                ),
+            ],
+        );
+        bundle.archived_at = Some("2026-08-15T12:05:00Z".to_string());
+        bundle
+    }
+
+    fn commit_group_node(slug: &str, shas: &[&str]) -> BundleNode {
+        BundleNode::commit_group(
+            format!("{slug}-group"),
+            "2026-08-02T09:00:00Z".to_string(),
+            format!("Add {slug} form"),
+            shas.iter()
+                .map(|sha| CommitRef {
+                    repo_id: "backend".to_string(),
+                    sha: sha.to_string(),
+                })
+                .collect(),
+            Vec::new(),
+        )
+    }
+
+    fn orphan_event(id: &str, bundle_id: &str, message: &str) -> HistoryEvent {
+        serde_json::from_value(serde_json::json!({
+            "schemaVersion": HISTORY_EVENT_SCHEMA_VERSION,
+            "eventId": id,
+            "projectId": "demo",
+            "kind": "commit.recorded",
+            "bundleId": bundle_id,
+            "bundleTitle": "deleted work",
+            "repoId": "backend",
+            "nodeId": format!("{id}-node"),
+            "message": message,
+            "occurredAt": "2026-08-01T10:00:00Z",
+            "recordedAt": "2026-08-01T10:00:00Z",
+            "recordedBy": "knit",
+        }))
+        .unwrap()
+    }
+
+    fn append_events_file(workspace: &RefreshWorkspace, events: &[HistoryEvent]) {
+        let mut text = workspace.ledger_text();
+        for event in events {
+            text.push_str(&serde_json::to_string(event).unwrap());
+            text.push('\n');
+        }
+        fs::write(workspace.ledger(), text).unwrap();
+    }
+
+    fn count_kind(events: &[HistoryEvent], bundle_id: &str, kind: &str) -> usize {
+        events
+            .iter()
+            .filter(|event| event.bundle_id.as_deref() == Some(bundle_id) && event.kind == kind)
+            .count()
+    }
+
+    #[test]
+    fn refresh_records_every_bundle_including_archived_and_landed() {
+        let workspace = RefreshWorkspace::new();
+        workspace.add_bundle(&project_bundle(
+            "alpha-work",
+            BundleState::Open,
+            vec![commit_group_node(
+                "alpha",
+                &["1111111111111111111111111111111111111111"],
+            )],
+        ));
+        workspace.add_bundle(&archived_bundle(
+            "beta-work",
+            &["2222222222222222222222222222222222222222"],
+        ));
+        workspace.add_bundle(&project_bundle(
+            "gamma-work",
+            BundleState::Closed,
+            vec![BundleNode::feature_landed(
+                "gamma-landed".to_string(),
+                "2026-08-15T12:00:00Z".to_string(),
+                "plan-1".to_string(),
+                "run-1".to_string(),
+                "github".to_string(),
+                vec!["backend".to_string()],
+                Vec::new(),
+                None,
+            )],
+        ));
+
+        let appended = refresh_project_history(workspace.root(), "demo").unwrap();
+        let events = load_history_events(workspace.root(), "demo").unwrap();
+        assert_eq!(count_kind(&events, "alpha-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "alpha-work", "commit.recorded"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "commit.recorded"), 1);
+        assert_eq!(count_kind(&events, "beta-work", "bundle.archived"), 1);
+        assert_eq!(count_kind(&events, "gamma-work", "bundle.created"), 1);
+        assert_eq!(count_kind(&events, "gamma-work", "bundle.landed"), 1);
+        assert_eq!(appended, events.len());
+        assert_eq!(events.len(), 7, "{events:#?}");
+
+        // The sweep is idempotent: a second pass appends nothing and leaves
+        // the ledger bytes exactly as they were.
+        let before = workspace.ledger_text();
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(workspace.ledger_text(), before);
+    }
+
+    #[test]
+    fn refresh_preserves_orphans_and_appends_only_missing_events() {
+        let workspace = RefreshWorkspace::new();
+        let alpha = project_bundle(
+            "alpha-work",
+            BundleState::Open,
+            vec![commit_group_node(
+                "alpha",
+                &["1111111111111111111111111111111111111111"],
+            )],
+        );
+        workspace.add_bundle(&alpha);
+        record_bundle_history(workspace.root(), &alpha).unwrap();
+        append_events_file(
+            &workspace,
+            &[orphan_event(
+                "khist_orphan0000000001",
+                "deleted-work",
+                "Work from a deleted bundle",
+            )],
+        );
+
+        // An archived bundle whose history was never recorded locally.
+        let before = workspace.ledger_text();
+        let before_count = load_history_events(workspace.root(), "demo").unwrap().len();
+        workspace.add_bundle(&archived_bundle(
+            "beta-work",
+            &[
+                "2222222222222222222222222222222222222222",
+                "3333333333333333333333333333333333333333",
+            ],
+        ));
+
+        let appended = refresh_project_history(workspace.root(), "demo").unwrap();
+        assert_eq!(appended, 4, "created + two commits + archived");
+        let after = workspace.ledger_text();
+        let after_events = load_history_events(workspace.root(), "demo").unwrap();
+        assert_eq!(after_events.len(), before_count + 4);
+        // Append-only: the recorded prefix, orphan included, is untouched.
+        assert!(
+            after.starts_with(&before),
+            "refresh must never rewrite recorded lines"
+        );
+        assert!(after_events
+            .iter()
+            .any(|event| event.event_id == "khist_orphan0000000001"
+                && event.message.as_deref() == Some("Work from a deleted bundle")));
+
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(workspace.ledger_text(), after);
+    }
+
+    #[test]
+    fn fully_recorded_refresh_skips_appending_over_a_large_ledger() {
+        let workspace = RefreshWorkspace::new();
+        let bundles = 140;
+        for index in 0..bundles {
+            let slug = format!("team-{index:03}");
+            let sha_a = format!("{index:020x}aa");
+            let sha_b = format!("{index:020x}bb");
+            let bundle = if index % 2 == 0 {
+                project_bundle(
+                    &slug,
+                    BundleState::Open,
+                    vec![commit_group_node(&slug, &[sha_a.as_str(), sha_b.as_str()])],
+                )
+            } else {
+                archived_bundle(&slug, &[sha_a.as_str(), sha_b.as_str()])
+            };
+            workspace.add_bundle(&bundle);
+        }
+        refresh_project_history(workspace.root(), "demo").unwrap();
+
+        // Bulk the ledger out with orphan events from deleted bundles so the
+        // recorded set dwarfs anything a sweep could regenerate.
+        let fillers: Vec<HistoryEvent> = (0..4000)
+            .map(|index| {
+                orphan_event(
+                    &format!("khist_filler{index:08x}"),
+                    "deleted-filler-work",
+                    "Recorded filler change from a deleted bundle",
+                )
+            })
+            .collect();
+        append_events_file(&workspace, &fillers);
+        let before = fs::read(workspace.ledger()).unwrap();
+        assert!(
+            before.len() > 1_000_000,
+            "ledger should be large: {}",
+            before.len()
+        );
+        // Each append takes the history lock; dropping it leaves the lock
+        // directory behind, so its absence proves no append was attempted.
+        let _ = fs::remove_dir_all(workspace.root().join(".knit/locks"));
+
+        assert_eq!(
+            refresh_project_history(workspace.root(), "demo").unwrap(),
+            0
+        );
+        assert_eq!(fs::read(workspace.ledger()).unwrap(), before);
+        assert!(
+            !workspace.root().join(".knit/locks").exists(),
+            "a fully recorded sweep must not append (or lock) once per bundle"
+        );
+    }
 
     fn bundle_with(nodes: Vec<BundleNode>) -> ChangeGroup {
         let mut bundle = ChangeGroup::new(
@@ -703,6 +1221,82 @@ mod tests {
 
     fn find<'a>(events: &'a [HistoryEvent], kind: &str) -> Vec<&'a HistoryEvent> {
         events.iter().filter(|event| event.kind == kind).collect()
+    }
+
+    #[test]
+    fn branch_receipts_preserve_destination_without_advancing_bundle_work() {
+        let receipt = BundleNode::branch_landed(
+            "receipt".into(),
+            "2026-08-14T09:00:00Z".into(),
+            "api".into(),
+            "staging".into(),
+            Some("source-head".into()),
+            "run-one".into(),
+            Some("preview".into()),
+        );
+        assert!(receipt.commits.is_empty());
+        let mut bundle = bundle_with(vec![receipt]);
+        bundle.repos.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "api", "path": "/nonexistent", "baseBranch": "stable",
+                "featureBranch": "knit/proposal"
+            }))
+            .unwrap(),
+        );
+        let events = events(&bundle);
+        let receipt = find(&events, "branch.landed")[0];
+        assert_eq!(receipt.branch.as_deref(), Some("staging"));
+        assert_eq!(receipt.base_branch.as_deref(), Some("stable"));
+        assert_eq!(receipt.occurred_at.as_deref(), Some("2026-08-14T09:00:00Z"));
+        assert!(receipt.commit.is_none());
+        assert_eq!(
+            receipt.metadata.as_ref().unwrap()["sourceCommit"],
+            "source-head"
+        );
+    }
+
+    #[test]
+    fn legacy_landing_requires_destination_evidence_and_archive_proves_nothing() {
+        let mut bundle = bundle_with(vec![
+            BundleNode::feature_landed(
+                "completed".into(),
+                "2026-08-14T09:00:00Z".into(),
+                "plan".into(),
+                "run".into(),
+                "github".into(),
+                vec!["api".into()],
+                vec!["https://example.test/pull/1".into()],
+                None,
+            ),
+            BundleNode::feature_archived(
+                "archive".into(),
+                "2026-08-14T10:00:00Z".into(),
+                Some("landed".into()),
+            ),
+        ]);
+        bundle.repos.push(
+            serde_json::from_value(serde_json::json!({
+                "id": "api", "path": "/nonexistent", "baseBranch": "stable"
+            }))
+            .unwrap(),
+        );
+        assert!(find(&events(&bundle), "branch.landed").is_empty());
+        bundle.publications.push(serde_json::from_value(serde_json::json!({
+            "repoId": "api", "provider": "github", "kind": "pr", "number": 1,
+            "url": "https://example.test/pull/1", "baseBranch": "release", "headBranch": "knit/proposal",
+            "state": "MERGED", "updatedAt": "2026-08-14T09:00:00Z"
+        })).unwrap());
+        let recorded = events(&bundle);
+        let receipt = find(&recorded, "branch.landed")[0];
+        assert_eq!(receipt.branch.as_deref(), Some("release"));
+        assert_eq!(receipt.base_branch.as_deref(), Some("stable"));
+        assert_eq!(
+            find(&recorded, "bundle.landed")[0]
+                .metadata
+                .as_ref()
+                .unwrap()["hasBranchReceipts"],
+            true
+        );
     }
 
     #[test]

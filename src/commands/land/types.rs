@@ -23,6 +23,7 @@ pub(super) enum LandStepKind {
     WaitChecks,
     Run,
     Deploy,
+    Manual,
 }
 
 impl LandStepKind {
@@ -33,6 +34,7 @@ impl LandStepKind {
             LandStepKind::WaitChecks => "wait_checks",
             LandStepKind::Run => "run",
             LandStepKind::Deploy => "deploy",
+            LandStepKind::Manual => "manual",
         }
     }
 }
@@ -177,6 +179,8 @@ pub(super) struct LandStep {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandCheckout {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) mode: Option<String>,
     pub(super) branch: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(super) remote: Option<String>,
@@ -187,6 +191,10 @@ pub(super) struct LandCheckout {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(super) struct LandRun {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(super) plan_hash: Option<String>,
+    #[serde(default)]
+    pub(super) finalized: bool,
     pub(super) schema_version: String,
     pub(super) kind: String,
     pub(super) id: String,

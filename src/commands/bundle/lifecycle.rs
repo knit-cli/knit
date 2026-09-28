@@ -9,7 +9,8 @@ use crate::git::{
 use crate::model::{BundleNode, BundleState, ChangeGroup};
 use crate::output as out;
 use crate::store::{
-    bundle_path as stored_bundle_path, load_config, save_config, write_json, ActiveBundle,
+    bundle_path as stored_bundle_path, load_config, save_active_bundle, save_config, write_json,
+    ActiveBundle,
 };
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -35,7 +36,7 @@ pub fn archive_bundle(
     let bundle = load_existing_bundle(&path, &bundle_id)?;
     let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
     let summary = archive_active_bundle(&mut active, reason, keep_worktrees, force)?;
-    write_json(&path, &active.bundle)?;
+    save_active_bundle(&active)?;
     clear_active_if_matches(&root, &bundle_id)?;
     println!(
         "{} {}",
@@ -194,6 +195,9 @@ pub fn delete_bundle(
     if branches && !worktrees {
         bail!("Deleting local branches requires --worktrees so generated checkouts are removed first.");
     }
+    // Preserve the portable event record before disposing artifacts or Git
+    // checkouts. Inspection no longer performs an implicit history refresh.
+    crate::history::record_bundle_history(&root, &bundle)?;
     if remote_bundles {
         let loaded_config;
         let config = match config {

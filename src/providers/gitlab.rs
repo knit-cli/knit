@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     MERGE_REQUEST_KIND,
 };
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -43,6 +44,19 @@ struct GlabMr {
     head_pipeline: Option<GlabPipeline>,
     #[serde(default)]
     pipeline: Option<GlabPipeline>,
+    #[serde(default)]
+    author: Option<GlabUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GlabUser {
+    username: String,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    web_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -123,7 +137,7 @@ impl Forge for GitLab {
                 OsString::from("1"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         if output.trim().is_empty() {
             return Ok(None);
         }
@@ -186,7 +200,7 @@ impl Forge for GitLab {
             args.push(OsString::from("--draft"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         parse_pr_url(&output).context("`glab mr create` did not print an MR URL")
     }
 
@@ -218,10 +232,52 @@ impl Forge for GitLab {
                 OsString::from("json"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         let mr: GlabMr =
             serde_json::from_str(&output).context("failed to parse `glab mr view` JSON")?;
         enrich_pull_request(target, &repo, mr)
+    }
+
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        #[derive(Deserialize)]
+        struct Review {
+            state: Option<String>,
+            merge_commit_sha: Option<String>,
+        }
+        let output = if target.repo_full_name.is_some() {
+            let repo = resolve_repo(target)?;
+            api_output(
+                target,
+                "GET",
+                &format!(
+                    "projects/{}/merge_requests/{}",
+                    encode_path_component(&repo),
+                    selector_iid(publication_url)
+                ),
+                None,
+            )?
+        } else {
+            // Keep checkout-mode authentication in glab, just like view/merge.
+            cli_output(
+                CLI,
+                target,
+                [
+                    "mr",
+                    "view",
+                    &selector_iid(publication_url),
+                    "--output",
+                    "json",
+                ],
+                None,
+            )?
+        };
+        let review: Review =
+            serde_json::from_str(&output).context("failed to parse GitLab merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("merged") {
+            review.merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
@@ -239,7 +295,7 @@ impl Forge for GitLab {
                 OsString::from(body),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -263,7 +319,7 @@ impl Forge for GitLab {
                 OsString::from(base),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -337,7 +393,7 @@ impl Forge for GitLab {
             args.push(OsString::from("--remove-source-branch"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -471,7 +527,7 @@ impl Forge for GitLab {
                 OsString::from("json"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         let mr: GlabMr =
             serde_json::from_str(&output).context("failed to parse `glab mr view` JSON")?;
         Ok(pipeline_check(mr.head_pipeline.or(mr.pipeline)))
@@ -606,7 +662,7 @@ fn api_output(
     body: Option<&str>,
 ) -> Result<String> {
     if target.repo_full_name.is_some() {
-        return native_api_output(method, endpoint, body);
+        return native_api_output(target, method, endpoint, body);
     }
     let mut args = vec![
         OsString::from("api"),
@@ -618,22 +674,37 @@ fn api_output(
         args.push(OsString::from("--input"));
         args.push(OsString::from("-"));
     }
-    cli_output(CLI, &target.cwd, args, body)
+    cli_output(CLI, target, args, body)
 }
 
-fn native_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result<String> {
-    let token = ["KNIT_GITLAB_TOKEN", "GITLAB_TOKEN"]
-        .into_iter()
-        .find_map(non_empty_env)
+fn native_api_output(
+    target: &PrTarget,
+    method: &str,
+    endpoint: &str,
+    body: Option<&str>,
+) -> Result<String> {
+    let credential = super::target_credential(target, "gitlab")?;
+    let token = credential
+        .as_ref()
+        .map(|value| value.token.clone())
+        .or_else(|| {
+            ["KNIT_GITLAB_TOKEN", "GITLAB_TOKEN"]
+                .into_iter()
+                .find_map(non_empty_env)
+        })
         .context("GitLab API access requires KNIT_GITLAB_TOKEN or GITLAB_TOKEN")?;
-    let base = std::env::var("KNIT_GITLAB_API_BASE")
-        .ok()
-        .map(|value| value.trim().trim_end_matches('/').to_string())
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string());
+    let base = match &credential {
+        Some(value) => super::bound_api_base(value)?,
+        None => std::env::var("KNIT_GITLAB_API_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty())
+            .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string()),
+    };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
         .timeout(std::time::Duration::from_secs(20))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -656,6 +727,10 @@ fn native_api_output(method: &str, endpoint: &str, body: Option<&str>) -> Result
             .with_context(|| format!("failed to read GitLab API response for {operation}")),
         Err(ureq::Error::Status(status, response)) => {
             let detail = response.into_string().unwrap_or_default();
+            let detail = credential
+                .as_ref()
+                .map(|value| value.redact(&detail))
+                .unwrap_or(detail);
             if status == 401 || status == 403 {
                 bail!(
                     "GitLab API request failed during {operation}: HTTP {status}: {}\nHint: set KNIT_GITLAB_TOKEN or GITLAB_TOKEN to a token with API access.",
@@ -762,6 +837,12 @@ fn into_pull_request(mr: GlabMr) -> PullRequest {
         mergeable: gitlab_mergeable(merge_status.as_deref()),
         merge_state_status: merge_status.map(|status| status.to_ascii_uppercase()),
         review_decision: None,
+        author: mr.author.map(|user| ForgeAuthor {
+            login: user.username,
+            name: user.name,
+            avatar_url: user.avatar_url,
+            url: user.web_url,
+        }),
     }
 }
 
@@ -812,6 +893,20 @@ pub(crate) fn full_name(remote: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn maps_mr_author() {
+        let json = r#"{"iid":3,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/3","author":{"username":"dana","name":"Dana Ruiz","avatar_url":"https://gitlab.com/uploads/dana.png","web_url":"https://gitlab.com/dana"}}"#;
+        let pr = into_pull_request(serde_json::from_str(json).unwrap());
+        let author = pr.author.expect("author");
+        assert_eq!(author.login, "dana");
+        assert_eq!(author.name.as_deref(), Some("Dana Ruiz"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://gitlab.com/uploads/dana.png")
+        );
+        assert_eq!(author.url.as_deref(), Some("https://gitlab.com/dana"));
+    }
 
     #[test]
     fn parses_nested_full_name() {

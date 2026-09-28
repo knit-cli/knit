@@ -161,7 +161,7 @@ Expected result: after `archive`, the bundle records a `feature.archived` node, 
 To test landing with real disposable GitHub PRs, push/publish first, then inspect before applying:
 
 ```sh
-knit publish create --base main --no-sync
+knit publish create --target main --no-sync
 knit land
 knit land status
 ```

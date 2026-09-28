@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     PULL_REQUEST_KIND,
 };
+use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
 use serde_json::json;
@@ -34,6 +35,12 @@ struct TeaPr {
 }
 
 #[derive(Debug, Deserialize)]
+struct MergeRevision {
+    merged: Option<bool>,
+    merge_commit_sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
 struct ForgejoApiPr {
     #[serde(default, alias = "index")]
     number: u64,
@@ -53,6 +60,19 @@ struct ForgejoApiPr {
     merged: bool,
     #[serde(default)]
     mergeable: Option<bool>,
+    #[serde(default)]
+    user: Option<ForgejoApiUser>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ForgejoApiUser {
+    login: String,
+    #[serde(default)]
+    full_name: Option<String>,
+    #[serde(default)]
+    avatar_url: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -105,7 +125,7 @@ impl Forge for Forgejo {
         head: &str,
         base: &str,
     ) -> Result<Option<PullRequest>> {
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let output = api_output(
                 target,
@@ -142,7 +162,7 @@ impl Forge for Forgejo {
         } else {
             title.to_string()
         };
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let payload = serde_json::to_string(&json!({
                 "head": head,
@@ -177,7 +197,7 @@ impl Forge for Forgejo {
                 OsString::from(body),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         if let Some(url) = parse_pr_url(&output) {
             return Ok(url);
         }
@@ -188,7 +208,7 @@ impl Forge for Forgejo {
     }
 
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let output = api_output(
                 target,
@@ -208,8 +228,28 @@ impl Forge for Forgejo {
             .with_context(|| format!("no Forgejo PR found for selector `{selector}`"))
     }
 
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        let review: MergeRevision = if use_api(target)? {
+            let repo = resolve_repo(target)?;
+            let output = api_output(
+                target,
+                "GET",
+                &format!("repos/{repo}/pulls/{}", selector_index(publication_url)),
+                None,
+            )?;
+            serde_json::from_str(&output).context("failed to parse Forgejo merged revision JSON")?
+        } else {
+            tea_merge_metadata(target, publication_url)?
+        };
+        Ok(if review.merged == Some(true) {
+            review.merge_commit_sha.filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
-        if use_api(target) {
+        if use_api(target)? {
             return edit_api_pr(target, selector, &json!({ "body": body }));
         }
         let args = repo_scoped_args(
@@ -223,7 +263,7 @@ impl Forge for Forgejo {
                 OsString::from(body),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -254,7 +294,7 @@ impl Forge for Forgejo {
             "rebase" => "rebase",
             other => bail!("unknown Forgejo merge method `{other}`"),
         };
-        if use_api(target) {
+        if use_api(target)? {
             let repo = resolve_repo(target)?;
             let payload = serde_json::to_string(&json!({
                 "Do": style,
@@ -269,6 +309,9 @@ impl Forge for Forgejo {
             )?;
             return Ok(());
         }
+        // Older tea list JSON contains branch names, not a merged commit identity.
+        // Check the authenticated raw metadata capability before any source mutation.
+        tea_merge_metadata(target, selector)?;
         let mut args = vec![
             OsString::from("pr"),
             OsString::from("merge"),
@@ -280,7 +323,7 @@ impl Forge for Forgejo {
             args.push(OsString::from("--delete-branch"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -290,7 +333,7 @@ impl Forge for Forgejo {
         selector: &str,
         _required_only: bool,
     ) -> Result<Vec<CheckRun>> {
-        if !use_api(target) {
+        if !use_api(target)? {
             // Basic tea-only users can still publish and land; richer status
             // evidence requires an API token.
             return Ok(Vec::new());
@@ -321,7 +364,7 @@ impl Forgejo {
                 OsString::from("json"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         if output.trim().is_empty() {
             return Ok(Vec::new());
         }
@@ -329,8 +372,27 @@ impl Forgejo {
     }
 }
 
-fn use_api(target: &PrTarget) -> bool {
-    target.repo_full_name.is_some() || api_token().is_some()
+/// `tea api` uses tea's saved login and repository context. List fields such as
+/// `head` and `base-commit` are not evidence of the commit produced by a merge.
+fn tea_merge_metadata(target: &PrTarget, selector: &str) -> Result<MergeRevision> {
+    let endpoint = format!(
+        "repos/{{owner}}/{{repo}}/pulls/{}",
+        selector_index(selector)
+    );
+    let output = cli_output(CLI, target, ["api", "--method", "GET", &endpoint], None)
+        .context("cannot establish authoritative Forgejo merge metadata before merging; use a tea version with authenticated `tea api` support, or configure native Forgejo credentials")?;
+    let review: MergeRevision = serde_json::from_str(&output)
+        .context("tea api did not return valid Forgejo merge metadata")?;
+    if review.merged.is_none() {
+        bail!("tea api response lacks confirmed merge state; refusing to infer a merged revision from branch or feature heads");
+    }
+    Ok(review)
+}
+
+fn use_api(target: &PrTarget) -> Result<bool> {
+    Ok(super::target_credential(target, "forgejo")?.is_some()
+        || target.repo_full_name.is_some()
+        || api_token().is_some())
 }
 
 fn resolve_repo(target: &PrTarget) -> Result<String> {
@@ -398,6 +460,12 @@ fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<Pull
         }),
         merge_state_status: None,
         review_decision: approved.then(|| "APPROVED".to_string()),
+        author: pr.user.map(|user| ForgeAuthor {
+            login: user.login,
+            name: user.full_name,
+            avatar_url: user.avatar_url,
+            url: user.html_url,
+        }),
     })
 }
 
@@ -462,13 +530,22 @@ fn api_output(
     endpoint: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    let token = api_token().context(
-        "Forgejo API access requires KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN",
-    )?;
-    let base = api_base(target)?;
+    let credential = super::target_credential(target, "forgejo")?;
+    let token = credential
+        .as_ref()
+        .map(|value| value.token.clone())
+        .or_else(api_token)
+        .context(
+            "Forgejo API access requires KNIT_FORGEJO_TOKEN, CODEBERG_TOKEN, or GITEA_TOKEN",
+        )?;
+    let base = match &credential {
+        Some(value) => super::bound_api_base(value)?,
+        None => api_base(target)?,
+    };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
     let agent = ureq::AgentBuilder::new()
+        .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(10))
         .timeout(std::time::Duration::from_secs(30))
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
@@ -494,6 +571,10 @@ fn api_output(
             }
             Err(ureq::Error::Status(status, response)) => {
                 let detail = response.into_string().unwrap_or_default();
+                let detail = credential
+                    .as_ref()
+                    .map(|value| value.redact(&detail))
+                    .unwrap_or(detail);
                 if (500..=599).contains(&status) && attempt < 2 {
                     std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
                     continue;
@@ -593,6 +674,7 @@ fn into_pull_request(pr: TeaPr) -> PullRequest {
         mergeable: None,
         merge_state_status: None,
         review_decision: None,
+        author: None,
     }
 }
 

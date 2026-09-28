@@ -196,6 +196,40 @@ pub fn rev_parse(cwd: &Path, reference: &str) -> Result<String> {
         .to_string())
 }
 
+/// Preserve Git's ordinary branch merge subject even when the actual input
+/// is an exact reviewed commit and the executor uses an isolated checkout.
+pub(crate) fn branch_merge_message(
+    root: &Path,
+    source: &str,
+    name: &str,
+    target: &str,
+) -> Result<String> {
+    use std::io::Write;
+    git_output(root, ["check-ref-format", &format!("refs/heads/{name}")])?;
+    let sha = rev_parse(root, &format!("{source}^{{commit}}"))?;
+    let mut child = Command::new("git")
+        .args(["fmt-merge-msg", "--into-name", target])
+        .current_dir(root)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("failed to format branch merge message")?;
+    child
+        .stdin
+        .take()
+        .context("merge message input unavailable")?
+        .write_all(format!("{sha}\t\tbranch '{name}' of .\n").as_bytes())?;
+    let output = child.wait_with_output()?;
+    if !output.status.success() {
+        bail!(
+            "git fmt-merge-msg failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8(output.stdout)?.trim().to_owned())
+}
+
 /// Reads the recorded Git author (name + email) of a commit. Reads the actual
 /// commit, so it reflects per-repo `user.name`/`user.email` rather than guessing.
 pub fn commit_author(cwd: &Path, sha: &str) -> Result<CommitAuthor> {
@@ -323,7 +357,8 @@ pub fn remote_ref_sha(cwd: &Path, remote: &str, reference: &str) -> Result<Optio
 }
 
 /// Probe whether a remote repository URL answers `git ls-remote` at all, using
-/// the ambient credential helpers. `Err` carries git's error text.
+/// the project's assigned credential when configured. `Err` carries redacted
+/// git error text.
 /// `GIT_TERMINAL_PROMPT=0` keeps a missing credential from turning the probe
 /// into an interactive hang.
 pub fn remote_repo_reachable(cwd: &Path, url: &str) -> std::result::Result<(), String> {
@@ -359,17 +394,33 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = collect_args(args);
-    let output = Command::new("git")
-        .args(&args)
-        .current_dir(cwd)
-        .output()
-        .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+    git_output_inner(cwd, collect_args(args), true)
+}
+
+fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Result<String> {
+    let mut command = Command::new("git");
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_inner(cwd, args, false);
+            }
+            return Err(error);
+        }
+    };
+    command.args(&args).current_dir(cwd);
+    let output = if crate::commands::land::git_progress::active(&args) {
+        crate::commands::land::git_progress::run(&mut command, &args, &credentials)
+    } else {
+        command.output().map_err(anyhow::Error::from)
+    }
+    .with_context(|| format!("failed to run git in {}", cwd.display()))?;
 
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string());
+        return Ok(crate::auth_git::redact(
+            &credentials,
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+        ));
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -379,11 +430,14 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_inner(cwd, args, false);
+    }
     bail!(
         "git {} failed in {}: {}",
-        display_args(&args),
+        crate::auth_git::redact(&credentials, &display_args(&args)),
         cwd.display(),
-        detail
+        crate::auth_git::redact(&credentials, detail)
     );
 }
 
@@ -405,10 +459,27 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    use std::io::Read;
+    git_output_timeout_inner(cwd, collect_args(args), timeout, true)
+}
 
-    let args = collect_args(args);
-    let mut child = Command::new("git")
+fn git_output_timeout_inner(
+    cwd: &Path,
+    args: Vec<OsString>,
+    timeout: std::time::Duration,
+    allow_recovery: bool,
+) -> Result<String> {
+    use std::io::Read;
+    let mut command = Command::new("git");
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_timeout_inner(cwd, args, timeout, false);
+            }
+            return Err(error);
+        }
+    };
+    let mut child = command
         .args(&args)
         .current_dir(cwd)
         .stdin(Stdio::null())
@@ -457,14 +528,17 @@ where
     let Some(status) = status else {
         bail!(
             "git {} in {} timed out after {}s",
-            display_args(&args),
+            crate::auth_git::redact(&credentials, &display_args(&args)),
             cwd.display(),
             timeout.as_secs()
         );
     };
 
     if status.success() {
-        return Ok(String::from_utf8_lossy(&stdout).trim_end().to_string());
+        return Ok(crate::auth_git::redact(
+            &credentials,
+            String::from_utf8_lossy(&stdout).trim_end(),
+        ));
     }
 
     let stderr = String::from_utf8_lossy(&stderr);
@@ -474,11 +548,14 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_timeout_inner(cwd, args, timeout, false);
+    }
     bail!(
         "git {} failed in {}: {}",
-        display_args(&args),
+        crate::auth_git::redact(&credentials, &display_args(&args)),
         cwd.display(),
-        detail
+        crate::auth_git::redact(&credentials, detail)
     );
 }
 
@@ -490,20 +567,38 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<OsStr>,
 {
-    let args = collect_args(args);
+    git_output_env_inner(cwd, collect_args(args), envs, true)
+}
+
+fn git_output_env_inner(
+    cwd: &Path,
+    args: Vec<OsString>,
+    envs: &[(&str, &str)],
+    allow_recovery: bool,
+) -> Result<String> {
     let mut command = Command::new("git");
-    command.args(&args).current_dir(cwd);
     for (key, value) in envs {
         command.env(key, value);
     }
+    let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
+        Ok(credentials) => credentials,
+        Err(error) => {
+            if allow_recovery && crate::git_fallback::recover(cwd, &args, &format!("{error:#}"))? {
+                return git_output_env_inner(cwd, args, envs, false);
+            }
+            return Err(error);
+        }
+    };
+    command.args(&args).current_dir(cwd);
     let output = command
         .output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
 
     if output.status.success() {
-        return Ok(String::from_utf8_lossy(&output.stdout)
-            .trim_end()
-            .to_string());
+        return Ok(crate::auth_git::redact(
+            &credentials,
+            String::from_utf8_lossy(&output.stdout).trim_end(),
+        ));
     }
 
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -513,11 +608,14 @@ where
     } else {
         stderr.trim()
     };
+    if allow_recovery && crate::git_fallback::recover(cwd, &args, detail)? {
+        return git_output_env_inner(cwd, args, envs, false);
+    }
     bail!(
         "git {} failed in {}: {}",
-        display_args(&args),
+        crate::auth_git::redact(&credentials, &display_args(&args)),
         cwd.display(),
-        detail
+        crate::auth_git::redact(&credentials, detail)
     );
 }
 
@@ -527,14 +625,17 @@ where
     S: AsRef<OsStr>,
 {
     let args = collect_args(args);
-    let output = Command::new("git")
+    let mut command = Command::new("git");
+    let credentials = crate::auth_git::configure(cwd, &args, &mut command)?;
+    let output = command
         .args(&args)
         .current_dir(cwd)
         .output()
         .with_context(|| format!("failed to run git in {}", cwd.display()))?;
 
     if output.status.success() {
-        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stdout =
+            crate::auth_git::redact(&credentials, String::from_utf8_lossy(&output.stdout).trim());
         return Ok((!stdout.is_empty()).then_some(stdout));
     }
 
@@ -547,7 +648,11 @@ where
     S: AsRef<OsStr>,
 {
     let args = collect_args(args);
-    Command::new("git")
+    let mut command = Command::new("git");
+    if crate::auth_git::configure(cwd, &args, &mut command).is_err() {
+        return false;
+    }
+    command
         .args(&args)
         .current_dir(cwd)
         .stdout(Stdio::null())

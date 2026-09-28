@@ -195,6 +195,45 @@ fn workspace_status_distinguishes_current_checkout_from_configured_base() {
 }
 
 #[test]
+fn plain_pull_updates_project_without_an_active_bundle() {
+    let root = unique_temp_dir();
+    let (_remote, backend, collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+
+    // Both a new project and a clone containing only archived history have
+    // source checkouts to pull, even though neither has an active bundle.
+    for archived_history in [false, true] {
+        if archived_history {
+            knit(&workspace, ["bundle", "finished work"]);
+            knit(&workspace, ["bundle", "archive", "finished-work"]);
+        }
+        let before = git(&backend, ["rev-parse", "HEAD"]);
+        append_line(&collaborator.join("app.txt"), "remote update");
+        git(&collaborator, ["commit", "-am", "Remote update"]);
+        git(&collaborator, ["push", "origin", "main"]);
+        let expected = git(&collaborator, ["rev-parse", "HEAD"]);
+
+        // Invalid explicit contexts must still fail, never silently broaden
+        // the operation to the entire project.
+        knit_fails(&workspace, ["--bundle", "missing", "pull"]);
+        knit_fails_with_env(&workspace, ["pull"], &[("KNIT_BUNDLE", "missing")]);
+        assert_eq!(git(&backend, ["rev-parse", "HEAD"]), before);
+
+        let report = knit(&workspace, ["pull"]);
+        assert!(report.contains("Current checkouts:"), "{report}");
+        assert!(report.contains(&expected[..7]), "{report}");
+        assert_eq!(git(&backend, ["rev-parse", "HEAD"]), expected);
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn pull_everything_at_root_reports_without_refusing_multiple_bundles() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");
@@ -1256,6 +1295,240 @@ fn sync_push_bundles_as_collaborator_skips_project_shape() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// A collaborator's `knit sync push --history` must reach the writable plane
+/// (history events) without reshaping the shared project: the PATCH refusal
+/// falls back to a read-only fetch, and repository records — part of the
+/// project shape — stay untouched.
+#[test]
+fn sync_push_history_as_collaborator_pushes_events_without_reshaping_the_project() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "collaborator-token")];
+
+    // The remote refuses the project-shape upsert: this caller reaches the
+    // project as a collaborator, not its owner.
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    // Creating a bundle records local history events for the push to carry.
+    knit(&workspace, ["bundle", "alpha work", "--repo", "backend"]);
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    assert!(output.contains("pushed history"), "{output}");
+
+    // History events landed on the writable plane...
+    let pushes = fs::read_to_string(fake_dir.join("history-pushes.jsonl"))
+        .expect("the collaborator's history events must be pushed");
+    assert!(
+        pushes.contains("alpha-work"),
+        "pushed events must mention the bundle: {pushes}"
+    );
+    // ...while the refused shape upsert never degraded into reshaping the
+    // shared membership or creating a personal duplicate.
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "collaborator history push must not push repository records"
+    );
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "collaborator history push must not POST-create a duplicate project"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `knit project push` deliberately changes the shared project shape, so a
+/// collaborator's refusal must fail loudly with the permission problem —
+/// never report success with the shape silently skipped — and must not leave
+/// any remote mutation behind (no duplicate project, no repository records,
+/// no prune).
+#[test]
+fn project_push_as_collaborator_fails_with_a_permission_error_and_no_mutations() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "collaborator-token")];
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    let output = knit_fails_with_env(&workspace, ["project", "push"], &env);
+    assert!(
+        output.contains("HTTP 403"),
+        "the refusal must be named for what it is: {output}"
+    );
+    assert!(
+        output.contains("knit project push") && output.contains("knit sync push"),
+        "the error must point at the owner remedy and the unaffected member path: {output}"
+    );
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "a 403 must never fall through to POST-creating a duplicate project"
+    );
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "a refused project push must not push repository records"
+    );
+    assert!(
+        !fake_dir.join("deleted-repositories.txt").exists(),
+        "a refused project push must not prune remote repositories"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The 403 refusal must not poison the genuine new-project path: a project
+/// that truly does not exist (PATCH 404) is still POST-created by its
+/// rightful first pusher, repository records included.
+#[test]
+fn project_push_creates_a_genuinely_missing_project() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "owner-token")];
+    fs::write(fake_dir.join("project-shape-missing"), "").unwrap();
+
+    let output = knit_with_env(&workspace, ["project", "push"], &env);
+    assert!(output.contains("pushed"), "{output}");
+    assert!(
+        fake_dir.join("project-created.txt").exists(),
+        "a 404 must still take the genuine create-the-missing-project path"
+    );
+    assert!(
+        fake_dir.join("repositories-pushed.txt").exists(),
+        "the first pusher of a new project also publishes its repository records"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// The member end-to-end flow for a renamed-but-retained project: clone
+/// `example-org/example-project` (hosted display name Renamed Project, technical slug and exported
+/// knitProject.id example-project), then push bundles and history as a writable org
+/// member who may not reshape the project. Everything must sync onto the
+/// existing hosted project — no personal duplicate, no membership rewrite.
+#[test]
+fn cloned_member_workspace_pushes_bundles_and_history_without_duplicates() {
+    let root = unique_temp_dir();
+    let (remote, _backend, _collaborator) = init_remote_repo(&root, "backend");
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+
+    let export = serde_json::json!({
+        "data": {
+            "project": {
+                "slug": "example-project",
+                "name": "Renamed Project",
+                "organization": {"slug": "example-org"},
+            },
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "example-project",
+                "createdAt": "2026-01-01T00:00:00.000Z",
+                "updatedAt": "2026-01-01T00:00:00.000Z",
+                "repos": [
+                    {"id": "backend", "path": "", "remote": remote.to_str().unwrap(), "baseBranch": "main"},
+                ],
+            },
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": remote.to_str().unwrap(), "metadata": {}},
+            ],
+            "bundles": [],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    // The hosted project exists; this clone's token belongs to a writable
+    // org member who may push bundles and history but not reshape the project.
+    fs::write(fake_dir.join("project-shape-forbidden"), "").unwrap();
+
+    let target = root.join("member-workspace");
+    let env = [("KNIT_REMOTE_TOKEN", "member-token")];
+    let output = knit_with_env(
+        &root,
+        [
+            "clone",
+            "example-org/example-project",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+        ],
+        &env,
+    );
+    assert!(output.contains("cloned"), "{output}");
+    // The local project id is the exported knitProject.id — the technical
+    // slug existing clones already use, not the hosted display name.
+    assert!(
+        target
+            .join(".knit/projects/example-project.project.json")
+            .exists(),
+        "clone must keep the example-project project id"
+    );
+    configure_git_user(&target.join("backend"));
+
+    knit(&target, ["bundle", "member work", "--repo", "backend"]);
+    append_line(
+        &target.join(".knit/worktrees/member-work/backend/app.txt"),
+        "member change",
+    );
+    knit(&target, ["commit", "--all", "-m", "Member change"]);
+
+    let output = knit_with_env(&target, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("bundle artifact(s)"), "{output}");
+    let states = fs::read_to_string(fake_dir.join("artifact-member-work.states"))
+        .expect("the member's bundle artifact must be pushed");
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+
+    let output = knit_with_env(&target, ["sync", "push", "--history"], &env);
+    assert!(output.contains("pushed history"), "{output}");
+    assert!(
+        fake_dir.join("history-pushes.jsonl").exists(),
+        "the member's history events must be pushed"
+    );
+
+    assert!(
+        !fake_dir.join("project-created.txt").exists(),
+        "the member's pushes must never POST-create a personal duplicate of the hosted project"
+    );
+    assert!(
+        !fake_dir.join("repositories-pushed.txt").exists(),
+        "the member's pushes must not rewrite the hosted membership"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
     let root = unique_temp_dir();
@@ -1911,6 +2184,197 @@ fn sync_pull_fetches_each_bundle_artifact_from_the_slim_export() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn sync_pull_terminal_landing_archives_existing_bundle_and_preserves_dirty_worktree() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["bundle", "remote landing", "--repo", "backend"],
+    );
+    let feature = workspace.join(".knit/worktrees/remote-landing/backend");
+    append_line(&feature.join("app.txt"), "published feature");
+    knit(&workspace, ["commit", "--all", "-m", "Published feature"]);
+    let artifact_path = workspace.join(".knit/bundles/remote-landing.bundle.json");
+    let original: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    // The remote feature branch is absent, as when the host deletes it after merge.
+    let original_head = git(&feature, ["rev-parse", "HEAD"]);
+    append_line(&feature.join("app.txt"), "uncommitted local work");
+    fs::write(feature.join("notes.txt"), "untracked local notes").unwrap();
+    let dirty_contents = fs::read_to_string(feature.join("app.txt")).unwrap();
+
+    // Hosted landing extends the shared ledger and archives its artifact.
+    // It cannot clean another machine's checkout, including unfinished work.
+    let mut landed = original.clone();
+    let landed_at = "2099-01-01T00:00:00.000Z";
+    landed["nodes"].as_array_mut().unwrap().extend([
+        serde_json::json!({
+            "id": "land_remote", "type": "feature.landed", "createdAt": landed_at,
+            "planId": "land-remote-landing", "runId": "run-hosted", "provider": "github",
+            "repoIds": ["backend"], "landing": {"terminal": true},
+        }),
+        serde_json::json!({
+            "id": "archive_remote", "type": "feature.archived", "createdAt": landed_at,
+            "message": "landed",
+        }),
+    ]);
+    landed["headNodeId"] = serde_json::json!("archive_remote");
+    landed["state"] = serde_json::json!("archived");
+    landed["archivedAt"] = serde_json::json!(landed_at);
+    landed["updatedAt"] = serde_json::json!(landed_at);
+    // Foreign checkout paths must never replace this machine's paths.
+    landed["repos"][0]["worktreePath"] = serde_json::json!("/other-machine/backend");
+
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    fs::write(
+        fake_dir.join("export.json"),
+        serde_json::json!({"data": {
+            "project": {"slug": "demo"}, "knitProject": null, "repositories": [],
+            "bundles": [
+                {"id": "rb-1", "slug": "remote-landing", "lifecycleState": "archived",
+                 "currentArtifact": {"artifactHash": "hash-landed", "sizeBytes": 42}},
+                {"id": "rb-old", "slug": "old-landed", "lifecycleState": "archived",
+                 "currentArtifact": {"artifactHash": "hash-old", "sizeBytes": 42}},
+            ], "historyEvents": [],
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({"data": {
+            "id": "rb-1", "slug": "remote-landing",
+            "currentArtifact": {"artifactHash": "hash-landed", "payload": landed},
+        }})
+        .to_string(),
+    )
+    .unwrap();
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    knit(&workspace, ["init", "unrelated"]);
+    let config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(workspace.join(".knit/config.json")).unwrap())
+            .unwrap();
+    assert_eq!(config["activeProject"], "unrelated");
+    assert_eq!(original["projectId"], "demo");
+    // An automatic sweep must yield to an authoring operation on this bundle.
+    let lock_path = workspace.join(".knit/locks/remote-landing.lock");
+    fs::create_dir_all(lock_path.parent().unwrap()).unwrap();
+    fs::write(&lock_path, std::process::id().to_string()).unwrap();
+    let before_locked_pull = fs::read(&artifact_path).unwrap();
+    let blocked = knit_fails_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert!(blocked.contains("Another Knit process"), "{blocked}");
+    assert_eq!(fs::read(&artifact_path).unwrap(), before_locked_pull);
+    assert_eq!(
+        fs::read_to_string(feature.join("app.txt")).unwrap(),
+        dirty_contents
+    );
+    assert_eq!(
+        fs::read_to_string(feature.join("notes.txt")).unwrap(),
+        "untracked local notes"
+    );
+    assert!(lock_path.exists());
+    fs::remove_file(&lock_path).unwrap();
+
+    let output = knit_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert!(output.contains("remote-landing"), "{output}");
+    let local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(local["state"], "archived");
+    assert_eq!(local["archivedAt"], landed_at);
+    assert_eq!(local["headNodeId"], "archive_remote");
+    assert_eq!(local["nodes"], landed["nodes"]);
+    assert_eq!(local["commitGroups"], original["commitGroups"]);
+    assert_eq!(
+        local["repos"][0]["worktreePath"],
+        original["repos"][0]["worktreePath"]
+    );
+    assert_eq!(git(&feature, ["rev-parse", "HEAD"]), original_head);
+    assert_eq!(
+        fs::read_to_string(feature.join("app.txt")).unwrap(),
+        dirty_contents
+    );
+    assert_eq!(
+        fs::read_to_string(feature.join("notes.txt")).unwrap(),
+        "untracked local notes"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/old-landed.bundle.json")
+        .exists());
+    assert!(!workspace
+        .join(".knit/deleted/bundles/remote-landing.bundle.json")
+        .exists());
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+
+    knit_with_env(
+        &workspace,
+        [
+            "--bundle",
+            "remote-landing",
+            "sync",
+            "pull",
+            "--bundles",
+            "--artifacts-only",
+            "--remote",
+            "hosted",
+        ],
+        &env,
+    );
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1".to_string()]
+    );
+    let repeated: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(repeated, local);
+    let projects = fs::read_to_string(fake_dir.join("project-export-fetches.txt")).unwrap();
+    assert!(!projects.is_empty());
+    assert!(
+        projects.lines().all(|project| project == "demo"),
+        "{projects}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// Once a bundle records the remote artifact hash it is in sync with, later
 /// pulls decide "nothing new" from the slim export alone: the payload is never
 /// downloaded again.
@@ -2235,6 +2699,59 @@ fn pull_reconcile_applies_adds_and_removals_together() {
     assert!(workspace.join("newrepo").join("app.txt").exists());
     // The removed repo's checkout on disk is left alone.
     assert!(root.join("oldrepo").join("app.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pull_reconcile_adds_record_the_membership_base_over_the_forge_default() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+
+    let newrepo = root.join("newrepo");
+    init_repo(&newrepo, "newrepo");
+    git(&newrepo, ["checkout", "-b", "release"]);
+    fs::write(newrepo.join("release.txt"), "release\n").unwrap();
+    git(&newrepo, ["add", "release.txt"]);
+    git(&newrepo, ["commit", "-m", "Release base"]);
+    git(&newrepo, ["checkout", "main"]);
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "release"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "defaultBranch": "main", "visibility": "public", "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull", "--bundles"], &env);
+    assert!(
+        output.contains("syncing membership from remote (+1 / -0)"),
+        "{output}"
+    );
+
+    let project: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/projects/demo.project.json")).unwrap(),
+    )
+    .unwrap();
+    let newrepo_entry = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|repo| repo["id"] == "newrepo")
+        .unwrap();
+    assert_eq!(newrepo_entry["baseBranch"], "release");
+    assert_eq!(
+        git(&workspace.join("newrepo"), ["branch", "--show-current"]).trim(),
+        "release"
+    );
 
     fs::remove_dir_all(root).unwrap();
 }
@@ -3075,6 +3592,203 @@ fn bundle_pull_by_name_extends_the_scope_view_with_what_it_cloned() {
     assert_eq!(
         views["views"]["scope"]["include"],
         serde_json::json!(["backend", "newrepo"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_sweep_records_and_retains_the_hosted_bundle_url() {
+    // Two open bundles from the workspace root: nothing resolves as the
+    // active bundle, so `sync push --bundles` is the pure project-wide sweep.
+    let (root, workspace, fake_dir) = force_push_scaffold(&["hosted url work", "second work"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    let hosted_url = "https://app.example.test/bundles/rb-hosted-url-work";
+    fs::write(fake_dir.join("bundle-web-url"), format!("{hosted_url}\n")).unwrap();
+
+    let pushed = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(pushed.contains("pushed 2 bundle artifact(s)"), "{pushed}");
+    let bundle_path = workspace.join(".knit/bundles/hosted-url-work.bundle.json");
+    let bundle: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+    // The swept sibling learned the same URL from the same server.
+    let sibling: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/second-work.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        sibling["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{sibling}"
+    );
+    // The artifact body the server received already carries the URL.
+    let body = last_artifact_body(&fake_dir, "hosted-url-work");
+    assert_eq!(
+        body["payload"]["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{body}"
+    );
+
+    // An older server that stops reporting a URL must not erase the known
+    // one on the next sweep.
+    fs::remove_file(fake_dir.join("bundle-web-url")).unwrap();
+    knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    let bundle: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn branch_push_sync_records_the_hosted_bundle_url() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _collab) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let hosted_url = "https://app.example.test/bundles/rb-quick-fix";
+    fs::write(fake_dir.join("bundle-web-url"), format!("{hosted_url}\n")).unwrap();
+
+    knit(&workspace, ["bundle", "quick fix", "--repo", "backend"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+    let output = knit_with_env(&workspace, ["push", "--set-upstream"], &env);
+    assert!(output.contains("syncing quick-fix"), "{output}");
+
+    let bundle: serde_json::Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(".knit/bundles/quick-fix.bundle.json")).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        bundle["syncTargets"][0]["webUrl"],
+        serde_json::json!(hosted_url),
+        "{bundle}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn a_remote_ahead_pull_keeps_the_locally_cached_hosted_url() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "remote made", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/remote-made/backend");
+    append_line(&feature.join("app.txt"), "work from another machine");
+    knit(&workspace, ["commit", "--all", "-m", "Remote-machine work"]);
+    // The feature branch is on origin, so the pull can refresh checkouts.
+    git(&backend, ["push", "origin", "knit/remote-made"]);
+
+    // The local artifact already reconciled with an older hosted server that
+    // reported the canonical web URL; its ledger is behind the remote's.
+    let artifact_path = workspace.join(".knit/bundles/remote-made.bundle.json");
+    let local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+
+    // The remote is a newer copy made before the URL existed: one extra node,
+    // no syncTargets, and an export entry whose server never reports webUrl.
+    let mut payload = local.clone();
+    payload["syncTargets"] = serde_json::json!([]);
+    payload["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "node-extra",
+            "type": "git.observed",
+            "createdAt": "2026-06-01T00:00:00.000Z",
+            "repoChanges": [],
+        }));
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "remote-made",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-new"},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "remote-made",
+                "currentArtifact": {"artifactHash": "hash-new", "payload": payload},
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    // The local artifact's sync target carries the cached URL against this
+    // exact hosted identity (remote name, bundle id, API URL).
+    let mut local: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    local["syncTargets"] = serde_json::json!([{
+        "remote": "hosted",
+        "bundleId": "rb-1",
+        "apiUrl": base_url,
+        "artifactHash": "hash-old",
+        "webUrl": "https://app.example.test/bundles/cached",
+    }]);
+    fs::write(
+        &artifact_path,
+        serde_json::to_string_pretty(&local).unwrap(),
+    )
+    .unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["pull"], &env);
+    assert!(output.contains("pulled hash-new"), "{output}");
+
+    // The remote-ahead copy replaced the artifact without losing the cached
+    // hosted URL, and the reconciliation hash moved to the remote's.
+    let saved: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&artifact_path).unwrap()).unwrap();
+    assert_eq!(
+        saved["syncTargets"][0]["webUrl"],
+        serde_json::json!("https://app.example.test/bundles/cached"),
+        "{saved}"
+    );
+    assert_eq!(
+        saved["syncTargets"][0]["artifactHash"],
+        serde_json::json!("hash-new"),
+        "{saved}"
     );
 
     fs::remove_dir_all(root).unwrap();

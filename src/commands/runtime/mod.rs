@@ -8,8 +8,8 @@
 
 use crate::checkout::checkout_dir;
 use crate::model::{KnitProject, ProjectRuntime};
-use crate::store::{load_active_bundle, project_path, read_json, ActiveBundle};
-use anyhow::{bail, Context, Result};
+use crate::store::{ActiveBundle, load_active_bundle, project_path, read_json};
+use anyhow::{Context, Result, bail};
 use knit_runtime::{EngineView, RuntimeContext, RuntimeRepo};
 use std::path::PathBuf;
 mod broker;
@@ -212,24 +212,6 @@ fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
     read_json(&project_path(&active.root, project_id))
 }
 
-#[cfg(test)]
-mod tests {
-    use super::is_volume_name;
-
-    #[test]
-    fn volume_names_follow_dockers_grammar() {
-        assert!(is_volume_name("svartal-ws-1"));
-        assert!(is_volume_name("a"));
-        assert!(is_volume_name("A_b.c-d0"));
-        assert!(!is_volume_name(""));
-        assert!(!is_volume_name("-leading-dash"));
-        assert!(!is_volume_name("has space"));
-        assert!(!is_volume_name("has/slash"));
-        assert!(!is_volume_name(&"a".repeat(129)));
-        assert!(is_volume_name(&"a".repeat(128)));
-    }
-}
-
 /// Called only through the dedicated command; never dispatch project commands or broker RPC.
 pub fn worker(action: &str, purge: bool, json: bool) -> Result<()> {
     if !["up", "down", "status"].contains(&action) || (purge && action != "down") {
@@ -240,4 +222,22 @@ pub fn worker(action: &str, purge: bool, json: bool) -> Result<()> {
         bail!("No runtime stack configured for this bundle");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_volume_name;
+
+    #[test]
+    fn volume_names_follow_dockers_grammar() {
+        assert!(is_volume_name("workspace-volume-1"));
+        assert!(is_volume_name("a"));
+        assert!(is_volume_name("A_b.c-d0"));
+        assert!(!is_volume_name(""));
+        assert!(!is_volume_name("-leading-dash"));
+        assert!(!is_volume_name("has space"));
+        assert!(!is_volume_name("has/slash"));
+        assert!(!is_volume_name(&"a".repeat(129)));
+        assert!(is_volume_name(&"a".repeat(128)));
+    }
 }

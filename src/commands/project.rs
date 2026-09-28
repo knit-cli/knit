@@ -102,6 +102,19 @@ pub fn add_project_repo(
 
     project.updated_at = now_iso();
     write_json(&path, &project)?;
+    // Repository registration: plain Git in the checkout resolves saved Knit
+    // credentials from here on. The explicit workspace/project context pins
+    // the helper even for checkouts outside the workspace, where the checkout
+    // location cannot reveal the project. Nothing is installed until a
+    // credential actually selects this checkout's forge URL, and a setup
+    // failure never undoes the registration — it is reported with the
+    // recovery path.
+    if let Err(error) = crate::auth_git::install_for_project(repo_path, &root, &project) {
+        println!(
+            "{} plain-Git credential helper not set up for this checkout: {error:#}; run `knit auth status` to repair",
+            out::warn("Warning:")
+        );
+    }
     println!(
         "{} {} ({})",
         out::heading("Base branch:"),
@@ -574,6 +587,16 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
 
     if incoming.requirements.is_some() {
         project.requirements = incoming.requirements;
+    }
+    if incoming.auth.is_some() {
+        // Validate the imported auth groups against this workspace's repos
+        // before accepting them; metadata outside auth is preserved as-is.
+        let mut candidate = project.clone();
+        candidate.auth = incoming.auth.clone();
+        crate::auth::validate_project_auth(&candidate).context(
+            "Refusing to import invalid project auth requirements from the stack repo config",
+        )?;
+        project.auth = incoming.auth;
     }
     if incoming.runtime.is_some() {
         project.runtime = incoming.runtime;

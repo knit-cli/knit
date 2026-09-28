@@ -30,6 +30,8 @@ pub struct SyncTargets {
     pub views: bool,
     pub architecture: bool,
     pub kg: bool,
+    pub plans: bool,
+    pub plans_required: bool,
 }
 
 impl SyncTargets {
@@ -55,6 +57,8 @@ impl SyncTargets {
                 views: true,
                 architecture: true,
                 kg,
+                plans: true,
+                plans_required: false,
             }
         } else {
             SyncTargets {
@@ -63,8 +67,24 @@ impl SyncTargets {
                 views,
                 architecture,
                 kg,
+                plans: false,
+                plans_required: false,
             }
         }
+    }
+
+    /// Keep the original resolver compatible with internal callers while
+    /// allowing an explicit plans-only selection on the CLI.
+    pub fn with_plans(mut self, plans: bool, other_flags: bool) -> Self {
+        if plans && !other_flags {
+            self.bundles = false;
+            self.history = false;
+            self.views = false;
+            self.architecture = false;
+        }
+        self.plans |= plans;
+        self.plans_required = plans;
+        self
     }
 }
 
@@ -172,6 +192,12 @@ pub fn sync_push(
                 failures.push(format!("{remote} kg: {error:#}"));
             }
         }
+        if targets.plans {
+            if let Err(error) = super::landing::push_plans(project, remote, targets.plans_required)
+            {
+                failures.push(format!("{remote} landing plans: {error:#}"));
+            }
+        }
     }
 
     finish(failures, "push")
@@ -183,7 +209,11 @@ pub fn sync_push(
 /// as does `knit pull --remote`/`knit fetch --knit` (bundles only). Bundle pull
 /// for the active bundle is delegated to the existing localize/refresh path in
 /// `remote::pull`; this module does not reimplement that logic.
-pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()> {
+pub fn sync_pull(
+    targets: SyncTargets,
+    remote_overrides: &[String],
+    artifacts_only: bool,
+) -> Result<()> {
     let remotes = resolve_remotes(remote_overrides)?;
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
@@ -211,7 +241,7 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             // matters: the artifact-only sync would fast-forward the active
             // bundle's artifact first and turn this into a skip, leaving its
             // checkouts stale.
-            if crate::store::load_active_bundle().is_ok() {
+            if !artifacts_only && crate::store::load_active_bundle().is_ok() {
                 if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
                     failures.push(format!("{remote} bundle: {error:#}"));
                 }
@@ -222,7 +252,10 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
             // their slugs. Diverged ledgers are reported, not merged;
             // `knit pull --merge` is the explicit door for that.
             match effective_workspace_config() {
-                Ok((root, config)) => {
+                Ok((root, mut config)) => {
+                    if let Some(project) = project {
+                        config.active_project = Some(project.to_string());
+                    }
                     if let Err(error) =
                         super::pull::fetch_bundles_from_remote(&root, &config, Some(remote))
                     {
@@ -240,6 +273,12 @@ pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String]) -> Result<()
         if targets.views {
             if let Err(error) = pull_views_from_remote(project, remote) {
                 failures.push(format!("{remote} views: {error:#}"));
+            }
+        }
+        if targets.plans {
+            if let Err(error) = super::landing::pull_plans(project, remote, targets.plans_required)
+            {
+                failures.push(format!("{remote} landing plans: {error:#}"));
             }
         }
     }
@@ -311,5 +350,20 @@ mod tests {
         assert!(targets.views);
         assert!(!targets.architecture);
         assert!(!targets.kg);
+    }
+
+    #[test]
+    fn plans_only_does_not_push_branches_or_other_artifacts() {
+        let targets =
+            SyncTargets::resolve(false, false, false, false, false, false).with_plans(true, false);
+        assert!(targets.plans);
+        assert!(targets.plans_required);
+        assert!(
+            !targets.bundles
+                && !targets.history
+                && !targets.views
+                && !targets.architecture
+                && !targets.kg
+        );
     }
 }

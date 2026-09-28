@@ -1,6 +1,8 @@
 //! Per-repo publish execution: push the feature branch (workspace mode),
 //! create or adopt the host review object, and fold the result back into the
-//! bundle. The `*_from_artifact` variants run without local checkouts.
+//! bundle. The push lives in its own phase ([`push_publish_branch`]) so the
+//! hosted bundle sync can run between branch pushes and review-object
+//! creation. The `*_from_artifact` variants run without local checkouts.
 
 use super::pr_body::initial_pr_body;
 use crate::checkout::checkout_dir;
@@ -25,19 +27,20 @@ pub(super) struct PublishJob {
 
 #[derive(Clone)]
 pub(super) struct PushedInfo {
-    sha: String,
-    branch: String,
+    pub(super) sha: String,
+    pub(super) branch: String,
 }
 
-/// What a publish worker reports while it runs. `Pushed` fires as soon as the
-/// branch is on origin, before the review object is looked up or created, so
-/// the caller can print progress per step instead of per joined worker.
+/// What a publish worker reports while it runs. `PushDone` fires as soon as
+/// one repo's branch phase finishes (success or failure) and `Done` when its
+/// review object does, so the caller can print progress per step instead of
+/// per joined worker.
 pub(super) enum PublishEvent {
     /// A mid-publish line (a retry, say) to print in the main thread's stream.
     Note(String),
-    Pushed {
+    PushDone {
         repo_id: String,
-        pushed: PushedInfo,
+        result: Box<Result<PushedInfo>>,
     },
     Done {
         repo_id: String,
@@ -49,6 +52,11 @@ pub(super) enum PublishStatus {
     ExistsRecorded(String),
     FoundExisting(PullRequest),
     Created(PullRequest),
+    /// The recorded open review was moved onto the requested base branch.
+    Retargeted {
+        summary: PullRequest,
+        from_base: String,
+    },
 }
 
 pub(super) struct PublishRemoteResult {
@@ -63,14 +71,49 @@ pub(super) struct ArtifactPublishResult {
     status: PublishStatus,
 }
 
+/// Validate one selected repo's checkout and push its feature branch to
+/// origin — publishing's first phase, split from review-object creation so
+/// the hosted bundle sync (which needs every open branch on origin) can run
+/// between the two and teach the bundle its hosted web URL before any PR
+/// body is rendered.
+pub(super) fn push_publish_branch(
+    active: &ActiveBundle,
+    job: &PublishJob,
+    set_upstream: bool,
+) -> Result<PushedInfo> {
+    let repo = &job.repo;
+    let branch = repo.feature_branch.as_deref().with_context(|| {
+        format!(
+            "{}: no feature branch recorded. Run `knit bundle worktree`.",
+            repo.id
+        )
+    })?;
+    let Some(cwd) = checkout_dir(active, repo) else {
+        bail!("{}: no feature checkout is recorded.", repo.id);
+    };
+    ensure_feature_branch(repo, branch, &cwd)?;
+    ensure_origin(repo, &cwd)?;
+    // Resolve the forge before anything mutates the remote: a repo on an
+    // unsupported host must fail here, the way the pre-split publish did,
+    // instead of after its branch is already pushed.
+    providers::for_repo(repo)?;
+    let sha = rev_parse(&cwd, "HEAD")
+        .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
+    run_push(&cwd, branch, set_upstream, PushForce::No)
+        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+    Ok(PushedInfo {
+        sha,
+        branch: format!("origin/{branch}"),
+    })
+}
+
 pub(super) fn publish_repo_remote(
     active: &ActiveBundle,
     bundle: &ChangeGroup,
     job: &PublishJob,
     draft: bool,
     renew: bool,
-    set_upstream: bool,
-    on_pushed: &dyn Fn(PushedInfo),
+    pushed_sha: &str,
 ) -> Result<PublishRemoteResult> {
     let repo = &job.repo;
     let base_branch = &job.base_branch;
@@ -83,28 +126,18 @@ pub(super) fn publish_repo_remote(
     let Some(cwd) = checkout_dir(active, repo) else {
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
-    ensure_feature_branch(repo, branch, &cwd)?;
-    ensure_origin(repo, &cwd)?;
     let forge = providers::for_repo(repo)?;
     let target = PrTarget::checkout(&cwd);
 
-    let sha = rev_parse(&cwd, "HEAD")
-        .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream, PushForce::No)
-        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
-    let pushed = PushedInfo {
-        sha,
-        branch: format!("origin/{branch}"),
-    };
-    on_pushed(pushed.clone());
-
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
-        if existing.base_branch != *base_branch {
-            bail!(
-                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
-                repo.id,
-                out::branch(&existing.base_branch)
-            );
+        if let Some(status) =
+            reconcile_recorded_base(repo, forge.as_ref(), &target, existing, base_branch, renew)?
+        {
+            return Ok(PublishRemoteResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                status,
+            });
         }
         if !renew {
             return Ok(PublishRemoteResult {
@@ -119,12 +152,12 @@ pub(super) fn publish_repo_remote(
                 repo.id, existing.url
             )
         })?;
-        ensure_review_can_be_renewed(repo, &summary, Some(&pushed.sha))?;
+        ensure_review_can_be_renewed(repo, &summary, Some(pushed_sha))?;
     }
 
     if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
         if renew && review_is_terminal(&existing) {
-            ensure_review_has_new_head(repo, &existing, Some(&pushed.sha))?;
+            ensure_review_has_new_head(repo, &existing, Some(pushed_sha))?;
         } else {
             return Ok(PublishRemoteResult {
                 repo_index: job.repo_index,
@@ -178,12 +211,14 @@ pub(super) fn publish_repo_remote_from_artifact(
     let target = PrTarget::explicit(cwd, repo_full_name);
 
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
-        if existing.base_branch != *base_branch {
-            bail!(
-                "{}: review object already recorded against {}. Knit records one review object per repo in a bundle; create a new bundle or publish before changing the base.",
-                repo.id,
-                out::branch(&existing.base_branch)
-            );
+        if let Some(status) =
+            reconcile_recorded_base(repo, forge.as_ref(), &target, existing, base_branch, renew)?
+        {
+            return Ok(ArtifactPublishResult {
+                repo_index: job.repo_index,
+                repo_id: repo.id.clone(),
+                status,
+            });
         }
         if !renew {
             return Ok(ArtifactPublishResult {
@@ -229,6 +264,84 @@ pub(super) fn publish_repo_remote_from_artifact(
     })
 }
 
+/// Bring a repo's recorded review onto the base this run asked for.
+///
+/// Without `--renew`, an open review (a draft included) is retargeted in
+/// place — the same view/edit/verify flow `knit land --target` applies — and
+/// a terminal review is refused with `--renew` named as the way out. With
+/// `--renew`, the existing renewal contract holds whatever the destination:
+/// an open review is refused untouched, a terminal one falls through so a
+/// fresh review is created against the new base.
+///
+/// Returns `Ok(Some(status))` when this repo is done (retargeted, or the live
+/// review already sits on the requested base and only the record was stale)
+/// and `Ok(None)` when the caller should continue with the normal
+/// find-or-create flow.
+fn reconcile_recorded_base(
+    repo: &RepoEntry,
+    forge: &dyn Forge,
+    target: &PrTarget,
+    existing: &crate::model::PublicationEntry,
+    base_branch: &str,
+    renew: bool,
+) -> Result<Option<PublishStatus>> {
+    if renew || existing.base_branch == base_branch {
+        return Ok(None);
+    }
+    let current = forge.view(target, &existing.url).with_context(|| {
+        format!(
+            "{}: failed to verify recorded review {} before retargeting",
+            repo.id, existing.url
+        )
+    })?;
+    let live_base = current
+        .base_ref_name
+        .clone()
+        .unwrap_or_else(|| existing.base_branch.clone());
+    if live_base == base_branch {
+        // The record is stale; the review already sits where this run wants it.
+        return Ok(Some(PublishStatus::FoundExisting(current)));
+    }
+    if review_is_terminal(&current) {
+        bail!(
+            "{}: review {} is {} against {} and cannot be retargeted to {}. Re-run with --renew to replace it with a fresh review against that branch.",
+            repo.id,
+            existing.url,
+            current.state.as_deref().unwrap_or("unknown").to_ascii_uppercase(),
+            out::branch(&live_base),
+            out::branch(base_branch)
+        );
+    }
+    if !review_is_open(&current) {
+        bail!(
+            "{}: review {} has unverifiable state `{}`; refusing to retarget it.",
+            repo.id,
+            existing.url,
+            current.state.as_deref().unwrap_or("unknown")
+        );
+    }
+    forge
+        .edit_base(target, &existing.url, base_branch)
+        .with_context(|| {
+            format!(
+                "{}: failed to retarget PR #{} from `{live_base}` to `{base_branch}`",
+                repo.id, current.number
+            )
+        })?;
+    let refreshed = forge.view(target, &existing.url)?;
+    if refreshed.base_ref_name.as_deref() != Some(base_branch) {
+        bail!(
+            "{}: provider did not retarget PR #{} to `{base_branch}`",
+            repo.id,
+            current.number
+        );
+    }
+    Ok(Some(PublishStatus::Retargeted {
+        summary: refreshed,
+        from_base: live_base,
+    }))
+}
+
 /// Create the review object, or adopt one a previous attempt already created.
 ///
 /// A create can fail *after* the host stored the review: a POST whose reply
@@ -246,7 +359,7 @@ fn create_or_adopt(
     draft: bool,
 ) -> Result<PublishStatus> {
     let title = format!("{} ({})", bundle.title, repo.id);
-    let initial_body = initial_pr_body(bundle, &repo.id);
+    let initial_body = initial_pr_body(bundle, &repo.id, forge.id());
     let url = match forge.create(target, base_branch, branch, &title, &initial_body, draft) {
         Ok(url) => url,
         Err(error) => {
@@ -271,6 +384,7 @@ fn create_or_adopt(
         mergeable: None,
         merge_state_status: None,
         review_decision: None,
+        author: None,
     });
     Ok(PublishStatus::Created(summary))
 }
@@ -309,6 +423,14 @@ fn report_status(repo_id: &str, status: &PublishStatus, progress: &str) {
             summary.number,
             summary.url
         ),
+        PublishStatus::Retargeted { summary, from_base } => println!(
+            "{}: {} #{} {} -> {}{progress}",
+            out::repo(repo_id),
+            out::movement("retargeted"),
+            summary.number,
+            out::branch(from_base),
+            out::branch(summary.base_ref_name.as_deref().unwrap_or_default())
+        ),
     }
 }
 
@@ -326,7 +448,9 @@ pub(super) fn apply_publish_remote_result(
     let repo = active.bundle.repos[outcome.repo_index].clone();
     match &outcome.status {
         PublishStatus::ExistsRecorded(_) => Ok(false),
-        PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) => {
+        PublishStatus::FoundExisting(summary)
+        | PublishStatus::Created(summary)
+        | PublishStatus::Retargeted { summary, .. } => {
             let forge = providers::for_repo(&repo)?;
             providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), summary);
             Ok(true)
@@ -393,7 +517,9 @@ pub(super) fn apply_artifact_publish_result(
 ) {
     report_status(&outcome.repo_id, &outcome.status, progress);
     let repo = bundle.repos[outcome.repo_index].clone();
-    if let PublishStatus::FoundExisting(summary) | PublishStatus::Created(summary) = &outcome.status
+    if let PublishStatus::FoundExisting(summary)
+    | PublishStatus::Created(summary)
+    | PublishStatus::Retargeted { summary, .. } = &outcome.status
     {
         let forge = providers::for_repo(&repo).expect("forge resolves for published repo");
         providers::upsert_publication(bundle, &repo, forge.as_ref(), summary);

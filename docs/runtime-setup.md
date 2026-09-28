@@ -71,6 +71,43 @@ if DEBUG:
     CORS_ALLOWED_ORIGIN_REGEXES += [r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"]
 ```
 
+### Bind dependencies by service identity when source ports overlap
+
+Two repositories can both publish the same development port. A URL such as
+`http://localhost:8000/api` does not identify which one the frontend needs.
+Declare that dependency once in the project's `runtime.bindings`. Bindings
+apply to automatically lifted (transform-mode) stacks. Contract files supply
+their own explicit wiring.
+
+```json
+{
+  "bindings": [
+    {
+      "repo": "frontend",
+      "service": "web",
+      "environment": "API_URL",
+      "target": { "repo": "backend", "service": "api", "port": 8000 }
+    }
+  ]
+}
+```
+
+`repo` and `service` identify the consumer; `target` identifies the provider.
+`target.port` is the provider's **container port**, and can be omitted when
+that service publishes exactly one port. Use `buildArg` instead of
+`environment` for a browser URL baked into an image; specify exactly one.
+Knit preserves the URL's host, scheme, path, query, and credentials and fills
+in the provider's allocated host port on every run. Parallel bundles therefore
+reach their own provider without changing the repositories' Compose ports.
+
+Unambiguous references still work automatically. A binding overrides automatic
+port inference for its selected value. A consumer omitted from a narrow bundle
+is skipped; an active consumer with a missing target, unknown key, or ambiguous
+target port fails before application startup. Unbound ambiguous references
+also fail with the consumer key and candidate services, without printing the
+value. The declaration travels with the committed project config and is
+imported using `knit project pull`.
+
 ## Step 2 — commit the runtime block (`knit.project.json`)
 
 The durable, machine-readable spec lives in the stack repo as
@@ -82,6 +119,9 @@ The durable, machine-readable spec lives in the stack repo as
   "schemaVersion": "0.1",
   "kind": "KnitProject",
   "id": "my-project",
+  "createdAt": "2026-01-01T00:00:00Z",
+  "updatedAt": "2026-01-01T00:00:00Z",
+  "repos": [],
   "runtime": {
     "kind": "docker-compose",
     "database": {
@@ -96,11 +136,17 @@ The durable, machine-readable spec lives in the stack repo as
 }
 ```
 
+Use the project's actual id and timestamps. The empty `repos` list in this
+import file leaves the workspace's existing repository definitions intact.
+
 Everything in `runtime` is optional. The fields you'll actually reach for:
 
 | Field | What it does |
 | --- | --- |
-| `database.mode: "shared"` + `database.service` | Test against real dev data: the named compose service is stripped from every lifted stack and references to it are rewired to the shared dev database on `host`/`port` (URLs like `@db:5432`, split `*_HOST`/`*_PORT` vars). Reachability is checked before anything starts; `startCommand` can boot it. **Tradeoff:** bundle code — including its migrations — runs against the shared database. Omit the block to keep the default: an isolated, empty database per bundle. |
+| `database.mode: "shared"` + `database.service` | Attach matching databases to the shared `host`/`port`. Database identity is checked before removing a service: an unrelated database keeps its service, credentials, and volume even when it has the same service name. Unknown identity also stays isolated; `database.repos` can explicitly select repositories to attach. **Tradeoff:** attached bundle code, including migrations, uses shared data. Omit this block for isolated databases. |
+| `bindings` | Consumer environment/build argument → provider repository/service dependencies; Knit supplies the allocated port. |
+| `database.repos: ["api"]` | Explicitly attach only these repositories to the configured shared database. This scope takes precedence over automatic identity matching. |
+| `startupTimeoutSeconds` | Startup verification timeout per stack, default 120 seconds. Knit launches all stacks before checking them, honors Compose healthchecks, and rejects crashed or unhealthy services before recording success. |
 | `stacks: ["api", "frontend"]` | Narrow which repos lift (default: every bundle repo with a compose file). |
 | `stackRepo` | Legacy single-stack pin; prefer `stacks`. |
 | `composeFile` | Non-default compose filename in the configured stack repo. |
@@ -161,12 +207,30 @@ repo, not a knit change.
   multi-stack runs.
 - **App talks to the wrong port** — the reference isn't in compose
   `environment:`; move it there (step 1).
+- **"Ambiguous cross-stack port references"** — two sibling stacks publish
+  the same source host port, and another stack's `environment:`/build args
+  reference it (`localhost:8000`). Knit cannot know which sibling the
+  reference means, so `knit run up` refuses to start rather than leave the
+  reference on a dead dev port. The error names the referencing repo,
+  service, key, and each sibling's bundle port. Declare the intended
+  provider using `runtime.bindings`; no Compose port renumbering is needed.
+  Siblings that publish duplicate ports with nothing referencing them are fine.
 - **`knit run up` fails, or the lifted stack is just wrong** — `knit run
   eject`, then edit the generated `docker-compose.knit.yml` (step 3). Don't
   fight the transform.
+- **A same-named database stays isolated** — its declared database name does
+  not match `database.name`, or its identity cannot be established. Use `database.repos` only when that repository is intended
+  to attach to the shared database. Knit never changes credentials to force a
+  connection.
+- **Startup verification fails** — inspect the named stack's service state
+  and logs. A successful detached container start is not a readiness result;
+  fix the service or its healthcheck, or increase `startupTimeoutSeconds` for
+  a slow startup. Runtime state is written only after verification passes.
 - **First build is slow** — real image builds; layer cache makes subsequent
   runs fast. Plain `knit run down` preserves named restart data while removing
   non-reusable anonymous volumes. Use `knit run down --purge` to remove all of
   the bundle's Compose volumes and locally built images; external volumes and
   explicitly tagged images are preserved. Landing, archiving, or otherwise
   disposing the bundle's worktrees purges the runtime automatically.
+
+Startup verification reads the resolved Compose service set and live container states. A job awaited through `depends_on: condition: service_completed_successfully` must finish with exit code 0; other services must remain running and pass any healthcheck. Declare application healthchecks when process startup alone is insufficient. `allocations.json` preserves assigned ports across failed starts; `state.json` records the last successful startup.

@@ -89,6 +89,16 @@ jobs:
       - name: cargo test
         run: cargo test --no-fail-fast
 
+  # Gate release packagers: archive, checksum, and metadata tests require
+  # only stdlib Python, without rebuilding Rust.
+  packaging:
+    name: packaging (Homebrew and Linux)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Packaging tests
+        run: python3 -m unittest discover -s scripts -p '*_test.py' -v
+
   # Windows support status lives in docs/windows.md. The fixtures are
   # cross-platform: fake forge CLIs are sh scripts launched through .cmd shims
   # (Git for Windows provides sh on the runners), and the GitHub API transport

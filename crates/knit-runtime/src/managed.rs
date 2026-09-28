@@ -1,19 +1,19 @@
 //! Restricted host-engine execution. Workspace documents are data, never authority.
 use crate::{
+    EngineView, RuntimeContext,
     config::{DatabaseMode, ProjectRuntime},
     plan::StackPlan,
-    EngineView, RuntimeContext,
 };
-use anyhow::{bail, Context, Result};
-use serde_json::{json, Value};
+use anyhow::{Context, Result, bail};
+use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     fs,
-    net::{TcpStream, ToSocketAddrs},
+    io::{Read, Seek},
     path::{Path, PathBuf},
-    process::Command,
-    time::Duration,
+    process::{Command, Stdio},
+    time::{Duration, Instant},
 };
 use tempfile::TempDir;
 #[path = "managed_images.rs"]
@@ -162,6 +162,178 @@ impl Docker {
         ])
         .arg(file);
         cmd
+    }
+
+    /// Bound read-only startup probes without allowing a full pipe to stall
+    /// the deadline. Compose and its plugins share the child's process group.
+    fn output_until(&self, mut command: Command, deadline: Instant) -> Result<String> {
+        let mut stdout = tempfile::tempfile_in(self.home.path())?;
+        let mut stderr = tempfile::tempfile_in(self.home.path())?;
+        command
+            .stdin(Stdio::null())
+            .stdout(Stdio::from(stdout.try_clone()?))
+            .stderr(Stdio::from(stderr.try_clone()?));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let mut child = command
+            .spawn()
+            .context("Failed to run managed startup probe")?;
+        loop {
+            if let Some(status) = child.try_wait()? {
+                if !status.success() {
+                    stderr.rewind()?;
+                    let mut error = Vec::new();
+                    stderr.read_to_end(&mut error)?;
+                    bail!(
+                        "Managed startup probe failed: {}",
+                        String::from_utf8_lossy(&error)
+                            .chars()
+                            .take(1200)
+                            .collect::<String>()
+                    );
+                }
+                stdout.rewind()?;
+                let mut output = Vec::new();
+                stdout.read_to_end(&mut output)?;
+                return Ok(String::from_utf8(output)?);
+            }
+            if Instant::now() >= deadline {
+                #[cfg(unix)]
+                let _ = Command::new("/bin/kill")
+                    .args(["-9", &format!("-{}", child.id())])
+                    .status();
+                let _ = child.kill();
+                let _ = child.wait();
+                bail!("Managed startup probe exceeded runtime.startupTimeoutSeconds");
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+fn verify_managed_startup(
+    docker: &Docker,
+    ctx: &RuntimeContext,
+    project: &str,
+    repo: &str,
+    snapshot: &Path,
+    document: &Value,
+    timeout_seconds: u64,
+) -> Result<()> {
+    let deadline = Instant::now() + Duration::from_secs(timeout_seconds);
+    let services = document["services"]
+        .as_object()
+        .context("Missing managed services")?;
+    let completed: BTreeSet<&str> = services
+        .values()
+        .filter_map(|service| service.get("depends_on").and_then(Value::as_object))
+        .flat_map(|dependencies| dependencies.iter())
+        .filter(|(_, dependency)| dependency["condition"] == "service_completed_successfully")
+        .map(|(name, _)| name.as_str())
+        .collect();
+    loop {
+        let mut ps = docker.compose(snapshot, project);
+        ps.args(["ps", "--all", "--orphans=false", "--format", "json"]);
+        let output = docker.output_until(ps, deadline)?;
+        let entries: Vec<Value> = if output.trim().is_empty() {
+            vec![]
+        } else if let Ok(Value::Array(entries)) = serde_json::from_str(output.trim()) {
+            entries
+        } else {
+            output
+                .lines()
+                .map(serde_json::from_str)
+                .collect::<std::result::Result<_, _>>()
+                .context("Invalid managed Compose status")?
+        };
+        let mut seen = BTreeSet::new();
+        let mut pending = Vec::new();
+        for entry in entries {
+            let Some(name) = entry["Service"].as_str() else {
+                continue;
+            };
+            if !services.contains_key(name)
+                || entry["Labels"]
+                    .as_str()
+                    .unwrap_or("")
+                    .contains("com.docker.compose.oneoff=True")
+            {
+                continue;
+            }
+            let id = entry["ID"]
+                .as_str()
+                .context("Compose status lacks container ID")?;
+            let mut inspect = docker.command();
+            inspect.args(["container", "inspect", id]);
+            let container: Value = serde_json::from_str(&docker.output_until(inspect, deadline)?)?;
+            let container = container
+                .get(0)
+                .context("Container inspect returned no resource")?;
+            if !owned(ctx, resource_labels("container", container))
+                || container["Config"]["Labels"]["com.docker.compose.project"] != project
+                || container["Config"]["Labels"]["com.docker.compose.service"] != name
+            {
+                bail!("Managed startup found an unowned container for {repo}/{name}");
+            }
+            if !seen.insert(name.to_string()) {
+                bail!("Managed startup found duplicate containers for {repo}/{name}");
+            }
+            let state = &container["State"];
+            match state["Status"].as_str().unwrap_or("") {
+                "running" if completed.contains(name) => {
+                    pending.push(format!("{name}: job still running"))
+                }
+                "running" => {
+                    if let Some(note) = pending_health(container, repo, name)? {
+                        pending.push(note);
+                    }
+                }
+                "exited" if completed.contains(name) && state["ExitCode"] == 0 => {}
+                "exited" => bail!(
+                    "Managed startup failed for {repo}/{name}: exited ({})",
+                    state["ExitCode"]
+                ),
+                "created" => pending.push(format!("{name}: created")),
+                other => bail!("Managed startup failed for {repo}/{name}: {other}"),
+            }
+        }
+        for name in services.keys() {
+            if !seen.contains(name) {
+                pending.push(format!("{name}: no container found"));
+            }
+        }
+        if pending.is_empty() {
+            return Ok(());
+        }
+        if Instant::now() >= deadline {
+            bail!(
+                "Managed startup timed out for {repo} after {timeout_seconds}s: {}",
+                pending.join(", ")
+            );
+        }
+        std::thread::sleep(
+            Duration::from_millis(500).min(deadline.saturating_duration_since(Instant::now())),
+        );
+    }
+}
+
+fn pending_health(container: &Value, repo: &str, name: &str) -> Result<Option<String>> {
+    // Docker inspect reports the effective healthcheck, including one inherited
+    // from the image. Config can precede the first State.Health update.
+    let configured = container["Config"]["Healthcheck"].is_object()
+        && container["Config"]["Healthcheck"]["Test"] != "NONE"
+        && container["Config"]["Healthcheck"]["Test"][0] != "NONE";
+    let state = &container["State"];
+    if !configured && !state["Health"].is_object() {
+        return Ok(None);
+    }
+    match state["Health"]["Status"].as_str() {
+        Some("healthy") => Ok(None),
+        Some("unhealthy") => bail!("Managed startup failed for {repo}/{name}: unhealthy"),
+        _ => Ok(Some(format!("{name}: health check starting"))),
     }
 }
 
@@ -367,7 +539,9 @@ fn sanitize(mut doc: Value, ctx: &RuntimeContext, project: &str, repo: &str) -> 
                         let mount = fs::canonicalize(&engine.mount)?;
                         let subpath = source.strip_prefix(mount)?.to_string_lossy().to_string();
                         if subpath.is_empty() {
-                            bail!("Mounting the entire workspace volume is not allowed; select a subdirectory");
+                            bail!(
+                                "Mounting the entire workspace volume is not allowed; select a subdirectory"
+                            );
                         }
                         *entry = json!({"type":"volume", "source":"knit_workspace", "target":target, "read_only":read_only, "volume":{"subpath":subpath, "nocopy":true}});
                     }
@@ -413,10 +587,6 @@ fn sanitize(mut doc: Value, ctx: &RuntimeContext, project: &str, repo: &str) -> 
             "logging".into(),
             json!({"driver":"json-file", "options":{"max-size":"10m", "max-file":"3"}}),
         );
-        obj.insert(
-            "extra_hosts".into(),
-            json!(["host.docker.internal:host-gateway"]),
-        );
     }
     volumes["knit_workspace"] = json!({"external":true, "name":engine.volume});
     doc["volumes"] = volumes;
@@ -449,8 +619,30 @@ fn up_with_docker(
     plans: Vec<StackPlan>,
     docker: &Docker,
 ) -> Result<()> {
+    if runtime.startup_timeout_seconds == 0 {
+        bail!("runtime.startupTimeoutSeconds must be greater than zero");
+    }
+    if !runtime.bindings.is_empty() {
+        bail!(
+            "Managed runtime forbids runtime.bindings: host-port endpoint wiring is unavailable; use service DNS on the project network"
+        );
+    }
+    if runtime.ports.is_some() {
+        bail!(
+            "Managed runtime forbids runtime.ports: applications cannot allocate or publish host ports"
+        );
+    }
+    if runtime
+        .database
+        .as_ref()
+        .is_some_and(|db| db.mode == DatabaseMode::Shared)
+    {
+        bail!(
+            "Managed runtime forbids shared databases and host.docker.internal; use a bundle database service"
+        );
+    }
     let engine = ctx.engine.as_ref().unwrap();
-    verify_preview_network(&docker, engine)?;
+    verify_preview_network(docker, engine)?;
     let mut env = BTreeMap::from([
         ("KNIT_ROOT".to_string(), ctx.root.display().to_string()),
         ("KNIT_BUNDLE".into(), ctx.bundle_id.clone()),
@@ -475,43 +667,15 @@ fn up_with_docker(
     }
     let mut profiles = Vec::new();
     if let Some(db) = &runtime.database {
-        let host = if ["localhost", "127.0.0.1", "::1"].contains(&db.host.as_str()) {
-            "host.docker.internal"
-        } else {
-            &db.host
-        };
-        if db.mode == DatabaseMode::Shared {
-            let reachable = (host, db.port)
-                .to_socket_addrs()?
-                .any(|addr| TcpStream::connect_timeout(&addr, Duration::from_secs(2)).is_ok());
-            if !reachable {
-                bail!("Shared database is unreachable at {host}:{}; start it separately or use bundle mode", db.port);
-            }
-        } else {
+        if db.mode == DatabaseMode::Bundle {
             profiles.push("bundle-db");
         }
         env.insert("KNIT_DB_MODE".into(), db.mode.to_string());
         env.insert(
             "KNIT_DB_HOST".into(),
-            if db.mode == DatabaseMode::Bundle {
-                db.service.clone().unwrap_or("db".into())
-            } else {
-                host.to_string()
-            },
+            db.service.clone().unwrap_or("db".into()),
         );
-        env.insert(
-            "KNIT_DB_PORT".into(),
-            if db.mode == DatabaseMode::Bundle {
-                5432
-            } else {
-                db.port
-            }
-            .to_string(),
-        );
-        env.insert(
-            "KNIT_DB_HOST_PORT".into(),
-            db.port_base.unwrap_or(db.port).to_string(),
-        );
+        env.insert("KNIT_DB_PORT".into(), 5432.to_string());
         env.insert(
             "KNIT_DB_NAME".into(),
             db.name_template
@@ -524,18 +688,13 @@ fn up_with_docker(
     let mut snapshots = Vec::new();
     for plan in plans {
         let compose = within(&plan.compose, &engine.mount)?;
+        reject_host_port_contract(&compose)?;
         let project = project(ctx, &plan.repo.id);
         let mut cmd = docker.compose(&compose, &project);
         cmd.args(["--project-directory"])
             .arg(within(&plan.checkout, &engine.mount)?);
         for profile in &profiles {
             cmd.args(["--profile", profile]);
-        }
-        for (service, port) in crate::up::contract_port_bases(&compose, runtime.ports.as_ref())? {
-            cmd.env(
-                format!("KNIT_PORT_{}", crate::support::env_var_suffix(&service)),
-                port.to_string(),
-            );
         }
         let output = cmd
             .envs(&env)
@@ -548,27 +707,22 @@ fn up_with_docker(
             );
         }
         let mut resolved: Value = serde_json::from_slice(&output.stdout)?;
+        if serde_json::to_string(&resolved)?.contains("host.docker.internal") {
+            bail!(
+                "Managed runtime forbids host.docker.internal; use service DNS on the project network"
+            );
+        }
+        if !crate::transform::collect_port_references(&resolved).is_empty() {
+            bail!(
+                "Managed runtime forbids loopback host-port references in service environment or build args; use service DNS and container ports"
+            );
+        }
         if plan.mode == crate::config::RuntimeMode::Transform {
             remap_workspace_paths(&mut resolved, ctx)?;
         }
-        let mut sanitized = sanitize(resolved, ctx, &project, &plan.repo.id)?;
-        if let Some(db) = runtime
-            .database
-            .as_ref()
-            .filter(|db| db.mode == DatabaseMode::Shared)
-        {
-            if let Some(service) = &db.service {
-                crate::transform::strip_shared_database(
-                    &mut sanitized,
-                    service,
-                    env.get("KNIT_DB_HOST").unwrap(),
-                    db.port,
-                    db.container_port.unwrap_or(5432),
-                );
-            }
-        }
-        check_project_ownership(&docker, ctx, &project)?;
-        check_named_resources(&docker, ctx, &sanitized)?;
+        let sanitized = sanitize(resolved, ctx, &project, &plan.repo.id)?;
+        check_project_ownership(docker, ctx, &project)?;
+        check_named_resources(docker, ctx, &sanitized)?;
         snapshots.push((project, plan.repo.id, sanitized));
     }
     // Only after every document passes policy may we contact registries/build.
@@ -634,12 +788,12 @@ fn up_with_docker(
         check_named_resources(docker, ctx, &document)?;
         let snapshot = docker.home.path().join(format!("{project}.run.json"));
         write_snapshot(&snapshot, &document)?;
-        executable.push((project, snapshot));
+        executable.push((project, repo, snapshot, document));
     }
-    for (project, snapshot) in executable {
-        check_project_ownership(&docker, ctx, &project)?;
+    for (project, _, snapshot, _) in &executable {
+        check_project_ownership(docker, ctx, project)?;
         let result = docker
-            .compose(&snapshot, &project)
+            .compose(snapshot, project)
             .args([
                 "up",
                 "--detach",
@@ -655,7 +809,7 @@ fn up_with_docker(
         // Compose automatically adds the service name as a network alias. Connect
         // the preview network explicitly so stacks never share a `web` alias.
         for id in list(
-            &docker,
+            docker,
             "container",
             &format!("label=com.docker.compose.project={project}"),
         )? {
@@ -673,12 +827,41 @@ fn up_with_docker(
                     "network",
                     "connect",
                     "--alias",
-                    &alias(&project, service),
+                    &alias(project, service),
                     &engine.network,
                     &id,
                 ])?;
             }
         }
+    }
+    for (project, repo, snapshot, document) in &executable {
+        verify_managed_startup(
+            docker,
+            ctx,
+            project,
+            repo,
+            snapshot,
+            document,
+            runtime.startup_timeout_seconds,
+        )?;
+    }
+    Ok(())
+}
+
+fn reject_host_port_contract(compose: &Path) -> Result<()> {
+    let source = fs::read_to_string(compose)?;
+    if [
+        "${KNIT_PORT_",
+        "$KNIT_PORT_",
+        "${KNIT_DB_HOST_PORT",
+        "$KNIT_DB_HOST_PORT",
+    ]
+    .iter()
+    .any(|variable| source.contains(variable))
+    {
+        bail!(
+            "Managed runtime forbids KNIT_PORT_* and KNIT_DB_HOST_PORT contract variables: host ports are unavailable; use service DNS and container ports"
+        );
     }
     Ok(())
 }
@@ -705,51 +888,30 @@ fn remap_workspace_paths(document: &mut Value, ctx: &RuntimeContext) -> Result<(
             mappings.push((within(&repo.source_path, mount)?, within(checkout, mount)?));
         }
     }
-    mappings.sort_by_key(|(source, _)| std::cmp::Reverse(source.components().count()));
-    let remap = |path: &Path| -> Result<PathBuf> {
-        let path = within(path, mount)?;
-        for (source, checkout) in &mappings {
-            if let Ok(relative) = path.strip_prefix(source) {
-                return within(&checkout.join(relative), mount);
-            }
-        }
-        Ok(path)
-    };
-    for service in document["services"]
-        .as_object_mut()
+    // The shared transform understands context-relative Dockerfile/build-arg
+    // paths and nested repository precedence. Its identity allocator only
+    // preserves Compose's declared port until sanitize removes publication.
+    if document["services"]
+        .as_object()
         .context("Expected services map")?
-        .values_mut()
+        .values()
+        .any(|service| service.get("container_name").is_some())
     {
-        if let Some(build) = service.get_mut("build") {
-            let original = PathBuf::from(text(build, "context")?);
-            if let Some(file) = build.get("dockerfile").and_then(Value::as_str) {
-                build["dockerfile"] = json!(remap(&original.join(file))?);
-            }
-            build["context"] = json!(remap(&original)?);
-            if let Some(args) = build.get_mut("args").and_then(Value::as_object_mut) {
-                for value in args.values_mut() {
-                    if let Some(path) = value.as_str().filter(|path| Path::new(path).is_absolute())
-                    {
-                        if let Ok(canonical) = fs::canonicalize(path) {
-                            if mappings
-                                .iter()
-                                .any(|(source, _)| canonical.starts_with(source))
-                            {
-                                *value = json!(remap(&canonical)?);
-                            }
-                        }
-                    }
-                }
-            }
+        bail!("Managed runtime forbids services.*.container_name");
+    }
+    for service in document["services"].as_object().unwrap().values() {
+        if let Some(context) = service["build"]["context"].as_str() {
+            within(Path::new(context), mount)?;
         }
-        if let Some(volumes) = service.get_mut("volumes").and_then(Value::as_array_mut) {
+        if let Some(volumes) = service["volumes"].as_array() {
             for volume in volumes {
                 if volume["type"] == "bind" {
-                    volume["source"] = json!(remap(Path::new(text(volume, "source")?))?);
+                    within(Path::new(text(volume, "source")?), mount)?;
                 }
             }
         }
     }
+    crate::transform::prepare_compose(document, &mappings, &mut |_, old, _| Ok(old))?;
     Ok(())
 }
 
@@ -874,7 +1036,9 @@ fn validate_network_topology(resource: &Value) -> Result<()> {
         ("Options", json!({})),
     ] {
         if resource.get(field) != Some(&expected) {
-            bail!("Managed network topology requires {field}={expected}; recreate this network with the broker-qualified default IPv4 bridge settings");
+            bail!(
+                "Managed network topology requires {field}={expected}; recreate this network with the broker-qualified default IPv4 bridge settings"
+            );
         }
     }
     Ok(())
@@ -1012,7 +1176,7 @@ fn down_with_docker(ctx: &RuntimeContext, purge: bool, docker: &Docker) -> Resul
         if !purge && ["volume", "image"].contains(&kind) {
             continue;
         }
-        for id in list(&docker, kind, &format!("label={SCOPE}={}", scope(ctx)))? {
+        for id in list(docker, kind, &format!("label={SCOPE}={}", scope(ctx)))? {
             let resource = docker.inspect(kind, &id)?;
             if !owned(ctx, resource_labels(kind, &resource)) {
                 bail!("Refusing to remove unowned {kind} {id}");
@@ -1134,6 +1298,99 @@ mod tests {
         json!({"services":{"web":{"image":"alpine:3", "ports":[{"target":8080,"published":"18080","protocol":"tcp"}],"networks":{"default":null}}}, "networks":{"default":{"name":"untrusted-default"}}})
     }
     #[test]
+    fn managed_contract_rejects_host_port_variables() {
+        let root = tempfile::tempdir().unwrap();
+        let compose = root.path().join("compose.yml");
+        for variable in ["${KNIT_PORT_WEB:-8080}", "${KNIT_DB_HOST_PORT:-5432}"] {
+            fs::write(
+                &compose,
+                format!("services:\n  web:\n    ports: [\"{variable}:8080\"]\n"),
+            )
+            .unwrap();
+            assert!(
+                reject_host_port_contract(&compose)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("host ports are unavailable")
+            );
+        }
+        fs::write(
+            &compose,
+            "services:\n  web:\n    image: example.test/web:1\n",
+        )
+        .unwrap();
+        reject_host_port_contract(&compose).unwrap();
+    }
+    #[test]
+    fn inherited_image_healthcheck_blocks_managed_success() {
+        let starting = json!({"Config":{"Healthcheck":{"Test":["CMD","check"]}},"State":{"Status":"running","Health":{"Status":"starting"}}});
+        assert_eq!(
+            pending_health(&starting, "app", "web").unwrap().as_deref(),
+            Some("web: health check starting")
+        );
+        let before_first_update =
+            json!({"Config":{"Healthcheck":{"Test":["CMD","check"]}},"State":{"Status":"running"}});
+        assert_eq!(
+            pending_health(&before_first_update, "app", "web")
+                .unwrap()
+                .as_deref(),
+            Some("web: health check starting")
+        );
+        let unhealthy = json!({"Config":{"Healthcheck":{"Test":["CMD","check"]}},"State":{"Status":"running","Health":{"Status":"unhealthy"}}});
+        assert!(
+            pending_health(&unhealthy, "app", "web")
+                .unwrap_err()
+                .to_string()
+                .contains("unhealthy")
+        );
+        let healthy = json!({"Config":{"Healthcheck":{"Test":["CMD","check"]}},"State":{"Status":"running","Health":{"Status":"healthy"}}});
+        assert!(pending_health(&healthy, "app", "web").unwrap().is_none());
+        let disabled =
+            json!({"Config":{"Healthcheck":{"Test":["NONE"]}},"State":{"Status":"running"}});
+        assert!(pending_health(&disabled, "app", "web").unwrap().is_none());
+    }
+    #[test]
+    fn managed_host_port_configuration_fails_before_docker_mutation() {
+        let root = tempfile::tempdir().unwrap();
+        let ctx = context(root.path(), "owner-a");
+        let docker = Docker {
+            home: tempfile::tempdir().unwrap(),
+            executable: "/missing/docker".into(),
+        };
+        let mut runtime = ProjectRuntime::default();
+        runtime.startup_timeout_seconds = 0;
+        assert!(
+            up_with_docker(&ctx, &runtime, vec![], &docker)
+                .unwrap_err()
+                .to_string()
+                .contains("startupTimeoutSeconds")
+        );
+        runtime.startup_timeout_seconds = 1;
+        runtime.bindings = serde_json::from_value(json!([{"repo":"app","service":"web","environment":"URL","target":{"repo":"app","service":"web"}}])).unwrap();
+        assert!(
+            up_with_docker(&ctx, &runtime, vec![], &docker)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime.bindings")
+        );
+        runtime.bindings.clear();
+        runtime.ports = Some(Default::default());
+        assert!(
+            up_with_docker(&ctx, &runtime, vec![], &docker)
+                .unwrap_err()
+                .to_string()
+                .contains("runtime.ports")
+        );
+        runtime.ports = None;
+        runtime.database = Some(Default::default());
+        assert!(
+            up_with_docker(&ctx, &runtime, vec![], &docker)
+                .unwrap_err()
+                .to_string()
+                .contains("shared databases")
+        );
+    }
+    #[test]
     fn hostile_service_and_build_options_fail_closed() {
         let dir = tempfile::tempdir().unwrap();
         let ctx = context(dir.path(), "owner-a");
@@ -1246,10 +1503,12 @@ mod tests {
             safe["services"]["web"]["volumes"][0]["volume"]["subpath"],
             "app"
         );
-        assert!(safe["services"]["web"]["image"]
-            .as_str()
-            .unwrap()
-            .starts_with(&project));
+        assert!(
+            safe["services"]["web"]["image"]
+                .as_str()
+                .unwrap()
+                .starts_with(&project)
+        );
         assert!(owned(&ctx, &safe["services"]["web"]["build"]["labels"]));
         assert!(owned(&ctx, &safe["volumes"]["data"]["labels"]));
         assert!(owned(&ctx, &safe["networks"]["default"]["labels"]));
@@ -1328,7 +1587,26 @@ mod tests {
         let log = root.path().join("calls.log");
         let captured = root.path().join("executed.json");
         let resolved = root.path().join("resolved.json");
+        let started = root.path().join("started.json");
+        let inspected = root.path().join("inspected.json");
         fs::write(&resolved, serde_json::to_vec(&basic()).unwrap()).unwrap();
+        fs::write(
+            &started,
+            r#"[{"ID":"container-fixture","Service":"web","State":"running"}]"#,
+        )
+        .unwrap();
+        let project_name = project(&ctx, "app");
+        let mut container_labels = labels(&ctx, &project_name, "app");
+        container_labels["com.docker.compose.project"] = json!(project_name);
+        container_labels["com.docker.compose.service"] = json!("web");
+        fs::write(
+            &inspected,
+            serde_json::to_vec(
+                &json!([{"Config":{"Labels":container_labels},"State":{"Status":"running"}}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         let script_text = format!(
             r#"#!/bin/sh
 set -eu
@@ -1337,6 +1615,8 @@ case "$*" in
   'image inspect '*) printf '%s' '[{{"Id":"sha256:public-fixture","RepoDigests":["alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"Config":{{"Volumes":{{"/config":{{}}}}}}}}]';;
   *'network inspect'*) printf '%s' '[{{"Id":"network-fixture","Driver":"bridge","Scope":"local","EnableIPv6":false,"Internal":false,"Options":{{}},"Labels":{{"io.knit.runtime.owner":"owner-a"}}}}]';;
   *'config --format json'*) cat '{resolved}'; printf '%s' '{{"services":{{"web":{{"privileged":true}}}}}}' > '{original}';;
+  *'ps --all --orphans=false --format json'*) cat '{started}';;
+  'container inspect '*) cat '{inspected}';;
   *'up --detach'*)
     previous=''
     for argument in "$@"; do
@@ -1347,6 +1627,8 @@ esac
 "#,
             log = log.display(),
             resolved = resolved.display(),
+            started = started.display(),
+            inspected = inspected.display(),
             original = original.display(),
             captured = captured.display()
         );
@@ -1394,10 +1676,12 @@ esac
         );
         assert!(owned(&ctx, &executed["volumes"][volume_key]["labels"]));
         let calls = fs::read_to_string(&log).unwrap();
-        assert!(calls
-            .lines()
-            .any(|line| line.contains("--profile bundle-db")
-                && line.contains("config --format json")));
+        assert!(
+            calls
+                .lines()
+                .any(|line| line.contains("--profile bundle-db")
+                    && line.contains("config --format json"))
+        );
         let up = calls.lines().find(|l| l.contains("up --detach")).unwrap();
         assert!(!up.contains(original.to_str().unwrap()));
         assert!(!up.contains("untrusted"));
@@ -1431,22 +1715,30 @@ esac
         assert_eq!(ports[0]["targetPort"], 8080);
         let mut stopped = running.clone();
         stopped["State"]["Running"] = json!(false);
-        assert!(verified_ports(&ctx, &stopped, "network-fixture")
-            .unwrap()
-            .is_empty());
-        assert!(verified_ports(&ctx, &running, "replaced-network")
-            .unwrap()
-            .is_empty());
+        assert!(
+            verified_ports(&ctx, &stopped, "network-fixture")
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            verified_ports(&ctx, &running, "replaced-network")
+                .unwrap()
+                .is_empty()
+        );
         let mut forged = running.clone();
         forged["Config"]["Labels"][OWNER] = json!("owner-b");
-        assert!(verified_ports(&ctx, &forged, "network-fixture")
-            .unwrap()
-            .is_empty());
+        assert!(
+            verified_ports(&ctx, &forged, "network-fixture")
+                .unwrap()
+                .is_empty()
+        );
         let mut missing = running;
         missing["NetworkSettings"]["Networks"]["preview-fixture"]["Aliases"] = json!(["web"]);
-        assert!(verified_ports(&ctx, &missing, "network-fixture")
-            .unwrap()
-            .is_empty());
+        assert!(
+            verified_ports(&ctx, &missing, "network-fixture")
+                .unwrap()
+                .is_empty()
+        );
     }
     #[test]
     fn compose_five_synthesized_empty_ipam_is_normalized_but_custom_ipam_is_rejected() {
@@ -1545,10 +1837,12 @@ esac
         let mut forged = image;
         forged["Config"]["Labels"][OWNER] = json!("owner-b");
         fs::write(&resource, serde_json::to_vec(&json!([forged])).unwrap()).unwrap();
-        assert!(down_with_docker(&ctx, true, &docker)
-            .unwrap_err()
-            .to_string()
-            .contains("unowned"));
+        assert!(
+            down_with_docker(&ctx, true, &docker)
+                .unwrap_err()
+                .to_string()
+                .contains("unowned")
+        );
         assert_eq!(fs::read_to_string(&log).unwrap(), removed);
     }
     #[test]
@@ -1605,14 +1899,18 @@ esac
             safe["services"]["nested"]["volumes"][0]["volume"]["subpath"],
             "bundle/nested"
         );
-        assert!(safe["services"]["app"]["build"]["dockerfile_inline"]
-            .as_str()
-            .unwrap()
-            .contains("bundle-app"));
-        assert!(safe["services"]["nested"]["build"]["dockerfile_inline"]
-            .as_str()
-            .unwrap()
-            .contains("bundle-nested"));
+        assert!(
+            safe["services"]["app"]["build"]["dockerfile_inline"]
+                .as_str()
+                .unwrap()
+                .contains("bundle-app")
+        );
+        assert!(
+            safe["services"]["nested"]["build"]["dockerfile_inline"]
+                .as_str()
+                .unwrap()
+                .contains("bundle-nested")
+        );
         fs::write(
             root.path().join("bundle/app/Dockerfile"),
             "FROM knit-foreign:runtime",
@@ -1717,12 +2015,32 @@ printf '%s' '[{{"Id":"sha256:synthetic-private-canary"}}]'
         let log = root.path().join("calls.log");
         let build_capture = root.path().join("build.json");
         let run_capture = root.path().join("run.json");
+        let started = root.path().join("started.json");
+        let inspected = root.path().join("inspected.json");
+        fs::write(
+            &started,
+            r#"[{"ID":"container-fixture","Service":"web","State":"running"}]"#,
+        )
+        .unwrap();
+        let mut container_labels = labels(&ctx, &project, "app");
+        container_labels["com.docker.compose.project"] = json!(project);
+        container_labels["com.docker.compose.service"] = json!("web");
+        fs::write(
+            &inspected,
+            serde_json::to_vec(
+                &json!([{"Config":{"Labels":container_labels},"State":{"Status":"running"}}]),
+            )
+            .unwrap(),
+        )
+        .unwrap();
         fs::write(&script,format!(r#"#!/bin/sh
 set -eu
 printf '%s\n' "$*" >> '{log}'
 case "$*" in
   'network inspect '*) printf '%s' '[{{"Id":"network-fixture","Driver":"bridge","Scope":"local","EnableIPv6":false,"Internal":false,"Options":{{}},"Labels":{{"io.knit.runtime.owner":"owner-a"}}}}]';;
   *'config --format json') cat '{resolved}';;
+  *'ps --all --orphans=false --format json'*) cat '{started}';;
+  'container inspect '*) cat '{inspected}';;
   'image pull '*) printf '%s' 'FROM knit-private-canary:runtime' > '{dockerfile}';;
   'image inspect docker.io/'*) printf '%s' '[{{"Id":"sha256:public-fixture","RepoDigests":["alpine@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"],"Config":{{}}}}]';;
   'image inspect knit-'*) cat '{output_metadata}';;
@@ -1739,7 +2057,7 @@ case "$*" in
       previous="$argument"
     done;;
 esac
-"#,log=log.display(),resolved=resolved.display(),dockerfile=dockerfile.display(),output_metadata=output_metadata.display(),build_capture=build_capture.display(),run_capture=run_capture.display())).unwrap();
+"#,log=log.display(),resolved=resolved.display(),started=started.display(),inspected=inspected.display(),dockerfile=dockerfile.display(),output_metadata=output_metadata.display(),build_capture=build_capture.display(),run_capture=run_capture.display())).unwrap();
         fs::set_permissions(&script, fs::Permissions::from_mode(0o700)).unwrap();
         let docker = Docker {
             home: tempfile::tempdir_in("/tmp").unwrap(),
@@ -1808,10 +2126,12 @@ esac
         ] {
             let mut unsafe_network = ordinary.clone();
             unsafe_network[field] = value;
-            assert!(validate_network_topology(&unsafe_network)
-                .unwrap_err()
-                .to_string()
-                .contains(field));
+            assert!(
+                validate_network_topology(&unsafe_network)
+                    .unwrap_err()
+                    .to_string()
+                    .contains(field)
+            );
         }
         for field in ["Scope", "Driver", "EnableIPv6", "Internal", "Options"] {
             let mut incomplete = ordinary.clone();
@@ -1863,16 +2183,20 @@ esac
                 .to_string()
                 .contains("Options")
         );
-        assert!(check_project_ownership(&docker, &ctx, &project)
-            .unwrap_err()
-            .to_string()
-            .contains("Options"));
+        assert!(
+            check_project_ownership(&docker, &ctx, &project)
+                .unwrap_err()
+                .to_string()
+                .contains("Options")
+        );
         let document =
             json!({"networks":{"default":{"name":"network-fixture"}},"volumes":{},"services":{}});
-        assert!(check_named_resources(&docker, &ctx, &document)
-            .unwrap_err()
-            .to_string()
-            .contains("Options"));
+        assert!(
+            check_named_resources(&docker, &ctx, &document)
+                .unwrap_err()
+                .to_string()
+                .contains("Options")
+        );
         assert!(!removed.exists());
         for purge in [false, true] {
             down_with_docker(&ctx, purge, &docker).unwrap();

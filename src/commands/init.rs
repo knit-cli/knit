@@ -100,11 +100,14 @@ pub fn start_bundle(
         KnitConfig::new(bundle_id.clone())
     };
     let project_id = resolve_start_project(&root, project, &config)?;
+    crate::auth::set_project_override(project_id.clone());
     let mut bundle = ChangeGroup::new(bundle_id.clone(), title.to_string(), now_iso());
     bundle.project_id = project_id.clone();
     write_json(&bundle_path, &bundle)?;
 
     let setup_result = (|| -> Result<()> {
+        // Empty project bundles have no tracking step to save their creation
+        // event. Record it here, after repo selection has succeeded.
         if let Some(project_id) = &project_id {
             let selected = select_project_repos(
                 &root, project_id, repo_ids, all_repos, view, include, exclude,
@@ -119,6 +122,8 @@ pub fn start_bundle(
                     base_mode,
                 )?;
                 save_active_bundle(&active)?;
+            } else {
+                crate::history::record_bundle_history(&root, &bundle)?;
             }
         }
 
@@ -200,13 +205,19 @@ fn rollback_empty_new_bundle(
     true
 }
 
-fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
+/// Resolve the directory a `--cd` shell should start in: the bundle worktree
+/// root for an empty selector, or the checkout of the one repo a selector
+/// matches. Shared by bundle creation and by entering an existing bundle, so
+/// both spellings navigate identically.
+pub(crate) fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
     if active.bundle.repos.is_empty() {
         bail!("Cannot cd into a checkout because the bundle has no tracked repos.");
     }
 
     if selector.trim().is_empty() {
-        return Ok(active.root.join(".knit/worktrees").join(&active.bundle.id));
+        let root = active.root.join(".knit/worktrees").join(&active.bundle.id);
+        ensure_enterable_worktree_root(active, &root)?;
+        return Ok(root);
     }
 
     let selectors = [selector.to_string()];
@@ -215,6 +226,39 @@ fn cd_target_dir(active: &ActiveBundle, selector: &str) -> Result<PathBuf> {
         bail!("Repo selector `{selector}` matched multiple repos; pass a more specific repo id.");
     }
     checkout_for_repo(active, indexes[0])
+}
+
+/// A shell may only start in a bundle worktree root that exists and holds at
+/// least one materialized checkout. Creation-time `--cd` always passes
+/// (materialization precedes navigation); entering an existing bundle can
+/// reach one that was never materialized or whose worktrees were removed, and
+/// that gets an actionable error instead of a shell in a missing or empty
+/// directory. Nothing is created here — no branches, no worktrees.
+fn ensure_enterable_worktree_root(active: &ActiveBundle, root: &Path) -> Result<()> {
+    let materialized = active
+        .bundle
+        .repos
+        .iter()
+        .any(|repo| checkout_dir(active, repo).is_some());
+    if root.is_dir() && materialized {
+        return Ok(());
+    }
+    if crate::commands::bundle::bundle_state(&active.bundle)
+        == crate::commands::bundle::BundleStatus::Archived
+    {
+        bail!(
+            "Bundle `{}` is archived and its generated worktrees were removed. Run `knit bundle restore {}` and then `knit --bundle {} bundle worktree` before entering it.",
+            active.bundle.id,
+            active.bundle.id,
+            active.bundle.id
+        );
+    }
+    bail!(
+        "Bundle `{}` has no materialized worktree at {}. Run `knit --bundle {} bundle worktree` first.",
+        active.bundle.id,
+        out::path(root.display()),
+        active.bundle.id
+    );
 }
 
 fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
@@ -227,7 +271,10 @@ fn checkout_for_repo(active: &ActiveBundle, index: usize) -> Result<PathBuf> {
     })
 }
 
-fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
+/// Start the user's shell in `path` with the bundle context exported. The one
+/// navigation helper shared by creation-time `--cd` and by entering an
+/// existing bundle with `knit bundle --cd`.
+pub(crate) fn start_shell_in(active: &ActiveBundle, path: &Path) -> Result<()> {
     let shell = std::env::var_os("SHELL").unwrap_or_else(default_shell);
     println!("{} {}", out::heading("cd:"), out::path(path.display()));
     let status = Command::new(&shell)
@@ -373,6 +420,8 @@ fn ensure_repos_cloned(root: &Path, selected: &[ProjectRepoEntry]) -> Result<()>
 /// Resolve which named view to apply: an explicit `--view` name (which must
 /// exist), otherwise the user's saved default view, otherwise none. Returns
 /// the view together with its name so warnings can point at the right view.
+/// Resolution uses the effective overlay: the user's personal views over the
+/// project's admin-managed shared templates, personal winning by name.
 pub(crate) fn resolve_active_view(
     root: &Path,
     project_id: &str,
@@ -382,9 +431,9 @@ pub(crate) fn resolve_active_view(
     match view_name {
         Some(name) => {
             let name = slugify(name);
-            let view = views.views.get(&name).cloned().with_context(|| {
+            let view = views.effective_view(&name).cloned().with_context(|| {
                 format!(
-                    "Project {} has no saved view named {}. Create it with `knit view save {name}`.",
+                    "Project {} has no view named {} (saved or shared). Create it with `knit view save {name}`, or refresh shared templates with `knit sync pull --views`.",
                     out::repo(project_id),
                     out::repo(&name)
                 )
@@ -394,8 +443,7 @@ pub(crate) fn resolve_active_view(
         // A dangling default is ignored rather than blocking `bundle start`.
         None => Ok(views.default_view.as_ref().and_then(|name| {
             views
-                .views
-                .get(name)
+                .effective_view(name)
                 .cloned()
                 .map(|view| (name.clone(), view))
         })),
@@ -602,6 +650,16 @@ creates one (like `git branch <name>`), `knit bundle` alone shows the current on
 creation flags go straight on it, e.g. `knit bundle "feature title" --project x --repo backend`.
 Bundle creation fetches each selected repo's configured `origin/<baseBranch>` and records that exact commit before creating any feature branch. Source checkouts are not moved, and a dirty source checkout does not make the new bundle stale. Use `--offline` to prefer cached remote bases or `--from-local-base` only when deliberately starting from local base branches.
 
+Set up personal forge credentials directly in Knit (no hosted service or desktop app required). Bare `knit auth` configures local per-forge-host defaults from any directory; `knit auth --project demo` optionally chooses between those defaults and a project-only token:
+
+```sh
+knit auth
+knit auth --project demo
+knit auth status --check
+```
+
+The defaults apply to clone, pull, and push and to forge API calls; the Svartal ledger token is separate. Per-repo assignments are not required. Advanced per-repository control remains for deliberate overrides (`knit auth use shared-token --repo backend --repo frontend`), one credential can cover many repositories across owners, and assignments stay in user-level config, outside shared project and bundle artifacts. Links do not grant provider permissions.
+
 Inspect and update the workspace's distinct Git states explicitly:
 
 ```sh
@@ -625,9 +683,9 @@ knit bundle "feature a" --repo backend
 knit bundle "feature b" --repo backend
 ```
 
-Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead.
+Use `knit bundle "feature title" --cd` to create the bundle from the current workspace project's default repos and immediately start your shell in `.knit/worktrees/<bundle>`. That bundle worktree root gets its own `AGENTS.md` with bundle-wide guidance. Pass `--project` when you want a project other than the current one, pass `--repo` only when you want to limit which repos are included, and pass a `--cd` value such as `--cd backend` only when you want a specific repo checkout instead. Without a title, `knit bundle --cd [<repo>]` enters the resolved existing bundle the same way; a missing or unmaterialized worktree is an error pointing at `knit bundle worktree`, never a silently created branch.
 
-Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Views are per-user config under `.knit/views/<project>.views.json`:
+Each user can save named views (bundle shapes) as include/exclude deltas over the project's default repo set, then start from them or reshape a live bundle. Project admins can also publish shared view templates everyone can use; personal views live under `.knit/views/<project>.views.json` and win over a template of the same name:
 
 ```sh
 knit view save backend --exclude frontend,docs
@@ -688,16 +746,17 @@ knit --bundle feature-a sync push --bundles
 knit --bundle feature-a sync pull --history
 ```
 
-Publish review objects (PRs/MRs) against their intended base branch. `create`
-pushes each feature branch itself, so the review path is commit then publish —
+Publish review objects (PRs/MRs) into each repository’s recorded bundle base
+by default. Use `--target` for one destination branch or `--lane` for a project
+mapping. `create` pushes each feature branch itself, so the review path is commit then publish —
 no separate `knit push` step. It auto-detects each repo's host; pass `--github`
 (or `--provider <id>`) to limit to one host. `knit request` is an alias for
 `knit publish`:
 
 ```sh
 knit publish create
-knit publish create --base release
-knit publish create --base backend=stable --base frontend=main
+knit publish create --target release
+knit publish create --lane staging
 knit publish create --github
 knit publish status
 ```
@@ -715,21 +774,42 @@ When the PRs are approved and the user says to land, merge, release, ship, or co
 knit land
 ```
 
-Inspect or edit the plan, then execute it explicitly:
+New plans are canonical schema `0.2` `KnitLandPlan` documents: the same saved revision executes locally and on a hosted runner. Edit visually or as raw JSON in the hosted plan editor, or edit the local plan JSON. `workflow` sequence/parallel groups or `steps[].needs` determine execution order; list position alone does not order a dependency graph. Validate the saved document, inspect live readiness, then execute it explicitly:
 
 ```sh
+knit land validate --plan .knit/land-plans/<bundle>.land.json --json
 knit land check
-knit land apply
+knit land apply --plan .knit/land-plans/<bundle>.land.json
 knit land status
 ```
 
 `knit land check` is a read-only preflight for the reviews' current bases. Use `knit land --target <branch>` to generate a native target-aware plan; apply retargets the reviews first and then checks mergeability and CI against that target. When apply reports a `conflict`, run `knit land update` after the retarget to merge the new base in and resolve, then land again. `knit publish status --live` shows the same live columns.
 
-Land from a bundle artifact JSON (merge-only, no local workspace):
+Execute an exact saved plan from portable bundle/project inputs and runner-owned repository bindings:
 
 ```sh
-knit land apply --from-artifact bundle.published.json --out bundle.landed.json
+knit land plan --from-artifact bundle.published.json --project-file project.json --out reviewed.land.json --json
+knit land validate --plan reviewed.land.json --from-artifact bundle.published.json --project-file project.json --json
+knit land apply --plan reviewed.land.json --from-artifact bundle.published.json --project-file project.json --repo-roots roots.json --run-out execution.run.json --out bundle.landed.json
 ```
+
+`roots.json` maps repository IDs to absolute runner-owned checkouts. Artifact apply without `--plan` remains the legacy merge-only path; it does not execute an edited plan or deployment recipes.
+
+Project/repository recipes live in project `landing` metadata: `landing.deployments[]` supports build, deploy, verify and recovery commands; `landing.steps[]` adds explicit operations, with destination overrides in `landing.targets` and `landing.lanes`. `whenChanged` selects recipes; `needs` orders dependencies. Edit recipes in the hosted recipe editor or local project JSON, preserving unrelated fields. Recipe or source changes require regenerating and reviewing a new plan revision.
+
+```sh
+knit sync pull --plans --remote hosted
+knit sync push --plans --remote hosted
+knit land resume --run execution.run.json
+knit land recover --run execution.run.json
+knit land recover --run execution.run.json --apply
+```
+
+`--plans` syncs plan revisions, run receipts and associated project landing recipes; routine sync includes them too. Pull materializes `.knit/land-plans/` and `.knit/land-runs/`. Preserve both sides of a sync conflict, adopt the remote candidate as the shared base, then reapply local edits. Runs pin the complete immutable plan hash: saving a new revision never changes an existing run. Resume uses the original plan and completed receipts; recovery previews without `--apply` and blocks further forward resume once started. A superseded run cannot restore over a newer execution generation.
+
+Synchronized execution requires hosted ownership as well as local locking; an unavailable authority blocks execution. Ownership conservatively serializes the project across destination aliases and does not expire automatically. Keep ownership tokens and raw captures private; release ownership only after receipts persist and processes are quiescent. Resolve interrupted ownership through verified reconciliation, never by stealing a lock.
+
+For v0.2, `onFailure: "stop"` is the default; `onFailure: "recover"` requires capture, idempotent restoration and verification for every deployment/external effect. Recovery restores captured state in reverse dependency order and reports service restoration separately from source revert proposals. Legacy `knit land --schema-version 0.1 plan` preserves v0.1 behavior: `knit land rollback --apply` or `onFailure: "rollback"` creates source revert PRs; it does not restore deployed services.
 
 Bare `knit land` creates or shows the default plan and stops. `knit land --lane staging` lands through a named project lane, which resolves one branch per repository; `knit land --target staging` creates a plan that owns one raw target for every repo, an ad-hoc lane: when staging is intermediate, `knit land --target staging apply` merges each repo's feature branch into staging and pushes it, leaving the reviews open; when staging is terminal, it retargets every recorded review through Knit, checks and merges them there. Either way it selects `landing.targets.staging.deployments`. Without `--target` or `--lane`, recorded review bases remain authoritative. A destination is terminal (the bundle's last stop) or intermediate. Landing into a terminal destination archives the bundle on full success and removes generated worktrees under `.knit/worktrees/<bundle>/` while preserving local feature branches and the bundle artifact; pass `--keep-worktrees` to keep those checkouts. Landing into an intermediate lane — a staging or preproduction environment — merges each repo's feature branch into that lane's branch, pushes it, runs the lane's deployments, and leaves the bundle open with its worktrees. The review objects are not touched: they stay open against the destination that ends the bundle's life, so the same bundle lands into the next environment afterwards. A terminal landing merges the recorded reviews instead, then archives. Knit treats a destination as terminal when it is every repository's configured base branch; `"terminal": true|false` on `landing.lanes.<name>` or `landing.targets.<branch>` overrides that, and `knit land` prints the answer before you apply. A repository with no such environment at all — a library or a script bag, released rather than deployed — takes a `null` branch in the lane (`landing.lanes.<name>.branches.<repo>: null`); the lane skips it, names it under `Not in this lane:`, and it keeps its work for the terminal landing. When push-sync is enabled, a successful land also syncs the updated bundle artifact to configured sync remotes; use `knit sync push --bundles` to push the landed artifact later. Project JSON can define a default `landing` template with merge priority, configured-base deployments, and branch-keyed `landing.targets.<branch>.deployments`; `.knit/land-plans/<bundle>.land.json` remains the editable per-bundle plan. A PR with no required checks has passed Knit’s required-check gate. Do not use `gh pr merge` for Knit-owned bundles. Do not use `knit merge --into main` as a substitute for PR landing unless the user explicitly asks for direct branch integration instead of PR landing.
 
@@ -762,12 +842,13 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
+- `knit bundle --cd [<repo>]` starts a shell in the resolved existing bundle's worktree (or one repo checkout) without creating or switching anything.
 - `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
-- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles.
-- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views; `knit sync push --views`/`knit sync pull --views` sync them to the sync remotes.
+- `knit view save <name> [--include <repo>]... [--exclude <repo>]...` saves a per-user bundle shape; `knit view default <name>` makes it the default for new bundles. Admin-managed shared templates are usable everywhere a saved view is (`--view`, defaults, `apply-view`, `clone --view`); saving a personal view with a template's name overrides it for you.
+- `knit view list`, `knit view show [name] [--repos]`, `knit view edit`, `knit view rm <name>` manage saved views (`list`/`show` also surface shared templates; `rm` refuses template-only names — copy them with `knit view save <new> --from <template>` instead). `knit sync push --views`/`knit sync pull --views` sync the personal document to the sync remotes; a pull also refreshes the shared template cache.
 - `knit cherrypick --from <bundle> <selector>...` cherry-picks selected source bundle commits into the resolved bundle.
 - `knit bundle path` prints the resolved bundle file.
 - `knit bundle validate` checks the bundle artifact.
@@ -796,21 +877,26 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit land` creates or shows the landing plan; `knit land apply` executes it, then archives the bundle and removes generated worktrees on success unless `--keep-worktrees` is passed.
 - `knit land --target <branch>` creates a native target-aware plan; applying with the same flag retargets review objects, checks and merges them there, and selects `landing.targets.<branch>` deployments.
 - `knit land check` previews each recorded PR's live landing readiness (state, mergeable, checks, review, verdict) without mutating anything; `knit publish status --live` shows the same columns.
-- `knit land resume` continues a failed run; `knit land rollback [--apply]` previews/creates revert PRs for the merge steps a failed run already completed. A landing template or plan can set `onFailure: "rollback"` to do this automatically.
+- `knit land validate --plan <path> --json` validates the saved executable plan without running commands; `knit land apply --plan <path>` executes that exact document.
+- `knit land resume --run <path>` continues the original run using its immutable plan; succeeded steps are not repeated. New plan revisions do not alter existing runs.
+- `knit land recover --run <path> [--apply]` previews/executes v0.2 recovery using captured prior state; forward resume is blocked after recovery starts. `onFailure: "recover"` opts into automatic recovery; the default is `stop`.
+- Legacy v0.1 `knit land rollback [--apply]` and `onFailure: "rollback"` propose source revert PRs only; they do not restore deployments. Generate legacy plans explicitly with `knit land --schema-version 0.1 plan`.
 - `knit tag <name>` records a cross-repo known-good marker: per repo it pins the freshly fetched `origin/<base_branch>` on the bundle ledger and exports annotated git tags `knit/<name>` (`--no-push` stays local and falls back to the local configured base when no `origin` exists; `--no-git` records the ledger only; `-r <repo>` selects a subset).
 - `knit tag` / `knit tag list` shows `knit/*` tags across repos with coverage; `knit tag show <name>` shows per-repo local/remote SHAs and ledger provenance.
 - `knit land apply --tag [name]` tags the configured project bases as part of the land (name defaults to the bundle slug); `knit config set auto-tag true` makes that the default (`--no-tag` opts out for one run).
 - `knit doctor` checks workspace JSON, stale locks, and missing paths.
 - `knit migrate --check` reports additive JSON migrations; `knit migrate` applies them.
 - `knit check run <name>` records a project command verdict against the current bundle heads; `knit check status` reports whether the latest verdicts remain fresh.
-- `knit history list` shows project-wide recorded commit history; `knit related <repo-id>/path` joins Git file history back to Knit bundles and commit groups.
+- `knit log` inspects the current bundle; `knit log --all` queries locally recorded project history without selecting a bundle. Combine `--repo`, `--view`, `--kind`, `--since`, and `--grep`; use `--json` for scripts. Inspection is offline and does not refresh the ledger.
+- `knit log --all --repo api --repo web --repo-match all` finds recorded groups involving both repos. `--group bundle` matches whole bundles; `--full-context` includes companion repo details in matching entries.
+- `knit history list` remains the compatible flat event listing; `knit history refresh` explicitly records missing events from local bundles. `knit related <repo-id>/path` joins Git file history back to Knit bundles and commit groups.
 - `knit config set advice false` disables sparse `Next:` advice.
 - `knit config set auto-tag true` makes a successful `knit land apply` record a cross-repo known-good tag automatically.
 - `knit config set sync-remotes hosted` makes push-sync upload bundle artifacts to your configured sync remote.
 - `knit show HEAD` explains the latest bundle ledger entry.
 - `knit sync` records Git commits made outside Knit (local reconcile, no network).
-- `knit sync push [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...` is the one verb family for moving artifacts to the sync remotes; with no target flag it pushes bundle, history, views, and architecture. The often-large knowledge-graph slice moves only with explicit `--kg`. Bundle push is project-wide: every local bundle artifact — open, landed, archived — is swept so remote lifecycle state converges on the local ledger. Pushing an open bundle always means branches + artifact: missing or stale feature branches are pushed to git `origin` first, and a bundle whose branches cannot be pushed or verified is skipped with a warning.
-- `knit sync pull [--bundles|--history|--views|--architecture|--kg|--all] [--remote <name>]...` pulls those same artifacts from the sync remotes. Bundle pull is project-wide: open bundles created on other machines (and their recorded PRs) are localized into `.knit/bundles/`, and stale local artifacts fast-forward whatever their state; materialize checkouts for a discovered bundle with `knit --bundle <slug> bundle worktree`.
+- `knit sync push [--bundles|--history|--views|--plans|--architecture|--kg|--all] [--remote <name>]...` is the one verb family for moving artifacts to the sync remotes; with no target flag it pushes bundle, history, views, landing plans/runs/recipes, and architecture. The often-large knowledge-graph slice moves only with explicit `--kg`. Bundle push is project-wide: every local bundle artifact — open, landed, archived — is swept so remote lifecycle state converges on the local ledger. Pushing an open bundle always means branches + artifact: missing or stale feature branches are pushed to git `origin` first, and a bundle whose branches cannot be pushed or verified is skipped with a warning.
+- `knit sync pull [--bundles|--history|--views|--plans|--architecture|--kg|--all] [--remote <name>]...` pulls those same artifacts from the sync remotes. Bundle pull is project-wide: open bundles created on other machines (and their recorded PRs) are localized into `.knit/bundles/`, and stale local artifacts fast-forward whatever their state; materialize checkouts for a discovered bundle with `knit --bundle <slug> bundle worktree`.
 - `knit pull --merge` union-merges the bundle ledger when the local and remote artifacts have diverged (two users recorded work concurrently); diverged feature branches still need a git merge in the worktree afterwards.
 - `knit push --set-upstream` pushes every tracked feature branch in the resolved bundle to `origin` and sets upstream tracking; it opens no review objects, so use `knit publish create` (which pushes too) for the PR path.
 - `knit push --remote hosted` pushes the resolved bundle's branches and artifact to the configured sync remote so it is visible in hosted dashboards.

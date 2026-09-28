@@ -1,0 +1,146 @@
+name: Linux packages
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        required: true
+        type: string
+    secrets:
+      APT_SIGNING_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to package, such as v0.1.0-alpha.22
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+# Serialize all versions: each publication retains the existing APT pool.
+concurrency:
+  group: linux-package-repository
+  cancel-in-progress: false
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate release and download binaries
+        run: |
+          set -euo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]
+          gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null
+          mkdir assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern "knit-${RELEASE_TAG}-*unknown-linux-musl.tar.gz" \
+            --pattern "knit-${RELEASE_TAG}-*unknown-linux-musl.sha256"
+      - name: Install verified nFPM
+        run: |
+          curl -fL --retry 3 -o nfpm.tar.gz https://github.com/goreleaser/nfpm/releases/download/v2.47.0/nfpm_2.47.0_Linux_x86_64.tar.gz
+          echo '0660ca602b2d2d2ae4781a06c692b3eeb9d437ffea05b831d76e41f4a3188783  nfpm.tar.gz' | sha256sum -c -
+          sudo tar -xzf nfpm.tar.gz -C /usr/local/bin nfpm
+      - name: Test and build packages
+        run: |
+          python3 -m unittest discover -s scripts -p 'linux_packages_test.py' -v
+          python3 scripts/linux_packages.py --version "$RELEASE_TAG" --assets-dir assets --output-dir linux-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: linux-packages
+          path: linux-dist
+          if-no-files-found: error
+
+  ubuntu:
+    needs: package
+    strategy:
+      matrix:
+        runner: [ubuntu-latest, ubuntu-24.04-arm]
+        ubuntu: ['22.04', '24.04']
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: linux-dist
+      - name: Install through signed APT and from a local package
+        env:
+          UBUNTU_VERSION: ${{ matrix.ubuntu }}
+        run: |
+          docker run --rm -v "$PWD:/src:ro" "ubuntu:${UBUNTU_VERSION}" \
+            bash /src/scripts/linux_install_smoke.sh /src/linux-dist
+
+  publish:
+    needs: [package, ubuntu]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+    env:
+      GH_TOKEN: ${{ github.token }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: linux-packages
+          path: linux-dist
+      - name: Install repository tools
+        run: sudo apt-get update && sudo apt-get install -y apt-utils dpkg-dev gnupg
+      - name: Prepare signing key
+        env:
+          APT_SIGNING_KEY: ${{ secrets.APT_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          test -n "$APT_SIGNING_KEY" || { echo '::error::Configure APT_SIGNING_KEY before publishing'; exit 1; }
+          export GNUPGHOME="$RUNNER_TEMP/knit-signing"
+          mkdir -m 700 "$GNUPGHOME"
+          printf '%s' "$APT_SIGNING_KEY" | gpg --batch --import
+          fingerprint=$(gpg --batch --with-colons --list-secret-keys | awk -F: '$1 == "fpr" { print $10; exit }')
+          test -n "$fingerprint"
+          echo "GNUPGHOME=$GNUPGHOME" >> "$GITHUB_ENV"
+          echo "APT_SIGNING_FINGERPRINT=$fingerprint" >> "$GITHUB_ENV"
+      - name: Prepare repository branch
+        run: |
+          set -euo pipefail
+          # GitHub Pages must already serve gh-pages / (see dist/README.md).
+          gh api "repos/$GITHUB_REPOSITORY/pages" | jq -e '.source.branch == "gh-pages" and .source.path == "/" and .build_type == "legacy"'
+          git fetch origin gh-pages
+          git worktree add site FETCH_HEAD
+          bash scripts/build_apt_repository.sh linux-dist site "$APT_SIGNING_FINGERPRINT"
+          cp dist/linux-index.html site/index.html
+      - name: Publish immutable release packages
+        run: bash scripts/publish_linux_assets.sh "$GITHUB_REPOSITORY" "$RELEASE_TAG" linux-dist
+      - name: Publish signed repository
+        run: |
+          set -euo pipefail
+          git -C site config user.name 'knit-release-bot'
+          git -C site config user.email 'release-bot@users.noreply.github.com'
+          git -C site add apt knit.gpg .nojekyll index.html
+          git -C site commit -m "Publish Linux packages for ${RELEASE_TAG}"
+          git -C site push origin HEAD:gh-pages
+          # GITHUB_TOKEN pushes do not automatically trigger Pages builds.
+          gh api --method POST "repos/$GITHUB_REPOSITORY/pages/builds"
+          head=$(git -C site rev-parse HEAD)
+          for attempt in $(seq 1 60); do
+            build=$(gh api "repos/$GITHUB_REPOSITORY/pages/builds/latest")
+            if jq -e --arg head "$head" '.commit == $head and .status == "built"' <<< "$build" >/dev/null; then
+              exit 0
+            fi
+            if jq -e --arg head "$head" '.commit == $head and .status == "errored"' <<< "$build" >/dev/null; then
+              jq '.error' <<< "$build"
+              exit 1
+            fi
+            sleep 5
+          done
+          echo '::error::Timed out waiting for the package repository deployment'
+          exit 1
+      - name: Remove signing material
+        if: always()
+        run: rm -rf "$RUNNER_TEMP/knit-signing"

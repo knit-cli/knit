@@ -109,7 +109,7 @@ fn sync_pr_body_remote(
     let pr = publication_for_repo(&active.bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
-    let block = render_knit_pr_block(&active.bundle, Some(&repo.id));
+    let block = render_knit_pr_block(&active.bundle, Some(&repo.id), forge.id());
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body == current_body {
         return Ok(SyncBodyResult::AlreadySynced);
@@ -138,7 +138,7 @@ fn sync_pr_body_remote_from_artifact(
     let pr = publication_for_repo(bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
-    let block = render_knit_pr_block(bundle, Some(&repo.id));
+    let block = render_knit_pr_block(bundle, Some(&repo.id), forge.id());
     let next_body = upsert_knit_pr_block(&current_body, &block);
     if next_body == current_body {
         return Ok(SyncBodyResult::AlreadySynced);

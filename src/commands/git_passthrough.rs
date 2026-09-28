@@ -39,14 +39,33 @@ pub fn run_git(args: &[OsString], explicit_repos: &[String], all: bool) -> Resul
             );
         }
 
-        let status = Command::new("git")
-            .args(&git_args)
-            .current_dir(&cwd)
-            .stdin(Stdio::inherit())
-            .stdout(Stdio::inherit())
-            .stderr(Stdio::inherit())
-            .status()
-            .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+        let mut command = Command::new("git");
+        let credentials = crate::auth_git::configure(&cwd, &git_args, &mut command)?;
+        command.args(&git_args).current_dir(&cwd);
+        let status = if credentials.is_empty() {
+            command
+                .stdin(Stdio::inherit())
+                .stdout(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .status()
+                .with_context(|| format!("failed to run git in {}", cwd.display()))?
+        } else {
+            // Network commands with a project token must capture output so an
+            // error or trace cannot print that secret through inherited stdio.
+            let output = command
+                .stdin(Stdio::null())
+                .output()
+                .with_context(|| format!("failed to run git in {}", cwd.display()))?;
+            print!(
+                "{}",
+                crate::auth_git::redact(&credentials, &String::from_utf8_lossy(&output.stdout))
+            );
+            eprint!(
+                "{}",
+                crate::auth_git::redact(&credentials, &String::from_utf8_lossy(&output.stderr))
+            );
+            output.status
+        };
 
         if !status.success() {
             failures.push(match status.code() {

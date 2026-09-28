@@ -1,0 +1,210 @@
+name: Homebrew bottles
+
+# Packages the raw binaries of an existing release into real Homebrew
+# bottles, publishes the bottles plus the complete generated formula to that
+# same release, verifies the published bytes, and only then opens the tap
+# bump PR. Nothing is compiled and no tag is touched, so this same workflow
+# backfills any already-published release via workflow_dispatch.
+
+on:
+  workflow_call:
+    inputs:
+      release_tag:
+        description: Release tag to package (v<version>)
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Existing release tag to package (v<version>); binaries are repackaged, never rebuilt
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: homebrew-bottles-${{ inputs.release_tag }}
+  cancel-in-progress: false
+
+env:
+  TAP_REPO: knit-cli/homebrew-tap
+
+jobs:
+  bottles:
+    name: package and publish bottles
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate release tag
+        run: |
+          set -euo pipefail
+          tag="${RELEASE_TAG:?release_tag is required}"
+          if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "::error::refusing to package '${tag}': expected a v<semver> release tag" >&2
+            exit 1
+          fi
+          gh release view "$tag" --repo "$GITHUB_REPOSITORY" > /dev/null
+
+      - name: Download raw release assets
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir assets
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --dir assets \
+            --pattern "knit-v${version}-*.tar.gz" \
+            --pattern "knit-v${version}-*.sha256"
+
+      # Manual dispatch of this workflow bypasses the release gate, so run
+      # the packager's own tests here too.
+      - name: Homebrew packaging tests
+        run: python3 -m unittest discover -s scripts -p 'homebrew_bottles_test.py' -v
+
+      - name: Package bottles and formula
+        run: |
+          set -euo pipefail
+          python3 scripts/homebrew_bottles.py \
+            --version "${RELEASE_TAG#v}" --assets-dir assets --output-dir homebrew-dist
+
+      # Release assets are immutable: upload only what is missing, and if an
+      # asset already exists under the same name its published bytes must be
+      # identical to what we just generated (idempotent re-runs are fine,
+      # silent replacement is not). Bottles go up first and the formula
+      # asset last, so the published formula never advertises bottles that
+      # are not on the release yet during a partial upload.
+      - name: Publish bottles and formula
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          cp homebrew-dist/knit.rb "homebrew-dist/knit-v${version}-formula.rb"
+
+          publish() {
+            local file="$1" name want tmp got
+            name="$(basename "$file")"
+            want="$(sha256sum "$file" | awk '{print $1}')"
+            if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets \
+              | jq -e --arg n "$name" '.assets[] | select(.name == $n)' > /dev/null; then
+              tmp="$(mktemp -d)"
+              gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+                --dir "$tmp" --pattern "$name"
+              got="$(sha256sum "$tmp/$name" | awk '{print $1}')"
+              if [[ "$got" != "$want" ]]; then
+                echo "::error::$name is already published hashing to $got; refusing to replace it with different bytes ($want)" >&2
+                exit 1
+              fi
+              echo "$name already published with identical bytes; nothing to do."
+            else
+              gh release upload "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" "$file"
+            fi
+          }
+
+          for bottle in homebrew-dist/bottles/*.bottle.tar.gz; do
+            publish "$bottle"
+          done
+          publish "homebrew-dist/knit-v${version}-formula.rb"
+
+      - name: Upload packaging artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: homebrew-bottles
+          path: homebrew-dist
+
+  tap-bump:
+    name: verify published bottles and bump tap
+    needs: bottles
+    runs-on: ubuntu-latest
+    env:
+      GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      RELEASE_TAG: ${{ inputs.release_tag }}
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: homebrew-bottles
+          path: homebrew-dist
+
+      # Re-download everything the formula references from the live release
+      # and compare bytes: the tap PR can only ever be opened against
+      # published, verified artifacts, so a fresh version can never inherit
+      # stale bottles.
+      - name: Verify published bytes match the generated formula
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          mkdir published
+          patterns=()
+          while read -r want name; do
+            patterns+=(--pattern "$name")
+          done < homebrew-dist/SHA256SUMS
+          gh release download "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+            --dir published "${patterns[@]}" --pattern "knit-v${version}-formula.rb"
+
+          while read -r want name; do
+            got="$(sha256sum "published/$name" | awk '{print $1}')"
+            if [[ "$got" != "$want" ]]; then
+              echo "::error::published $name hashes to $got, expected $want" >&2
+              exit 1
+            fi
+          done < homebrew-dist/SHA256SUMS
+
+          diff -u homebrew-dist/knit.rb "published/knit-v${version}-formula.rb"
+
+          python3 - "$version" <<'PY'
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          version = sys.argv[1]
+          root = pathlib.Path("homebrew-dist")
+          manifest = json.loads((root / "manifest.json").read_text())
+          formula = (root / "knit.rb").read_text()
+          assert 'version "%s"' % version in formula
+          assert manifest["version"] == version
+          for tag, info in sorted(manifest["bottles"].items()):
+              digest = hashlib.sha256((root / "bottles" / info["file"]).read_bytes()).hexdigest()
+              assert digest == info["sha256"], tag
+              assert 'cellar: :any_skip_relocation, {}: "{}"'.format(tag, digest) in formula, tag
+          print("verified %d bottle digests against the formula" % len(manifest["bottles"]))
+          PY
+
+      # The bottles and formula are already published by the job above; a
+      # missing tap token must fail loudly instead of leaving the tap stale
+      # on a green run.
+      - name: Fail clearly when the tap token is missing
+        if: env.TAP_TOKEN == ''
+        run: |
+          echo "::error::HOMEBREW_TAP_TOKEN is not configured. Bottles and the formula for ${RELEASE_TAG} are published on the release, but Formula/knit.rb in ${TAP_REPO} was NOT updated, so 'brew install knit-cli/tap/knit' still serves the previous version. Configure the secret (Contents:write and Pull-requests:write on ${TAP_REPO}) and re-run 'Homebrew bottles' with release_tag=${RELEASE_TAG}."
+          exit 1
+
+      - name: Open tap formula PR
+        env:
+          GH_TOKEN: ${{ env.TAP_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="${RELEASE_TAG#v}"
+          branch="bump-knit-${version}-${GITHUB_RUN_ID}"
+          gh auth setup-git
+          git clone "https://github.com/${TAP_REPO}.git" tap
+          cd tap
+          git switch -c "$branch"
+          cp "${GITHUB_WORKSPACE}/homebrew-dist/knit.rb" Formula/knit.rb
+          if git diff --quiet; then
+            echo "::notice::tap formula already serves ${version}; no PR needed."
+            exit 0
+          fi
+          git config user.name "knit-release-bot"
+          git config user.email "release-bot@users.noreply.github.com"
+          git add Formula/knit.rb
+          git commit -m "knit ${version}"
+          git push -u origin "$branch"
+          gh pr create \
+            --repo "${TAP_REPO}" \
+            --title "knit ${version}" \
+            --body "Automated formula bump for knit ${version}, generated from the ${RELEASE_TAG} release assets. The bottle checksums were verified against the published release before this PR was opened." \
+            --head "$branch" \
+            --base main

@@ -8,7 +8,7 @@
 use crate::commands::init::{resolve_active_view, resolve_view_repos};
 use crate::commands::project::load_project_by_id;
 use crate::ids::{expand_repo_selectors, slugify};
-use crate::model::{KnitProjectViews, ProjectView, ViewBase};
+use crate::model::{KnitProjectViews, ProjectView, ViewBase, ViewSource};
 use crate::output as out;
 use crate::store::{
     acquire_named_lock, find_knit_root, load_active_bundle, load_config, load_views, project_path,
@@ -22,21 +22,27 @@ use std::process::Command;
 pub fn list_views(project: Option<&str>) -> Result<()> {
     let (root, project_id) = resolve_project(project)?;
     let views = load_views(&root, &project_id)?;
-    if views.views.is_empty() {
+    let effective = views.effective_views();
+    if effective.is_empty() {
         println!("{}", out::muted("No saved views."));
         return Ok(());
     }
-    for (name, view) in &views.views {
+    for (name, view, source) in effective {
         let marker = if views.default_view.as_deref() == Some(name.as_str()) {
             "*"
         } else {
             " "
         };
+        let provenance = match source {
+            ViewSource::Personal => String::new(),
+            ViewSource::Template => " (shared template)".to_string(),
+        };
         println!(
-            "{} {} {}",
+            "{} {} {}{}",
             marker,
             out::repo(name),
-            out::muted(summary(view))
+            out::muted(summary(view)),
+            out::muted(provenance)
         );
     }
     Ok(())
@@ -70,14 +76,15 @@ pub fn show_view(name: Option<&str>, project: Option<&str>, repos: bool) -> Resu
         Some(name) => {
             let name = slugify(name);
             let view = views
-                .views
-                .get(&name)
+                .effective_view(&name)
                 .with_context(|| missing_view(&project_id, &name))?;
             println!(
                 "{}",
                 serde_json::to_string_pretty(view).context("failed to serialize view")?
             );
         }
+        // The whole artifact, personal views and the shared template cache
+        // side by side: the `templates` key is the provenance.
         None => println!(
             "{}",
             serde_json::to_string_pretty(&views).context("failed to serialize views")?
@@ -103,13 +110,13 @@ pub fn save_view(
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
 
-    // Seed from an existing view, the current bundle, or empty; the flags
-    // then apply on top of the seed.
+    // Seed from an existing view (personal, or a shared template — copying a
+    // template is the supported way to branch off it), the current bundle, or
+    // empty; the flags then apply on top of the seed.
     let mut view = if let Some(from_name) = from {
         let from_name = slugify(from_name);
         views
-            .views
-            .get(&from_name)
+            .effective_view(&from_name)
             .cloned()
             .with_context(|| missing_view(&project_id, &from_name))?
     } else if from_bundle {
@@ -147,7 +154,18 @@ pub fn save_view(
     views.views.insert(name.clone(), view);
     views.updated_at = now_iso();
     save_views(&root, &views)?;
-    println!("{} {}", out::movement("saved view"), out::repo(&name));
+    // A same-named personal view shadows the shared template in resolution.
+    let override_note = if views.templates.contains_key(&name) {
+        out::muted(" (personal override of the shared template)")
+    } else {
+        String::new()
+    };
+    println!(
+        "{} {}{}",
+        out::movement("saved view"),
+        out::repo(&name),
+        override_note
+    );
     Ok(())
 }
 
@@ -160,6 +178,9 @@ pub fn freeze_view(name: &str, project: Option<&str>) -> Result<()> {
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
+    if !views.views.contains_key(&name) && views.templates.contains_key(&name) {
+        bail!(template_managed_view(&name));
+    }
     let view = views
         .views
         .get(&name)
@@ -229,6 +250,7 @@ pub fn view_unset(name: &str, repos: &[String], project: Option<&str>) -> Result
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
+    seed_template_override(&mut views, &name);
     let view = views
         .views
         .get_mut(&name)
@@ -251,7 +273,9 @@ pub fn set_default_view(name: Option<&str>, clear: bool, project: Option<&str>) 
         println!("{}", out::movement("cleared default view"));
     } else {
         let name = slugify(name.context("Pass a view name or use --clear.")?);
-        if !views.views.contains_key(&name) {
+        // The default may name a personal view or a shared template; either
+        // resolves, so both are accepted here.
+        if views.effective_view(&name).is_none() {
             bail!(missing_view(&project_id, &name));
         }
         views.default_view = Some(name.clone());
@@ -268,6 +292,12 @@ pub fn remove_view(name: &str, project: Option<&str>) -> Result<()> {
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
     if views.views.remove(&name).is_none() {
+        // A template-only name is not ours to remove: templates are
+        // admin-managed on the server, and silently dropping them from the
+        // local cache would only hide them until the next refresh anyway.
+        if views.templates.contains_key(&name) {
+            bail!(template_managed_view(&name));
+        }
         bail!(missing_view(&project_id, &name));
     }
     if views.default_view.as_deref() == Some(name.as_str()) {
@@ -275,7 +305,17 @@ pub fn remove_view(name: &str, project: Option<&str>) -> Result<()> {
     }
     views.updated_at = now_iso();
     save_views(&root, &views)?;
-    println!("{} {}", out::movement("removed view"), out::repo(&name));
+    let template_note = if views.templates.contains_key(&name) {
+        out::muted(" (the shared template of the same name is now visible)")
+    } else {
+        String::new()
+    };
+    println!(
+        "{} {}{}",
+        out::movement("removed view"),
+        out::repo(&name),
+        template_note
+    );
     Ok(())
 }
 
@@ -344,6 +384,24 @@ enum ListKind {
     Exclude,
 }
 
+/// Editing a name that only exists as a shared template starts from a copy:
+/// the mutation lands in a personal override (personal wins in resolution)
+/// instead of an empty view silently shadowing the template. Prints a note so
+/// the override is never a surprise.
+fn seed_template_override(views: &mut KnitProjectViews, name: &str) {
+    if views.views.contains_key(name) {
+        return;
+    }
+    if let Some(template) = views.templates.get(name).cloned() {
+        views.views.insert(name.to_string(), template);
+        println!(
+            "{} created a personal override of shared template {} (edits stay personal)",
+            out::heading("Views:"),
+            out::repo(name)
+        );
+    }
+}
+
 fn mutate_view_list(
     name: &str,
     repos: &[String],
@@ -357,6 +415,7 @@ fn mutate_view_list(
 
     let _lock = acquire_named_lock(&root, &format!("views-{project_id}"))?;
     let mut views = load_views(&root, &project_id)?;
+    seed_template_override(&mut views, &name);
     let view = views.views.entry(name.clone()).or_default();
     if matches!(kind, ListKind::Exclude) && view.base == ViewBase::None {
         bail!(
@@ -445,6 +504,13 @@ pub(crate) fn extend_scope_view(root: &Path, project_id: &str, repos: &[String])
     };
     let _lock = acquire_named_lock(root, &format!("views-{project_id}"))?;
     let mut views = load_views(root, project_id)?;
+    if !views.views.contains_key(&scope) {
+        // A `clone --view <template>` workspace is scoped by the template; the
+        // first extension forks it into a personal override so the recorded
+        // scope keeps resolving even if the admin later changes or removes the
+        // template.
+        seed_template_override(&mut views, &scope);
+    }
     let Some(view) = views.views.get_mut(&scope) else {
         println!(
             "{} scope view {} is not saved locally, so {} was cloned without recording it in the scope.",
@@ -543,6 +609,19 @@ fn missing_view(project_id: &str, name: &str) -> String {
     format!(
         "Project {} has no saved view named {}.",
         out::repo(project_id),
+        out::repo(name)
+    )
+}
+
+/// The clear refusal for personal mutations of a shared-template-only name:
+/// templates are admin-managed on the server, so the CLI never edits or drops
+/// them. Copying (`knit view save <new> --from <name>`) stays the supported
+/// way to branch off one.
+fn template_managed_view(name: &str) -> String {
+    format!(
+        "{} is a shared template managed by project admins, so the CLI will not modify or remove it. \
+         Copy it with `knit view save <new> --from {name}` to make an editable personal view, \
+         or ask an admin to change the template.",
         out::repo(name)
     )
 }

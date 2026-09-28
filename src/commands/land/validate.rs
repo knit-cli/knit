@@ -14,6 +14,13 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
 
 pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -> Result<()> {
+    if plan
+        .steps
+        .iter()
+        .any(|s| s.checkout.as_ref().is_some_and(|c| c.mode.is_some()))
+    {
+        bail!("checkout.mode requires a schema 0.2 landing plan");
+    }
     if plan.schema_version != SCHEMA_VERSION {
         bail!(
             "Land plan schemaVersion must be `{SCHEMA_VERSION}`, found `{}`.",
@@ -36,6 +43,19 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
     ensure_provider(&plan.provider)?;
     ensure_plan_matches_bundle_state(active, plan)?;
     ordered_step_ids(&plan.steps)?;
+    if plan.terminal {
+        let covered: BTreeSet<_> = plan
+            .steps
+            .iter()
+            .filter(|s| s.step_type == LandStepKind::MergePr)
+            .filter_map(|s| s.repo_id.as_ref())
+            .collect();
+        for id in crate::commands::publish::publish_scope_repo_ids(&active.bundle) {
+            if !covered.contains(&id) {
+                bail!("Terminal land plan omits changed repository `{id}`; it would strand work when archiving.");
+            }
+        }
+    }
     if plan.target_branch.is_some() && plan.lane.is_some() {
         bail!("land plan cannot contain both targetBranch and lane");
     }
@@ -101,6 +121,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
             LandStepKind::WaitChecks => {
                 required_repo_id(step)?;
             }
+            LandStepKind::Manual => bail!("manual steps require schemaVersion 0.2"),
             LandStepKind::Run => {
                 if step.command.is_empty() {
                     bail!("run step `{}` must provide command", step.id);

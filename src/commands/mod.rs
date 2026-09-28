@@ -1,4 +1,5 @@
 pub mod agents;
+pub mod auth;
 pub mod base;
 pub mod bundle;
 pub mod check;
@@ -39,8 +40,8 @@ pub mod worktree;
 
 pub use base::BundleBaseMode;
 pub use bundle::{
-    archive_bundle, bundle_path, delete_bundle, list_bundles, print_bundle, prune_merged_bundles,
-    restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
+    archive_bundle, bundle_path, delete_bundle, enter_bundle_shell, list_bundles, print_bundle,
+    prune_merged_bundles, restore_bundle, show_current_bundle, switch_bundle, validate_bundle,
 };
 pub use check::{record_check, run_check, show_check_status};
 pub use cherrypick::cherrypick_from_bundle;
@@ -72,10 +73,10 @@ pub use publish::{
 pub use pull::{pull, pull_repos};
 pub use push::{push_repos, PushForce};
 pub use remote::{
-    add_remote, clone_project_from_remote, fetch_bundles_from_remote, list_remote_projects,
-    list_remote_views, list_remotes, pull_bundle_by_slug, push_project_to_remote,
-    remote_auth_status, remove_remote, set_remote_token, show_remote, sync_remote_helpers_command,
-    CloneScopeRequest,
+    add_remote, auth_remote, clone_project_from_remote, fetch_bundles_from_remote,
+    list_remote_projects, list_remote_views, list_remotes, pull_bundle_by_slug,
+    push_project_to_remote, remote_auth_status, remove_remote, set_remote_token, show_remote,
+    sync_remote_helpers_command, CloneScopeRequest,
 };
 pub use remove::remove_repos;
 pub use revert::revert_target;

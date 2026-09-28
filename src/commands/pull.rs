@@ -13,8 +13,8 @@ use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::status::status_label;
 use crate::store::{
-    bundle_path, find_knit_root, load_active_bundle, load_active_bundle_for_update, load_config,
-    read_json, save_active_bundle, ActiveBundle, BundleResolutionSource,
+    bundle_path, find_knit_root, load_active_bundle_for_update, load_config, read_json,
+    resolve_optional_bundle_id, save_active_bundle, ActiveBundle, BundleResolutionSource,
 };
 use crate::time::now_iso;
 use crate::tracking::{sync_note, sync_observed_changes_for_repo_ids};
@@ -294,8 +294,13 @@ pub fn pull(
     // "update everything": the project's source checkouts plus every open bundle.
     // Explicit selectors, `--all`, or `--feature` keep the single-bundle meaning.
     if selectors.is_empty() && !all && !feature {
-        let active = load_active_bundle()?;
-        if active.resolution_source == BundleResolutionSource::Config {
+        let cwd = std::env::current_dir().context("failed to read current directory")?;
+        let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+        let config = load_config(&root)?;
+        if matches!(
+            resolve_optional_bundle_id(&root, &cwd, &config)?,
+            None | Some((_, BundleResolutionSource::Config))
+        ) {
             return aggregate_pull(false, true, true, rebase, force, remote, no_remote, merge);
         }
     }

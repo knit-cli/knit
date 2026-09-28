@@ -1,0 +1,318 @@
+{
+  "version": 1,
+  "views": {
+    "Backend": [
+      "api",
+      "worker"
+    ],
+    "Empty": []
+  },
+  "units": [
+    {
+      "id": "a",
+      "bundle": "release-a",
+      "title": "Shared release",
+      "events": [
+        {
+          "repo": "api",
+          "message": "Fix login",
+          "at": "2026-09-01T09:00:00Z",
+          "branch": "feature/auth",
+          "sha": "abc123"
+        },
+        {
+          "repo": "web",
+          "message": "Update form",
+          "at": "2026-09-02T09:00:00Z",
+          "branch": "feature/auth",
+          "sha": "def456"
+        }
+      ]
+    },
+    {
+      "id": "b",
+      "bundle": "release-b",
+      "title": "Worker retry",
+      "events": [
+        {
+          "repo": "worker",
+          "message": "Retry timeout",
+          "at": "2026-09-03T09:00:00Z",
+          "branch": "main",
+          "sha": "123abc"
+        }
+      ]
+    },
+    {
+      "id": "c",
+      "bundle": "release-c",
+      "title": "Docs only",
+      "events": [
+        {
+          "repo": "docs",
+          "message": "AND OR NOT literal 100% _value_",
+          "at": "2026-09-04T23:59:59.999999Z",
+          "branch": "main",
+          "sha": "456def"
+        }
+      ]
+    },
+    {
+      "id": "d",
+      "bundle": "release-d",
+      "title": "API followup",
+      "events": [
+        {
+          "repo": "api",
+          "message": "Fix timeout",
+          "at": "2026-09-05T00:00:00Z",
+          "branch": "main",
+          "sha": "789abc"
+        }
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "query": "",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:api",
+      "matches": [
+        "a",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:api AND repo:web",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "repo:api repo:web",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "repo:api OR repo:worker",
+      "matches": [
+        "a",
+        "b",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:api OR repo:worker AND timeout",
+      "matches": [
+        "a",
+        "b",
+        "d"
+      ]
+    },
+    {
+      "query": "(repo:api OR repo:worker) AND timeout",
+      "matches": [
+        "b",
+        "d"
+      ]
+    },
+    {
+      "query": "NOT (repo:api OR repo:worker)",
+      "matches": [
+        "c"
+      ]
+    },
+    {
+      "query": "repo:api AND NOT repo:web",
+      "matches": [
+        "d"
+      ]
+    },
+    {
+      "query": "not not repo:api",
+      "matches": [
+        "a",
+        "d"
+      ]
+    },
+    {
+      "query": "view:Backend",
+      "matches": [
+        "a",
+        "b",
+        "d"
+      ]
+    },
+    {
+      "query": "view:Empty",
+      "matches": []
+    },
+    {
+      "query": "NOT view:Empty",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "bundle:release-a",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "\"Fix login\"",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "fix form",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "\"AND\"",
+      "matches": [
+        "c"
+      ]
+    },
+    {
+      "query": "\"100%\"",
+      "matches": [
+        "c"
+      ]
+    },
+    {
+      "query": "\"_value_\"",
+      "matches": [
+        "c"
+      ]
+    },
+    {
+      "query": "abc123",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "feature/auth",
+      "matches": [
+        "a"
+      ]
+    },
+    {
+      "query": "since:2026-09-02 until:2026-09-04",
+      "matches": [
+        "a",
+        "b",
+        "c"
+      ]
+    },
+    {
+      "query": "until:2026-09-01",
+      "matches": []
+    },
+    {
+      "query": "since:2026-09-06 until:2026-09-01",
+      "matches": []
+    },
+    {
+      "query": "REPO : \"api\" aNd (repo:web oR timeout)",
+      "matches": [
+        "a",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:\"a\\u0070i\"",
+      "matches": [
+        "a",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:api AND NOT repo:web OR repo:docs",
+      "matches": [
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "repo:missing",
+      "matches": []
+    },
+    {
+      "query": "NOT repo:missing",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "\"\"",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "until:9999-12-31",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    },
+    {
+      "query": "since:0001-01-01",
+      "matches": [
+        "a",
+        "b",
+        "c",
+        "d"
+      ]
+    }
+  ],
+  "invalid": [
+    "repo:",
+    "repo:api OR",
+    "AND repo:api",
+    "repo:api AND OR repo:web",
+    "(repo:api",
+    "repo:api)",
+    "()",
+    "\"unterminated",
+    "repo:\"\"",
+    "unknown:api",
+    "since:2026-02-30",
+    "until:yesterday",
+    "match:all",
+    "context:matched",
+    "repo:(api OR web)",
+    "since:0000-01-01",
+    "\"\\u0000\"",
+    "repo:\"\\u0000\"",
+    "null\u0000byte"
+  ],
+  "invalidViews": [
+    "view:Missing",
+    "repo:api OR view:Missing"
+  ]
+}

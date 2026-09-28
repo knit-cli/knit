@@ -1,8 +1,7 @@
 //! Runs landing commands with live output, bounded capture, and a hard timeout.
 //!
-//! Children stay in Knit's foreground process group so terminal interrupts are
-//! delivered naturally. On timeout we explicitly terminate the full descendant
-//! tree before reaping the command.
+//! Children have managed process groups; interactive commands acquire the
+//! foreground terminal. On timeout we terminate the full descendant tree.
 
 use anyhow::{Context, Result};
 #[cfg(unix)]
@@ -60,19 +59,124 @@ pub(super) fn run_streamed(
     command: &mut Command,
     timeout_seconds: Option<u64>,
 ) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, false, false, &[], true, false)
+}
+
+// Preserve v2's process-group/quiescence semantics while changing only where
+// its previously captured output is displayed. Legacy streaming is unchanged.
+pub(super) fn run_streamed_managed(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, false, false, &[], true, true)
+}
+
+pub(super) fn run_streamed_redacted(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+    secrets: &[String],
+    cleanup: bool,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(
+        command,
+        timeout_seconds,
+        false,
+        false,
+        secrets,
+        !cleanup,
+        true,
+    )
+}
+
+pub(super) fn run_captured(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, true, false, &[], true, true)
+}
+
+pub(super) fn run_attached(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+) -> Result<StreamedCommandOutput> {
+    run_with_output(command, timeout_seconds, false, true, &[], true, true)
+}
+
+fn run_with_output(
+    command: &mut Command,
+    timeout_seconds: Option<u64>,
+    quiet: bool,
+    attached: bool,
+    secrets: &[String],
+    respect_cancellation: bool,
+    managed: bool,
+) -> Result<StreamedCommandOutput> {
     ensure_cancellation_handler()?;
+    if managed && respect_cancellation && cancellation_requested() {
+        anyhow::bail!("landing cancelled before spawning command");
+    }
     let timeout_seconds = timeout_seconds.unwrap_or(DEFAULT_COMMAND_TIMEOUT_SECONDS);
+    #[cfg(unix)]
+    if managed {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let stdout_to_stderr = crate::output::human_lines_to_stderr();
     let mut child = command
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
+        .stdin(if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::null()
+        })
+        .stdout(if attached && stdout_to_stderr {
+            Stdio::from(io::stderr())
+        } else if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
+        .stderr(if attached {
+            Stdio::inherit()
+        } else {
+            Stdio::piped()
+        })
         .spawn()
         .context("failed to spawn command")?;
+    #[cfg(unix)]
+    let _foreground = if attached {
+        match ForegroundTerminal::attach(child.id()) {
+            Ok(guard) => Some(guard),
+            Err(error) => {
+                force_terminate_process_tree(&mut child);
+                return Err(error);
+            }
+        }
+    } else {
+        None
+    };
     let active_child = ActiveChild::register(child.id());
-    let stdout = child.stdout.take().expect("piped child stdout");
-    let stderr = child.stderr.take().expect("piped child stderr");
-    let stdout_reader = thread::spawn(move || tee_and_capture(stdout, io::stdout()));
-    let stderr_reader = thread::spawn(move || tee_and_capture(stderr, io::stderr()));
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
+    let stdout_secrets = secrets.to_vec();
+    let stderr_secrets = secrets.to_vec();
+    let stdout_reader = stdout.map(|stdout| {
+        thread::spawn(move || {
+            if quiet {
+                tee_redacted(stdout, io::sink(), &stdout_secrets)
+            } else if stdout_to_stderr {
+                tee_redacted(stdout, io::stderr(), &stdout_secrets)
+            } else {
+                tee_redacted(stdout, io::stdout(), &stdout_secrets)
+            }
+        })
+    });
+    let stderr_reader = stderr.map(|stderr| {
+        thread::spawn(move || {
+            // Capture adapters return private JSON on stdout; their diagnostic
+            // stderr is still live so a long capture operation is observable.
+            tee_redacted(stderr, io::stderr(), &stderr_secrets)
+        })
+    });
 
     let started = Instant::now();
     let mut timed_out = false;
@@ -96,19 +200,78 @@ pub(super) fn run_streamed(
         thread::sleep(WAIT_INTERVAL);
     };
 
+    // Machine adapters must quiesce descendants even when a shell exits after
+    // launching background children. Their private group is never reused.
+    #[cfg(unix)]
+    if managed {
+        let group = -(child.id() as i32);
+        unsafe {
+            libc::kill(group, libc::SIGTERM);
+        }
+        let until = Instant::now() + TERMINATION_GRACE;
+        while unsafe { libc::kill(group, 0) } == 0 && Instant::now() < until {
+            thread::sleep(WAIT_INTERVAL);
+        }
+        unsafe {
+            libc::kill(group, libc::SIGKILL);
+        }
+    }
+
     // Always drain and join both readers, including after a wait failure, so a
     // subprocess can never be left blocked on a full pipe.
-    let cancelled = cancellation_requested();
+    let cancelled = respect_cancellation && cancellation_requested();
     drop(active_child);
-    let stdout = join_reader(stdout_reader, "stdout");
-    let stderr = join_reader(stderr_reader, "stderr");
+    let stdout = stdout_reader.map(|r| join_reader(r, "stdout")).transpose();
+    let stderr = stderr_reader.map(|r| join_reader(r, "stderr")).transpose();
     Ok(StreamedCommandOutput {
         status: status?,
-        stdout: stdout?,
-        stderr: stderr?,
+        stdout: stdout?.unwrap_or_default(),
+        stderr: stderr?.unwrap_or_default(),
         timed_out,
         cancelled,
     })
+}
+
+// Give attached commands their own foreground group. This preserves real job
+// control while allowing descendant cleanup without signalling Knit itself.
+#[cfg(unix)]
+struct ForegroundTerminal {
+    previous: libc::pid_t,
+}
+#[cfg(unix)]
+impl ForegroundTerminal {
+    fn set(group: libc::pid_t) -> Result<()> {
+        // SAFETY: terminal operations use stdin's descriptor and an OS group ID.
+        // SIGTTOU must be suppressed while the parent restores the foreground.
+        unsafe {
+            let prior = libc::signal(libc::SIGTTOU, libc::SIG_IGN);
+            let result = libc::tcsetpgrp(libc::STDIN_FILENO, group);
+            let error = std::io::Error::last_os_error();
+            libc::signal(libc::SIGTTOU, prior);
+            if result < 0 {
+                return Err(error).context("cannot attach command to foreground terminal");
+            }
+        }
+        Ok(())
+    }
+    fn attach(pid: u32) -> Result<Self> {
+        let previous = unsafe { libc::tcgetpgrp(libc::STDIN_FILENO) };
+        if previous < 0 {
+            return Err(std::io::Error::last_os_error()).context("no controlling terminal");
+        }
+        Self::set(pid as libc::pid_t)?;
+        // A fast reader may have received SIGTTIN before the foreground handoff.
+        unsafe {
+            libc::kill(-(pid as libc::pid_t), libc::SIGCONT);
+        }
+        Ok(Self { previous })
+    }
+}
+#[cfg(unix)]
+impl Drop for ForegroundTerminal {
+    fn drop(&mut self) {
+        let _ = Self::set(self.previous);
+    }
 }
 
 struct ActiveChild {
@@ -181,6 +344,72 @@ fn tee_and_capture<R: Read, W: Write>(mut reader: R, mut live: W) -> io::Result<
         }
     }
     Ok(capture.into_string())
+}
+
+// Hold only suffixes that could be the start of a secret. This handles tokens
+// split across pipe reads without delaying ordinary output until a newline.
+fn tee_redacted<R: Read, W: Write>(reader: R, live: W, secrets: &[String]) -> io::Result<String> {
+    if secrets.is_empty() {
+        return tee_and_capture(reader, live);
+    }
+    let reader = RedactedReader {
+        reader,
+        secrets,
+        pending: Vec::new(),
+        ready: VecDeque::new(),
+        eof: false,
+    };
+    tee_and_capture(reader, live)
+}
+
+struct RedactedReader<'a, R> {
+    reader: R,
+    secrets: &'a [String],
+    pending: Vec<u8>,
+    ready: VecDeque<u8>,
+    eof: bool,
+}
+
+impl<R: Read> Read for RedactedReader<'_, R> {
+    fn read(&mut self, out: &mut [u8]) -> io::Result<usize> {
+        if out.is_empty() {
+            return Ok(0);
+        }
+        while self.ready.is_empty() {
+            if !self.eof {
+                let mut chunk = [0; 8192];
+                let n = self.reader.read(&mut chunk)?;
+                self.eof = n == 0;
+                self.pending.extend_from_slice(&chunk[..n]);
+            }
+            let mut consumed = 0;
+            while consumed < self.pending.len() {
+                let rest = &self.pending[consumed..];
+                if let Some(secret) = self
+                    .secrets
+                    .iter()
+                    .find(|s| !s.is_empty() && rest.starts_with(s.as_bytes()))
+                {
+                    self.ready.extend(b"[REDACTED]");
+                    consumed += secret.len();
+                } else if !self.eof && self.secrets.iter().any(|s| s.as_bytes().starts_with(rest)) {
+                    break;
+                } else {
+                    self.ready.push_back(rest[0]);
+                    consumed += 1;
+                }
+            }
+            self.pending.drain(..consumed);
+            if self.eof && self.ready.is_empty() {
+                return Ok(0);
+            }
+        }
+        let n = out.len().min(self.ready.len());
+        for byte in &mut out[..n] {
+            *byte = self.ready.pop_front().unwrap();
+        }
+        Ok(n)
+    }
 }
 
 struct BoundedCapture {
@@ -353,6 +582,24 @@ fn terminate_windows_tree(root: u32, force: bool) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn streaming_redaction_handles_tokens_split_between_reads() {
+        struct Chunks(std::collections::VecDeque<Vec<u8>>);
+        impl std::io::Read for Chunks {
+            fn read(&mut self, out: &mut [u8]) -> std::io::Result<usize> {
+                let Some(chunk) = self.0.pop_front() else {
+                    return Ok(0);
+                };
+                out[..chunk.len()].copy_from_slice(&chunk);
+                Ok(chunk.len())
+            }
+        }
+        let mut live = Vec::new();
+        let input = Chunks([b"before tok".to_vec(), b"en-value after\n".to_vec()].into());
+        let captured = super::tee_redacted(input, &mut live, &["token-value".into()]).unwrap();
+        assert_eq!(captured, "before [REDACTED] after\n");
+        assert_eq!(live, captured.as_bytes());
+    }
     use super::*;
 
     #[test]
@@ -376,10 +623,12 @@ mod tests {
         ));
         let started = Instant::now();
         let mut command = Command::new("sh");
+        // Waiting for this child preserves its termination status. A bare
+        // `wait` may return zero once all children have exited on Linux shells.
         command
             .args([
                 "-c",
-                "printf ready; sleep 20 & echo $! > \"$KNIT_TEST_PID_FILE\"; wait",
+                "printf ready; sleep 20 & child_pid=$!; echo \"$child_pid\" > \"$KNIT_TEST_PID_FILE\"; wait \"$child_pid\"",
             ])
             .env("KNIT_TEST_PID_FILE", &pid_file);
         let output = run_streamed(&mut command, Some(1)).unwrap();

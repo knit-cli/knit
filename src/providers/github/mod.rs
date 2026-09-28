@@ -16,7 +16,22 @@ use transport::use_native_github_api;
 
 pub(super) const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
-    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision";
+    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision,author";
+
+/// `gh --json author` reports only the login and name. The avatar and the
+/// profile page follow from the PR's host.
+fn with_author_links(mut pr: PullRequest) -> PullRequest {
+    let host = crate::providers::remote_host(&pr.url);
+    if let (Some(author), Some(host)) = (pr.author.as_mut(), host) {
+        if author.url.is_none() {
+            author.url = Some(format!("https://{host}/{}", author.login));
+        }
+        if author.avatar_url.is_none() {
+            author.avatar_url = Some(format!("https://{host}/{}.png", author.login));
+        }
+    }
+    pr
+}
 
 /// GitHub forge adapter, backed by the `gh` CLI.
 pub struct GitHub;
@@ -77,10 +92,10 @@ impl Forge for GitHub {
                 OsString::from("1"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
+        let output = cli_output(CLI, target, args, None)?;
         let prs: Vec<PullRequest> =
             serde_json::from_str(&output).context("failed to parse `gh pr list` JSON")?;
-        Ok(prs.into_iter().next())
+        Ok(prs.into_iter().next().map(with_author_links))
     }
 
     fn create(
@@ -112,7 +127,7 @@ impl Forge for GitHub {
             args.push(OsString::from("--draft"));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        let output = cli_output(CLI, target, args, Some(body))?;
         parse_pr_url(&output).context("`gh pr create` did not print a PR URL")
     }
 
@@ -132,8 +147,52 @@ impl Forge for GitHub {
                 OsString::from(PR_JSON_FIELDS),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, None)?;
-        serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")
+        let output = cli_output(CLI, target, args, None)?;
+        let pr: PullRequest =
+            serde_json::from_str(&output).context("failed to parse `gh pr view` JSON")?;
+        Ok(with_author_links(pr))
+    }
+
+    fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>> {
+        if let Some(repo) = &target.repo_full_name {
+            return api::merged_revision(target, repo, publication_url);
+        }
+        #[derive(serde::Deserialize)]
+        struct Review {
+            state: Option<String>,
+            #[serde(rename = "mergeCommit")]
+            merge_commit: Option<Commit>,
+        }
+        #[derive(serde::Deserialize)]
+        struct Commit {
+            oid: Option<String>,
+        }
+        let output = cli_output(
+            CLI,
+            target,
+            repo_scoped_args(
+                target,
+                "--repo",
+                vec![
+                    "pr".into(),
+                    "view".into(),
+                    publication_url.into(),
+                    "--json".into(),
+                    "state,mergeCommit".into(),
+                ],
+            ),
+            None,
+        )?;
+        let review: Review =
+            serde_json::from_str(&output).context("failed to parse GitHub merged revision JSON")?;
+        Ok(if review.state.as_deref() == Some("MERGED") {
+            review
+                .merge_commit
+                .and_then(|c| c.oid)
+                .filter(|sha| !sha.trim().is_empty())
+        } else {
+            None
+        })
     }
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
@@ -152,7 +211,7 @@ impl Forge for GitHub {
                 OsString::from("-"),
             ],
         );
-        cli_output(CLI, &target.cwd, args, Some(body))?;
+        cli_output(CLI, target, args, Some(body))?;
         Ok(())
     }
 
@@ -172,7 +231,7 @@ impl Forge for GitHub {
                 OsString::from(base),
             ],
         );
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -226,7 +285,7 @@ impl Forge for GitHub {
             args.push(OsString::from(sha));
         }
         let args = repo_scoped_args(target, "--repo", args);
-        cli_output(CLI, &target.cwd, args, None)?;
+        cli_output(CLI, target, args, None)?;
         Ok(())
     }
 
@@ -250,7 +309,7 @@ impl Forge for GitHub {
                 OsString::from("-"),
             ],
         );
-        let output = cli_output(CLI, &target.cwd, args, Some(body))?;
+        let output = cli_output(CLI, target, args, Some(body))?;
         parse_pr_url(&output).context("`gh pr revert` did not print a PR URL")
     }
 
@@ -278,7 +337,7 @@ impl Forge for GitHub {
         }
         let args = repo_scoped_args(target, "--repo", args);
 
-        match cli_output(CLI, &target.cwd, args, None) {
+        match cli_output(CLI, target, args, None) {
             Ok(output) if output.trim().is_empty() => Ok(Vec::new()),
             Ok(output) => {
                 serde_json::from_str(&output).context("failed to parse `gh pr checks` JSON")
@@ -322,6 +381,18 @@ fn is_checks_permission_error(error: &anyhow::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gh_author_gets_profile_links_from_the_pr_host() {
+        let json = r#"{"number":5,"url":"https://github.com/acme/backend/pull/5","author":{"login":"dana","name":"","is_bot":false}}"#;
+        let pr = with_author_links(serde_json::from_str(json).unwrap());
+        let author = pr.author.expect("author");
+        assert_eq!(author.url.as_deref(), Some("https://github.com/dana"));
+        assert_eq!(
+            author.avatar_url.as_deref(),
+            Some("https://github.com/dana.png")
+        );
+    }
 
     #[test]
     fn treats_checks_permission_errors_as_nonfatal() {

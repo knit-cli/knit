@@ -9,10 +9,9 @@ use crate::model::KnitRemote;
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
 
-/// Appended to a repo's failure when HTTPS access was refused: the fix is on
-/// the remote (connect a forge account) or outside knit (SSH credentials).
+/// Appended when Git reports an authentication failure.
 pub(super) const NO_ACCESS_HINT: &str =
-    "no HTTPS git access: connect your forge account on the remote or configure SSH credentials";
+    "no HTTPS git access: run `knit auth` to configure local forge defaults, or check your existing Git credentials";
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]

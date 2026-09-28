@@ -1,9 +1,13 @@
 pub mod advice;
+pub mod auth;
+pub mod auth_git;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
 pub mod git;
+mod git_fallback;
 pub mod history;
+pub mod history_query;
 pub mod ids;
 pub mod model;
 pub mod output;
@@ -17,6 +21,7 @@ pub mod selectors;
 pub mod status;
 pub mod store;
 pub mod time;
+pub mod token_entry;
 pub mod tracking;
 
 use anyhow::Result;
@@ -24,14 +29,18 @@ use commands::PushForce;
 
 pub use cli::{
     BundleCommand, CheckCommand, Cli, Commands, ConfigCommand, HistoryCommand, LandCommand,
-    ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
+    LogArgs, ProjectCommand, ProjectRunCommandCli, PublishCommand, RemoteCommand, SchemaCommand,
     SyncCommand, TagCommand, ViewCommand, WorkspaceCommand,
 };
 
 pub fn run(cli: Cli) -> Result<()> {
+    auth::set_project_override(None);
     let bundle_context = cli.bundle.clone();
     store::set_bundle_override(cli.bundle);
     match cli.command {
+        Commands::Auth { command, project } => {
+            commands::auth::dispatch(command, project.as_deref())
+        }
         Commands::Handoff { command } => match command {
             cli::HandoffCommand::Out {
                 to,
@@ -62,6 +71,9 @@ pub fn run(cli: Cli) -> Result<()> {
         Commands::Init { name, agents } => commands::init_project(&name, agents),
         Commands::Agents { project } => commands::refresh_agents(project.as_deref()),
         Commands::Project { command } => match command {
+            ProjectCommand::Auth { project, repos } => {
+                commands::auth::setup(project.as_deref(), &repos)
+            }
             ProjectCommand::Add {
                 repo_id,
                 repo_path,
@@ -191,8 +203,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 name,
                 token,
                 clear,
+                token_stdin,
                 global,
-            } => commands::set_remote_token(&name, token.as_deref(), clear, global),
+            } => commands::set_remote_token(&name, token.as_deref(), clear, token_stdin, global),
         },
         Commands::GitCredential { remote, operation } => {
             commands::run_git_credential_helper(&remote, operation)
@@ -208,6 +221,7 @@ pub fn run(cli: Cli) -> Result<()> {
             prefer_https,
             view,
             repos,
+            credentials,
             json,
         } => commands::clone_project_from_remote(
             &project,
@@ -222,6 +236,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 view: view.as_deref(),
                 repos: &repos,
             },
+            &credentials,
             json,
         ),
         Commands::Add {
@@ -263,7 +278,10 @@ pub fn run(cli: Cli) -> Result<()> {
                     agents,
                     cd.as_deref(),
                 ),
-                None => commands::show_current_bundle(),
+                None => match cd.as_deref() {
+                    Some(selector) => commands::enter_bundle_shell(selector),
+                    None => commands::show_current_bundle(),
+                },
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
             Some(BundleCommand::Pull { slug, json }) => commands::pull_bundle_by_slug(&slug, json),
@@ -492,7 +510,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 from_artifact,
                 out,
                 no_push,
-                bases,
+                target,
+                lane,
                 all,
                 draft,
                 renew,
@@ -513,7 +532,8 @@ pub fn run(cli: Cli) -> Result<()> {
                         all,
                         draft,
                         renew,
-                        &bases,
+                        target.as_deref(),
+                        lane.as_deref(),
                         sync || !no_sync,
                         !no_push,
                         provider.as_deref(),
@@ -523,7 +543,8 @@ pub fn run(cli: Cli) -> Result<()> {
                         all,
                         draft,
                         renew,
-                        &bases,
+                        target.as_deref(),
+                        lane.as_deref(),
                         sync || !no_sync,
                         set_upstream,
                         &remote,
@@ -564,164 +585,308 @@ pub fn run(cli: Cli) -> Result<()> {
             }
         },
         Commands::Land {
+            schema_version,
             target,
             lane,
             repo_targets,
             repo_absent,
             command,
-        } => match command {
-            None => {
-                if !repo_targets.is_empty() || !repo_absent.is_empty() {
-                    anyhow::bail!(
-                        "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
-                    );
-                }
-                commands::land_default(target.as_deref(), lane.as_deref())
-            }
-            Some(LandCommand::Plan {
-                provider,
-                out,
-                force,
-            }) => {
-                if !repo_targets.is_empty() || !repo_absent.is_empty() {
-                    anyhow::bail!(
-                        "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
-                    );
-                }
-                commands::generate_land_plan(
-                    provider.as_deref(),
-                    out.as_deref(),
-                    force,
-                    target.as_deref(),
-                    lane.as_deref(),
-                )
-            }
-            Some(LandCommand::Apply {
-                plan,
-                from_artifact,
-                out,
-                remote,
-                no_remote,
-                skip_checks,
-                keep_worktrees,
-                tag,
-                no_tag,
-                terminal,
-                intermediate,
-            }) => match from_artifact {
-                Some(path) => {
-                    if tag.is_some() || no_tag {
-                        anyhow::bail!(
-                            "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
-                        );
-                    }
-                    let declared_terminal = match (terminal, intermediate) {
-                        (true, _) => Some(true),
-                        (_, true) => Some(false),
-                        _ => None,
-                    };
-                    commands::apply_land_from_artifact(
-                        &path,
-                        out.as_deref(),
-                        target.as_deref(),
-                        lane.as_deref(),
-                        &repo_targets,
-                        &repo_absent,
-                        declared_terminal,
-                    )
-                }
+        } => {
+            match command {
                 None => {
                     if !repo_targets.is_empty() || !repo_absent.is_empty() {
                         anyhow::bail!(
-                            "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
-                        );
+                    "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
+                );
                     }
-                    commands::apply_land_plan(
-                        plan.as_deref(),
+                    commands::land::land_default_version(
+                        target.as_deref(),
+                        lane.as_deref(),
+                        &schema_version,
+                    )
+                }
+                Some(LandCommand::Show { plan }) => {
+                    commands::land::v2::show(&plan, target.as_deref(), lane.as_deref())
+                }
+                Some(LandCommand::Destinations { json }) => commands::land::v2::destinations(json),
+                Some(LandCommand::Validate {
+                    plan,
+                    from_artifact,
+                    project_file,
+                    json,
+                }) => commands::land::v2::validate(
+                    &plan,
+                    from_artifact.as_deref(),
+                    project_file.as_deref(),
+                    json,
+                ),
+                Some(LandCommand::Source {
+                    plan,
+                    repo,
+                    branch,
+                    sha,
+                    repo_root,
+                    out,
+                }) => commands::land::v2::source(
+                    &plan,
+                    &repo,
+                    &branch,
+                    sha.as_deref(),
+                    repo_root.as_deref(),
+                    &out,
+                ),
+                Some(LandCommand::Preflight {
+                    plan,
+                    from_artifact,
+                    project_file,
+                    repo_roots,
+                    json,
+                }) => commands::land::v2::preflight(
+                    &plan,
+                    from_artifact.as_deref(),
+                    project_file.as_deref(),
+                    repo_roots.as_deref(),
+                    json,
+                ),
+                Some(LandCommand::Recover {
+                    plan,
+                    run,
+                    from_artifact,
+                    repo_roots,
+                    run_out,
+                    out,
+                    apply,
+                    json,
+                }) => commands::land::v2::recover(
+                    plan.as_deref(),
+                    &run,
+                    from_artifact.as_deref(),
+                    repo_roots.as_deref(),
+                    run_out.as_deref(),
+                    out.as_deref(),
+                    apply,
+                    json,
+                ),
+                Some(LandCommand::Plan {
+                    from_artifact,
+                    project_file,
+                    json,
+                    provider,
+                    out,
+                    force,
+                }) => {
+                    if !repo_targets.is_empty() || !repo_absent.is_empty() {
+                        anyhow::bail!(
+                    "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
+                );
+                    }
+                    if schema_version == "0.1" {
+                        if from_artifact.is_some() {
+                            anyhow::bail!("artifact generation requires schema 0.2");
+                        }
+                        commands::generate_land_plan(
+                            provider.as_deref(),
+                            out.as_deref(),
+                            force,
+                            target.as_deref(),
+                            lane.as_deref(),
+                        )
+                    } else {
+                        commands::land::v2::generate(
+                            from_artifact.as_deref(),
+                            project_file.as_deref(),
+                            out.as_deref(),
+                            provider.as_deref(),
+                            target.as_deref(),
+                            lane.as_deref(),
+                            force,
+                            json,
+                        )
+                    }
+                }
+                Some(LandCommand::Apply {
+                    expected_plan_hash,
+                    project_file,
+                    repo_roots,
+                    run_out,
+                    resume,
+                    json,
+                    plan,
+                    from_artifact,
+                    out,
+                    remote,
+                    no_remote,
+                    skip_checks,
+                    keep_worktrees,
+                    tag,
+                    no_tag,
+                    terminal,
+                    intermediate,
+                }) => match from_artifact {
+                    Some(path) => {
+                        if let Some(plan) = &plan {
+                            if tag.is_some()
+                                || no_tag
+                                || terminal
+                                || intermediate
+                                || !repo_targets.is_empty()
+                                || !repo_absent.is_empty()
+                            {
+                                anyhow::bail!("artifact exact-plan execution cannot override saved destinations/lifecycle or tag local bases");
+                            }
+                            let saved: serde_json::Value = crate::store::read_json(plan)?;
+                            if target
+                                .as_deref()
+                                .is_some_and(|t| saved["targetBranch"] != t)
+                                || lane.as_deref().is_some_and(|l| saved["lane"] != l)
+                            {
+                                anyhow::bail!(
+                                    "requested destination differs from the exact saved plan"
+                                );
+                            }
+                            return commands::land::v2::apply_with_checks(
+                                plan,
+                                &path,
+                                project_file.as_deref(),
+                                repo_roots.as_deref(),
+                                run_out.as_deref().ok_or_else(|| {
+                                    anyhow::anyhow!("--run-out required for exact-plan execution")
+                                })?,
+                                out.as_deref().ok_or_else(|| {
+                                    anyhow::anyhow!("--out required for exact-plan execution")
+                                })?,
+                                resume,
+                                json,
+                                skip_checks,
+                                expected_plan_hash.as_deref(),
+                            );
+                        }
+                        if expected_plan_hash.is_some() {
+                            anyhow::bail!("--expected-plan-hash requires an exact --plan for artifact execution");
+                        }
+                        if tag.is_some() || no_tag {
+                            anyhow::bail!(
+                        "--tag/--no-tag need local checkouts and cannot be used with --from-artifact; tag afterwards with `knit tag <name> --bundle <slug>`."
+                    );
+                        }
+                        let declared_terminal = match (terminal, intermediate) {
+                            (true, _) => Some(true),
+                            (_, true) => Some(false),
+                            _ => None,
+                        };
+                        commands::apply_land_from_artifact(
+                            &path,
+                            out.as_deref(),
+                            target.as_deref(),
+                            lane.as_deref(),
+                            &repo_targets,
+                            &repo_absent,
+                            declared_terminal,
+                        )
+                    }
+                    None => {
+                        if project_file.is_some()
+                            || repo_roots.is_some()
+                            || run_out.is_some()
+                            || out.is_some()
+                            || resume
+                            || json
+                        {
+                            anyhow::bail!("--project-file/--repo-roots/--run-out/--out/--resume/--json are artifact execution flags; pass --from-artifact, or use local `knit land resume --run FILE`.");
+                        }
+                        if !repo_targets.is_empty() || !repo_absent.is_empty() {
+                            anyhow::bail!(
+                        "--repo-target/--repo-absent are only used with `knit land apply --from-artifact`"
+                    );
+                        }
+                        commands::apply_land_plan(
+                            plan.as_deref(),
+                            &remote,
+                            no_remote,
+                            skip_checks,
+                            keep_worktrees,
+                            tag,
+                            no_tag,
+                            target.as_deref(),
+                            lane.as_deref(),
+                            expected_plan_hash.as_deref(),
+                        )
+                    }
+                },
+                Some(LandCommand::Rollback { run, apply }) => {
+                    if target.is_some()
+                        || lane.is_some()
+                        || !repo_targets.is_empty()
+                        || !repo_absent.is_empty()
+                    {
+                        anyhow::bail!("--target/--lane cannot be changed during rollback; the selection is stored in the landing plan.");
+                    }
+                    commands::rollback_land_run(run.as_deref(), apply)
+                }
+                Some(LandCommand::Resume {
+                    run,
+                    remote,
+                    no_remote,
+                    skip_checks,
+                    keep_worktrees,
+                    tag,
+                    no_tag,
+                }) => {
+                    if target.is_some()
+                        || lane.is_some()
+                        || !repo_targets.is_empty()
+                        || !repo_absent.is_empty()
+                    {
+                        anyhow::bail!("--target/--lane cannot be changed during resume; the selection is stored in the landing plan.");
+                    }
+                    commands::resume_land_run(
+                        run.as_deref(),
                         &remote,
                         no_remote,
                         skip_checks,
                         keep_worktrees,
                         tag,
                         no_tag,
-                        target.as_deref(),
-                        lane.as_deref(),
                     )
                 }
-            },
-            Some(LandCommand::Rollback { run, apply }) => {
-                if target.is_some()
-                    || lane.is_some()
-                    || !repo_targets.is_empty()
-                    || !repo_absent.is_empty()
-                {
-                    anyhow::bail!("--target/--lane cannot be changed during rollback; the selection is stored in the landing plan.");
+                Some(LandCommand::Status { run }) => {
+                    if target.is_some()
+                        || lane.is_some()
+                        || !repo_targets.is_empty()
+                        || !repo_absent.is_empty()
+                    {
+                        anyhow::bail!("--target/--lane are not used by land status; inspect the stored plan instead.");
+                    }
+                    commands::show_land_status(run.as_deref())
                 }
-                commands::rollback_land_run(run.as_deref(), apply)
-            }
-            Some(LandCommand::Resume {
-                run,
-                remote,
-                no_remote,
-                skip_checks,
-                keep_worktrees,
-                tag,
-                no_tag,
-            }) => {
-                if target.is_some()
-                    || lane.is_some()
-                    || !repo_targets.is_empty()
-                    || !repo_absent.is_empty()
-                {
-                    anyhow::bail!("--target/--lane cannot be changed during resume; the selection is stored in the landing plan.");
+                Some(LandCommand::Check) => {
+                    if target.is_some()
+                        || lane.is_some()
+                        || !repo_targets.is_empty()
+                        || !repo_absent.is_empty()
+                    {
+                        anyhow::bail!("--target/--lane are applied during land apply; `knit land check` reports current review bases.");
+                    }
+                    commands::check_landing()
                 }
-                commands::resume_land_run(
-                    run.as_deref(),
-                    &remote,
-                    no_remote,
-                    skip_checks,
-                    keep_worktrees,
-                    tag,
-                    no_tag,
-                )
-            }
-            Some(LandCommand::Status { run }) => {
-                if target.is_some()
-                    || lane.is_some()
-                    || !repo_targets.is_empty()
-                    || !repo_absent.is_empty()
-                {
-                    anyhow::bail!("--target/--lane are not used by land status; inspect the stored plan instead.");
+                Some(LandCommand::Update {
+                    repos,
+                    all,
+                    push,
+                    set_upstream,
+                    continue_merge,
+                }) => {
+                    if target.is_some()
+                        || lane.is_some()
+                        || !repo_targets.is_empty()
+                        || !repo_absent.is_empty()
+                    {
+                        anyhow::bail!("--target/--lane are not used by land update; apply the plan once to retarget reviews, then run update.");
+                    }
+                    commands::update_land_branches(&repos, all, push, set_upstream, continue_merge)
                 }
-                commands::show_land_status(run.as_deref())
             }
-            Some(LandCommand::Check) => {
-                if target.is_some()
-                    || lane.is_some()
-                    || !repo_targets.is_empty()
-                    || !repo_absent.is_empty()
-                {
-                    anyhow::bail!("--target/--lane are applied during land apply; `knit land check` reports current review bases.");
-                }
-                commands::check_landing()
-            }
-            Some(LandCommand::Update {
-                repos,
-                all,
-                push,
-                set_upstream,
-                continue_merge,
-            }) => {
-                if target.is_some()
-                    || lane.is_some()
-                    || !repo_targets.is_empty()
-                    || !repo_absent.is_empty()
-                {
-                    anyhow::bail!("--target/--lane are not used by land update; apply the plan once to retarget reviews, then run update.");
-                }
-                commands::update_land_branches(&repos, all, push, set_upstream, continue_merge)
-            }
-        },
+        }
         Commands::Merge {
             source,
             into,
@@ -766,6 +931,15 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.architecture,
                     targets.kg,
                     targets.all,
+                )
+                .with_plans(
+                    targets.plans,
+                    targets.bundles
+                        || targets.history
+                        || targets.views
+                        || targets.architecture
+                        || targets.kg
+                        || targets.all,
                 );
                 commands::remote::sync_push(
                     targets,
@@ -773,7 +947,11 @@ pub fn run(cli: Cli) -> Result<()> {
                     PushForce::from_flags(force_with_lease, force),
                 )
             }
-            Some(SyncCommand::Pull { targets, remote }) => {
+            Some(SyncCommand::Pull {
+                targets,
+                remote,
+                artifacts_only,
+            }) => {
                 let targets = commands::remote::SyncTargets::resolve(
                     targets.bundles,
                     targets.history,
@@ -781,15 +959,25 @@ pub fn run(cli: Cli) -> Result<()> {
                     targets.architecture,
                     targets.kg,
                     targets.all,
+                )
+                .with_plans(
+                    targets.plans,
+                    targets.bundles
+                        || targets.history
+                        || targets.views
+                        || targets.architecture
+                        || targets.kg
+                        || targets.all,
                 );
-                commands::remote::sync_pull(targets, &remote)
+                commands::remote::sync_pull(targets, &remote, artifacts_only)
             }
         },
         Commands::History { command } => match command {
             // `knit history --bundle x` reads as a filter, so the global bundle
             // flag stands in for the list filter when the subcommand omits it.
-            None => commands::show_history(None, 20, None, bundle_context.as_deref(), &[]),
+            None => commands::show_history(None, 20, None, bundle_context.as_deref(), &[], None),
             Some(HistoryCommand::List {
+                query,
                 limit,
                 repo,
                 bundle,
@@ -801,6 +989,7 @@ pub fn run(cli: Cli) -> Result<()> {
                 repo.as_deref(),
                 bundle.or(bundle_context).as_deref(),
                 &kinds,
+                query.as_deref(),
             ),
             Some(HistoryCommand::Refresh { rebuild, project }) => {
                 commands::refresh_history(project.as_deref(), rebuild)
@@ -824,17 +1013,25 @@ pub fn run(cli: Cli) -> Result<()> {
             remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
-        Commands::Log {
-            limit,
-            shorthand_limit,
-        } => commands::show_log(limit, shorthand_limit.as_deref()),
+        Commands::Log { args } => commands::show_log(&args, bundle_context.as_deref()),
         Commands::Revert {
             target,
             plan: _,
             apply,
         } => commands::revert_target(&target, apply),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
-        Commands::Show { target } => commands::show_target(&target),
+        Commands::Show {
+            target,
+            all,
+            project,
+            json,
+        } => commands::show_target(
+            &target,
+            all,
+            project.as_deref(),
+            json,
+            bundle_context.as_deref(),
+        ),
         Commands::Config { command } => match command {
             ConfigCommand::Show { global } => commands::show_config(global),
             ConfigCommand::Set { key, value, global } => {

@@ -13,6 +13,12 @@ use std::{
 /// disable Git prompts, and terminate hung probes (including SSH children).
 pub(crate) fn command_output(program: &str, args: &[String], cwd: &Path) -> Result<String> {
     let mut command = Command::new(program);
+    let credentials = if program == "git" {
+        let git_args: Vec<_> = args.iter().map(std::ffi::OsString::from).collect();
+        crate::auth_git::configure(cwd, &git_args, &mut command)?
+    } else {
+        Vec::new()
+    };
     command
         .args(args)
         .current_dir(cwd)
@@ -74,6 +80,9 @@ pub(crate) fn command_output(program: &str, args: &[String], cwd: &Path) -> Resu
     let out = out.join().unwrap_or_default();
     let err = err.join().unwrap_or_default();
     match status {
+        // Authenticated network callers need only success/failure. Discard
+        // bounded output rather than risk retaining a truncated secret prefix.
+        Some(s) if s.success() && !credentials.is_empty() => Ok(String::new()),
         Some(s) if s.success() => Ok(format!("{out}\n{err}")),
         Some(_) => bail!("{program} probe failed"),
         None => bail!("{program} probe timed out after 30 seconds"),

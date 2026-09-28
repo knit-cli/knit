@@ -1,4 +1,4 @@
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::ffi::OsString;
 use std::path::PathBuf;
 
@@ -31,8 +31,115 @@ pub enum GitCredentialOperation {
     Erase,
 }
 
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum HistoryRepoMatchArg {
+    #[default]
+    Any,
+    All,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, Default)]
+pub enum HistoryGroupArg {
+    Event,
+    #[default]
+    Commit,
+    Bundle,
+}
+
+#[derive(Args, Clone, Debug, Default)]
+pub struct LogArgs {
+    /// Boolean history expression: NOT > AND > OR; adjacency means AND. Fields: repo, view, bundle, since, until.
+    #[arg(long, value_name = "EXPRESSION")]
+    pub query: Option<String>,
+    /// History reading: base ledger (project default), base with ongoing work, ongoing, landings, or all activity.
+    #[arg(long, value_parser = ["base", "base-and-ongoing", "ongoing", "landings", "activity"], value_name = "SCOPE")]
+    pub scope: Option<String>,
+    /// Inspect every locally recorded bundle in the selected project.
+    #[arg(long)]
+    pub all: bool,
+    /// Project id for --all. Defaults to the worktree bundle's project, then the workspace default.
+    #[arg(long, requires = "all")]
+    pub project: Option<String>,
+    /// Match history involving these repo ids. Repeat for multiple repos.
+    #[arg(short = 'r', long = "repo", value_name = "REPO")]
+    pub repos: Vec<String>,
+    /// Use a locally saved personal view or shared template as a repo filter.
+    #[arg(long, value_name = "NAME")]
+    pub view: Option<String>,
+    /// Match any selected repo, or require all selected repos in one history group.
+    #[arg(long = "repo-match", value_enum, default_value_t)]
+    pub repo_match: HistoryRepoMatchArg,
+    /// Group matching history by event, commit/node, or bundle.
+    #[arg(long, value_enum, default_value_t)]
+    pub group: HistoryGroupArg,
+    /// Limit to an event kind. Repeat for multiple kinds.
+    #[arg(long = "kind", value_name = "KIND")]
+    pub kinds: Vec<String>,
+    /// Show entries at or after this ISO date or relative date (plain dates mean midnight UTC).
+    #[arg(long, alias = "after", value_name = "DATE")]
+    pub since: Option<String>,
+    /// Show entries at or before this ISO date or relative date (plain dates mean midnight UTC).
+    #[arg(long, alias = "before", value_name = "DATE")]
+    pub until: Option<String>,
+    /// Match an entry message. Repeat to add patterns.
+    #[arg(long, value_name = "PATTERN")]
+    pub grep: Vec<String>,
+    /// Require every --grep pattern instead of any one pattern.
+    #[arg(long, requires = "grep")]
+    pub all_match: bool,
+    /// Match --grep patterns without regard to case.
+    #[arg(short = 'i', long = "regexp-ignore-case")]
+    pub ignore_case: bool,
+    /// Treat --grep patterns as literal strings.
+    #[arg(short = 'F', long = "fixed-strings")]
+    pub fixed_strings: bool,
+    /// Use extended regular expressions for --grep (default: Git basic syntax).
+    #[arg(
+        short = 'E',
+        long = "extended-regexp",
+        conflicts_with = "fixed_strings"
+    )]
+    pub extended_regexp: bool,
+    /// Print one line per history entry.
+    #[arg(long, conflicts_with = "json")]
+    pub oneline: bool,
+    /// Print a standalone JSON array of history entries.
+    #[arg(long, conflicts_with = "oneline")]
+    pub json: bool,
+    /// Reverse the selected, limited page.
+    #[arg(long)]
+    pub reverse: bool,
+    /// Skip this many matching entries before applying the count limit.
+    #[arg(long, default_value_t = 0)]
+    pub skip: usize,
+    /// Show at most COUNT entries.
+    #[arg(
+        short = 'n',
+        long = "max-count",
+        visible_alias = "limit",
+        value_name = "COUNT",
+        num_args = 0..=1,
+        default_missing_value = "10"
+    )]
+    pub limit: Option<usize>,
+    /// Keep other repos' event details in a matching multi-repo group.
+    #[arg(long = "full-context")]
+    pub full_context: bool,
+    /// Git-style shorthand for the latest N entries, for example `knit log -2`.
+    #[arg(value_name = "-COUNT", allow_negative_numbers = true)]
+    pub shorthand_limit: Option<String>,
+}
+
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Set up credentials: bare `knit auth` is a guided menu for both token kinds — personal forge tokens (GitHub/GitLab/Bitbucket/Forgejo) and the separate hosted sync-service token (`r`); `knit auth --project NAME` wires one project's forge tokens.
+    Auth {
+        /// Scope the wizard to one project: use the default tokens or give the project its own.
+        #[arg(long)]
+        project: Option<String>,
+        #[command(subcommand)]
+        command: Option<AuthCommand>,
+    },
     /// Continue a bundle on another machine.
     Handoff {
         #[command(subcommand)]
@@ -95,6 +202,15 @@ pub enum Commands {
         /// Remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN.
         #[arg(long)]
         token: Option<String>,
+        /// Authenticate the clone with a saved personal credential
+        /// (`knit auth add`), selected by name and matched to the export's
+        /// repository hosts. Repeat to select one credential per forge:
+        /// `knit auth add work-github --provider github`, then `knit clone
+        /// team-project --remote hosted --credential work-github`. Applies
+        /// only to this clone's repositories, never to the remote's API, and
+        /// is saved as the new workspace's repository assignments.
+        #[arg(long = "credential", value_name = "NAME")]
+        credentials: Vec<String>,
         /// Bundle to make active after clone. Defaults to the latest open exported bundle.
         #[arg(long = "active-bundle")]
         active_bundle: Option<String>,
@@ -135,7 +251,7 @@ pub enum Commands {
     /// Show the resolved bundle, create one (`knit bundle "feature title"`), or manage it.
     #[command(args_conflicts_with_subcommands = true)]
     Bundle {
-        /// Title of a new bundle to create. With no title and no subcommand, shows the current bundle.
+        /// Title of a new bundle to create. With no title and no subcommand, shows the current bundle, or enters it with --cd.
         title: Option<String>,
         /// Project template to use. Defaults to the active project when present.
         #[arg(long)]
@@ -173,7 +289,7 @@ pub enum Commands {
         /// Write an AGENTS.md tutorial for agents working in this Knit workspace.
         #[arg(long)]
         agents: bool,
-        /// Start a shell in .knit/worktrees/<bundle>. Pass a repo selector to cd into that repo checkout instead.
+        /// Start a shell in .knit/worktrees/<bundle>: with a title the bundle is created first, without one the resolved existing bundle is entered. Pass a repo selector to cd into that repo checkout instead.
         #[arg(long, value_name = "REPO", num_args = 0..=1, default_missing_value = "", conflicts_with = "no_worktree")]
         cd: Option<String>,
         #[command(subcommand)]
@@ -372,6 +488,9 @@ pub enum Commands {
     },
     /// Create or show the landing plan. Use `knit land apply` to execute it.
     Land {
+        /// Authoring version for newly generated plans; existing plans keep their semantics.
+        #[arg(long, global = true, value_parser = ["0.1", "0.2"], default_value = "0.2")]
+        schema_version: String,
         /// Land every recorded review object into this target branch. The target is
         /// stored in the plan and applied by Knit before checks and merging.
         #[arg(long, global = true, value_name = "BRANCH", conflicts_with = "lane")]
@@ -501,12 +620,8 @@ pub enum Commands {
     },
     /// Show bundle ledger entries.
     Log {
-        /// Show only the latest N log entries. With no value, defaults to 10.
-        #[arg(short = 'n', long = "limit", value_name = "COUNT", num_args = 0..=1, default_missing_value = "10")]
-        limit: Option<usize>,
-        /// Git-style shorthand for the latest N entries, for example `knit log -2`.
-        #[arg(value_name = "-COUNT", allow_hyphen_values = true)]
-        shorthand_limit: Option<String>,
+        #[command(flatten)]
+        args: LogArgs,
     },
     /// Revert a bundle log entry across its affected repos.
     Revert {
@@ -535,6 +650,15 @@ pub enum Commands {
     Show {
         /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
         target: String,
+        /// Resolve the selector across all locally recorded bundles in a project.
+        #[arg(long)]
+        all: bool,
+        /// Project id for --all.
+        #[arg(long, requires = "all")]
+        project: Option<String>,
+        /// Print the selected history entry as JSON.
+        #[arg(long)]
+        json: bool,
     },
     /// Manage Knit workspace config.
     Config {
@@ -578,6 +702,9 @@ pub enum SyncCommand {
     /// Pull artifacts from the sync remotes. With no target flags, pulls bundle, history,
     /// and views for the resolved project/bundle.
     Pull {
+        /// Only sync artifacts; do not fetch branches, create worktrees, or update checkouts.
+        #[arg(long)]
+        artifacts_only: bool,
         #[command(flatten)]
         targets: SyncTargetArgs,
         /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
@@ -597,6 +724,9 @@ pub struct SyncTargetArgs {
     /// Sync your saved views for the project.
     #[arg(long)]
     pub views: bool,
+    /// Sync editable landing plans and their execution/recovery receipts.
+    #[arg(long)]
+    pub plans: bool,
     /// Sync the project architecture artifact (produced by `urdir kg architecture`).
     #[arg(long)]
     pub architecture: bool,
@@ -616,6 +746,9 @@ pub struct SyncTargetArgs {
 pub enum HistoryCommand {
     /// Show local project history.
     List {
+        /// Boolean expression (NOT > AND > OR); fields: repo, view, bundle, since, until.
+        #[arg(long, value_name = "EXPRESSION")]
+        query: Option<String>,
         /// Show only the latest N events.
         #[arg(short = 'n', long = "limit", default_value_t = 20)]
         limit: usize,
@@ -664,7 +797,7 @@ pub enum BundleCommand {
         /// Paths to local git repositories or project repo ids.
         #[arg(required = true)]
         repos: Vec<String>,
-        /// Override the inferred base branch for raw repo paths.
+        /// Override the inferred base branch for raw repo paths and project repo ids.
         #[arg(long)]
         base: Option<String>,
         /// Use each original repo checkout directly instead of creating a Knit worktree.
@@ -825,6 +958,13 @@ pub enum WorkspaceCommand {
 
 #[derive(Subcommand)]
 pub enum ProjectCommand {
+    /// Set up forge access for this project (same as `knit auth setup`).
+    Auth {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
     /// Add or update a repo in the active project.
     Add {
         /// Stable repo id inside the project.
@@ -1056,7 +1196,7 @@ pub enum RemoteCommand {
         /// Optional remote token. Prefer KNIT_REMOTE_<NAME>_TOKEN or KNIT_REMOTE_TOKEN for shared workspaces.
         #[arg(long)]
         token: Option<String>,
-        /// Read the remote token from stdin instead of command arguments.
+        /// Read the remote token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
         #[arg(long, conflicts_with = "token")]
         token_stdin: bool,
         /// Store this remote in the user-level Knit config instead of the workspace. This is automatic outside a workspace.
@@ -1125,12 +1265,17 @@ pub enum RemoteCommand {
         /// Remote name (must be configured in the user-level Knit config).
         name: String,
     },
-    /// Store or clear a token for a remote.
+    /// Store or clear a token for a remote. Without a token value, a terminal
+    /// (--global) shows a hidden prompt; without one, --token-stdin reads a
+    /// piped token up to EOF.
     Token {
         /// Remote name.
         name: String,
-        /// Token value. Omit with --clear.
+        /// Token value. Omit with --clear, or to be prompted at a terminal with --global.
         token: Option<String>,
+        /// Read the token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long, conflicts_with_all = ["token", "clear"])]
+        token_stdin: bool,
         /// Remove the stored token.
         #[arg(long)]
         clear: bool,
@@ -1184,10 +1329,15 @@ pub enum PublishCommand {
         /// Skip pushing feature branches. Branches must already exist on the remote.
         #[arg(long)]
         no_push: bool,
-        /// Set the review target branch. Landing keeps it unless `knit land --target` overrides it.
-        /// Use once for all repos or repeat as REPO=BRANCH.
-        #[arg(long = "base", value_name = "BRANCH|REPO=BRANCH")]
-        bases: Vec<String>,
+        /// Publish every selected repo's review against this one target branch.
+        /// Default without a destination flag: each repo's recorded bundle base branch.
+        #[arg(long, value_name = "BRANCH", conflicts_with = "lane")]
+        target: Option<String>,
+        /// Resolve each repo's review base from this project landing lane
+        /// (`landing.lanes.<name>`), including per-repo branches, a default or
+        /// wildcard, and `null` exclusions. Requires a project-backed workspace.
+        #[arg(long, value_name = "LANE", conflicts_with_all = ["target", "from_artifact"])]
+        lane: Option<String>,
         /// Create review objects for every tracked repo instead of only repos with recorded work.
         #[arg(long)]
         all: bool,
@@ -1302,8 +1452,24 @@ pub enum TagCommand {
 
 #[derive(Subcommand)]
 pub enum LandCommand {
+    /// List configured and saved destinations without generating or executing plans.
+    Destinations {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Display an exact authored plan without generating or executing it.
+    Show {
+        #[arg(long)]
+        plan: PathBuf,
+    },
     /// Generate an editable landing plan from recorded publications.
     Plan {
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
         /// Landing provider to target (github, gitlab, forgejo, bitbucket).
         #[arg(long)]
         provider: Option<String>,
@@ -1314,8 +1480,85 @@ pub enum LandCommand {
         #[arg(long)]
         force: bool,
     },
+    /// Validate an exact saved plan without executing it.
+    Validate {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Pin an integration source branch into a newly authored plan file.
+    Source {
+        /// Saved plan to derive from. Never modified; a new file is authored.
+        #[arg(long)]
+        plan: PathBuf,
+        /// Repository whose merge_branch step integrates the source branch.
+        #[arg(long)]
+        repo: String,
+        /// Branch to resolve to its exact SHA and pin.
+        #[arg(long)]
+        branch: String,
+        /// Refuse the authoring unless the branch resolves to this SHA.
+        #[arg(long)]
+        sha: Option<String>,
+        /// Repository checkout to resolve from; defaults to the workspace.
+        #[arg(long)]
+        repo_root: Option<PathBuf>,
+        /// New plan file to write. Must not exist and must not be a plan revision.
+        #[arg(long)]
+        out: PathBuf,
+    },
+    /// Read-only structural and live readiness preflight for a saved plan.
+    Preflight {
+        #[arg(long)]
+        plan: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Restore captured deployment state for an immutable run.
+    Recover {
+        #[arg(long)]
+        plan: Option<PathBuf>,
+        #[arg(long)]
+        run: PathBuf,
+        #[arg(long)]
+        from_artifact: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        run_out: Option<PathBuf>,
+        #[arg(long)]
+        out: Option<PathBuf>,
+        #[arg(long)]
+        apply: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Execute a landing plan.
     Apply {
+        /// Refuse execution unless the saved plan matches this reviewed canonical hash.
+        #[arg(long)]
+        expected_plan_hash: Option<String>,
+        #[arg(long)]
+        project_file: Option<PathBuf>,
+        #[arg(long)]
+        repo_roots: Option<PathBuf>,
+        #[arg(long)]
+        run_out: Option<PathBuf>,
+        #[arg(long)]
+        resume: bool,
+        #[arg(long)]
+        json: bool,
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
         #[arg(long)]
         plan: Option<PathBuf>,
@@ -1450,5 +1693,112 @@ pub enum HandoffCommand {
     Status {
         #[arg(long)]
         json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+pub enum AuthCommand {
+    /// Set up or update the sync remote token (hosted Knit service), verifying it against the server before saving.
+    Remote {
+        /// Remote name. Required without a terminal; interactively picked or typed when omitted.
+        name: Option<String>,
+        /// Service base URL, for example `https://host.example` or `http://localhost:4000`. Defaults to the remote's saved URL; prompted for a new remote.
+        #[arg(long)]
+        url: Option<String>,
+        /// Read the token from stdin. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long)]
+        token_stdin: bool,
+        /// Save without contacting the server to verify it; the token is stored unverified.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Choose host defaults or project-only tokens, with optional repository scope.
+    Setup {
+        #[arg(long)]
+        project: Option<String>,
+        /// Limit editable repositories; setup still displays full-project coverage.
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
+    /// Save a named credential. `--token-stdin` reads a piped token to EOF (at a terminal it is typed at a hidden prompt, Enter submits); otherwise a terminal prompts hidden. `--token-env` stores a variable reference instead.
+    Add {
+        name: String,
+        #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "forgejo"])]
+        provider: String,
+        /// Forge hostname; defaults to the provider's public host.
+        #[arg(long)]
+        host: Option<String>,
+        /// Bitbucket Atlassian account email for an API token; omit for a repository access token.
+        #[arg(long)]
+        username: Option<String>,
+        /// Which of the provider's token kinds this is, e.g. fine_grained_pat or atlassian_api_token.
+        #[arg(long)]
+        token_type: Option<String>,
+        /// Store an environment variable reference instead of storing the token itself.
+        #[arg(long, conflicts_with = "token_stdin")]
+        token_env: Option<String>,
+        /// Read the token from stdin, never from a command-line argument. Piped stdin reads to EOF; at a terminal the token is typed at a hidden prompt and submitted with Enter.
+        #[arg(long)]
+        token_stdin: bool,
+        /// Explicitly rotate an existing named credential for all its assignments.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Assign a saved credential to selected repositories in a project.
+    Use {
+        name: String,
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(short = 'r', long = "repo", required = true)]
+        repos: Vec<String>,
+    },
+    /// Choose which saved credential is a host's default. The default serves every project on that forge unless overridden.
+    Default {
+        /// An existing credential name.
+        name: String,
+    },
+    /// Show per-repository assignments. --check probes Git read access without modifying repositories.
+    Status {
+        #[arg(long)]
+        project: Option<String>,
+        #[arg(long)]
+        check: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// List named credentials and assignment counts, never token values.
+    List,
+    /// Remove an unused named credential from this machine.
+    Remove { name: String },
+    /// Remove personal assignments. With none left, the project resumes existing Git/forge login behavior.
+    Clear {
+        #[arg(long)]
+        project: Option<String>,
+        /// Omit to clear every assignment in the project.
+        #[arg(short = 'r', long = "repo")]
+        repos: Vec<String>,
+    },
+    #[command(hide = true)]
+    GitCredential {
+        /// Named credential to serve (fixed selection).
+        #[arg(long, conflicts_with = "resolve")]
+        credential: Option<String>,
+        #[arg(long, conflicts_with = "resolve")]
+        host: Option<String>,
+        #[arg(long, conflicts_with = "resolve")]
+        path: Option<String>,
+        /// Serve the credential Git asks for by resolving the request target
+        /// against the current checkout's Knit context (dynamic helper used
+        /// by generated repository config).
+        #[arg(long, conflicts_with = "credential")]
+        resolve: bool,
+        /// Workspace root the request resolves against (with `--project`,
+        /// for helpers generated by an installation with explicit context).
+        #[arg(long)]
+        workspace: Option<PathBuf>,
+        /// Project id the request resolves against (with `--workspace`).
+        #[arg(long)]
+        project: Option<String>,
+        operation: GitCredentialOperation,
     },
 }

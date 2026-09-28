@@ -81,6 +81,8 @@ pub enum LandOnFailure {
     #[default]
     Resume,
     Rollback,
+    Stop,
+    Recover,
 }
 
 impl LandOnFailure {
@@ -88,6 +90,8 @@ impl LandOnFailure {
         match self {
             LandOnFailure::Resume => "resume",
             LandOnFailure::Rollback => "rollback",
+            LandOnFailure::Stop => "stop",
+            LandOnFailure::Recover => "recover",
         }
     }
 }

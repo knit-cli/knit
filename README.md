@@ -8,6 +8,21 @@ Knit shells out to `git`. It does not use libgit2 and it does not try to replace
 
 ## Install
 
+Ubuntu / Debian (native packages and automatic updates):
+```sh
+sudo apt-get update
+sudo apt-get install -y ca-certificates curl
+sudo install -d -m 0755 /etc/apt/keyrings
+curl -fsSL https://knit-cli.github.io/knit/knit.gpg | sudo tee /etc/apt/keyrings/knit.gpg >/dev/null
+sudo chmod 0644 /etc/apt/keyrings/knit.gpg
+echo 'deb [signed-by=/etc/apt/keyrings/knit.gpg] https://knit-cli.github.io/knit/apt ./' | sudo tee /etc/apt/sources.list.d/knit.list
+sudo apt-get update
+sudo apt-get install -y knit
+```
+Supports amd64 and arm64 on Ubuntu 22.04+ and Debian 12+. The repository includes
+prereleases. `.deb` and `.rpm` packages are also available on
+[GitHub Releases](https://github.com/knit-cli/knit/releases) for direct installation.
+
 Brew:
 ```sh
 brew install knit-cli/tap/knit   # macOS / Linux binaries
@@ -71,13 +86,10 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 ## Docs
 
 - **[docs/quickstart.md](docs/quickstart.md)** — install to landed multi-repo change in ten minutes, plus the concepts in full.
+- **[docs/forge-auth.md](docs/forge-auth.md)** — native CLI setup for per-project and per-repository forge tokens.
 - **[docs/runtime-setup.md](docs/runtime-setup.md)** — configure any dockerized project for `knit run up`: zero-config to shared dev database, step by step.
 - **[docs/reference.md](docs/reference.md)** — the complete behavior reference: every command, projects and views, bundle lifecycle, publish/land/merge, checks, history and `related`, revert, storage layout, limitations, roadmap.
 - **[docs/harness.md](docs/harness.md)** — building a host on top of Knit: the artifacts to read, the commands that answer in JSON, bundle context, and session attribution.
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
 - **[dist/README.md](dist/README.md)** — how releases are cut (binaries, crates.io, Homebrew/Scoop/winget).
-
-## Knit, Urdir, and Gloss
-
-Knit, Urdir, and Gloss share a simple handoff. Knit owns authoring and workspace mechanics — repos, worktrees, feature branches, commit groups, ledger updates. Urdir reads a bundle later and produces cross-repo review analysis. Gloss displays and explains that review artifact; a compatible remote can bring the three together in one page.

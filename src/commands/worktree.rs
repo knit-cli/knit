@@ -92,7 +92,32 @@ pub fn materialize_repos(
             Ok(update) => {
                 apply_materialize_result(&mut active.bundle.repos[update.repo_index], &update);
                 print_materialize_result(&update);
-                materialized_repo_ids.push(repo_id);
+                materialized_repo_ids.push(repo_id.clone());
+                // Repository creation/use: make plain Git in the new checkout
+                // resolve saved Knit credentials. The checkout works
+                // regardless, but a setup failure is never silently ignored —
+                // it is reported with the `knit auth status` recovery path.
+                if let Some(path) = update
+                    .worktree_path
+                    .as_deref()
+                    .map(|path| {
+                        let path = PathBuf::from(path);
+                        if path.is_absolute() {
+                            path
+                        } else {
+                            root.join(path)
+                        }
+                    })
+                    .or_else(|| Some(PathBuf::from(&active.bundle.repos[update.repo_index].path)))
+                {
+                    if let Err(error) = crate::auth_git::install(&path) {
+                        crate::human!(
+                            "{} plain-Git credential helper not set up for {}: {error:#}; run `knit auth status` to repair",
+                            out::warn("Warning:"),
+                            out::repo(&repo_id)
+                        );
+                    }
+                }
             }
             Err(error) => {
                 crate::human!(
