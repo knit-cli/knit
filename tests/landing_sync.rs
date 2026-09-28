@@ -110,7 +110,24 @@ impl Server {
                 } else if request.starts_with("POST ") {
                     let payload: Value = serde_json::from_slice(&body).unwrap();
                     let mut imported = state.clone();
+                    if state["failCompletedSyncOnce"] == true
+                        && payload["plans"]
+                            .as_array()
+                            .is_some_and(|plans| !plans.is_empty())
+                    {
+                        state["failCompletedSyncOnce"] = json!(false);
+                        code = 503;
+                    }
                     for p in payload["plans"].as_array().unwrap() {
+                        if code != 200 {
+                            break;
+                        }
+                        if state["rejectUnsnapshottedPlan"] == true
+                            && (p["bundleSnapshot"].is_null() || p["projectSnapshot"].is_null())
+                        {
+                            code = 422;
+                            break;
+                        }
                         if let Some(known) = imported["plans"]
                             .as_array()
                             .unwrap()
@@ -658,6 +675,38 @@ fn unexecuted_authored_revision_follows_offline_run_history() {
 }
 
 #[test]
+fn completed_history_sync_failure_is_reported_and_retryable() {
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    let root = unique_temp_dir();
+    let (a, _, bundle, project) = offline_history(&root, &server);
+    let original = fs::read(root.join(".knit/land-runs/z-first.run.json")).unwrap();
+    server.state.lock().unwrap()["failCompletedSyncOnce"] = json!(true);
+    let error = knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+    assert!(error.contains("503"), "{error}");
+    assert!(server.state.lock().unwrap()["plans"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        fs::read(root.join(".knit/land-runs/z-first.run.json")).unwrap(),
+        original
+    );
+    knit(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+    let state = server.state.lock().unwrap();
+    assert_eq!(state["plans"][0]["hash"], hash(&a));
+    assert_eq!(state["plans"][0]["bundleSnapshot"], bundle);
+    assert_eq!(state["plans"][0]["projectSnapshot"], project);
+    assert_eq!(state["runs"].as_array().unwrap().len(), 2);
+    drop(state);
+    assert_eq!(
+        fs::read(root.join(".knit/land-runs/z-first.run.json")).unwrap(),
+        original
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn offline_recipe_revisions_keep_exact_projects_and_resume_preserves_provenance() {
     let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::new();
@@ -847,6 +896,10 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
                 &workspace,
                 ["sync", "push", "--plans", "--remote", "hosted"],
             );
+        } else {
+            // The hosted project may predate a repo added to this local
+            // project. A plan without its execution snapshots is rejected.
+            server.state.lock().unwrap()["rejectUnsnapshottedPlan"] = json!(true);
         }
         let plan_bytes = fs::read(&plan_path).unwrap();
         let apply = [
@@ -867,8 +920,13 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
         let first: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
         assert_eq!(first["status"], "succeeded");
         assert_eq!(first["finalized"], true);
+        assert!(first["finalization"]["error"].is_null());
         {
             let state = server.state.lock().unwrap();
+            if !synchronized {
+                assert_eq!(state["plans"][0]["bundleSnapshot"], first["sourceBundle"]);
+                assert_eq!(state["plans"][0]["projectSnapshot"], first["sourceProject"]);
+            }
             assert_eq!(state["uploads"].as_array().unwrap().len(), 1);
             assert_eq!(state["uploads"][0]["owned"], synchronized);
             assert_eq!(state["uploads"][0]["run"], first);
