@@ -14,6 +14,7 @@ pub mod config;
 mod eject;
 mod engine;
 mod envfile;
+mod managed;
 mod plan;
 mod state;
 mod support;
@@ -38,12 +39,8 @@ pub struct RuntimeContext {
     /// Additional repo checkouts exposed through the `KNIT_CHECKOUT_*` env
     /// contract (project repos that are not in the bundle).
     pub extra_checkouts: Vec<(String, PathBuf)>,
-    /// How the docker engine sees this process's filesystem, when the engine
-    /// is not the one this process runs on ("docker outside of docker"). Set,
-    /// `up` writes a compose override per stack that turns bind mounts under
-    /// [`EngineView::mount`] into subpaths of [`EngineView::volume`], adds a
-    /// `host.docker.internal` host entry, and labels containers with the
-    /// bundle and owner. Unset, nothing about a run changes.
+    /// Trusted managed engine context. Enables restricted snapshot execution,
+    /// owner-scoped resources and private endpoints instead of local host ports.
     pub engine: Option<EngineView>,
 }
 
@@ -56,6 +53,7 @@ pub struct EngineView {
     pub volume: String,
     pub mount: PathBuf,
     pub owner: Option<String>,
+    pub network: String,
 }
 
 #[derive(Clone)]
@@ -77,6 +75,9 @@ pub fn up(
         bail!("Unsupported runtime kind `{}`.", runtime.kind);
     }
     let plans = plan::build_stack_plans(ctx, runtime, stack_repo_ids)?;
+    if ctx.engine.is_some() {
+        return managed::up(ctx, runtime, plans);
+    }
     up::run_up_stacks(ctx, runtime, plans)
 }
 
@@ -101,6 +102,9 @@ pub fn eject(
 /// Stop and remove the bundle's stacks, resolved from recorded run state or
 /// by derived compose project names when a failed `up` never recorded state.
 pub fn down(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.engine.is_some() {
+        return managed::down(ctx, false);
+    }
     state::run_down(ctx, false)
 }
 
@@ -108,17 +112,26 @@ pub fn down(ctx: &RuntimeContext) -> Result<()> {
 /// Compose build images. External volumes and explicitly tagged images remain
 /// outside Knit's lifecycle.
 pub fn purge(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.engine.is_some() {
+        return managed::down(ctx, true);
+    }
     state::run_down(ctx, true)
 }
 
 /// Report live service states, ports, and URLs for the bundle's stacks.
 pub fn status(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.engine.is_some() {
+        return managed::status(ctx);
+    }
     state::run_status(ctx)
 }
 
 /// The same report as [`status`], as one JSON object on stdout and nothing
 /// else — the machine-readable surface remote callers parse.
 pub fn status_json(ctx: &RuntimeContext) -> Result<()> {
+    if ctx.engine.is_some() {
+        return managed::status(ctx);
+    }
     state::run_status_json(ctx)
 }
 

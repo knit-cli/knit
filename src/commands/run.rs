@@ -49,6 +49,11 @@ pub fn run_project_command(
 
     if raw_args.is_empty() {
         if let Some(runtime_command) = name.filter(|name| RUNTIME_COMMANDS.contains(name)) {
+            if ["up", "down", "status"].contains(&runtime_command)
+                && crate::commands::runtime::remote_enabled()
+            {
+                return crate::commands::runtime::forward_active(runtime_command, purge, json);
+            }
             // An explicitly configured project command of the same name wins
             // over the built-in runtime verbs.
             let shadowed = load_active_bundle()

@@ -12,10 +12,8 @@ use crate::store::{load_active_bundle, project_path, read_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use knit_runtime::{EngineView, RuntimeContext, RuntimeRepo};
 use std::path::PathBuf;
-
-/// Where this process sees the engine's workspace volume, when
-/// `KNIT_RUNTIME_ENGINE_VOLUME_MOUNT` does not say.
-const DEFAULT_ENGINE_VOLUME_MOUNT: &str = "/var/lib/svartal";
+mod broker;
+pub(crate) use broker::{forward_active, remote_enabled};
 
 pub fn try_handle(name: &str, force: bool, purge: bool, json: bool) -> Result<bool> {
     let active = load_active_bundle()?;
@@ -68,6 +66,10 @@ pub fn try_handle(name: &str, force: bool, purge: bool, json: bool) -> Result<bo
 /// transitions (archive/land/delete), where keeping restart data would only
 /// leak project-scoped volumes and Compose build images.
 pub(crate) fn purge_active_runtime(active: &ActiveBundle) -> Result<bool> {
+    if remote_enabled() {
+        broker::forward(active, "down", true, false)?;
+        return Ok(true);
+    }
     let project = load_project_for_bundle(active).ok();
     let runtime = project.as_ref().and_then(|project| project.runtime.clone());
     let ctx = runtime_context(active, project.as_ref())?;
@@ -82,7 +84,8 @@ pub(crate) fn purge_active_runtime(active: &ActiveBundle) -> Result<bool> {
 /// recorded run state, or a detectable stack repo (so cleanup works even when
 /// a failed `up` never recorded state).
 fn runtime_applies(ctx: &RuntimeContext, runtime: Option<&ProjectRuntime>) -> bool {
-    runtime.is_some()
+    ctx.engine.is_some()
+        || runtime.is_some()
         || knit_runtime::has_state(ctx)
         || !knit_runtime::detect_stack_repo_ids(ctx).is_empty()
 }
@@ -159,7 +162,7 @@ fn engine_view() -> Result<Option<EngineView>> {
     }
     let mount = PathBuf::from(
         trimmed_env("KNIT_RUNTIME_ENGINE_VOLUME_MOUNT")
-            .unwrap_or_else(|| DEFAULT_ENGINE_VOLUME_MOUNT.to_string()),
+            .context("runtime-worker requires KNIT_RUNTIME_ENGINE_VOLUME_MOUNT")?,
     );
     if !mount.is_absolute() {
         bail!(
@@ -170,7 +173,13 @@ fn engine_view() -> Result<Option<EngineView>> {
     Ok(Some(EngineView {
         volume,
         mount,
-        owner: trimmed_env("KNIT_RUNTIME_OWNER"),
+        owner: Some(
+            trimmed_env("KNIT_RUNTIME_OWNER")
+                .context("runtime-worker requires KNIT_RUNTIME_OWNER")?,
+        ),
+        network: trimmed_env("KNIT_RUNTIME_NETWORK")
+            .filter(|s| is_volume_name(s))
+            .context("runtime-worker requires valid KNIT_RUNTIME_NETWORK")?,
     }))
 }
 
@@ -219,4 +228,16 @@ mod tests {
         assert!(!is_volume_name(&"a".repeat(129)));
         assert!(is_volume_name(&"a".repeat(128)));
     }
+}
+
+/// Called only through the dedicated command; never dispatch project commands or broker RPC.
+pub fn worker(action: &str, purge: bool, json: bool) -> Result<()> {
+    if !["up", "down", "status"].contains(&action) || (purge && action != "down") {
+        bail!("Invalid runtime-worker operation");
+    }
+    engine_view()?.context("runtime-worker requires complete trusted engine environment")?;
+    if !try_handle(action, false, purge, json)? {
+        bail!("No runtime stack configured for this bundle");
+    }
+    Ok(())
 }

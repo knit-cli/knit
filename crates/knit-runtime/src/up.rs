@@ -667,7 +667,7 @@ fn runtime_env(
 /// not knit's — run with no `ports` config at all. A scanned variable with no
 /// default and no configured pool is an error: the allocator would have no
 /// base to start from, and compose would silently interpolate an empty port.
-fn contract_port_bases(
+pub(crate) fn contract_port_bases(
     compose_file: &Path,
     ports: Option<&crate::config::ProjectRuntimePorts>,
 ) -> Result<BTreeMap<String, u16>> {
@@ -1131,6 +1131,7 @@ mod tests {
             volume: "svartal-ws-1".to_string(),
             mount: PathBuf::from("/var/lib/svartal"),
             owner: None,
+            network: "preview-test".into(),
         };
         assert_eq!(
             engine_override_path(Some(&engine), run_dir, false, "knithub"),

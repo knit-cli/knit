@@ -628,3 +628,131 @@ fn run_up_lifts_every_compose_repo_and_cross_wires_ports() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn managed_cli_forwards_before_shadowing_and_reads_environment_identity_file() {
+    use std::{
+        io::{Read, Write},
+        os::unix::net::UnixListener,
+        time::{Duration, Instant},
+    };
+    let root = unique_temp_dir();
+    let workspace = setup_workspace(&root, true);
+    for action in ["up", "down", "status"] {
+        knit(
+            &workspace,
+            [
+                "project",
+                "command",
+                "set",
+                action,
+                "--repo",
+                "stack",
+                "--",
+                "echo",
+                "shadow-must-not-run",
+            ],
+        );
+    }
+    let home = root.join("runtime-home");
+    fs::create_dir_all(home.join("userdata")).unwrap();
+    fs::write(
+        home.join("userdata/environment-id"),
+        "synthetic-environment\n",
+    )
+    .unwrap();
+    // Keep the Unix socket below the platform's short path limit.
+    let socket = std::env::temp_dir().join(format!("knit-cli-broker-{}.sock", std::process::id()));
+    let listener = UnixListener::bind(&socket).unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        for action in ["up", "status", "down"] {
+            let deadline = Instant::now() + Duration::from_secs(30);
+            let mut stream = loop {
+                match listener.accept() {
+                    Ok((stream, _)) => break stream,
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(Instant::now() < deadline, "broker request timed out");
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(e) => panic!("{e}"),
+                }
+            };
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut header = Vec::new();
+            let mut byte = [0];
+            while !header.ends_with(b"\r\n\r\n") {
+                stream.read_exact(&mut byte).unwrap();
+                header.push(byte[0]);
+            }
+            let header = String::from_utf8(header).unwrap();
+            assert!(header.starts_with(&format!("POST /v1/runtime/{action} ")));
+            let len: usize = header
+                .lines()
+                .find_map(|l| l.strip_prefix("Content-Length: "))
+                .unwrap()
+                .parse()
+                .unwrap();
+            let mut body = vec![0; len];
+            stream.read_exact(&mut body).unwrap();
+            let body: Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(body["environmentId"], "synthetic-environment");
+            assert_eq!(body["runtimeToken"], "synthetic-token");
+            assert_eq!(body["bundleId"], "venue-capacity");
+            assert_eq!(body["purge"], action == "down");
+            stream.write_all(b"HTTP/1.1 200 OK\r\nConnection: close\r\n\r\n{\"exitCode\":0,\"output\":\"broker-handled\",\"status\":{\"running\":false,\"stacks\":[]}}").unwrap();
+        }
+    });
+    let env = [
+        ("SVARTAL_RUNTIME_TOKEN", "synthetic-token"),
+        ("T3_PROVIDER_BROKER_SOCKET", socket.to_str().unwrap()),
+        ("T3CODE_HOME", home.to_str().unwrap()),
+        ("KNIT_ENVIRONMENT_ID", ""),
+    ];
+    assert_eq!(
+        knit_with_env(&workspace, ["run", "up"], &env).trim(),
+        "broker-handled"
+    );
+    let status = knit_with_env(&workspace, ["run", "status", "--json"], &env);
+    assert_eq!(
+        serde_json::from_str::<Value>(&status).unwrap()["running"],
+        false
+    );
+    assert_eq!(
+        knit_with_env(&workspace, ["run", "down", "--purge"], &env).trim(),
+        "broker-handled"
+    );
+    server.join().unwrap();
+    fs::remove_file(socket).unwrap();
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn internal_worker_requires_complete_trusted_environment_before_loading_commands() {
+    let root = unique_temp_dir();
+    let output = knit_fails_with_env(
+        &root,
+        ["--bundle", "demo", "runtime-worker", "up"],
+        &[("KNIT_RUNTIME_ENGINE_VOLUME", "")],
+    );
+    assert!(
+        output.contains("requires complete trusted engine environment"),
+        "{output}"
+    );
+    let output = knit_fails_with_env(
+        &root,
+        ["--bundle", "demo", "runtime-worker", "up"],
+        &[
+            ("KNIT_RUNTIME_ENGINE_VOLUME", "synthetic-volume"),
+            ("KNIT_RUNTIME_ENGINE_VOLUME_MOUNT", ""),
+        ],
+    );
+    assert!(
+        output.contains("KNIT_RUNTIME_ENGINE_VOLUME_MOUNT"),
+        "{output}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}

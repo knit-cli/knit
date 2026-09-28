@@ -462,6 +462,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             },
         },
+        Commands::RuntimeWorker {
+            action,
+            purge,
+            json,
+        } => commands::runtime::worker(&action, purge, json),
         Commands::Run {
             name,
             repos,

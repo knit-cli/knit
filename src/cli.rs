@@ -326,6 +326,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<TagCommand>,
     },
+    /// Internal trusted runtime entrypoint.
+    #[command(hide = true)]
+    RuntimeWorker {
+        #[arg(value_parser = ["up", "down", "status"])]
+        action: String,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a project command inside resolved bundle checkouts.
     Run {
         /// Configured project command name. Omit when passing a raw command after --.

@@ -203,6 +203,7 @@ mod tests {
             volume: "svartal-ws-1".to_string(),
             mount: PathBuf::from("/var/lib/svartal-test-mount"),
             owner: Some("ws-1".to_string()),
+            network: "preview-test".into(),
         }
     }
 
