@@ -853,6 +853,33 @@ fn pull_merge_unions_diverged_bundle_ledgers() {
     let plain = knit_with_env(&workspace, ["pull"], &env);
     assert!(plain.contains("diverged"));
     assert!(plain.contains("--merge"));
+    assert!(plain.contains("local rewrite"), "{plain}");
+    assert!(
+        plain.contains("knit sync push --force-with-lease"),
+        "{plain}"
+    );
+
+    // A locally observed rewrite gets an explicit rewrite diagnostic in both
+    // active-bundle pull and the project-wide artifact pull.
+    let path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let mut local = read_bundle(&workspace);
+    local["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .push(serde_json::json!({
+            "id": "local-rewrite", "type": "git.observed", "createdAt": "2098-01-02T00:00:00Z",
+            "repoChanges": [{"repoId": "backend", "movement": "rewound",
+                "beforeSha": "old", "afterSha": "new", "commits": []}]
+        }));
+    fs::write(&path, serde_json::to_vec_pretty(&local).unwrap()).unwrap();
+    for args in [vec!["pull"], vec!["sync", "pull", "--bundles"]] {
+        let report = knit_with_env(&workspace, args, &env);
+        assert!(report.contains("after a local rewrite"), "{report}");
+        assert!(
+            report.contains("knit sync push --force-with-lease"),
+            "{report}"
+        );
+    }
 
     // With --merge, the union ledger is saved even though the git branches
     // themselves still need a manual merge.
@@ -1914,6 +1941,18 @@ fn project_push_prune_deletes_remote_repos_absent_from_local_shape() {
     fs::remove_dir_all(root).unwrap();
 }
 
+fn seed_artifact_lease(workspace: &std::path::Path, slug: &str, hash: &str) {
+    let path = workspace.join(format!(".knit/bundles/{slug}.bundle.json"));
+    let mut bundle: serde_json::Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let config: serde_json::Value =
+        serde_json::from_slice(&fs::read(workspace.join(".knit/config.json")).unwrap()).unwrap();
+    bundle["syncTargets"] = serde_json::json!([{
+        "remote": "hosted", "bundleId": format!("rb-{slug}"),
+        "apiUrl": config["remotes"]["hosted"]["url"], "artifactHash": hash
+    }]);
+    fs::write(path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+}
+
 #[test]
 fn sync_push_without_force_hits_409_and_hints_at_force_with_lease() {
     let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
@@ -1948,11 +1987,17 @@ fn sync_push_force_overwrites_remote_ledger_unconditionally() {
 }
 
 #[test]
-fn sync_push_force_with_lease_fetches_hash_and_cas_accepts() {
+fn sync_push_force_with_lease_uses_saved_hash_and_cas_accepts() {
     let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
     fs::write(fake_dir.join("enforce-fast-forward"), "").unwrap();
-    fs::write(fake_dir.join("current-artifact-hash"), "lease-hash-1").unwrap();
+    seed_artifact_lease(&workspace, "quick-fix", "lease-hash-1");
+    fs::write(
+        fake_dir.join("current-artifact-hash"),
+        "unrelated-index-hash",
+    )
+    .unwrap();
+    fs::write(fake_dir.join("post-current-artifact-hash"), "lease-hash-1").unwrap();
 
     let output = knit_with_env(
         &workspace,
@@ -1979,8 +2024,9 @@ fn sync_push_force_with_lease_mismatch_fails_each_bundle() {
     // are collected instead of aborting the run at the first one.
     let (root, workspace, fake_dir) = force_push_scaffold(&["alpha work", "beta work"]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
-    // The GET for the lease sees hash-a; by the time the POST lands the
-    // remote is on hash-b — a concurrent push in the window.
+    // The saved lease is hash-a, but unseen remote work has advanced to hash-b.
+    seed_artifact_lease(&workspace, "alpha-work", "hash-a");
+    seed_artifact_lease(&workspace, "beta-work", "hash-a");
     fs::write(fake_dir.join("current-artifact-hash"), "hash-a").unwrap();
     fs::write(fake_dir.join("post-current-artifact-hash"), "hash-b").unwrap();
 
@@ -1990,15 +2036,67 @@ fn sync_push_force_with_lease_mismatch_fails_each_bundle() {
         &env,
     );
     assert!(
-        failure.contains("alpha-work: remote artifact changed since fetch"),
+        failure
+            .contains("alpha-work: remote artifact changed since the last successful push or pull"),
         "{failure}"
     );
     assert!(
-        failure.contains("beta-work: remote artifact changed since fetch"),
+        failure
+            .contains("beta-work: remote artifact changed since the last successful push or pull"),
         "{failure}"
     );
     assert!(failure.contains("hash-b"), "{failure}");
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_saved_leases_persist_for_single_and_sweep_and_reject_unseen_changes() {
+    for titles in [vec!["alpha work"], vec!["alpha work", "beta work"]] {
+        let (root, workspace, fake_dir) = force_push_scaffold(&titles);
+        let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+        knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+        for title in &titles {
+            let slug = title.replace(' ', "-");
+            let path = workspace.join(format!(".knit/bundles/{slug}.bundle.json"));
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(saved["syncTargets"][0]["artifactHash"], "fakehash");
+        }
+        fs::write(fake_dir.join("current-artifact-hash"), "unseen-work").unwrap();
+        let failure = knit_fails_with_env(
+            &workspace,
+            ["sync", "push", "--bundles", "--force-with-lease"],
+            &env,
+        );
+        assert!(failure.contains("remote artifact changed"), "{failure}");
+        for title in &titles {
+            let slug = title.replace(' ', "-");
+            let body = last_artifact_body(&fake_dir, &slug);
+            assert_eq!(body["expectedArtifactHash"], "fakehash");
+            let path = workspace.join(format!(".knit/bundles/{slug}.bundle.json"));
+            let saved: serde_json::Value =
+                serde_json::from_slice(&fs::read(path).unwrap()).unwrap();
+            assert_eq!(saved["syncTargets"][0]["artifactHash"], "fakehash");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn sync_push_lease_without_saved_hash_does_not_authorize_remote_overwrite() {
+    let (root, workspace, fake_dir) = force_push_scaffold(&["quick fix"]);
+    fs::write(fake_dir.join("current-artifact-hash"), "unseen-work").unwrap();
+    fs::write(fake_dir.join("enforce-fast-forward"), "").unwrap();
+    let failure = knit_fails_with_env(
+        &workspace,
+        ["sync", "push", "--bundles", "--force-with-lease"],
+        &[("KNIT_REMOTE_TOKEN", "test-token")],
+    );
+    assert!(failure.contains("local rewrite"), "{failure}");
+    let body = last_artifact_body(&fake_dir, "quick-fix");
+    assert!(body.get("force").is_none());
+    assert!(body.get("expectedArtifactHash").is_none());
     fs::remove_dir_all(root).unwrap();
 }
 
@@ -2057,15 +2155,15 @@ fn push_force_with_lease_propagates_into_the_artifact_sync() {
     assert!(body.get("expectedArtifactHash").is_none(), "{body}");
 
     // A forced branch push carries the same force mode into the artifact
-    // sync: lease hash fetched from the sync remote, then compare-and-swap.
-    fs::write(fake_dir.join("current-artifact-hash"), "lease-hash-9").unwrap();
+    // sync: compare-and-swap against the previous successful push.
+    fs::write(fake_dir.join("current-artifact-hash"), "fakehash").unwrap();
     let output = knit_with_env(&workspace, ["push", "--force-with-lease"], &env);
     assert!(output.contains("pushed (forced)"), "{output}");
     let body = last_artifact_body(&fake_dir, "quick-fix");
     assert_eq!(body["force"], serde_json::json!(true), "{body}");
     assert_eq!(
         body["expectedArtifactHash"],
-        serde_json::json!("lease-hash-9"),
+        serde_json::json!("fakehash"),
         "{body}"
     );
 
@@ -3792,4 +3890,75 @@ fn a_remote_ahead_pull_keeps_the_locally_cached_hosted_url() {
     );
 
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn bundle_pull_by_name_records_equal_and_local_ahead_leases_for_next_push() {
+    for local_ahead in [false, true] {
+        let root = unique_temp_dir();
+        let (_origin, backend, _collaborator) = init_remote_repo(&root, "backend");
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        knit(&workspace, ["init", "demo"]);
+        knit(
+            &workspace,
+            ["project", "add", "backend", backend.to_str().unwrap()],
+        );
+        knit(&workspace, ["bundle", "lease work", "--repo", "backend"]);
+        git(&backend, ["push", "origin", "knit/lease-work"]);
+        let fake_dir = root.join("fake-remote");
+        let base_url = spawn_fake_remote_push_api(&fake_dir);
+        knit(&workspace, ["remote", "add", "hosted", &base_url]);
+        let path = workspace.join(".knit/bundles/lease-work.bundle.json");
+        let read_local =
+            || -> serde_json::Value { serde_json::from_slice(&fs::read(&path).unwrap()).unwrap() };
+        let payload = read_local();
+        fs::write(fake_dir.join("export.json"), serde_json::json!({
+            "data": {
+                "project": {"slug": "demo"}, "knitProject": null, "repositories": [],
+                "bundles": [{"id": "rb-lease-work", "slug": "lease-work", "lifecycleState": "open",
+                    "currentArtifact": {"artifactHash": "downloaded-hash", "payload": payload}}],
+                "historyEvents": []
+            }
+        }).to_string()).unwrap();
+        seed_artifact_lease(&workspace, "lease-work", "stale-hash");
+        if local_ahead {
+            let mut local = read_local();
+            local["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .push(serde_json::json!({
+                    "id": "local-only", "type": "checkpoint", "createdAt": "2099-01-01T00:00:00Z"
+                }));
+            fs::write(&path, serde_json::to_vec_pretty(&local).unwrap()).unwrap();
+        }
+        let nodes_before = read_local()["nodes"].clone();
+        let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+        let report = knit_with_env(&workspace, ["bundle", "pull", "lease-work"], &env);
+        assert!(report.contains("artifact already current"), "{report}");
+        let pulled = read_local();
+        assert_eq!(pulled["syncTargets"][0]["artifactHash"], "downloaded-hash");
+        assert_eq!(pulled["nodes"], nodes_before);
+        fs::write(
+            fake_dir.join("current-artifact-hash"),
+            "unrelated-index-hash",
+        )
+        .unwrap();
+        fs::write(
+            fake_dir.join("post-current-artifact-hash"),
+            "downloaded-hash",
+        )
+        .unwrap();
+        knit_with_env(
+            &workspace,
+            ["sync", "push", "--bundles", "--force-with-lease"],
+            &env,
+        );
+        assert_eq!(
+            last_artifact_body(&fake_dir, "lease-work")["expectedArtifactHash"],
+            "downloaded-hash"
+        );
+        assert_eq!(read_local()["syncTargets"][0]["artifactHash"], "fakehash");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

@@ -730,3 +730,411 @@ fn ledger_merge_preserves_fallback_source_identity() {
     );
     assert_eq!(merged.repos[0].remote.as_deref(), Some(TARGET));
 }
+
+#[test]
+fn fork_force_with_lease_uses_source_tracking_and_preserves_identity() {
+    let f = Fixture::new();
+    f.create();
+    let before = f.bundle();
+    let repo: knit::model::RepoEntry = serde_json::from_value(before["repos"][0].clone()).unwrap();
+    let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
+    let first = git(&f.fork, ["rev-parse", "knit/contribution"]);
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), first);
+    // Fetching a same-named upstream branch must not replace the fork lease.
+    git(&f.upstream, ["branch", "knit/contribution", "main"]);
+    git(&f.checkout, ["fetch", "origin"]);
+    let upstream = git(&f.upstream, ["rev-parse", "knit/contribution"]);
+    assert_ne!(upstream, first);
+    git(
+        &f.checkout,
+        ["commit", "--amend", "-m", "Rewritten contribution"],
+    );
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]);
+    let error = f.fail(&["push", "--no-remote"]);
+    assert!(error.contains("non-fast-forward"), "{error}");
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), first);
+    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), rewritten);
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), rewritten);
+    assert_eq!(
+        git(&f.upstream, ["rev-parse", "knit/contribution"]),
+        upstream
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["sourceRemote"],
+        before["repos"][0]["sourceRemote"]
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["targetRemote"],
+        before["repos"][0]["targetRemote"]
+    );
+    assert_eq!(f.bundle()["publications"], before["publications"]);
+    assert_eq!(
+        f.bundle()["repos"][0]["headSha"],
+        git(&f.checkout, ["rev-parse", "HEAD"]).trim()
+    );
+    // Ordinary pushes also advance the source expectation without -u.
+    git(&f.checkout, ["commit", "--allow-empty", "-m", "Follow-up"]);
+    f.run(&["push", "--no-remote"]);
+    assert_eq!(
+        git(&f.checkout, ["rev-parse", &reference]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    git(
+        &f.checkout,
+        [
+            "commit",
+            "--amend",
+            "--allow-empty",
+            "-m",
+            "Rewritten follow-up",
+        ],
+    );
+    f.run(&[
+        "push",
+        "--force-with-lease",
+        "--set-upstream",
+        "--no-remote",
+    ]);
+    assert_eq!(
+        git(&f.checkout, ["config", "branch.knit/contribution.remote"]).trim(),
+        SOURCE
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["sourceRemote"],
+        before["repos"][0]["sourceRemote"]
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["targetRemote"],
+        before["repos"][0]["targetRemote"]
+    );
+    assert_eq!(f.bundle()["publications"], before["publications"]);
+    assert_eq!(
+        f.bundle()["repos"][0]["headSha"],
+        git(&f.checkout, ["rev-parse", "HEAD"]).trim()
+    );
+}
+
+#[test]
+fn fork_force_with_lease_rejects_stale_source_even_when_origin_matches() {
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    let before = f.bundle();
+    let repo: knit::model::RepoEntry = serde_json::from_value(before["repos"][0].clone()).unwrap();
+    let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
+    let observed = git(&f.checkout, ["rev-parse", &reference]);
+    // Another writer changes the fork, then an upstream fetch matches that tip.
+    let moved = git(&f.fork, ["rev-parse", "main"]);
+    git(
+        &f.fork,
+        ["update-ref", "refs/heads/knit/contribution", moved.trim()],
+    );
+    git(&f.upstream, ["branch", "knit/contribution", "main"]);
+    git(&f.checkout, ["fetch", "origin"]);
+    git(
+        &f.checkout,
+        ["commit", "--amend", "-m", "Rewritten contribution"],
+    );
+    let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
+    assert!(error.contains("stale info"), "{error}");
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), moved);
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), observed);
+    assert_eq!(f.bundle(), before);
+}
+
+#[test]
+fn fork_force_with_lease_without_observation_only_creates_missing_branch() {
+    let f = Fixture::new();
+    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    let repo: knit::model::RepoEntry =
+        serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+    let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
+    let first = git(&f.fork, ["rev-parse", "knit/contribution"]);
+    git(&f.checkout, ["update-ref", "-d", &reference]);
+    git(
+        &f.checkout,
+        ["commit", "--amend", "-m", "Rewritten contribution"],
+    );
+    let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
+    assert!(error.contains("stale info"), "{error}");
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), first);
+    // An explicit source fetch establishes the expectation for older bundles.
+    knit::contribution::fetch_ref(&f.checkout, &repo, "knit/contribution", true).unwrap();
+    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    assert_eq!(
+        git(&f.fork, ["rev-parse", "knit/contribution"]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+}
+
+#[test]
+fn fork_plain_force_is_still_refused() {
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    let first = git(&f.fork, ["rev-parse", "knit/contribution"]);
+    git(
+        &f.checkout,
+        ["commit", "--amend", "-m", "Rewritten contribution"],
+    );
+    let error = f.fail(&["push", "--force", "--no-remote"]);
+    assert!(
+        error.contains("force push is not supported for cross-repository contributions"),
+        "{error}"
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), first);
+}
+
+#[test]
+fn fork_force_with_lease_uses_dedicated_fork_remote_tracking() {
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    git(
+        &f.checkout,
+        ["remote", "set-url", "--push", "origin", TARGET],
+    );
+    git(&f.checkout, ["remote", "add", "fork", SOURCE]);
+    // A Knit source fetch must refresh both the role ref and the dedicated
+    // fork tracking ref, even when the latter is initially absent.
+    git(
+        &f.checkout,
+        ["commit", "--allow-empty", "-m", "Fork advances"],
+    );
+    git(&f.checkout, ["push", "fork", "knit/contribution"]);
+    git(
+        &f.checkout,
+        ["update-ref", "-d", "refs/remotes/fork/knit/contribution"],
+    );
+    let repo: knit::model::RepoEntry =
+        serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+    knit::contribution::fetch_ref(&f.checkout, &repo, "knit/contribution", true).unwrap();
+    assert!(git_success(
+        &f.checkout,
+        [
+            "show-ref",
+            "--verify",
+            "refs/remotes/fork/knit/contribution"
+        ]
+    ));
+    git(
+        &f.checkout,
+        [
+            "commit",
+            "--amend",
+            "--allow-empty",
+            "-m",
+            "Rewritten contribution",
+        ],
+    );
+    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    let observed = git(&f.fork, ["rev-parse", "knit/contribution"]);
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-parse", "refs/remotes/fork/knit/contribution"]
+        ),
+        observed
+    );
+    let moved = git(&f.fork, ["rev-parse", "main"]);
+    git(
+        &f.fork,
+        ["update-ref", "refs/heads/knit/contribution", moved.trim()],
+    );
+    git(
+        &f.checkout,
+        [
+            "commit",
+            "--amend",
+            "--allow-empty",
+            "-m",
+            "Another rewrite",
+        ],
+    );
+    let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
+    assert!(error.contains("stale info"), "{error}");
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), moved);
+}
+
+#[test]
+fn fork_force_with_lease_shares_observation_across_transport_spellings() {
+    check_fork_lease_transport_spelling(false);
+}
+
+#[test]
+fn fork_force_with_lease_migrates_recorded_source_legacy_observation() {
+    check_fork_lease_transport_spelling(true);
+}
+
+fn check_fork_lease_transport_spelling(legacy: bool) {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    let before = f.bundle();
+    let repo: knit::model::RepoEntry = serde_json::from_value(before["repos"][0].clone()).unwrap();
+    let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
+    let observed = git(&f.fork, ["rev-parse", "knit/contribution"]);
+    if legacy {
+        let old_ref = format!(
+            "refs/knit/contributions/{:x}",
+            Sha256::digest(format!("{SOURCE}\0knit/contribution").as_bytes())
+        );
+        git(&f.checkout, ["update-ref", &old_ref, observed.trim()]);
+        git(&f.checkout, ["update-ref", "-d", &reference]);
+    } else {
+        f.run(&["pull", "--feature", "--no-remote"]);
+    }
+    let ssh_source = "git@github.com:contributor/widget.git";
+    git(
+        &f.checkout,
+        [
+            "config",
+            "--add",
+            &format!("url.{}.insteadOf", f.fork.display()),
+            ssh_source,
+        ],
+    );
+    git(
+        &f.checkout,
+        ["remote", "set-url", "--push", "origin", ssh_source],
+    );
+    let mut alias = repo.clone();
+    alias.source_remote = Some(ssh_source.into());
+    assert_eq!(
+        knit::contribution::role_ref(&alias, "knit/contribution", true).unwrap(),
+        reference
+    );
+    git(
+        &f.checkout,
+        [
+            "commit",
+            "--amend",
+            "-m",
+            "Rewritten transport contribution",
+        ],
+    );
+    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    assert_eq!(
+        git(&f.fork, ["rev-parse", "knit/contribution"]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        git(&f.checkout, ["rev-parse", &reference]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["sourceRemote"],
+        before["repos"][0]["sourceRemote"]
+    );
+    assert_eq!(
+        f.bundle()["repos"][0]["targetRemote"],
+        before["repos"][0]["targetRemote"]
+    );
+}
+
+#[test]
+fn fork_force_with_lease_observes_native_then_knit_fetch_after_canonical_receipt() {
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    git(
+        &f.checkout,
+        ["remote", "set-url", "--push", "origin", TARGET],
+    );
+    git(&f.checkout, ["remote", "add", "fork", SOURCE]);
+    let repo: knit::model::RepoEntry =
+        serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+    let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
+    let writer = f.root.join("fork-writer");
+    git(
+        &f.root,
+        ["clone", f.fork.to_str().unwrap(), writer.to_str().unwrap()],
+    );
+    configure_git_user(&writer);
+    git(&writer, ["checkout", "knit/contribution"]);
+    for native in [true, false] {
+        git(&writer, ["fetch", "origin"]);
+        git(&writer, ["reset", "--hard", "origin/knit/contribution"]);
+        git(
+            &writer,
+            ["commit", "--allow-empty", "-m", "Fork writer advances"],
+        );
+        git(&writer, ["push", "origin", "knit/contribution"]);
+        let latest = git(&f.fork, ["rev-parse", "knit/contribution"]);
+        assert_ne!(git(&f.checkout, ["rev-parse", &reference]), latest);
+        if native {
+            git(&f.checkout, ["fetch", "fork"]);
+            // A native observation must win over the older canonical receipt.
+            assert_ne!(git(&f.checkout, ["rev-parse", &reference]), latest);
+        } else {
+            // The next Knit observation must refresh the older native receipt.
+            assert_ne!(
+                git(
+                    &f.checkout,
+                    ["rev-parse", "refs/remotes/fork/knit/contribution"]
+                ),
+                latest
+            );
+            f.run(&["pull", "--feature", "--no-remote"]);
+        }
+        assert_eq!(
+            git(
+                &f.checkout,
+                ["rev-parse", "refs/remotes/fork/knit/contribution"]
+            ),
+            latest
+        );
+        git(&f.checkout, ["reset", "--hard", latest.trim()]);
+        git(
+            &f.checkout,
+            [
+                "commit",
+                "--amend",
+                "--allow-empty",
+                "-m",
+                "Rewritten observed contribution",
+            ],
+        );
+        f.run(&["push", "--force-with-lease", "--no-remote"]);
+        assert_eq!(
+            git(&f.fork, ["rev-parse", "knit/contribution"]),
+            git(&f.checkout, ["rev-parse", "HEAD"])
+        );
+    }
+}
+
+#[test]
+fn fork_source_fetch_does_not_rewrite_custom_tracking_destinations() {
+    let f = Fixture::new();
+    f.run(&["push", "--no-remote"]);
+    git(&f.checkout, ["remote", "add", "fork", SOURCE]);
+    git(
+        &f.checkout,
+        [
+            "config",
+            "remote.fork.fetch",
+            "+refs/heads/*:refs/remotes/origin/*",
+        ],
+    );
+    git(&f.upstream, ["branch", "knit/contribution", "main"]);
+    git(&f.checkout, ["fetch", "origin"]);
+    let trap = git(
+        &f.checkout,
+        ["rev-parse", "refs/remotes/origin/knit/contribution"],
+    );
+    let repo: knit::model::RepoEntry =
+        serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+    knit::contribution::fetch_ref(&f.checkout, &repo, "knit/contribution", true).unwrap();
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-parse", "refs/remotes/origin/knit/contribution"]
+        ),
+        trap
+    );
+    assert!(!git_success(
+        &f.checkout,
+        [
+            "show-ref",
+            "--verify",
+            "refs/remotes/fork/knit/contribution"
+        ]
+    ));
+}

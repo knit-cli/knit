@@ -679,7 +679,7 @@ pub enum SyncCommand {
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
         /// Force-push bundle artifacts, overwriting the remote ledger only when it
-        /// still matches the state fetched for the lease. Applies to bundle targets only.
+        /// still matches this workspace's last successful push or pull. Applies to bundle targets only.
         #[arg(long)]
         force_with_lease: bool,
         /// Force-push bundle artifacts unconditionally. Prefer --force-with-lease.

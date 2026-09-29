@@ -1966,6 +1966,7 @@ fn handle_fake_remote_push_request(
             fs::write(&record, existing).unwrap();
             (200, format!("{{\"data\":{{\"id\":\"{repo_id}\"}}}}"))
         }
+        ("PUT", ["api", "v1", "projects", _, "view"]) => (200, json!({"data": body}).to_string()),
         ("POST", ["api", "v1", "projects", _, "history-events"]) => {
             // Every history push is recorded, one line per request, so a
             // test can see how many requests a sync made and which events
@@ -2002,6 +2003,22 @@ fn handle_fake_remote_push_request(
                 format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"{web_url}}}}}"),
             )
         }
+        ("GET", ["api", "v1", "bundles", bundle_id, "artifacts"])
+            if dir.join("stateful-artifacts").exists() =>
+        {
+            let history = fs::read_to_string(dir.join(format!("{bundle_id}.artifact-history")))
+                .unwrap_or_default();
+            // Deliberately oldest-first: an artifact index is not a lease receipt.
+            let artifacts: Vec<Value> = history
+                .lines()
+                .map(|hash| {
+                    json!({
+                        "id": hash, "artifactHash": hash
+                    })
+                })
+                .collect();
+            (200, json!({"data": artifacts}).to_string())
+        }
         ("GET", ["api", "v1", "bundles", _, "artifacts"]) => {
             match fs::read_to_string(dir.join("current-artifact-hash")) {
                 Ok(hash) => (
@@ -2030,12 +2047,26 @@ fn handle_fake_remote_push_request(
 
             let force = body["force"].as_bool().unwrap_or(false);
             let expected = body["expectedArtifactHash"].as_str();
-            let server_hash = fs::read_to_string(dir.join("post-current-artifact-hash"))
-                .or_else(|_| fs::read_to_string(dir.join("current-artifact-hash")))
-                .ok()
-                .map(|hash| hash.trim().to_string());
-            let accepted =
-                "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string();
+            let stateful = dir.join("stateful-artifacts").exists();
+            let state_path = dir.join(format!("{bundle_id}.artifact-current"));
+            let server_hash = if stateful {
+                fs::read_to_string(&state_path).ok()
+            } else {
+                fs::read_to_string(dir.join("post-current-artifact-hash"))
+                    .or_else(|_| fs::read_to_string(dir.join("current-artifact-hash")))
+                    .ok()
+                    .map(|hash| hash.trim().to_string())
+            };
+            let next_hash = if stateful {
+                use sha2::{Digest, Sha256};
+                format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&body["payload"]).unwrap())
+                )
+            } else {
+                "fakehash".to_string()
+            };
+            let accepted = json!({"data": {"id": "art-1", "artifactHash": next_hash}}).to_string();
             let rejected_node = fs::read_to_string(dir.join("reject-node-type")).ok();
             let reject = rejected_node.as_deref().is_some_and(|kind| {
                 body["payload"]["nodes"].as_array().is_some_and(|nodes| {
@@ -2044,7 +2075,7 @@ fn handle_fake_remote_push_request(
                         .any(|node| node["type"].as_str() == Some(kind.trim()))
                 })
             });
-            if reject {
+            let result = if reject {
                 (503, r#"{"error":{"kind":"unavailable","message":"injected artifact publication failure"}}"#.to_string())
             } else if let Some(expected) = expected {
                 // Compare-and-swap: accept only when the lease matches the
@@ -2070,7 +2101,20 @@ fn handle_fake_remote_push_request(
                 )
             } else {
                 (201, accepted)
+            };
+            if stateful && result.0 == 201 {
+                fs::write(&state_path, &next_hash)?;
+                let history_path = dir.join(format!("{bundle_id}.artifact-history"));
+                let mut history = fs::read_to_string(&history_path).unwrap_or_default();
+                history.push_str(&next_hash);
+                history.push('\n');
+                fs::write(history_path, history)?;
+                fs::write(
+                    dir.join(format!("{bundle_id}.artifact-payload")),
+                    serde_json::to_vec(&body["payload"]).unwrap(),
+                )?;
             }
+            result
         }
         _ => (
             404,

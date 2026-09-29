@@ -820,8 +820,23 @@ source branch is successful cleanup.
 Cross-repository publication currently supports verified direct forks on
 `github.com`, including renamed forks and forks owned by the target organization.
 Other forges, cross-host pairs, unrelated repositories, ambiguous push URLs, and
-force pushes of cross-repository contributions fail explicitly. Same-repository
-artifacts and explicit same-repository fields retain ordinary forge behavior.
+unconditional `knit push --force` of cross-repository contributions fail explicitly.
+Same-repository artifacts and explicit same-repository fields retain ordinary
+forge behavior.
+
+After rewriting contribution commits, use `knit push --force-with-lease`. The Git
+lease checks the fork's feature branch against its last pushed or fetched state,
+including when `origin` fetches upstream and pushes to the fork. A concurrent
+fork update refuses the push. A successful push records the contribution identity
+and any commits authored or rewritten outside Knit, then carries the same lease mode into configured hosted bundle syncs.
+
+`knit sync push --force-with-lease` publishes a rewritten bundle ledger using the
+artifact hash recorded by this workspace's last successful push or pull to that
+sync destination. Each successful upload refreshes that receipt, including an
+implicit sync from `knit push`. An unseen hosted update refuses the overwrite;
+inspect and reconcile it before retrying. Without a recorded receipt, Knit uses
+the ordinary fast-forward gate rather than an unguarded overwrite. For intentional
+rewrites, use the lease path instead of merging removed ledger nodes back in.
 
 Choose the PR destination with the same flags used for landing:
 
