@@ -436,6 +436,7 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             remote,
             no_remote,
+            no_history,
         } => commands::push_repos(
             &repos,
             all,
@@ -443,6 +444,7 @@ pub fn run(cli: Cli) -> Result<()> {
             PushForce::from_flags(force_with_lease, force),
             &remote,
             no_remote,
+            no_history,
         ),
         Commands::Check { command } => match command {
             CheckCommand::Run { name, repos, all } => commands::run_check(&name, &repos, all),
@@ -940,7 +942,8 @@ pub fn run(cli: Cli) -> Result<()> {
             Some(SyncCommand::Pull {
                 targets,
                 remote,
-                artifacts_only,
+                artifacts_only: _,
+                repos,
             }) => {
                 let targets = commands::remote::SyncTargets::resolve(
                     targets.bundles,
@@ -959,7 +962,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         || targets.kg
                         || targets.all,
                 );
-                commands::remote::sync_pull(targets, &remote, artifacts_only)
+                commands::remote::sync_pull(targets, &remote, repos)
             }
         },
         Commands::History { command } => match command {

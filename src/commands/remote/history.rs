@@ -63,7 +63,7 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
         "{} {} {}",
         out::movement("pushed history"),
         out::repo(&project_id),
-        out::muted(format!("{pushed} event(s)"))
+        out::muted(format!("{pushed} new event(s)"))
     );
     Ok(())
 }
@@ -106,23 +106,20 @@ pub(super) fn push_project_history_events(
     let to_send: &[HistoryEvent] = match plan {
         HistoryPushPlan::UpToDate => {
             record_history_sync(root, project_id, remote_name, &encoded, state)?;
-            return Ok(events.len());
+            return Ok(0);
         }
         HistoryPushPlan::Tail(from) => &events[from..],
         HistoryPushPlan::Full => &events,
     };
 
     let batches: Vec<&[HistoryEvent]> = to_send.chunks(HISTORY_PAGE_SIZE).collect();
-    if batches.len() > 1 {
-        println!(
-            "{}",
-            out::muted(format!(
-                "syncing history to {remote_name}: {} event(s) in {} request(s)…",
-                to_send.len(),
-                batches.len()
-            ))
-        );
-    }
+    crate::human!(
+        "{}",
+        out::muted(format!(
+            "syncing history to {remote_name}: {} new event(s)…",
+            to_send.len()
+        ))
+    );
     // Batched so a project ledger of thousands of events never rides in one
     // request body; each batch upserts independently and is idempotent, so
     // the batches go out concurrently — a full push of a large ledger is
@@ -173,10 +170,6 @@ pub(super) fn push_project_history_events(
         // Only a fully accepted push moves the cursor: a rejected event stays
         // ahead of it and rides again next time.
         record_history_sync(root, project_id, remote_name, &encoded, state)?;
-    }
-    if let HistoryPushPlan::Tail(from) = plan {
-        // What the remote holds now, for the "N event(s) synced" line.
-        accepted += from;
     }
     Ok(accepted)
 }

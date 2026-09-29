@@ -74,7 +74,10 @@ impl Server {
                 let mut response = None;
                 let recipes = request.contains("/api/v1/projects/demo/landing-recipes ");
                 let executing = state["execution"] == true;
-                if executing && request.contains("/landing-ownership ") {
+                if request.contains("/api/v1/projects/demo/export") {
+                    response =
+                        Some(json!({"project":{"slug":"demo"},"repositories":[],"bundles":[]}));
+                } else if executing && request.contains("/landing-ownership ") {
                     let payload: Value = serde_json::from_slice(&body).unwrap();
                     state["ownership"] = json!({"id":"lease", "token":"test-token"});
                     state["boundRun"] = payload["runIdentity"].clone();

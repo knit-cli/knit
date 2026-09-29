@@ -690,7 +690,7 @@ pub(crate) fn push_active_bundle_to_remote(
     active: &mut ActiveBundle,
     force: PushForce,
 ) -> Result<()> {
-    push_active_bundle_to_remote_impl(remote_name, project, active, force, true)
+    push_active_bundle_to_remote_impl(remote_name, project, active, force, true, true)
 }
 
 /// Handoff moves one bundle; it must not reshape an existing hosted project.
@@ -698,7 +698,7 @@ pub(crate) fn push_handoff_bundle_to_remote(
     remote_name: &str,
     active: &mut ActiveBundle,
 ) -> Result<()> {
-    push_active_bundle_to_remote_impl(remote_name, None, active, PushForce::No, false)
+    push_active_bundle_to_remote_impl(remote_name, None, active, PushForce::No, false, true)
 }
 
 fn push_active_bundle_to_remote_impl(
@@ -707,6 +707,7 @@ fn push_active_bundle_to_remote_impl(
     active: &mut ActiveBundle,
     force: PushForce,
     publish_project_shape: bool,
+    history: bool,
 ) -> Result<()> {
     // An open bundle's artifact must never reach a sync remote unless its
     // feature branches are on git origin: pushing a bundle means branches +
@@ -784,14 +785,18 @@ fn push_active_bundle_to_remote_impl(
         false,
         Some(&active.bundle.id),
     )?;
-    let history_result = super::history::push_project_history_events(
-        remote,
-        &token,
-        &pushed_project.slug,
-        &active.root,
-        &project_id,
-        remote_name,
-    );
+    let history_result = if history {
+        super::history::push_project_history_events(
+            remote,
+            &token,
+            &pushed_project.slug,
+            &active.root,
+            &project_id,
+            remote_name,
+        )
+    } else {
+        Ok(0)
+    };
 
     crate::human!(
         "{} {} -> {}",
@@ -814,7 +819,7 @@ fn push_active_bundle_to_remote_impl(
             crate::human!(
                 "{} {}",
                 out::heading("History:"),
-                out::muted(format!("{history_count} event(s) synced"))
+                out::muted(format!("{history_count} new event(s) synced"))
             );
         }
         Ok(_) => {}
@@ -841,6 +846,16 @@ pub fn maybe_sync_bundle_to_remote(
     remote_overrides: &[String],
     no_remote: bool,
     force: PushForce,
+) -> Result<()> {
+    maybe_sync_bundle_to_remote_with_history(active, remote_overrides, no_remote, force, true)
+}
+
+pub fn maybe_sync_bundle_to_remote_with_history(
+    active: &mut ActiveBundle,
+    remote_overrides: &[String],
+    no_remote: bool,
+    force: PushForce,
+    history: bool,
 ) -> Result<()> {
     if no_remote {
         return Ok(());
@@ -874,7 +889,9 @@ pub fn maybe_sync_bundle_to_remote(
         if multiple {
             println!("{} {}", out::heading("Remote:"), out::repo(&remote_name));
         }
-        if let Err(error) = push_active_bundle_to_remote(&remote_name, None, active, force) {
+        if let Err(error) =
+            push_active_bundle_to_remote_impl(&remote_name, None, active, force, true, history)
+        {
             println!(
                 "{} {error:#}",
                 out::warn(format!("remote sync skipped ({remote_name}):"))

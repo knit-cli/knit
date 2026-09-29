@@ -196,7 +196,10 @@ fn sync_pull_views_replaces_the_template_cache_but_not_personal_state() {
     setup_three_repo_project(&workspace, &root);
 
     let fake_dir = root.join("fake-remote");
-    let base_url = spawn_fake_remote_api(&fake_dir, json!({"data": {}}).to_string());
+    let base_url = spawn_fake_remote_api(
+        &fake_dir,
+        json!({"data": {"project":{"slug":"demo"},"repositories":[],"bundles":[]}}).to_string(),
+    );
     knit(&workspace, ["remote", "add", "hosted", &base_url]);
     let env = [("KNIT_REMOTE_TOKEN", "test-token")];
 
