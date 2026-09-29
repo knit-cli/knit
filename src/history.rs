@@ -130,7 +130,7 @@ pub fn refresh_project_history(root: &Path, project_id: &str) -> Result<usize> {
     let bundles = project_bundles(root, project_id)?;
     let recorded = recorded_event_ids(root, project_id)?;
     let mut lookup = CommitLookup::new(root);
-    let mut generated = base::events(root, project_id)?;
+    let mut generated = base::events(root, project_id, &bundles)?;
     for (_, bundle) in bundles {
         generated.extend(events_for_bundle(
             project_id,
@@ -165,7 +165,7 @@ pub struct RebuildSummary {
 pub fn rebuild_project_history(root: &Path, project_id: &str) -> Result<RebuildSummary> {
     let bundles = project_bundles(root, project_id)?;
     let mut lookup = CommitLookup::new(root);
-    let mut generated = base::events(root, project_id)?;
+    let mut generated = base::events(root, project_id, &bundles)?;
     for (_, bundle) in &bundles {
         generated.extend(events_for_bundle(project_id, bundle, &mut lookup, None));
     }

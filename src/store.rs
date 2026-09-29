@@ -59,6 +59,14 @@ pub fn set_bundle_override(bundle_id: Option<String>) {
         .expect("bundle override lock poisoned") = bundle_id;
 }
 
+/// The explicit CLI selector, excluding environment, cwd and workspace fallback.
+pub(crate) fn explicit_bundle_override() -> Option<String> {
+    BUNDLE_OVERRIDE
+        .lock()
+        .expect("bundle override lock poisoned")
+        .clone()
+}
+
 pub fn load_active_bundle() -> Result<ActiveBundle> {
     load_active_bundle_inner(false)
 }
@@ -509,11 +517,7 @@ pub(crate) fn resolve_optional_bundle_id(
     cwd: &Path,
     config: &KnitConfig,
 ) -> Result<Option<(String, BundleResolutionSource)>> {
-    if let Some(bundle_id) = BUNDLE_OVERRIDE
-        .lock()
-        .expect("bundle override lock poisoned")
-        .clone()
-    {
+    if let Some(bundle_id) = explicit_bundle_override() {
         ensure_bundle_exists(root, &bundle_id)?;
         return Ok(Some((bundle_id, BundleResolutionSource::Explicit)));
     }

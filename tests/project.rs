@@ -1975,6 +1975,7 @@ fn project_pull_imports_requirements_from_the_resolved_bundle_checkout() {
     let checkout = workspace.join(".knit/worktrees/requirements/stack");
     let mut changed = source;
     changed["requirements"]["tools"][0]["minVersion"] = serde_json::json!("24");
+    changed["history"] = serde_json::json!({"baseCommitDepth": 50});
     fs::write(checkout.join("knit.project.json"), changed.to_string()).unwrap();
     knit(&checkout, ["project", "pull", "--repo", "stack"]);
     let saved: serde_json::Value = serde_json::from_str(
@@ -1982,6 +1983,7 @@ fn project_pull_imports_requirements_from_the_resolved_bundle_checkout() {
     )
     .unwrap();
     assert_eq!(saved["requirements"]["tools"][0]["minVersion"], "24");
+    assert_eq!(saved["history"]["baseCommitDepth"], 50);
     assert_eq!(saved["repos"][0]["path"], repo.to_string_lossy().as_ref());
     fs::remove_dir_all(root).unwrap();
 }

@@ -2922,7 +2922,14 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
 
     // Nothing changed: the second push makes no history request at all, and
     // still reports what the remote holds.
-    let second = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    let second = knit_with_env(
+        &workspace,
+        ["sync", "push", "--history"],
+        &[
+            ("KNIT_REMOTE_TOKEN", "owner-token"),
+            ("KNIT_BUNDLE", "missing"),
+        ],
+    );
     assert!(
         second.contains(&format!("{} event(s)", initial.len())),
         "{second}"
@@ -2965,6 +2972,151 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
     assert_eq!(mirror[0].len(), initial.len() + pushes[1].len());
     assert_eq!(common::recorded_history_pushes(&fake_dir).len(), 2);
 
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_history_bounds_upstream_commits_without_bundle_anchors() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let tree = git(&backend, ["rev-parse", "HEAD^{tree}"]);
+    let mut head = git(&backend, ["rev-parse", "HEAD"]);
+    for index in 0..215 {
+        head = git(
+            &backend,
+            [
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                head.trim(),
+                "-m",
+                &format!("Upstream {index}"),
+            ],
+        );
+    }
+    // The refresh reads cached origin/main, not HEAD or a live remote.
+    git(
+        &backend,
+        ["update-ref", "refs/remotes/origin/main", head.trim()],
+    );
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let output = knit_with_env(
+        &workspace,
+        ["sync", "push", "--history"],
+        &[("KNIT_REMOTE_TOKEN", "owner-token")],
+    );
+    let pushes = recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.iter().map(Vec::len).sum::<usize>(), 200);
+    assert!(
+        output.contains("syncing history to hosted: 200 event(s) in 1 request(s)…"),
+        "{output}"
+    );
+    let bodies = fs::read_to_string(fake_dir.join("history-pushes.jsonl")).unwrap();
+    for line in bodies.lines() {
+        let body: serde_json::Value = serde_json::from_str(line).unwrap();
+        assert!(body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["kind"] == "base.commit"));
+    }
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_history_bundle_subset_preserves_project_cursor() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "selected", "--repo", "backend"]);
+    knit(&workspace, ["bundle", "other", "--repo", "backend"]);
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "owner-token")];
+    let cursor = workspace.join(".knit/history/demo.history-sync.json");
+
+    let subset = knit_with_env(
+        &workspace,
+        ["sync", "push", "--history", "--bundle", "selected"],
+        &env,
+    );
+    assert!(
+        !cursor.exists(),
+        "a subset must not create a project cursor"
+    );
+    let initial = recorded_history_pushes(&fake_dir);
+    assert_eq!(initial.len(), 1);
+    assert!(!initial[0].is_empty());
+    assert!(
+        subset.contains(&format!(
+            "syncing history to hosted: {} event(s) in 1 request(s)…",
+            initial[0].len()
+        )),
+        "{subset}"
+    );
+
+    knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    let saved_cursor = fs::read(&cursor).unwrap();
+    let all = recorded_history_pushes(&fake_dir);
+    assert!(all[1].len() > initial[0].len());
+    let feature = workspace.join(".knit/worktrees/selected/backend");
+    append_line(&feature.join("app.txt"), "new selected work");
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "selected",
+            "commit",
+            "--all",
+            "-m",
+            "Selected work",
+        ],
+    );
+    knit_with_env(
+        &workspace,
+        ["--bundle", "selected", "sync", "push", "--history"],
+        &env,
+    );
+    assert_eq!(
+        fs::read(&cursor).unwrap(),
+        saved_cursor,
+        "subset changed the cursor bytes"
+    );
+    let pushes = recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 3);
+    assert!(pushes[2].len() > initial[0].len());
+    let bodies = fs::read_to_string(fake_dir.join("history-pushes.jsonl")).unwrap();
+    for index in [0, 2] {
+        let body: serde_json::Value =
+            serde_json::from_str(bodies.lines().nth(index).unwrap()).unwrap();
+        assert!(body["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|event| event["bundleId"] == "selected" && event["kind"] != "base.commit"));
+    }
+    // The full push still sends the new events, even after their subset upsert.
+    knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    let pushes = recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 4);
+    let expected: Vec<_> = pushes[2].iter().filter(|id| !all[1].contains(id)).collect();
+    assert_eq!(pushes[3].iter().collect::<Vec<_>>(), expected);
     fs::remove_dir_all(root).unwrap();
 }
 
