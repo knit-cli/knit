@@ -4,6 +4,8 @@
 
 mod apply;
 mod plan;
+mod review;
+pub(crate) use review::create_review;
 
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::ids::short_sha;

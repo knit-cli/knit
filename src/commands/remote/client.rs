@@ -312,8 +312,10 @@ pub(super) fn localize_bundle(
                 )
             })?;
         repo.path = local.path.clone();
-        repo.remote = local.remote.clone().or_else(|| repo.remote.clone());
-        repo.base_branch = local.base_branch.clone();
+        if !crate::contribution::configured(repo) {
+            repo.remote = local.remote.clone().or_else(|| repo.remote.clone());
+            repo.base_branch = local.base_branch.clone();
+        }
         repo.checkout_mode = local.checkout_mode;
         repo.worktree_path = None;
     }
@@ -382,6 +384,7 @@ fn origin_lacks_branch(repo_path: &Path, branch: &str, fetch_error: &str) -> boo
 }
 
 pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
+    crate::contribution::validate_bundle(bundle)?;
     // Fetch every repo before creating local branches: a skipped bundle stays unmaterialized.
     let mut missing = Vec::new();
     for repo in &bundle.repos {
@@ -389,6 +392,10 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
             continue;
         };
         let repo_path = PathBuf::from(&repo.path);
+        if crate::contribution::configured(repo) {
+            crate::contribution::fetch_ref(&repo_path, repo, branch, true)?;
+            continue;
+        }
         if git_output(&repo_path, ["remote", "get-url", "origin"]).is_err() {
             continue;
         }
@@ -427,6 +434,14 @@ pub(super) fn prepare_feature_branches(bundle: &ChangeGroup) -> Result<()> {
             continue;
         };
         let repo_path = PathBuf::from(&repo.path);
+        if crate::contribution::configured(repo) {
+            let reference = crate::contribution::role_ref(repo, branch, true)?;
+            if !branch_exists(&repo_path, branch) {
+                git_output(&repo_path, ["branch", "--no-track", branch, &reference])?;
+            }
+            crate::contribution::track_source(&repo_path, repo, branch)?;
+            continue;
+        }
         if git_output(&repo_path, ["remote", "get-url", "origin"]).is_err() {
             continue;
         }
@@ -461,6 +476,7 @@ pub(super) fn ensure_remote_bundle_fast_forward(
     local: &ChangeGroup,
     remote: &ChangeGroup,
 ) -> Result<()> {
+    crate::contribution::compatible(local, remote)?;
     for remote_repo in &remote.repos {
         let Some(remote_head) = remote_repo.head_sha.as_deref() else {
             continue;
@@ -489,7 +505,7 @@ pub(super) fn ensure_remote_bundle_fast_forward(
 
 pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Result<()> {
     let root = active.root.clone();
-    let jobs: Vec<(usize, String, PathBuf, String)> = active
+    let jobs: Vec<(usize, crate::model::RepoEntry, PathBuf, String)> = active
         .bundle
         .repos
         .iter()
@@ -497,7 +513,7 @@ pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Resul
         .filter_map(|(repo_index, repo)| {
             let branch = repo.feature_branch.as_deref()?;
             let checkout = remote_checkout_dir(&root, repo)?;
-            Some((repo_index, repo.id.clone(), checkout, branch.to_string()))
+            Some((repo_index, repo.clone(), checkout, branch.to_string()))
         })
         .collect();
 
@@ -508,15 +524,16 @@ pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Resul
     let results: Vec<(String, Result<(usize, String)>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = jobs
             .iter()
-            .map(|(repo_index, repo_id, checkout, branch)| {
+            .map(|(repo_index, repo, checkout, branch)| {
                 let repo_index = *repo_index;
-                let repo_id = repo_id.clone();
+                let repo = repo.clone();
+                let repo_id = repo.id.clone();
                 let checkout = checkout.clone();
                 let branch = branch.clone();
                 scope.spawn(move || {
                     (
                         repo_id.clone(),
-                        fast_forward_one_checkout(repo_index, &repo_id, &checkout, &branch),
+                        fast_forward_one_checkout(repo_index, &repo, &checkout, &branch),
                     )
                 })
             })
@@ -548,10 +565,11 @@ pub(super) fn fast_forward_feature_checkouts(active: &mut ActiveBundle) -> Resul
 
 fn fast_forward_one_checkout(
     repo_index: usize,
-    repo_id: &str,
+    repo: &crate::model::RepoEntry,
     checkout: &Path,
     branch: &str,
 ) -> Result<(usize, String)> {
+    let repo_id = &repo.id;
     let actual = current_branch(checkout)?.unwrap_or_else(|| "(detached HEAD)".to_string());
     if actual != branch {
         bail!(
@@ -559,7 +577,11 @@ fn fast_forward_one_checkout(
             checkout.display()
         );
     }
-    let remote_ref = format!("origin/{branch}");
+    let remote_ref = if crate::contribution::configured(repo) {
+        crate::contribution::role_ref(repo, branch, true)?
+    } else {
+        format!("origin/{branch}")
+    };
     if ref_exists(checkout, &remote_ref) {
         git_output(checkout, ["merge", "--ff-only", &remote_ref])
             .with_context(|| format!("{repo_id}: failed to fast-forward {branch}"))?;

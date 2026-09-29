@@ -8,7 +8,7 @@ use crate::git::{commit_details, current_branch, git_output, is_ancestor, rev_li
 use crate::ids::{node_id, short_sha};
 use crate::model::{BundleNode, Movement, RepoChange};
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, PrTarget};
+use crate::providers::{self, publication_for_repo};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
@@ -146,6 +146,8 @@ struct LandUpdateTarget {
     feature_branch: String,
     base_branch: String,
     publication_url: String,
+    source_remote: String,
+    target_remote: String,
     recorded_head: String,
 }
 
@@ -173,7 +175,29 @@ fn update_target(active: &ActiveBundle, repo_index: usize) -> Result<LandUpdateT
         )
     })?;
 
+    let source_remote = crate::contribution::push_remote(&cwd, repo)?;
+    let target_remote = if crate::contribution::configured(repo) {
+        let forge = providers::for_repo(repo)?;
+        let mut target = crate::contribution::target(
+            &cwd,
+            repo,
+            forge.as_ref(),
+            &publication.base_branch,
+            false,
+        )?;
+        // The local recorded head may already include an unpushed base update.
+        // Verify repository/ref identity now; the refreshed post-push read pins SHA.
+        target.verify_head = false;
+        forge.view(&target, &publication.url)?;
+        crate::contribution::destination(repo)
+            .context("missing targetRemote")?
+            .to_owned()
+    } else {
+        "origin".into()
+    };
     Ok(LandUpdateTarget {
+        source_remote,
+        target_remote,
         repo_index,
         repo_id: repo.id.clone(),
         cwd,
@@ -243,7 +267,7 @@ fn merge_base_into_feature(
         &target.cwd,
         [
             OsString::from("fetch"),
-            OsString::from("origin"),
+            OsString::from(&target.target_remote),
             OsString::from(&target.base_branch),
         ],
     )
@@ -262,7 +286,7 @@ fn merge_base_into_feature(
         return Ok(None);
     }
 
-    let base_label = format!("origin/{}", target.base_branch);
+    let base_label = base_sha;
     git_output(
         &target.cwd,
         [
@@ -364,7 +388,7 @@ fn push_update_target(target: &LandUpdateTarget, set_upstream: bool) -> Result<(
     if set_upstream {
         args.push(OsString::from("--set-upstream"));
     }
-    args.push(OsString::from("origin"));
+    args.push(OsString::from(&target.source_remote));
     args.push(OsString::from(&target.feature_branch));
     git_output(&target.cwd, args)?;
     let sha = rev_parse(&target.cwd, "HEAD")?;
@@ -372,7 +396,10 @@ fn push_update_target(target: &LandUpdateTarget, set_upstream: bool) -> Result<(
         "{}: {} {} {}",
         out::repo(&target.repo_id),
         out::movement("pushed"),
-        out::branch(format!("origin/{}", target.feature_branch)),
+        out::branch(format!(
+            "{}/{}",
+            target.source_remote, target.feature_branch
+        )),
         out::sha(short_sha(&sha))
     );
     Ok(())
@@ -383,9 +410,16 @@ fn refresh_update_publications(
     targets: &[LandUpdateTarget],
 ) -> Result<()> {
     for target in targets {
+        active.bundle.repos[target.repo_index].head_sha = Some(rev_parse(&target.cwd, "HEAD")?);
         let repo = active.bundle.repos[target.repo_index].clone();
         let forge = providers::for_repo(&repo)?;
-        let pr_target = PrTarget::checkout(&target.cwd);
+        let pr_target = crate::contribution::target(
+            &target.cwd,
+            &repo,
+            forge.as_ref(),
+            &target.base_branch,
+            false,
+        )?;
         let pr = forge
             .view(&pr_target, &target.publication_url)
             .with_context(|| format!("{}: failed to refresh PR metadata", target.repo_id))?;

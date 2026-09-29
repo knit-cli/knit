@@ -363,6 +363,20 @@
         "type": "string"
       }
     },
+    "repositoryIdentities": {
+      "description": "Pinned repository URLs and feature branches for portable landing execution.",
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "properties": {
+          "remote": { "type": ["string", "null"] },
+          "sourceRemote": { "type": ["string", "null"] },
+          "targetRemote": { "type": ["string", "null"] },
+          "featureBranch": { "type": ["string", "null"] }
+        },
+        "additionalProperties": false
+      }
+    },
     "requiredCapabilities": {
       "type": "array",
       "items": {

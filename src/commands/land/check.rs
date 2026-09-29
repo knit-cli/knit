@@ -7,7 +7,7 @@
 
 use crate::checkout::checkout_dir;
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
+use crate::providers::{self, publication_for_repo, CheckRun};
 use crate::store::{load_active_bundle, ActiveBundle};
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -178,7 +178,18 @@ pub(crate) fn assess_landing_readiness(
         }
     };
     let cwd = checkout_dir(active, repo).unwrap_or_else(|| PathBuf::from(&repo.path));
-    let target = PrTarget::checkout(&cwd);
+    let branch = publication_for_repo(&active.bundle, &repo.id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = match crate::contribution::target(&cwd, repo, forge.as_ref(), branch, false) {
+        Ok(target) => target,
+        Err(error) => {
+            return LandReadiness {
+                verdict: format!("invalid contribution: {error}"),
+                ..base
+            }
+        }
+    };
 
     let pr = match forge.view(&target, publication_url) {
         Ok(pr) => pr,

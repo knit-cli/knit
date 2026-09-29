@@ -86,6 +86,7 @@ pub fn fetch_repos(
 }
 
 struct FetchTarget {
+    contribution: Option<crate::model::RepoEntry>,
     repo_id: String,
     path: String,
     base_branch: String,
@@ -99,6 +100,7 @@ struct FetchTarget {
 fn resolve_fetch_targets(selectors: &[String]) -> Result<Vec<FetchTarget>> {
     let bundle_error = match load_active_bundle() {
         Ok(active) => {
+            crate::contribution::validate_bundle(&active.bundle)?;
             if active.bundle.repos.is_empty() {
                 bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
             }
@@ -108,6 +110,7 @@ fn resolve_fetch_targets(selectors: &[String]) -> Result<Vec<FetchTarget>> {
                 .map(|index| {
                     let repo = &active.bundle.repos[*index];
                     FetchTarget {
+                        contribution: crate::contribution::configured(repo).then(|| repo.clone()),
                         repo_id: repo.id.clone(),
                         path: repo.path.clone(),
                         base_branch: repo.base_branch.clone(),
@@ -131,6 +134,7 @@ fn resolve_fetch_targets(selectors: &[String]) -> Result<Vec<FetchTarget>> {
         .iter()
         .filter(|repo| selectors.is_empty() || selectors.iter().any(|s| s == &repo.id))
         .map(|repo| FetchTarget {
+            contribution: None,
             repo_id: repo.id.clone(),
             path: repo.path.clone(),
             base_branch: repo.base_branch.clone(),
@@ -155,6 +159,17 @@ fn fetch_repo(repo: &FetchTarget) -> Result<FetchOutcome> {
         bail!("original repo path does not exist: {}", cwd.display());
     }
 
+    if let Some(entry) = &repo.contribution {
+        let reference = crate::contribution::role_ref(entry, &repo.base_branch, false)?;
+        let before = ref_commit_sha(&cwd, &reference)?;
+        crate::contribution::fetch_ref(&cwd, entry, &repo.base_branch, false)?;
+        return Ok(FetchOutcome {
+            repo_id: repo.repo_id.clone(),
+            remote_ref: reference.clone(),
+            before,
+            after: ref_commit_sha(&cwd, &reference)?,
+        });
+    }
     let remote = "origin";
     git_output_optional(&cwd, ["remote", "get-url", remote])?
         .with_context(|| format!("no `{remote}` remote configured in {}", cwd.display()))?;

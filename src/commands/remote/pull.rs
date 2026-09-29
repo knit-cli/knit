@@ -1178,6 +1178,7 @@ pub fn pull_bundle_remote_state(
         LedgerRelation::Diverged => {
             let localized = localize_bundle(remote_payload, &context.project)?;
             prepare_feature_branches(&localized)?;
+            crate::contribution::compatible(&local, &localized)?;
             let mut merged = merge_ledgers(&local, &localized, now_iso());
             merged.record_sync_target_with_web_url(
                 &context.remote_name,

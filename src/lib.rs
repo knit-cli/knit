@@ -4,6 +4,7 @@ pub mod auth_git;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
+pub mod contribution;
 pub mod git;
 mod git_fallback;
 pub mod history;
@@ -491,6 +492,8 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::run_project_command(name.as_deref(), &repos, all, list, force, purge, &args),
         Commands::Publish { target } => match target {
             PublishCommand::Create {
+                source_remote,
+                target_remote,
                 repos,
                 from_artifact,
                 out,
@@ -524,6 +527,8 @@ pub fn run(cli: Cli) -> Result<()> {
                         provider.as_deref(),
                     ),
                     None => commands::create_publications(
+                        source_remote.as_deref(),
+                        target_remote.as_deref(),
                         &repos,
                         all,
                         draft,

@@ -359,11 +359,16 @@ pub fn merge_ledgers(local: &ChangeGroup, remote: &ChangeGroup, now: String) -> 
     }
 
     for repo in &remote.repos {
-        if !merged
+        if let Some(existing) = merged
             .repos
-            .iter()
-            .any(|local_repo| local_repo.id == repo.id)
+            .iter_mut()
+            .find(|local_repo| local_repo.id == repo.id)
         {
+            if !crate::contribution::configured(existing) && crate::contribution::configured(repo) {
+                existing.source_remote = crate::contribution::source(repo).map(str::to_owned);
+                existing.target_remote = crate::contribution::destination(repo).map(str::to_owned);
+            }
+        } else {
             merged.repos.push(repo.clone());
         }
     }
@@ -439,6 +444,18 @@ pub struct ForgeAuthor {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RepoEntry {
+    #[serde(
+        default,
+        deserialize_with = "contribution_remote",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub source_remote: Option<String>,
+    #[serde(
+        default,
+        deserialize_with = "contribution_remote",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub target_remote: Option<String>,
     pub id: String,
     pub path: String,
     pub remote: Option<String>,
@@ -1447,4 +1464,12 @@ mod sync_target_tests {
         let merged = merge_ledgers(&local, &other_id, "2026-01-02T00:00:00Z".into());
         assert_eq!(merged.sync_targets[0].web_url, None);
     }
+}
+
+fn contribution_remote<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<String>, D::Error> {
+    let value = String::deserialize(d)?;
+    if value.trim().is_empty() {
+        return Err(serde::de::Error::custom("empty contribution remote"));
+    }
+    Ok(Some(value))
 }

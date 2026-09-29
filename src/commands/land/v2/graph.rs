@@ -43,6 +43,8 @@ pub(crate) fn bundle_fingerprint(value: &Value) -> String {
                 &[
                     "id",
                     "remote",
+                    "sourceRemote",
+                    "targetRemote",
                     "baseBranch",
                     "baseSha",
                     "featureBranch",
@@ -86,7 +88,7 @@ pub(crate) fn project_fingerprint(value: &Value) -> String {
         .flatten()
         .map(|r| {
             let mut v = serde_json::Map::new();
-            for key in ["id", "remote", "baseBranch"] {
+            for key in ["id", "remote", "sourceRemote", "targetRemote", "baseBranch"] {
                 if let Some(x) = r.get(key).filter(|v| !v.is_null()) {
                     v.insert(key.into(), x.clone());
                 }
@@ -594,6 +596,24 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             if plan["bundleId"] != bundle["id"] {
                 bail!("plan belongs to a different bundle");
             }
+            if v2
+                && bundle["repos"]
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .any(|r| r["sourceRemote"].is_string() || r["targetRemote"].is_string())
+                && !plan["repositoryIdentities"].is_object()
+            {
+                bail!("explicit remote identities require a newly generated plan with repositoryIdentities");
+            }
+            if let Some(identities) = plan.get("repositoryIdentities") {
+                let expected = repository_identities(bundle, &Value::Null);
+                for (id, identity) in expected.as_object().unwrap() {
+                    if identities.get(id) != Some(identity) {
+                        bail!("saved repository identities differ from bundle");
+                    }
+                }
+            }
             let reviewed_identity = super::branch_checkout::reviewed_identity(plan, bundle);
             if v2 && plan["bundleFingerprint"] != bundle_fingerprint(&reviewed_identity) {
                 bail!("stale bundle fingerprint");
@@ -673,6 +693,11 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             }
         }
         if let Some(project) = project {
+            if let (Some(identities), Some(bundle)) = (plan.get("repositoryIdentities"), bundle) {
+                if *identities != repository_identities(bundle, project) {
+                    bail!("saved repository identities differ from project/bundle");
+                }
+            }
             if v2 && plan["projectFingerprint"] != project_fingerprint(project) {
                 bail!("stale project fingerprint");
             }
@@ -683,4 +708,20 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
         errors.push(format!("{e:#}"));
     }
     json!({"valid":errors.is_empty(),"errors":errors,"waves":waves,"recovery":{"automatic":manual.is_empty(),"manualSteps":manual}})
+}
+
+/// Preserve both transport identities for standalone source resolution and recipe checkouts.
+pub(super) fn repository_identities(bundle: &Value, project: &Value) -> Value {
+    let mut result = serde_json::Map::new();
+    for repo in project["repos"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .chain(bundle["repos"].as_array().into_iter().flatten())
+    {
+        if let Some(id) = repo["id"].as_str() {
+            result.insert(id.into(), json!({"remote":repo["remote"],"sourceRemote":repo["sourceRemote"],"targetRemote":repo["targetRemote"],"featureBranch":repo["featureBranch"]}));
+        }
+    }
+    Value::Object(result)
 }

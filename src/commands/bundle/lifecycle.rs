@@ -34,6 +34,7 @@ pub fn archive_bundle(
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let bundle = load_existing_bundle(&path, &bundle_id)?;
+    crate::contribution::validate_bundle(&bundle)?;
     let mut active = ActiveBundle::unlocked(root.clone(), path.clone(), bundle);
     let summary = archive_active_bundle(&mut active, reason, keep_worktrees, force)?;
     save_active_bundle(&active)?;
@@ -117,6 +118,7 @@ pub fn restore_bundle(bundle_id: &str) -> Result<()> {
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    crate::contribution::validate_bundle(&bundle)?;
     if bundle_state(&bundle) != BundleStatus::Archived {
         bail!("Bundle `{bundle_id}` is not archived.");
     }
@@ -157,6 +159,7 @@ pub fn archive_dead_bundle(
         let bundle_id = crate::ids::slugify(bundle_id);
         let path = stored_bundle_path(&root, &bundle_id);
         let bundle = load_existing_bundle(&path, &bundle_id)?;
+        crate::contribution::validate_bundle(&bundle)?;
         if branches {
             delete_local_feature_branches(&bundle, force_branches)?;
         }
@@ -186,6 +189,7 @@ pub fn delete_bundle(
     let bundle_id = crate::ids::slugify(bundle_id);
     let path = stored_bundle_path(&root, &bundle_id);
     let mut bundle = load_existing_bundle(&path, &bundle_id)?;
+    crate::contribution::validate_bundle(&bundle)?;
     if force_branches && !branches {
         bail!("Use --branches with --force-branches.");
     }
@@ -419,7 +423,12 @@ fn delete_remote_feature_branches(bundle: &ChangeGroup) -> Result<()> {
             ));
             continue;
         }
-        match delete_remote_feature_branch(&repo_root, &repo.id, branch) {
+        let result = if crate::contribution::configured(repo) {
+            delete_contribution_branch(&repo_root, repo, branch)
+        } else {
+            delete_remote_feature_branch(&repo_root, &repo.id, branch)
+        };
+        match result {
             Ok(()) => {}
             Err(error) => failures.push(format!("{}: {error:#}", repo.id)),
         }
@@ -512,5 +521,38 @@ pub(super) fn clear_active_if_matches(root: &std::path::Path, bundle_id: &str) -
         config.active_bundle = None;
         save_config(root, &config)?;
     }
+    Ok(())
+}
+
+fn delete_contribution_branch(
+    root: &Path,
+    repo: &crate::model::RepoEntry,
+    branch: &str,
+) -> Result<()> {
+    let source = crate::contribution::source(repo).context("missing sourceRemote")?;
+    let reference = format!("refs/heads/{branch}");
+    if crate::git::remote_ref_sha(root, source, &reference)?.is_some() {
+        git_output(root, ["push", source, "--delete", &reference])?;
+    }
+    let reference = crate::contribution::role_ref(repo, branch, true)?;
+    git_output(root, ["update-ref", "-d", &reference])?;
+    // A split pushurl never makes origin's fetch-side tracking ref ours.
+    let remotes = git_output(root, ["remote"])?;
+    for remote in remotes.lines() {
+        if crate::contribution::remote_url(root, remote, false)
+            .ok()
+            .is_some_and(|url| crate::contribution::same_repository(&url, source).unwrap_or(false))
+        {
+            git_output(
+                root,
+                [
+                    "update-ref",
+                    "-d",
+                    &format!("refs/remotes/{remote}/{branch}"),
+                ],
+            )?;
+        }
+    }
+    println!("{}: removed source branch {branch}", out::repo(&repo.id));
     Ok(())
 }

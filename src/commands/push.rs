@@ -7,7 +7,7 @@ use crate::ids::short_sha;
 use crate::model::{BundleState, ChangeGroup, RepoEntry};
 use crate::output as out;
 use crate::repo_selectors::resolve_repo_indexes;
-use crate::store::{load_active_bundle_for_update, ActiveBundle};
+use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::tracking::latest_recorded_head_sha;
 use anyhow::{anyhow, bail, Context, Result};
 use std::ffi::OsString;
@@ -84,6 +84,26 @@ pub fn push_repos(
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    let mut discovered = false;
+    for &index in &indexes {
+        if let Some(cwd) = checkout_dir(&active, &active.bundle.repos[index]) {
+            discovered |= crate::contribution::discover(&cwd, &mut active.bundle.repos[index])?;
+        }
+    }
+    crate::contribution::validate_bundle(&active.bundle)?;
+    for &index in &indexes {
+        let repo = &active.bundle.repos[index];
+        if crate::contribution::configured(repo) {
+            if force.is_force() && crate::contribution::cross_repository(repo)? {
+                bail!("force push is not supported for cross-repository contributions");
+            }
+            let cwd = checkout_dir(&active, repo).context("missing contribution checkout")?;
+            crate::contribution::push_remote(&cwd, repo)?;
+        }
+    }
+    if discovered {
+        save_active_bundle(&active)?;
+    }
     let total = indexes.len();
     let limit = crate::parallel::git_jobs()?;
     if total > 1 {
@@ -187,14 +207,26 @@ fn push_repo(
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
     ensure_feature_branch(repo, branch, &cwd)?;
-    ensure_origin(repo, &cwd)?;
+    if !crate::contribution::configured(repo) {
+        ensure_origin(repo, &cwd)?;
+    }
 
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream, force)
-        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+    let remote = crate::contribution::push_remote(&cwd, repo)?;
+    if remote == "origin" {
+        run_push(&cwd, branch, set_upstream, force)
+    } else {
+        run_push_to(&cwd, &remote, branch, set_upstream, force)
+    }
+    .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
 
-    let upstream = if set_upstream {
+    if set_upstream {
+        crate::contribution::track_source(&cwd, repo, branch)?;
+    }
+    let upstream = if crate::contribution::configured(repo) {
+        format!("{remote}/{branch}")
+    } else if set_upstream {
         read_upstream(&cwd).unwrap_or_else(|| format!("origin/{branch}"))
     } else {
         format!("origin/{branch}")
@@ -241,6 +273,16 @@ pub(crate) fn run_push(
     set_upstream: bool,
     force: PushForce,
 ) -> Result<()> {
+    run_push_to(cwd, "origin", branch, set_upstream, force)
+}
+
+pub(crate) fn run_push_to(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    set_upstream: bool,
+    force: PushForce,
+) -> Result<()> {
     let timeout = crate::retry::git_push_timeout()?;
     crate::retry::retry_transient(
         "push",
@@ -254,7 +296,7 @@ pub(crate) fn run_push(
             if let Some(force_arg) = force.git_arg() {
                 args.push(OsString::from(force_arg));
             }
-            args.push(OsString::from("origin"));
+            args.push(OsString::from(remote));
             args.push(OsString::from(branch));
 
             git_output_with_timeout(cwd, args, timeout)?;
@@ -289,10 +331,22 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
         return Ok(Vec::new());
     }
 
+    crate::contribution::validate_bundle(bundle)?;
+    for repo in &bundle.repos {
+        if let Some(cwd) = branch_push_dir(root, repo) {
+            let mut resolved = repo.clone();
+            if crate::contribution::discover(&cwd, &mut resolved)? {
+                bail!("{}: contribution identity is not recorded; run knit push or publish create for this repository before syncing", repo.id);
+            }
+            if crate::contribution::configured(repo) {
+                crate::contribution::push_remote(&cwd, repo)?;
+            }
+        }
+    }
     let mut pushed = Vec::new();
     for repo in &bundle.repos {
         // No git remote recorded: the branch/artifact coupling cannot apply.
-        let Some(remote_url) = repo.remote.as_deref() else {
+        let Some(remote_url) = crate::contribution::source(repo) else {
             continue;
         };
         let Some(branch) = repo.feature_branch.as_deref() else {
@@ -320,7 +374,13 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
                 repo.id
             )
         })?;
-        let remote_sha = remote_ref_sha(&cwd, "origin", &reference).with_context(|| {
+        let push_remote = crate::contribution::push_remote(&cwd, repo)?;
+        let verify_remote = if crate::contribution::configured(repo) {
+            remote_url
+        } else {
+            "origin"
+        };
+        let remote_sha = remote_ref_sha(&cwd, verify_remote, &reference).with_context(|| {
             format!(
                 "repo {}: origin is unreachable, so feature branch {branch} cannot be verified",
                 repo.id
@@ -336,12 +396,13 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
         if remote_sha.as_deref() == Some(local_tip.as_str()) {
             continue;
         }
-        run_push(&cwd, branch, true, PushForce::No).map_err(|error| {
+        run_push_to(&cwd, &push_remote, branch, true, PushForce::No).map_err(|error| {
             anyhow!(
                 "repo {}: feature branch {branch} is not on origin and could not be pushed: {error:#}",
                 repo.id
             )
         })?;
+        crate::contribution::track_source(&cwd, repo, branch)?;
         pushed.push(format!(
             "{}: {} {} {}",
             out::repo(&repo.id),

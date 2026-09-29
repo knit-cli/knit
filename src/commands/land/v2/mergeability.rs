@@ -304,8 +304,8 @@ fn git_best_effort(dir: &Path, args: &[&str]) -> Option<String> {
 /// `ls-remote`. When origin answers, the answer is authoritative: a missing
 /// ref is a missing branch, never papered over with a cached or local ref.
 /// Fetch/transport failures are returned as errors so callers fail closed.
-pub(crate) fn target_tip(root: &Path, branch: &str) -> Result<Option<String>> {
-    crate::git::remote_ref_sha(root, "origin", &format!("refs/heads/{branch}"))
+pub(crate) fn target_tip(root: &Path, branch: &str, remote: &str) -> Result<Option<String>> {
+    crate::git::remote_ref_sha(root, remote, &format!("refs/heads/{branch}"))
         .with_context(|| format!("failed to resolve origin/{branch} from {}", root.display()))
 }
 
@@ -319,8 +319,10 @@ pub(crate) fn verify_integration_source(
     branch: &str,
     sha: &str,
     reviewed_head: &str,
+    bundle: &Value,
 ) -> Result<()> {
-    let tip = target_tip(root, branch)?.with_context(|| {
+    let remote = bundle_remote(bundle, repo_id, Some(branch), false);
+    let tip = target_tip(root, branch, remote)?.with_context(|| {
         format!("{repo_id}: integration source branch {branch} is missing from origin")
     })?;
     if tip != sha {
@@ -337,7 +339,7 @@ pub(crate) fn verify_integration_source(
                 "fetch",
                 "--quiet",
                 "--no-tags",
-                "origin",
+                remote,
                 &format!("+refs/heads/{branch}:refs/knit/landing/source/{repo_id}"),
             ],
         )
@@ -369,14 +371,14 @@ pub(crate) struct Simulation {
 /// Fetch a branch's objects into the source repository, auth-aware, so an
 /// isolated clone of it can simulate locally. Fetching updates the
 /// repository's refs, never its checkout.
-fn fetch_objects(root: &Path, repo_id: &str, branch: &str) -> Result<()> {
+fn fetch_objects(root: &Path, repo_id: &str, branch: &str, remote: &str) -> Result<()> {
     git(
         root,
         &[
             "fetch",
             "--quiet",
             "--no-tags",
-            "origin",
+            remote,
             &format!("+refs/heads/{branch}:refs/knit/landing/sim/{repo_id}/{branch}"),
         ],
     )
@@ -393,26 +395,38 @@ fn fetch_objects(root: &Path, repo_id: &str, branch: &str) -> Result<()> {
 /// actually verified; any other failure — unrelated histories, a missing
 /// source object, a broken merge driver — propagates with its original
 /// error, and a diff that cannot be read is never treated as success.
-pub(crate) fn simulate_merge(
+pub(crate) fn simulate_merge_for_bundle(
     root: &Path,
     repo_id: &str,
     source_branch: Option<&str>,
     source_sha: &str,
     target_branch: &str,
     target_sha: &str,
+    bundle: &Value,
 ) -> Result<Simulation> {
     let missing =
         |object: &str| git(root, &["cat-file", "-e", &format!("{object}^{{commit}}")]).is_err();
     if missing(target_sha) {
-        fetch_objects(root, repo_id, target_branch)?;
+        fetch_objects(root, repo_id, target_branch, destination(bundle, repo_id))?;
     }
     if missing(source_sha) {
         if let Some(branch) = source_branch {
-            fetch_objects(root, repo_id, branch)?;
+            fetch_objects(
+                root,
+                repo_id,
+                branch,
+                bundle_remote(bundle, repo_id, Some(branch), false),
+            )?;
         } else {
             git(
                 root,
-                &["fetch", "--quiet", "--no-tags", "origin", source_sha],
+                &[
+                    "fetch",
+                    "--quiet",
+                    "--no-tags",
+                    bundle_remote(bundle, repo_id, None, true),
+                    source_sha,
+                ],
             )
             .with_context(|| format!("{repo_id}: fetching source object {source_sha} failed"))?;
         }
@@ -647,9 +661,11 @@ pub(crate) fn mergeability_checks(
             let (source_branch, source_sha) =
                 merge_source(plan, bundle, repo_id).unwrap_or_default();
             let target_branch = step["targetBranch"].as_str().unwrap_or("");
-            let target_sha = roots
-                .get(repo_id)
-                .and_then(|root| target_tip(root, target_branch).ok().flatten());
+            let target_sha = roots.get(repo_id).and_then(|root| {
+                target_tip(root, target_branch, destination(bundle, repo_id))
+                    .ok()
+                    .flatten()
+            });
             checks.push(MergeCheck {
                 step_id: id.to_owned(),
                 repo_id: repo_id.to_owned(),
@@ -696,7 +712,7 @@ pub(crate) fn mergeability_checks(
                 plan["bundleHeads"][repo_id].as_str(),
             ) {
                 if let Err(error) =
-                    verify_integration_source(root, repo_id, branch, &source_sha, reviewed)
+                    verify_integration_source(root, repo_id, branch, &source_sha, reviewed, bundle)
                 {
                     check.status = "source_drift".to_owned();
                     check.error = Some(format!("{error:#}"));
@@ -713,13 +729,15 @@ pub(crate) fn mergeability_checks(
             // provenance was just verified above; no target is scanned or
             // pinned for them.
             if mode == CheckMode::Report {
-                check.target_sha = target_tip(root, target_branch).ok().flatten();
+                check.target_sha = target_tip(root, target_branch, destination(bundle, repo_id))
+                    .ok()
+                    .flatten();
             }
             check.status = "not_required".to_owned();
             checks.push(check);
             continue;
         }
-        let target_sha = match target_tip(root, target_branch) {
+        let target_sha = match target_tip(root, target_branch, destination(bundle, repo_id)) {
             Ok(Some(sha)) => sha,
             Ok(None) => {
                 errors.push(format!(
@@ -738,13 +756,14 @@ pub(crate) fn mergeability_checks(
             }
         };
         check.target_sha = Some(target_sha.clone());
-        match simulate_merge(
+        match simulate_merge_for_bundle(
             root,
             repo_id,
             source_branch.as_deref(),
             &source_sha,
             target_branch,
             &target_sha,
+            bundle,
         ) {
             Ok(result) if result.contained => {
                 check.status = "already_contained".to_owned();
@@ -784,6 +803,73 @@ pub(crate) fn mergeability_checks(
 
 pub(crate) fn checks_to_json(checks: &[MergeCheck]) -> Vec<Value> {
     checks.iter().map(MergeCheck::to_json).collect()
+}
+
+/// Resolve feature objects from their source and all other branches from the destination.
+pub(super) fn recorded_remote<'a>(
+    identity: &'a Value,
+    branch: Option<&str>,
+    source: bool,
+) -> &'a str {
+    if identity["sourceRemote"].is_null() && identity["targetRemote"].is_null() {
+        return "origin";
+    }
+    let feature = source || branch.is_some_and(|b| identity["featureBranch"].as_str() == Some(b));
+    if !feature {
+        if let Some(remote) = identity["targetRemote"].as_str() {
+            return remote;
+        }
+    }
+    identity["sourceRemote"]
+        .as_str()
+        .or(identity["remote"].as_str())
+        .unwrap_or("origin")
+}
+pub(super) fn repo_identity<'a>(bundle: &'a Value, repo: &str) -> &'a Value {
+    bundle["repos"]
+        .as_array()
+        .and_then(|rs| rs.iter().find(|r| r["id"] == repo))
+        .unwrap_or(&Value::Null)
+}
+pub(super) fn bundle_remote<'a>(
+    bundle: &'a Value,
+    repo: &str,
+    branch: Option<&str>,
+    source: bool,
+) -> &'a str {
+    recorded_remote(repo_identity(bundle, repo), branch, source)
+}
+pub(super) fn destination<'a>(bundle: &'a Value, repo: &str) -> &'a str {
+    let r = repo_identity(bundle, repo);
+    if r["sourceRemote"].is_null() && r["targetRemote"].is_null() {
+        "origin"
+    } else {
+        r["targetRemote"]
+            .as_str()
+            .or(r["sourceRemote"].as_str())
+            .or(r["remote"].as_str())
+            .unwrap_or("origin")
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn simulate_merge(
+    root: &Path,
+    repo_id: &str,
+    source_branch: Option<&str>,
+    source_sha: &str,
+    target_branch: &str,
+    target_sha: &str,
+) -> Result<Simulation> {
+    simulate_merge_for_bundle(
+        root,
+        repo_id,
+        source_branch,
+        source_sha,
+        target_branch,
+        target_sha,
+        &Value::Null,
+    )
 }
 
 #[cfg(test)]

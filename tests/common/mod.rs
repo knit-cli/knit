@@ -1089,6 +1089,48 @@ esac
     write_windows_shim(&script);
 }
 
+/// Discover Python once, including Windows installations without `python3`.
+pub fn python_executable() -> &'static str {
+    static PYTHON: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    PYTHON.get_or_init(|| {
+        for name in ["python3", "python", "py"] {
+            if let Ok(output) = Command::new(name)
+                .args([
+                    "-c",
+                    "import sys; assert sys.version_info.major == 3; print(sys.executable)",
+                ])
+                .output()
+            {
+                if output.status.success() {
+                    return String::from_utf8(output.stdout).unwrap().trim().to_owned();
+                }
+            }
+        }
+        panic!("Python fixtures require a working Python 3 interpreter");
+    })
+}
+
+/// The Windows forge launcher runs extensionless fixtures through `sh`.
+/// Keep that entry point a shell script, with Python in a separate file.
+pub fn write_fake_python_cli(fake_bin: &Path, name: &str, source: &str) {
+    fs::create_dir_all(fake_bin).unwrap();
+    let script = fake_bin.join(name);
+    let python_script = fake_bin.join(format!("{name}.py"));
+    fs::write(&python_script, source).unwrap();
+    let quote = |value: &str| format!("'{}'", value.replace('\\', "/").replace('\'', "'\\''"));
+    fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\nexec {} {} \"$@\"\n",
+            quote(python_executable()),
+            quote(&python_script.to_string_lossy()),
+        ),
+    )
+    .unwrap();
+    make_executable(&script);
+    write_windows_shim(&script);
+}
+
 /// Mark a fake script executable on Unix. On Windows execute bits do not
 /// exist; the `.cmd` shim from `write_windows_shim` makes it spawnable.
 fn make_executable(script: &Path) {

@@ -98,6 +98,15 @@ impl Journal {
         let mut typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
         let run_id = run["id"].as_str().context("run id required")?;
         for s in run["steps"].as_array().context("run steps required")? {
+            if s["type"] == "merge_pr" {
+                if let Some(base) = s["reviewBefore"]["targetBranch"].as_str() {
+                    for publication in &mut typed.publications {
+                        if Some(publication.repo_id.as_str()) == s["repoId"].as_str() {
+                            publication.base_branch = base.to_owned();
+                        }
+                    }
+                }
+            }
             if !matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch"))
                 || !matches!(
                     s["attribution"].as_str(),
@@ -302,6 +311,11 @@ fn preflight(
     }
     for (repo, root) in roots {
         if let Some(pin) = plan["bundleHeads"][repo].as_str() {
+            // Source-only runners may not yet have the fork's feature object.
+            if git(root, &["cat-file", "-e", &format!("{pin}^{{commit}}")]).is_err() {
+                let remote = super::mergeability::bundle_remote(bundle, repo, None, true);
+                git(root, &["fetch", "--no-tags", remote, pin])?;
+            }
             // Verify object availability without switching or modifying the checkout.
             let resolved = git(root, &["rev-parse", &format!("{pin}^{{commit}}")])?;
             if resolved != pin {
@@ -349,7 +363,7 @@ fn preflight(
             }
         }
     }
-    super::branch_checkout::preflight(steps, roots, bundle)?;
+    super::branch_checkout::preflight(steps, roots, bundle, plan)?;
     for step in steps {
         if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch"))
             && !step["repoId"]
@@ -390,7 +404,14 @@ fn preflight(
                 .find(|r| r.id == id)
                 .context("unknown repo")?;
             let forge = crate::providers::for_repo(repo)?;
-            let target = provider_target(roots, forge.as_ref(), repo)?;
+            let target = provider_target(
+                roots,
+                forge.as_ref(),
+                repo,
+                crate::providers::publication_for_repo(&typed, &repo.id)
+                    .map(|p| p.base_branch.as_str())
+                    .unwrap_or(&repo.base_branch),
+            )?;
             let pub_ = crate::providers::publication_for_repo(&typed, id)
                 .context("missing publication")?;
             let pr = forge.view(&target, &pub_.url)?;
@@ -478,7 +499,12 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
                 .context("checkout repoId required")?;
             if !revisions.contains_key(repo) {
                 let root = roots.get(repo).context("checkout binding missing")?;
-                let remote = step["checkout"]["remote"].as_str().unwrap_or("origin");
+                let routed = super::branch_checkout::routed_step(
+                    step,
+                    &snapshot["plan"],
+                    &snapshot["sourceBundle"],
+                );
+                let remote = routed["checkout"]["remote"].as_str().unwrap_or("origin");
                 git(root, &["fetch", "--no-tags", remote, branch])?;
                 revisions.insert(repo.into(), json!(git(root, &["rev-parse", "FETCH_HEAD"])?));
             }
@@ -494,7 +520,19 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
             if !revisions.contains_key(repo) {
                 if let Some(branch) = snapshot["plan"]["recipeBases"][repo].as_str() {
                     let root = roots.get(repo).context("consumer binding required")?;
-                    git(root, &["fetch", "--no-tags", "origin", branch])?;
+                    git(
+                        root,
+                        &[
+                            "fetch",
+                            "--no-tags",
+                            super::mergeability::recorded_remote(
+                                &snapshot["plan"]["repositoryIdentities"][&repo],
+                                Some(branch),
+                                false,
+                            ),
+                            branch,
+                        ],
+                    )?;
                     revisions.insert(repo.into(), json!(git(root, &["rev-parse", "FETCH_HEAD"])?));
                 }
             }
@@ -516,7 +554,19 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
                     let branch = snapshot["plan"]["recipeBases"][&repo]
                         .as_str()
                         .context("sourceRepos requires an immutable source or project base")?;
-                    git(root, &["fetch", "--no-tags", "origin", branch])?;
+                    git(
+                        root,
+                        &[
+                            "fetch",
+                            "--no-tags",
+                            super::mergeability::recorded_remote(
+                                &snapshot["plan"]["repositoryIdentities"][&repo],
+                                Some(branch),
+                                false,
+                            ),
+                            branch,
+                        ],
+                    )?;
                     git(root, &["rev-parse", "FETCH_HEAD"])?
                 };
             revisions.insert(repo, json!(revision));
@@ -530,7 +580,11 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         let root = roots.get(repo).context("branch checkout binding missing")?;
         let revision = super::branch_checkout::command_revision(
             root,
-            step,
+            &super::branch_checkout::routed_step(
+                step,
+                &snapshot["plan"],
+                &snapshot["sourceBundle"],
+            ),
             phase,
             record["sourceRevisions"][repo].as_str(),
         )?;
@@ -554,6 +608,21 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
             .with_extension("checkouts")
             .join(canonical_hash(&json!([repo, rev])));
         if !checkout.exists() {
+            if git(root, &["cat-file", "-e", &format!("{rev}^{{commit}}")]).is_err() {
+                let identity = super::mergeability::repo_identity(&snapshot["sourceBundle"], &repo);
+                let identity = if identity.is_null() {
+                    &snapshot["plan"]["repositoryIdentities"][&repo]
+                } else {
+                    identity
+                };
+                let feature_checkout = step["repoId"] == repo
+                    && step["checkout"]["branch"].is_string()
+                    && step["checkout"]["branch"] == identity["featureBranch"];
+                let source = snapshot["plan"]["bundleHeads"][&repo].as_str() == Some(rev)
+                    || feature_checkout;
+                let remote = super::mergeability::recorded_remote(identity, None, source);
+                git(root, &["fetch", "--no-tags", remote, rev])?;
+            }
             fs::create_dir_all(checkout.parent().unwrap())?;
             git(
                 root,
@@ -788,11 +857,12 @@ fn provider_target(
     roots: &Roots,
     forge: &dyn crate::providers::Forge,
     repo: &crate::model::RepoEntry,
+    base: &str,
 ) -> Result<crate::providers::PrTarget> {
     if let Some(root) = roots.get(&repo.id) {
-        Ok(crate::providers::PrTarget::checkout(root))
+        crate::contribution::target(root, repo, forge, base, false)
     } else {
-        super::super::artifact_target(&std::env::current_dir()?, forge, repo)
+        crate::contribution::target(&std::env::current_dir()?, repo, forge, base, true)
     }
 }
 
@@ -803,7 +873,8 @@ fn provider_step(
     roots: &Roots,
     journal: &Journal,
 ) -> Result<Value> {
-    let typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
+    let typed: crate::model::ChangeGroup =
+        serde_json::from_value(journal.bundle.lock().unwrap().clone())?;
     let id = step["repoId"].as_str().context("repoId required")?;
     let repo = typed
         .repos
@@ -811,7 +882,14 @@ fn provider_step(
         .find(|r| r.id == id)
         .context("unknown repo")?;
     let forge = crate::providers::for_repo(repo)?;
-    let target = provider_target(roots, forge.as_ref(), repo)?;
+    let mut target = provider_target(
+        roots,
+        forge.as_ref(),
+        repo,
+        crate::providers::publication_for_repo(&typed, &repo.id)
+            .map(|p| p.base_branch.as_str())
+            .unwrap_or(&repo.base_branch),
+    )?;
     let sid = step["id"].as_str().unwrap();
     if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch")) {
         let branch = step["targetBranch"]
@@ -826,18 +904,21 @@ fn provider_step(
             // Read-only pre-mutation state. A target that disappeared or a
             // transport that cannot answer refused the step before any
             // effect: a known no-effect failure, not an uncertain one.
-            let before =
-                crate::git::remote_ref_sha(root, "origin", &format!("refs/heads/{branch}"))
-                    .map_err(|e| {
-                        super::mergeability::KnownNoEffect(format!(
-                            "{id}: reading target branch {branch} from origin failed: {e:#}"
-                        ))
-                    })?
-                    .ok_or_else(|| {
-                        super::mergeability::KnownNoEffect(format!(
+            let before = crate::git::remote_ref_sha(
+                root,
+                crate::commands::merge::destination_remote(repo),
+                &format!("refs/heads/{branch}"),
+            )
+            .map_err(|e| {
+                super::mergeability::KnownNoEffect(format!(
+                    "{id}: reading target branch {branch} from origin failed: {e:#}"
+                ))
+            })?
+            .ok_or_else(|| {
+                super::mergeability::KnownNoEffect(format!(
                     "{id}: target branch {branch} is missing from origin; nothing was merged"
                 ))
-                    })?;
+            })?;
             journal.edit_step(sid, |s| {
                 s["before"] = json!({"targetBranch":branch,"revision":before})
             })?;
@@ -872,7 +953,7 @@ fn provider_step(
                         .as_deref()
                         .context("integration source branch required")?;
                     super::mergeability::verify_integration_source(
-                        root, id, branch, &head, reviewed,
+                        root, id, branch, &head, reviewed, bundle,
                     )
                     .map_err(|e| super::mergeability::KnownNoEffect(format!("{e:#}")))?;
                 }
@@ -896,7 +977,7 @@ fn provider_step(
             let outcome = if super::branch_checkout::enabled(step) {
                 super::branch_checkout::merge(
                     root,
-                    step,
+                    &super::branch_checkout::routed_step(step, plan, bundle),
                     &head,
                     source_branch.as_deref(),
                     expected_sha,
@@ -953,10 +1034,16 @@ fn provider_step(
     }
     if pr.base_ref_name.as_deref().unwrap_or(&pub_.base_branch) != desired {
         forge.edit_base(&target, &pub_.url, desired)?;
+        if let Some(identity) = &mut target.contribution {
+            identity.base = desired.to_owned();
+        }
         pr = forge.view(&target, &pub_.url)?;
         if pr.base_ref_name.as_deref() != Some(desired) {
             bail!("review retarget not confirmed");
         }
+        // Keep the confirmed base even if readiness now reports a conflict;
+        // land update must fetch the base the review actually targets.
+        journal.edit_step(sid, |s| s["reviewBefore"] = json!({"publicationUrl":pub_.url,"state":pr.state,"source":pr.head_ref_oid,"targetBranch":desired}))?;
     }
     super::super::ensure_open_and_ready(id, &pr)?;
     if step["waitForChecks"].as_bool().unwrap_or(true) {
@@ -1004,9 +1091,24 @@ fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Va
             .find(|r| r.id == id)
             .context("unknown merge repo")?;
         let forge = crate::providers::for_repo(repo)?;
-        let target = provider_target(roots, forge.as_ref(), repo)?;
+        let mut target = provider_target(
+            roots,
+            forge.as_ref(),
+            repo,
+            crate::providers::publication_for_repo(&typed, &repo.id)
+                .map(|p| p.base_branch.as_str())
+                .unwrap_or(&repo.base_branch),
+        )?;
         let publication =
             crate::providers::publication_for_repo(&typed, id).context("missing review")?;
+        if let (Some(identity), Some(base)) =
+            (&mut target.contribution, output["targetBranch"].as_str())
+        {
+            identity.base = base.to_owned();
+        }
+        if target.contribution.is_some() {
+            forge.view(&target, &publication.url)?;
+        }
         output["revision"] = json!(forge.merged_revision(&target, &publication.url)?.context(
             "provider has not reported an immutable merged revision; resume after reconciliation"
         )?);
@@ -1016,14 +1118,15 @@ fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Va
         bail!("provider returned invalid merged commit identity");
     }
     if let Some(root) = roots.get(id) {
+        let remote = super::mergeability::destination(bundle, id);
         let object = format!("{revision}^{{commit}}");
         if git(root, &["cat-file", "-e", &object]).is_err()
-            && git(root, &["fetch", "--no-tags", "origin", revision]).is_err()
+            && git(root, &["fetch", "--no-tags", remote, revision]).is_err()
         {
             let branch = output["targetBranch"]
                 .as_str()
                 .context("merge destination required")?;
-            git(root, &["fetch", "--no-tags", "origin", branch])?;
+            git(root, &["fetch", "--no-tags", remote, branch])?;
         }
         if git(root, &["rev-parse", &object])? != revision {
             bail!("merge object identity mismatch");
@@ -1562,7 +1665,20 @@ fn compensation(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) 
                         .find(|r| Some(r.id.as_str()) == step["repoId"].as_str())
                         .context("unknown repo")?;
                     let forge = crate::providers::for_repo(repo)?;
-                    let target = provider_target(roots, forge.as_ref(), repo)?;
+                    let mut target = provider_target(
+                        roots,
+                        forge.as_ref(),
+                        repo,
+                        crate::providers::publication_for_repo(&typed, &repo.id)
+                            .map(|p| p.base_branch.as_str())
+                            .unwrap_or(&repo.base_branch),
+                    )?;
+                    if let (Some(identity), Some(base)) = (
+                        &mut target.contribution,
+                        record["output"]["targetBranch"].as_str(),
+                    ) {
+                        identity.base = base.to_owned();
+                    }
                     let pub_ = crate::providers::publication_for_repo(&typed, &repo.id)
                         .context("missing publication")?;
                     // A crash while proposing a revert requires explicit reconciliation;
@@ -1574,7 +1690,7 @@ fn compensation(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) 
                         bail!("source revert proposal needs reconciliation before retry");
                     }
                     journal.edit_step(id, |s| s["recovery"] = json!({"status":"running"}))?;
-                    let url=forge.revert_pull_request(&target,&pub_.url,"Revert landing change","Source compensation for a landing run; deployment restoration is recorded separately.")?;
+                    let (url, _) = crate::commands::revert::create_review(forge.as_ref(), &target, repo, &pub_.url, "Revert landing change", "Source compensation for a landing run; deployment restoration is recorded separately.")?;
                     journal.edit_step(id, |s| {
                         s["recovery"] =
                             json!({"status":"succeeded","sourceStatus":"revert_proposed","url":url})
@@ -1889,13 +2005,16 @@ fn execute(
                     a.iter().find(|s| {
                         s["repoId"] == publication["repoId"]
                             && s["type"] == "merge_pr"
-                            && matches!(
-                                s["attribution"].as_str(),
-                                Some("performed" | "already_satisfied")
-                            )
+                            && (s["reviewBefore"]["targetBranch"].is_string()
+                                || matches!(
+                                    s["attribution"].as_str(),
+                                    Some("performed" | "already_satisfied")
+                                ))
                     })
                 }) {
-                    if publication["baseBranch"] == receipt["output"]["targetBranch"] {
+                    if publication["baseBranch"] == receipt["output"]["targetBranch"]
+                        || publication["baseBranch"] == receipt["reviewBefore"]["targetBranch"]
+                    {
                         if let Some(original) = source["publications"]
                             .as_array()
                             .and_then(|a| a.iter().find(|p| p["repoId"] == publication["repoId"]))

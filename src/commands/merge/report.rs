@@ -155,13 +155,17 @@ pub(super) fn push_merge_run_steps(
         // origin. `push -u` sets nothing from a detached HEAD, so upstream
         // tracking is recorded on the local branch by hand below.
         let refspec = format!("HEAD:refs/heads/{}", step.target);
-        match git_output(&checkout, ["push", "origin", refspec.as_str()]) {
+        let remote = step
+            .push_remote
+            .clone()
+            .unwrap_or_else(|| "origin".to_owned());
+        match git_output(&checkout, ["push", &remote, refspec.as_str()]) {
             Ok(_) => {
                 let now = now_iso();
                 step.pushed_at = Some(now);
                 step.pushed_sha = Some(after_sha.clone());
-                step.push_remote = Some("origin".to_string());
-                if set_upstream {
+                step.push_remote = Some(remote.clone());
+                if set_upstream && remote == "origin" {
                     let repo_root = Path::new(&step.repo_path);
                     if branch_exists(repo_root, &step.target) {
                         let upstream = format!("--set-upstream-to=origin/{}", step.target);

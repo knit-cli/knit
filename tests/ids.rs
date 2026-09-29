@@ -37,6 +37,8 @@ fn makes_unique_repo_ids() {
     let mut bundle = empty_bundle();
     assert_eq!(unique_repo_id(&bundle, "backend"), "backend");
     bundle.repos.push(RepoEntry {
+        source_remote: None,
+        target_remote: None,
         id: "backend".to_string(),
         path: "/tmp/backend".to_string(),
         remote: None,

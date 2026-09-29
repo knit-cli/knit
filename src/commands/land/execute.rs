@@ -15,7 +15,7 @@ use crate::model::{
     BundleNode, DeployCheckoutUpdate, DeployMode, PublicationEntry, SCHEMA_VERSION,
 };
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, PrTarget, PullRequest};
+use crate::providers::{self, publication_for_repo, PullRequest};
 use crate::store::{save_active_bundle, write_json, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -479,7 +479,13 @@ fn execute_merge_branch(active: &ActiveBundle, step: &LandStep) -> Result<StepOu
     let outcome = crate::commands::merge::merge_branch_into_target(
         &active.root,
         &repo,
-        feature_branch,
+        if crate::contribution::configured(&repo) {
+            repo.head_sha
+                .as_deref()
+                .context("missing recorded source SHA")?
+        } else {
+            feature_branch
+        },
         Some(feature_branch),
         branch,
         true,
@@ -512,7 +518,15 @@ fn execute_merge_pr(
     let repo_id = required_repo_id(step)?;
     let (_, repo, cwd) = repo_context(active, repo_id)?;
     let forge = providers::for_repo(&repo)?;
-    let target = PrTarget::checkout(&cwd);
+    let target = crate::contribution::target(
+        &cwd,
+        &repo,
+        forge.as_ref(),
+        &publication_for_repo(&active.bundle, repo_id)
+            .context("missing review")?
+            .base_branch,
+        false,
+    )?;
     let publication = publication_for_repo(&active.bundle, repo_id)
         .with_context(|| format!("{repo_id}: no review publication recorded"))?
         .clone();
@@ -577,7 +591,15 @@ fn execute_wait_checks(active: &ActiveBundle, step: &LandStep) -> Result<StepOut
     let repo_id = required_repo_id(step)?;
     let (_, repo, cwd) = repo_context(active, repo_id)?;
     let forge = providers::for_repo(&repo)?;
-    let target = PrTarget::checkout(&cwd);
+    let target = crate::contribution::target(
+        &cwd,
+        &repo,
+        forge.as_ref(),
+        &publication_for_repo(&active.bundle, repo_id)
+            .context("missing review")?
+            .base_branch,
+        false,
+    )?;
     let publication = publication_for_repo(&active.bundle, repo_id)
         .with_context(|| format!("{repo_id}: no review publication recorded"))?;
     let summary = forge.wait_for_checks(
@@ -802,7 +824,15 @@ fn prepare_deployment_checkout(
         );
     }
 
-    let remote = checkout.remote.as_deref().unwrap_or("origin");
+    let remote = if crate::contribution::configured(repo) {
+        if repo.feature_branch.as_deref() == Some(checkout.branch.as_str()) {
+            crate::contribution::source(repo).context("missing source remote")?
+        } else {
+            crate::contribution::destination(repo).context("missing target remote")?
+        }
+    } else {
+        checkout.remote.as_deref().unwrap_or("origin")
+    };
     let update = checkout.update.unwrap_or_default();
     let path = active
         .root
@@ -817,9 +847,19 @@ fn prepare_deployment_checkout(
     }
 
     let target_ref = if update == DeployCheckoutUpdate::None {
-        format!("{remote}/{}", checkout.branch)
+        if crate::contribution::configured(repo) {
+            let feature = repo.feature_branch.as_deref() == Some(checkout.branch.as_str());
+            crate::contribution::role_ref(repo, &checkout.branch, feature)?
+        } else {
+            format!("{remote}/{}", checkout.branch)
+        }
     } else {
-        fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
+        if crate::contribution::configured(repo) {
+            let feature = repo.feature_branch.as_deref() == Some(checkout.branch.as_str());
+            crate::contribution::fetch_ref(&repo_root, repo, &checkout.branch, feature)?;
+        } else {
+            fetch_deploy_branch(&repo_root, remote, &checkout.branch)?;
+        }
         // FETCH_HEAD belongs to the worktree where fetch ran. Resolve it before
         // operating in a managed deployment worktree that already exists.
         rev_parse(&repo_root, "FETCH_HEAD")?

@@ -32,6 +32,7 @@ pub fn pull_repos(
     feature: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    crate::contribution::validate_bundle(&active.bundle)?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
@@ -46,6 +47,26 @@ pub fn pull_repos(
                 repo_index: *index,
                 repo_id: repo.id.clone(),
                 cwd,
+                explicit: if crate::contribution::configured(repo) {
+                    Some((
+                        if feature {
+                            crate::contribution::source(repo)
+                        } else {
+                            crate::contribution::destination(repo)
+                        }
+                        .context("missing contribution remote")?
+                        .into(),
+                        if feature {
+                            repo.feature_branch
+                                .clone()
+                                .context("missing feature branch")?
+                        } else {
+                            repo.base_branch.clone()
+                        },
+                    ))
+                } else {
+                    None
+                },
             })
         })
         .collect::<Result<Vec<_>>>()?;
@@ -113,6 +134,7 @@ pub fn pull_repos(
 }
 
 struct PullTarget {
+    explicit: Option<(String, String)>,
     repo_index: usize,
     repo_id: String,
     cwd: PathBuf,
@@ -127,8 +149,20 @@ struct PullOutcome {
 fn run_pull_target(target: &PullTarget, rebase: bool) -> Result<PullOutcome> {
     let before = rev_parse(&target.cwd, "HEAD")
         .with_context(|| format!("{}: failed to read HEAD before pull", target.repo_id))?;
-    run_pull(&target.cwd, rebase)
-        .with_context(|| format!("{}: git pull failed", target.repo_id))?;
+    if let Some((remote, branch)) = &target.explicit {
+        git_output(
+            &target.cwd,
+            [
+                "pull",
+                if rebase { "--rebase" } else { "--ff-only" },
+                remote,
+                branch,
+            ],
+        )?;
+    } else {
+        run_pull(&target.cwd, rebase)
+            .with_context(|| format!("{}: git pull failed", target.repo_id))?;
+    }
     let after = rev_parse(&target.cwd, "HEAD")
         .with_context(|| format!("{}: failed to read HEAD after pull", target.repo_id))?;
     Ok(PullOutcome {

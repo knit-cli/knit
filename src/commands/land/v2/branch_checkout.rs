@@ -75,7 +75,7 @@ pub(super) fn execution_sources(
                 &[
                     "fetch",
                     "--no-tags",
-                    "origin",
+                    super::mergeability::bundle_remote(bundle, &id, None, true),
                     &format!("refs/heads/{branch}"),
                 ],
             )?;
@@ -338,7 +338,12 @@ fn inspect(root: &Path, checkout: &Value) -> Result<String> {
     Ok(tip)
 }
 
-pub(super) fn preflight(steps: &[Value], roots: &Roots, bundle: &Value) -> Result<()> {
+pub(super) fn preflight(
+    steps: &[Value],
+    roots: &Roots,
+    bundle: &Value,
+    plan: &Value,
+) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     for step in steps.iter().filter(|s| enabled(s)) {
         let repo = step["repoId"]
@@ -362,7 +367,7 @@ pub(super) fn preflight(steps: &[Value], roots: &Roots, bundle: &Value) -> Resul
                 bail!("{repo}: branch checkout must use a source checkout separate from the feature branch");
             }
         }
-        inspect(root, &step["checkout"])?;
+        inspect(root, &routed_step(step, plan, bundle)["checkout"])?;
     }
     Ok(())
 }
@@ -445,7 +450,7 @@ pub(super) fn merge(
         &[
             "push",
             &format!("--force-with-lease=refs/heads/{branch}:{before}"),
-            "origin",
+            step["checkout"]["remote"].as_str().unwrap_or("origin"),
             &format!("HEAD:refs/heads/{branch}"),
         ],
     )?;
@@ -471,4 +476,27 @@ pub(super) fn command_revision(
         bail!("branch checkout changed since the command; reconcile it before recovery");
     }
     Ok(revision)
+}
+
+/// Resolve portable checkout transport without mutating the saved plan.
+pub(super) fn routed_step(step: &Value, plan: &Value, bundle: &Value) -> Value {
+    let mut routed = step.clone();
+    if let (Some(id), Some(branch)) = (step["repoId"].as_str(), step["checkout"]["branch"].as_str())
+    {
+        let identity = super::mergeability::repo_identity(bundle, id);
+        let identity = if identity.is_null() {
+            &plan["repositoryIdentities"][id]
+        } else {
+            identity
+        };
+        let remote = if step["type"] == "merge_branch" {
+            super::mergeability::destination(bundle, id)
+        } else {
+            super::mergeability::recorded_remote(identity, Some(branch), false)
+        };
+        if remote != "origin" {
+            routed["checkout"]["remote"] = json!(remote);
+        }
+    }
+    routed
 }

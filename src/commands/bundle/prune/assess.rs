@@ -391,15 +391,34 @@ fn assess_repo_signals(
 ) -> Result<RepoPruneSignals> {
     let branch = repo.feature_branch.as_deref();
     let mut publication_update = None;
+    let contribution = crate::contribution::cross_repository(repo)?;
 
     if refresh {
         if let Ok(forge) = providers::for_repo(repo) {
             if cache.forge_auth_failed(forge.id()) {
+                if contribution {
+                    anyhow::bail!(
+                        "cannot verify contribution reviews after forge authentication failed"
+                    );
+                }
                 // This forge already rejected our credentials; every further
                 // call would fail the same way, so stay on recorded state.
             } else if let Some(existing) = recorded {
-                match cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url) {
+                let reviewed = if crate::contribution::configured(repo) {
+                    let target = crate::contribution::target(
+                        Path::new(&repo.path),
+                        repo,
+                        forge.as_ref(),
+                        &existing.base_branch,
+                        false,
+                    )?;
+                    forge.view(&target, &existing.url)
+                } else {
+                    cache.view_pr(forge.as_ref(), Path::new(&repo.path), &existing.url)
+                };
+                match reviewed {
                     Ok(pr) => publication_update = Some(pr),
+                    Err(err) if contribution => return Err(err),
                     Err(err) => cache.note_refresh_failure(
                         forge.id(),
                         bundle_id,
@@ -409,14 +428,31 @@ fn assess_repo_signals(
                     ),
                 }
             } else if let Some(branch) = branch {
-                match cache.find_existing_pr(
-                    forge.as_ref(),
-                    Path::new(&repo.path),
-                    branch,
-                    &repo.base_branch,
-                ) {
+                let found = if crate::contribution::configured(repo) {
+                    let target = crate::contribution::target(
+                        Path::new(&repo.path),
+                        repo,
+                        forge.as_ref(),
+                        &repo.base_branch,
+                        false,
+                    )?;
+                    forge.find_existing(
+                        &target,
+                        &crate::contribution::head(repo, branch)?,
+                        &repo.base_branch,
+                    )
+                } else {
+                    cache.find_existing_pr(
+                        forge.as_ref(),
+                        Path::new(&repo.path),
+                        branch,
+                        &repo.base_branch,
+                    )
+                };
+                match found {
                     Ok(Some(pr)) => publication_update = Some(pr),
                     Ok(None) => {}
+                    Err(err) if contribution => return Err(err),
                     Err(err) => cache.note_refresh_failure(
                         forge.id(),
                         bundle_id,

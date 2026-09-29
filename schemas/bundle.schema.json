@@ -9,7 +9,16 @@
     "id": { "type": "string" },
     "title": { "type": "string" },
     "state": { "enum": ["open", "closed", "archived", "deleted"] },
-    "repos": { "type": "array" },
+    "repos": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "sourceRemote": { "type": "string", "minLength": 1 },
+          "targetRemote": { "type": "string", "minLength": 1 }
+        }
+      }
+    },
     "commitGroups": {
       "type": "array",
       "items": {

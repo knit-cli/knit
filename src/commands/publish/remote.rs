@@ -6,7 +6,7 @@
 
 use super::pr_body::initial_pr_body;
 use crate::checkout::checkout_dir;
-use crate::commands::push::{run_push, PushForce};
+use crate::commands::push::{run_push_to, PushForce};
 use crate::git::{current_branch, git_output_optional, rev_parse};
 use crate::ids::short_sha;
 use crate::model::{ChangeGroup, RepoEntry};
@@ -92,18 +92,24 @@ pub(super) fn push_publish_branch(
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
     ensure_feature_branch(repo, branch, &cwd)?;
-    ensure_origin(repo, &cwd)?;
+    if !crate::contribution::configured(repo) {
+        ensure_origin(repo, &cwd)?;
+    }
     // Resolve the forge before anything mutates the remote: a repo on an
     // unsupported host must fail here, the way the pre-split publish did,
     // instead of after its branch is already pushed.
     providers::for_repo(repo)?;
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
-    run_push(&cwd, branch, set_upstream, PushForce::No)
+    let remote = crate::contribution::push_remote(&cwd, repo)?;
+    run_push_to(&cwd, &remote, branch, set_upstream, PushForce::No)
         .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+    if set_upstream {
+        crate::contribution::track_source(&cwd, repo, branch)?;
+    }
     Ok(PushedInfo {
         sha,
-        branch: format!("origin/{branch}"),
+        branch: format!("{remote}/{branch}"),
     })
 }
 
@@ -127,8 +133,9 @@ pub(super) fn publish_repo_remote(
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
     let forge = providers::for_repo(repo)?;
-    let target = PrTarget::checkout(&cwd);
+    let target = crate::contribution::target(&cwd, repo, forge.as_ref(), base_branch, false)?;
 
+    let head = crate::contribution::head(repo, branch)?;
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
         if let Some(status) =
             reconcile_recorded_base(repo, forge.as_ref(), &target, existing, base_branch, renew)?
@@ -140,13 +147,21 @@ pub(super) fn publish_repo_remote(
             });
         }
         if !renew {
+            if target.contribution.is_some() {
+                forge.view(&target, &existing.url)?;
+            }
             return Ok(PublishRemoteResult {
                 repo_index: job.repo_index,
                 repo_id: repo.id.clone(),
                 status: PublishStatus::ExistsRecorded(existing.url.clone()),
             });
         }
-        let summary = forge.view(&target, &existing.url).with_context(|| {
+        let mut previous = target.clone();
+        previous.verify_head = false;
+        if let Some(id) = &mut previous.contribution {
+            id.base = existing.base_branch.clone();
+        }
+        let summary = forge.view(&previous, &existing.url).with_context(|| {
             format!(
                 "{}: failed to verify recorded review {} before renewal",
                 repo.id, existing.url
@@ -155,7 +170,9 @@ pub(super) fn publish_repo_remote(
         ensure_review_can_be_renewed(repo, &summary, Some(pushed_sha))?;
     }
 
-    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
+    let mut lookup = target.clone();
+    lookup.verify_head = !renew;
+    if let Some(existing) = forge.find_existing(&lookup, &head, base_branch)? {
         if renew && review_is_terminal(&existing) {
             ensure_review_has_new_head(repo, &existing, Some(pushed_sha))?;
         } else {
@@ -173,7 +190,7 @@ pub(super) fn publish_repo_remote(
         bundle,
         repo,
         base_branch,
-        branch,
+        &head,
         draft,
     )?;
     Ok(PublishRemoteResult {
@@ -198,18 +215,10 @@ pub(super) fn publish_repo_remote_from_artifact(
             repo.id
         )
     })?;
-    let remote = repo.remote.as_deref().with_context(|| {
-        format!(
-            "{}: no git remote recorded in the bundle artifact.",
-            repo.id
-        )
-    })?;
     let forge = providers::for_repo(repo)?;
-    let repo_full_name = forge
-        .repo_full_name(remote)
-        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
-    let target = PrTarget::explicit(cwd, repo_full_name);
+    let target = crate::contribution::target(cwd, repo, forge.as_ref(), base_branch, true)?;
 
+    let head = crate::contribution::head(repo, branch)?;
     if let Some(existing) = publication_for_repo(bundle, &repo.id) {
         if let Some(status) =
             reconcile_recorded_base(repo, forge.as_ref(), &target, existing, base_branch, renew)?
@@ -221,13 +230,21 @@ pub(super) fn publish_repo_remote_from_artifact(
             });
         }
         if !renew {
+            if target.contribution.is_some() {
+                forge.view(&target, &existing.url)?;
+            }
             return Ok(ArtifactPublishResult {
                 repo_index: job.repo_index,
                 repo_id: repo.id.clone(),
                 status: PublishStatus::ExistsRecorded(existing.url.clone()),
             });
         }
-        let summary = forge.view(&target, &existing.url).with_context(|| {
+        let mut previous = target.clone();
+        previous.verify_head = false;
+        if let Some(id) = &mut previous.contribution {
+            id.base = existing.base_branch.clone();
+        }
+        let summary = forge.view(&previous, &existing.url).with_context(|| {
             format!(
                 "{}: failed to verify recorded review {} before renewal",
                 repo.id, existing.url
@@ -236,7 +253,9 @@ pub(super) fn publish_repo_remote_from_artifact(
         ensure_review_can_be_renewed(repo, &summary, repo.head_sha.as_deref())?;
     }
 
-    if let Some(existing) = forge.find_existing(&target, branch, base_branch)? {
+    let mut lookup = target.clone();
+    lookup.verify_head = !renew;
+    if let Some(existing) = forge.find_existing(&lookup, &head, base_branch)? {
         if renew && review_is_terminal(&existing) {
             ensure_review_has_new_head(repo, &existing, repo.head_sha.as_deref())?;
         } else {
@@ -254,7 +273,7 @@ pub(super) fn publish_repo_remote_from_artifact(
         bundle,
         repo,
         base_branch,
-        branch,
+        &head,
         draft,
     )?;
     Ok(ArtifactPublishResult {
@@ -288,12 +307,24 @@ fn reconcile_recorded_base(
     if renew || existing.base_branch == base_branch {
         return Ok(None);
     }
-    let current = forge.view(target, &existing.url).with_context(|| {
-        format!(
-            "{}: failed to verify recorded review {} before retargeting",
-            repo.id, existing.url
-        )
-    })?;
+    let mut previous = target.clone();
+    if let Some(id) = &mut previous.contribution {
+        id.base = existing.base_branch.clone();
+    }
+    let current = forge
+        .view(&previous, &existing.url)
+        .or_else(|error| {
+            if previous.contribution.is_none() {
+                return Err(error);
+            }
+            forge.view(target, &existing.url)
+        })
+        .with_context(|| {
+            format!(
+                "{}: failed to verify recorded review {} before retargeting",
+                repo.id, existing.url
+            )
+        })?;
     let live_base = current
         .base_ref_name
         .clone()
@@ -321,7 +352,7 @@ fn reconcile_recorded_base(
         );
     }
     forge
-        .edit_base(target, &existing.url, base_branch)
+        .edit_base(&previous, &existing.url, base_branch)
         .with_context(|| {
             format!(
                 "{}: failed to retarget PR #{} from `{live_base}` to `{base_branch}`",
@@ -371,7 +402,11 @@ fn create_or_adopt(
             return Err(error);
         }
     };
-    let summary = forge.view(target, &url).unwrap_or_else(|_| PullRequest {
+    let viewed = forge.view(target, &url);
+    if target.contribution.is_some() {
+        return Ok(PublishStatus::Created(viewed?));
+    }
+    let summary = viewed.unwrap_or_else(|_| PullRequest {
         number: pr_number_from_url(&url).unwrap_or(0),
         url: url.clone(),
         state: Some("OPEN".to_string()),

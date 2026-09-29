@@ -55,7 +55,12 @@ pub fn source(
         ))?
         .to_owned();
     let root = resolve_root(repo_id, repo_root)?;
-    let tip = crate::git::remote_ref_sha(&root, "origin", &format!("refs/heads/{branch}"))?
+    let remote = super::mergeability::recorded_remote(
+        &plan["repositoryIdentities"][repo_id],
+        Some(branch),
+        false,
+    );
+    let tip = crate::git::remote_ref_sha(&root, remote, &format!("refs/heads/{branch}"))?
         .with_context(|| format!("{repo_id}: branch {branch} is missing from origin"))?;
     if let Some(expected) = expected_sha {
         if expected != tip {
@@ -75,7 +80,7 @@ pub fn source(
                 "fetch",
                 "--quiet",
                 "--no-tags",
-                "origin",
+                remote,
                 &format!("+refs/heads/{branch}:refs/knit/landing/source/{repo_id}"),
             ],
         )

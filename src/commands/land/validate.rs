@@ -8,7 +8,7 @@ use super::{
 };
 use crate::model::{DeployMode, SCHEMA_VERSION};
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
+use crate::providers::{self, publication_for_repo, CheckRun};
 use crate::store::ActiveBundle;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeSet;
@@ -204,7 +204,15 @@ pub(super) fn preflight_publications(
         }
         let (_, repo, cwd) = repo_context(active, repo_id)?;
         let forge = providers::for_repo(&repo)?;
-        let target = PrTarget::checkout(&cwd);
+        let target = crate::contribution::target(
+            &cwd,
+            &repo,
+            forge.as_ref(),
+            &publication_for_repo(&active.bundle, repo_id)
+                .context("missing review")?
+                .base_branch,
+            false,
+        )?;
         let publication = publication_for_repo(&active.bundle, repo_id)
             .with_context(|| format!("{repo_id}: missing review publication"))?;
         let pr = forge.view(&target, &publication.url)?;

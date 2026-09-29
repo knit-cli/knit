@@ -43,8 +43,23 @@ pub(crate) fn feature_branch_unmerged_commits(repo: &RepoEntry) -> Result<bool> 
     if !repo_root.exists() {
         return Ok(false);
     }
-    let base_ref = resolve_base_ref(repo_root, &repo.base_branch);
-    for candidate in [branch.to_string(), format!("origin/{branch}")] {
+    let base_ref = if crate::contribution::configured(repo) {
+        repo.base_sha
+            .clone()
+            .unwrap_or(crate::contribution::role_ref(
+                repo,
+                &repo.base_branch,
+                false,
+            )?)
+    } else {
+        resolve_base_ref(repo_root, &repo.base_branch)
+    };
+    let remote_ref = if crate::contribution::configured(repo) {
+        crate::contribution::role_ref(repo, branch, true)?
+    } else {
+        format!("origin/{branch}")
+    };
+    for candidate in [branch.to_string(), remote_ref] {
         if !ref_exists(repo_root, &candidate) {
             continue;
         }

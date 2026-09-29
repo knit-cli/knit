@@ -1328,6 +1328,12 @@ pub enum PublishCommand {
         /// Create review objects for every tracked repo instead of only repos with recorded work.
         #[arg(long)]
         all: bool,
+        /// Existing Git remote whose push URL holds the contribution (one selected repo).
+        #[arg(long, conflicts_with = "from_artifact")]
+        source_remote: Option<String>,
+        /// Existing Git remote whose fetch URL owns the review base (one selected repo).
+        #[arg(long, conflicts_with = "from_artifact")]
+        target_remote: Option<String>,
         /// Create draft review objects.
         #[arg(long)]
         draft: bool,
