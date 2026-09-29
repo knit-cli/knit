@@ -4825,3 +4825,80 @@ fn bundle_pull_by_name_records_equal_and_local_ahead_leases_for_next_push() {
         fs::remove_dir_all(root).unwrap();
     }
 }
+
+#[test]
+fn scoped_history_retry_preserves_all_project_cursors() {
+    for existing_cursor in [false, true] {
+        let root = unique_temp_dir();
+        let workspace = root.join("workspace");
+        fs::create_dir_all(&workspace).unwrap();
+        knit(&workspace, ["init", "demo"]);
+        knit(&workspace, ["bundle", "selected"]);
+        let history_dir = workspace.join(".knit/history");
+        fs::create_dir_all(&history_dir).unwrap();
+        let ledger = (0..2000)
+            .map(|i| {
+                format!(
+                    "{}\n",
+                    serde_json::json!({
+                        "schemaVersion": "knit.history.event.v1",
+                        "eventId": format!("e{i:04}"), "projectId": "demo",
+                        "bundleId": "selected", "kind": "test",
+                        "recordedAt": "2026-01-01T00:00:00Z", "recordedBy": "synthetic"
+                    })
+                )
+            })
+            .collect::<String>();
+        fs::write(history_dir.join("demo.history.jsonl"), ledger).unwrap();
+        let cursor = history_dir.join("demo.history-sync.json");
+        let saved = br#"{"hosted":{"eventCount":17,"fingerprint":"synthetic"},"mirror":{"eventCount":9,"fingerprint":"other"}}"#;
+        if existing_cursor {
+            fs::write(&cursor, saved).unwrap();
+        }
+        let fake_dir = root.join("fake-remote");
+        let url = spawn_fake_remote_push_api(&fake_dir);
+        knit(&workspace, ["remote", "add", "hosted", &url]);
+        fs::write(
+            fake_dir.join("history-batches.json"),
+            serde_json::json!({
+                "e0000": {"delayMs": 10},
+                "e0500": {"delayMs": 50, "failure": "http"}
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let args = [
+            "--bundle",
+            "selected",
+            "sync",
+            "push",
+            "--history",
+            "--remote",
+            "hosted",
+        ];
+        let env = [("KNIT_REMOTE_TOKEN", "synthetic-token")];
+        let failed = knit_fails_with_env(&workspace, args, &env);
+        assert!(failed.contains("incomplete history sync"), "{failed}");
+        let assert_cursor = || {
+            if existing_cursor {
+                assert_eq!(fs::read(&cursor).unwrap(), saved);
+            } else {
+                assert!(!cursor.exists(), "scoped upload created a project cursor");
+            }
+        };
+        assert_cursor();
+        let first_count = recorded_history_pushes(&fake_dir).len();
+        fs::remove_file(fake_dir.join("history-batches.json")).unwrap();
+        knit_with_env(&workspace, args, &env);
+        assert_cursor();
+        let pushes = recorded_history_pushes(&fake_dir);
+        let retried = pushes[first_count..].iter().flatten().collect::<Vec<_>>();
+        for i in 0..2000 {
+            assert!(
+                retried.contains(&&format!("e{i:04}")),
+                "scoped retry skipped {i}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
