@@ -71,7 +71,7 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
         remote_name,
         selected_bundle.as_ref(),
     )?;
-    println!(
+    crate::human!(
         "{} {} {}",
         out::movement("pushed history"),
         out::repo(&project_id),
@@ -87,7 +87,7 @@ pub fn pull_history_from_remote(project: Option<&str>, remote_name: Option<&str>
         fetch_project_history_events(remote, token, &project_id)
     })?;
     let appended = append_history_events(&root, &project_id, &events)?;
-    println!(
+    crate::human!(
         "{} {} {}",
         out::movement("pulled history"),
         out::repo(&project_id),
@@ -207,7 +207,10 @@ fn push_history_events(
                         false
                     }
                 };
-                if let Some(prefix) = progress.complete(index, successful).filter(|_| bundle.is_none()) {
+                if let Some(prefix) = progress
+                    .complete(index, successful)
+                    .filter(|_| bundle.is_none())
+                {
                     let end = (from + prefix * HISTORY_PAGE_SIZE).min(events.len());
                     record_history_sync(
                         root,

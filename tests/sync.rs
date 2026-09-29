@@ -3027,7 +3027,14 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
 
     // Nothing changed: the second push makes no history request at all, and
     // reports zero new events.
-    let second = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    let second = knit_with_env(
+        &workspace,
+        ["sync", "push", "--history"],
+        &[
+            ("KNIT_REMOTE_TOKEN", "owner-token"),
+            ("KNIT_BUNDLE", "missing"),
+        ],
+    );
     assert!(second.contains("0 new event(s)"), "{second}");
     assert!(!second.contains("syncing history to"), "{second}");
     assert_eq!(
