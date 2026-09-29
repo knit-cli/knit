@@ -1967,19 +1967,36 @@ fn handle_fake_remote_push_request(
             (200, format!("{{\"data\":{{\"id\":\"{repo_id}\"}}}}"))
         }
         ("POST", ["api", "v1", "projects", _, "history-events"]) => {
-            // Every history push is recorded, one line per request, so a
-            // test can see how many requests a sync made and which events
-            // rode in each.
-            let record = dir.join("history-pushes.jsonl");
-            let mut existing = fs::read_to_string(&record).unwrap_or_default();
-            existing.push_str(&body.to_string());
-            existing.push('\n');
-            fs::write(&record, existing).unwrap();
+            // Serialize append operations: the client sends four batches in
+            // parallel, so read/modify/write can silently lose recordings.
+            static HISTORY_RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            {
+                let _guard = HISTORY_RECORD_LOCK.lock().unwrap();
+                let mut record = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("history-pushes.jsonl"))?;
+                writeln!(record, "{body}")?;
+            }
             let count = body["events"].as_array().map(Vec::len).unwrap_or(0);
-            (
-                201,
-                format!("{{\"data\":{{\"insertedCount\":{count},\"skippedCount\":0}}}}"),
-            )
+            // Key knobs by first event, never nondeterministic arrival order.
+            // {"e0500":{"failure":"rejected"|"http", "delayMs":10}}
+            let knobs: Value = fs::read_to_string(dir.join("history-batches.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            let first = body["events"][0]["eventId"].as_str().unwrap_or_default();
+            let knob = &knobs[first];
+            if let Some(delay) = knob["delayMs"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            match knob["failure"].as_str() {
+                Some("http") => (500, r#"{"errors":{"detail":"synthetic batch failure"}}"#.to_string()),
+                Some("rejected") => (201, json!({"data": {
+                    "insertedCount": count.saturating_sub(1), "skippedCount": 0, "failedCount": 1
+                }}).to_string()),
+                _ => (201, json!({"data": {"insertedCount": count, "skippedCount": 0}}).to_string()),
+            }
         }
         ("POST", ["api", "v1", "projects", _, "bundles"]) => {
             let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
