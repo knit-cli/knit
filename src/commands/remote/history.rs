@@ -75,7 +75,7 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
         "{} {} {}",
         out::movement("pushed history"),
         out::repo(&project_id),
-        out::muted(format!("{pushed} event(s)"))
+        out::muted(format!("{pushed} new event(s)"))
     );
     Ok(())
 }
@@ -146,8 +146,7 @@ fn push_history_events(
     let plan = plan_history_push(&encoded, state.get(remote_name));
     let to_send: &[HistoryEvent] = match plan {
         HistoryPushPlan::UpToDate => {
-            print_history_push_size(remote_name, 0, 0);
-            return Ok(events.len());
+            return Ok(0);
         }
         HistoryPushPlan::Tail(from) => &events[from..],
         HistoryPushPlan::Full => &events,
@@ -162,7 +161,7 @@ fn push_history_events(
         _ => 0,
     };
     let mut progress = HistoryPushProgress::new(batches.len());
-    let mut accepted = from;
+    let mut accepted = 0;
     let mut failed = 0;
     let mut completed = 0;
     let mut attempted = 0;

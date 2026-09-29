@@ -2919,21 +2919,19 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
     assert_eq!(pushes.len(), 1, "{pushes:?}");
     let initial: Vec<String> = pushes[0].clone();
     assert!(!initial.is_empty());
+    assert!(
+        first.contains(&format!(
+            "syncing history to hosted: {} event(s) in 1 request(s)…",
+            initial.len()
+        )),
+        "{first}"
+    );
 
     // Nothing changed: the second push makes no history request at all, and
-    // still reports what the remote holds.
-    let second = knit_with_env(
-        &workspace,
-        ["sync", "push", "--history"],
-        &[
-            ("KNIT_REMOTE_TOKEN", "owner-token"),
-            ("KNIT_BUNDLE", "missing"),
-        ],
-    );
-    assert!(
-        second.contains(&format!("{} event(s)", initial.len())),
-        "{second}"
-    );
+    // reports zero new events.
+    let second = knit_with_env(&workspace, ["sync", "push", "--history"], &env);
+    assert!(second.contains("0 new event(s)"), "{second}");
+    assert!(!second.contains("syncing history to"), "{second}");
     assert_eq!(
         common::recorded_history_pushes(&fake_dir).len(),
         1,
@@ -2953,7 +2951,7 @@ fn sync_push_history_sends_only_what_the_remote_does_not_have_yet() {
         pushes[1]
     );
     assert!(
-        third.contains(&format!("{} event(s)", initial.len() + pushes[1].len())),
+        third.contains(&format!("{} new event(s)", pushes[1].len())),
         "{third}"
     );
 
@@ -3704,9 +3702,11 @@ fn sync_pull_remembers_skipped_bundles_and_does_not_refetch_them() {
         first.contains("skipped: repo frontend not cloned here"),
         "{first}"
     );
+    assert!(first.contains("knit bundle pull elsewhere"), "{first}");
     assert_eq!(recorded_artifact_fetches(&fake_dir), vec!["rb-1"]);
 
     let second = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(second.contains("knit bundle pull elsewhere"), "{second}");
     assert!(second.contains("unchanged"), "{second}");
     assert_eq!(
         recorded_artifact_fetches(&fake_dir),
@@ -3947,6 +3947,579 @@ fn a_remote_ahead_pull_keeps_the_locally_cached_hosted_url() {
 }
 
 #[test]
+fn sync_pull_repos_applies_adds_and_removals_together() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "oldrepo"]);
+
+    let newrepo = root.join("newrepo");
+    init_repo(&newrepo, "newrepo");
+
+    let export = membership_export(
+        serde_json::json!([
+            {"id": "backend", "path": "", "remote": root.join("backend").to_str().unwrap(), "baseBranch": "main"},
+            {"id": "newrepo", "path": "", "remote": newrepo.to_str().unwrap(), "baseBranch": "main"},
+        ]),
+        serde_json::json!([
+            {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            {"localId": "newrepo", "name": "newrepo", "remoteUrl": newrepo.to_str().unwrap(), "defaultBranch": "main", "visibility": "public", "metadata": {}},
+        ]),
+        0,
+    );
+    let base_url = spawn_fake_remote_with_body(export);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["sync", "pull", "--bundles", "--repos"], &env);
+    assert!(
+        output.contains("syncing membership from remote (+1 / -1)"),
+        "{output}"
+    );
+    assert!(output.contains("added"), "{output}");
+    assert!(output.contains("newrepo"), "{output}");
+    assert!(output.contains("removed"), "{output}");
+    assert!(output.contains("oldrepo"), "{output}");
+
+    let mut ids = project_repo_ids(&workspace);
+    ids.sort();
+    assert_eq!(ids, vec!["backend", "newrepo"]);
+    assert!(workspace.join("newrepo").join("app.txt").exists());
+    // The removed repo's checkout on disk is left alone.
+    assert!(root.join("oldrepo").join("app.txt").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_pull_default_preserves_membership_and_reports_missing_checkouts() {
+    for flags in [
+        vec![],
+        vec!["--all"],
+        vec!["--bundles"],
+        vec!["--artifacts-only", "--bundles"],
+        vec!["--history"],
+        vec!["--views"],
+        vec!["--plans"],
+        vec!["--architecture"],
+        vec!["--kg"],
+        vec!["--history", "--views"],
+    ] {
+        let root = unique_temp_dir();
+        let workspace = reconcile_scaffold(&root, &["backend", "oldrepo", "missing"]);
+        fs::remove_dir_all(root.join("missing")).unwrap();
+        let newrepo = root.join("newrepo-origin");
+        init_repo(&newrepo, "newrepo");
+        let export = membership_export(
+            serde_json::json!([
+                {"id": "backend", "path": "", "baseBranch": "main"},
+                {"id": "missing", "path": "", "baseBranch": "main"},
+                {"id": "newrepo", "path": "", "remote": newrepo, "baseBranch": "main"}
+            ]),
+            serde_json::json!([]),
+            0,
+        );
+        let (base_url, exports) = spawn_membership_sync_remote(export);
+        knit(&workspace, ["remote", "add", "hosted", &base_url]);
+        let before = fs::read(workspace.join(".knit/projects/demo.project.json")).unwrap();
+        knit(&workspace, ["view", "save", "core", "--exclude", "oldrepo"]);
+        let views_path = workspace.join(".knit/views/demo.views.json");
+        let views_before = fs::read(&views_path).unwrap();
+        let bundles_only = flags == vec!["--bundles"];
+        let mut args = vec!["sync", "pull"];
+        args.extend(flags);
+        let output = knit_with_env(&workspace, args, &[("KNIT_REMOTE_TOKEN", "test-token")]);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(
+            output.matches("Remote project lists").count(),
+            1,
+            "{output}"
+        );
+        assert!(output.contains("2 repo(s) not set up here (missing, newrepo) and 1 local repo(s) it no longer lists (oldrepo). Run `knit sync pull --repos` to apply."), "{output}");
+        assert_eq!(
+            before,
+            fs::read(workspace.join(".knit/projects/demo.project.json")).unwrap()
+        );
+        if bundles_only {
+            assert_eq!(
+                views_before,
+                fs::read(&views_path).unwrap(),
+                "saved views were pruned"
+            );
+        }
+        assert!(!workspace.join("newrepo").exists());
+        assert!(!root.join("missing").exists());
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn push_no_history_still_pushes_branches_and_artifacts() {
+    let root = unique_temp_dir();
+    let (origin, backend, _) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "sample work", "--repo", "backend"]);
+    let fake_dir = root.join("fake-remote");
+    let url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &url]);
+    let output = knit_with_env(
+        &workspace,
+        ["push", "--no-history"],
+        &[("KNIT_REMOTE_TOKEN", "owner-token")],
+    );
+    assert!(output.contains("Artifact:"), "{output}");
+    assert!(!output.contains("syncing history"), "{output}");
+    assert!(common::recorded_history_pushes(&fake_dir).is_empty());
+    assert!(!git(&origin, ["rev-parse", "refs/heads/knit/sample-work"]).is_empty());
+    let output = knit_with_env(
+        &workspace,
+        ["push"],
+        &[("KNIT_REMOTE_TOKEN", "owner-token")],
+    );
+    let pushes = common::recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 1);
+    assert!(
+        output.contains(&format!(
+            "syncing history to hosted: {} event(s) in 1 request(s)…",
+            pushes[0].len()
+        )),
+        "{output}"
+    );
+    assert!(
+        output.contains(&format!("{} new event(s) synced", pushes[0].len())),
+        "{output}"
+    );
+    let unchanged = knit_with_env(
+        &workspace,
+        ["push"],
+        &[("KNIT_REMOTE_TOKEN", "owner-token")],
+    );
+    assert!(!unchanged.contains("syncing history to"), "{unchanged}");
+    assert!(!unchanged.contains("event(s) synced"), "{unchanged}");
+    assert_eq!(common::recorded_history_pushes(&fake_dir).len(), 1);
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn spawn_membership_sync_remote(
+    export: String,
+) -> (String, std::sync::Arc<std::sync::atomic::AtomicUsize>) {
+    let (url, exports, _) = spawn_membership_sync_remote_with_failure(export, 200, None);
+    (url, exports)
+}
+
+type MembershipSyncRequests = std::sync::Arc<std::sync::Mutex<Vec<String>>>;
+
+fn spawn_membership_sync_remote_with_failure(
+    export: String,
+    export_status: u16,
+    failed_path: Option<&'static str>,
+) -> (
+    String,
+    std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    MembershipSyncRequests,
+) {
+    use std::io::{BufRead, BufReader, Write};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc,
+    };
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}", listener.local_addr().unwrap());
+    let exports = Arc::new(AtomicUsize::new(0));
+    let count = exports.clone();
+    let requests = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let recorded_requests = requests.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut request = String::new();
+            reader.read_line(&mut request).unwrap();
+            loop {
+                let mut line = String::new();
+                reader.read_line(&mut line).unwrap();
+                if line.trim().is_empty() {
+                    break;
+                }
+            }
+            recorded_requests.lock().unwrap().push(request.clone());
+            let (status, body) = if failed_path.is_some_and(|path| request.contains(path)) {
+                (403, r#"{"errors":{"detail":"artifact unavailable"}}"#)
+            } else if request.contains("/export") {
+                count.fetch_add(1, Ordering::SeqCst);
+                (export_status, export.as_str())
+            } else if request.contains("/history-events") {
+                (200, r#"{"data":[]}"#)
+            } else if request.contains("/landing-artifacts") {
+                (200, r#"{"data":{"plans":[],"runs":[]}}"#)
+            } else if request.contains("/landing-recipes") {
+                (
+                    200,
+                    r#"{"data":{"landing":{},"hash":"44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"}}"#,
+                )
+            } else if request.contains("/view ") {
+                (200, r#"{"data":{"views":{}}}"#)
+            } else {
+                (404, r#"{"errors":{"detail":"not available"}}"#)
+            };
+            write!(stream, "HTTP/1.1 {status} OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        }
+    });
+    (url, exports, requests)
+}
+
+#[test]
+fn sync_pull_summary_handles_incomplete_and_legacy_membership() {
+    for legacy in [false, true] {
+        let root = unique_temp_dir();
+        let workspace = reconcile_scaffold(&root, &["backend", "legacy", "worker"]);
+        fs::remove_dir_all(root.join("worker")).unwrap();
+        let mut export: serde_json::Value = serde_json::from_str(&membership_export(
+            serde_json::json!([
+                {"id": "worker", "path": "", "baseBranch": "main"},
+                {"id": "backend", "path": "", "baseBranch": "main"},
+                {"id": "api", "path": "", "baseBranch": "main"}
+            ]),
+            serde_json::json!([]),
+            1,
+        ))
+        .unwrap();
+        if legacy {
+            export["data"]
+                .as_object_mut()
+                .unwrap()
+                .remove("knitProject");
+        }
+        let (url, _) = spawn_membership_sync_remote(export.to_string());
+        knit(&workspace, ["remote", "add", "hosted", &url]);
+        let output = knit_with_env(
+            &workspace,
+            ["sync", "pull", "--bundles"],
+            &[("KNIT_REMOTE_TOKEN", "test-token")],
+        );
+        let expected = if legacy {
+            "Local project lists 1 repo(s) not set up here (worker). Run `knit sync pull --repos` to apply."
+        } else {
+            "Remote project lists 2 repo(s) not set up here (api, worker). Run `knit sync pull --repos` to apply."
+        };
+        assert_eq!(output.matches(expected).count(), 1, "{output}");
+        assert!(!output.contains("no longer lists"), "{output}");
+        assert_eq!(
+            project_repo_ids(&workspace),
+            vec!["backend", "legacy", "worker"]
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn sync_pull_views_with_repos_does_not_import_export_history() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend"]);
+    let mut export: serde_json::Value = serde_json::from_str(&membership_export(
+        serde_json::json!([{"id":"backend", "path":"", "baseBranch":"main"}]),
+        serde_json::json!([]),
+        0,
+    ))
+    .unwrap();
+    export["data"]["historyEvents"] = serde_json::json!([{
+        "schemaVersion":"knit.history.event.v1", "eventId":"export-only-event",
+        "projectId":"demo", "kind":"bundle_created", "recordedAt":"2026-01-01T00:00:00Z",
+        "recordedBy":"synthetic"
+    }]);
+    let (url, exports) = spawn_membership_sync_remote(export.to_string());
+    knit(&workspace, ["remote", "add", "hosted", &url]);
+    let history = workspace.join(".knit/history/demo.history.jsonl");
+    let before = fs::read(&history).unwrap_or_default();
+    for flags in [
+        vec!["--views", "--repos"],
+        vec!["--views"],
+        vec!["--history"],
+        vec!["--plans"],
+        vec!["--architecture"],
+        vec!["--kg"],
+    ] {
+        let mut args = vec!["sync", "pull"];
+        args.extend(flags);
+        knit_with_env(&workspace, args, &[("KNIT_REMOTE_TOKEN", "test-token")]);
+        assert_eq!(before, fs::read(&history).unwrap_or_default());
+    }
+    assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 6);
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_pull_restored_checkout_invalidates_skipped_artifact_cache() {
+    let root = unique_temp_dir();
+    let workspace = reconcile_scaffold(&root, &["backend", "frontend"]);
+    fs::rename(root.join("frontend"), root.join("frontend-parked")).unwrap();
+    let fake_dir = root.join("fake-remote");
+    fs::create_dir_all(&fake_dir).unwrap();
+
+    // Slim export: the artifact has to be fetched to learn which repos the
+    // bundle touches — exactly once.
+    let export = serde_json::json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": null,
+            "repositories": [
+                {"localId": "backend", "name": "backend", "remoteUrl": root.join("backend").to_str().unwrap(), "metadata": {}},
+            ],
+            "bundles": [{
+                "id": "rb-1",
+                "slug": "elsewhere",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "h1", "sizeBytes": 42},
+            }],
+            "historyEvents": [],
+        }
+    });
+    fs::write(fake_dir.join("export.json"), export.to_string()).unwrap();
+    fs::write(
+        fake_dir.join("bundle-rb-1.json"),
+        serde_json::json!({
+            "data": {
+                "id": "rb-1",
+                "slug": "elsewhere",
+                "currentArtifact": {
+                    "artifactHash": "h1",
+                    "payload": {
+                        "schemaVersion": "1",
+                        "kind": "knit.bundle",
+                        "id": "elsewhere",
+                        "title": "elsewhere",
+                        "createdAt": "2026-01-01T00:00:00Z",
+                        "updatedAt": "2026-01-01T00:00:00Z",
+                        "repos": [
+                            {"id": "backend", "path": "/tmp/backend", "baseBranch": "main"},
+                            {"id": "frontend", "path": "/tmp/frontend", "baseBranch": "main"},
+                        ],
+                        "commitGroups": [],
+                    },
+                },
+            }
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let base_url = spawn_fake_remote_bundle_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let first = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(
+        first.contains("skipped: repo frontend not cloned here"),
+        "{first}"
+    );
+    assert!(first.contains("knit bundle pull elsewhere"), "{first}");
+    assert_eq!(recorded_artifact_fetches(&fake_dir), vec!["rb-1"]);
+
+    let second = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(second.contains("knit bundle pull elsewhere"), "{second}");
+    assert!(second.contains("unchanged"), "{second}");
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1"],
+        "the unchanged artifact must not be downloaded again"
+    );
+    assert!(!workspace
+        .join(".knit/bundles/elsewhere.bundle.json")
+        .exists());
+
+    // Hash-only caches from earlier versions upgrade on the next pull.
+    fs::write(
+        workspace.join(".knit/sync-skipped.json"),
+        r#"{"elsewhere":"h1"}"#,
+    )
+    .unwrap();
+    let legacy = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(legacy.contains("knit bundle pull elsewhere"), "{legacy}");
+    assert_eq!(recorded_artifact_fetches(&fake_dir), vec!["rb-1", "rb-1"]);
+    let cache: serde_json::Value =
+        serde_json::from_slice(&fs::read(workspace.join(".knit/sync-skipped.json")).unwrap())
+            .unwrap();
+    assert_eq!(
+        cache["elsewhere"]["missing_repos"],
+        serde_json::json!(["frontend"])
+    );
+
+    // A manually restored checkout must unblock an unchanged remote artifact.
+    fs::rename(root.join("frontend-parked"), root.join("frontend")).unwrap();
+    let restored = knit_with_env(&workspace, ["sync", "pull", "--bundles"], &env);
+    assert!(!restored.contains("skipped:"), "{restored}");
+    assert_eq!(
+        recorded_artifact_fetches(&fake_dir),
+        vec!["rb-1", "rb-1", "rb-1"]
+    );
+    assert!(workspace
+        .join(".knit/bundles/elsewhere.bundle.json")
+        .exists());
+    assert!(!workspace.join(".knit/sync-skipped.json").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_pull_narrow_artifacts_succeed_when_membership_export_is_unavailable() {
+    for flags in [
+        vec!["--history"],
+        vec!["--views"],
+        vec!["--plans"],
+        vec!["--history", "--views", "--plans"],
+    ] {
+        let root = unique_temp_dir();
+        let workspace = reconcile_scaffold(&root, &["backend"]);
+        let (url, exports, requests) = spawn_membership_sync_remote_with_failure(
+            r#"{"errors":{"detail":"export unavailable"}}"#.to_string(),
+            403,
+            None,
+        );
+        knit(&workspace, ["remote", "add", "hosted", &url]);
+        let mut args = vec!["sync", "pull"];
+        args.extend(flags.iter().copied());
+        let output = knit_with_env(&workspace, args, &[("KNIT_REMOTE_TOKEN", "test-token")]);
+        assert_eq!(exports.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let requests = requests.lock().unwrap();
+        for (flag, endpoint, success) in [
+            ("--history", "/history-events", Some("pulled history")),
+            ("--views", "/view ", Some("pulled views")),
+            ("--plans", "/landing-artifacts", None),
+        ] {
+            assert_eq!(
+                requests.iter().any(|request| request.contains(endpoint)),
+                flags.contains(&flag),
+                "{flags:?}: {requests:?}"
+            );
+            if flags.contains(&flag) {
+                if let Some(success) = success {
+                    assert!(output.contains(success), "{output}");
+                }
+            }
+        }
+        if flags.contains(&"--plans") {
+            assert!(
+                requests
+                    .iter()
+                    .any(|request| request.contains("/landing-recipes")),
+                "{requests:?}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn sync_pull_required_export_and_requested_artifact_failures_remain_fatal() {
+    for (flags, failed_path, expected) in [
+        (vec!["--bundles"], None, "bundles:"),
+        (vec!["--history", "--repos"], None, "bundles:"),
+        (vec!["--views", "--repos"], None, "bundles:"),
+        (vec!["--plans", "--repos"], None, "bundles:"),
+        (vec!["--history"], Some("/history-events"), "history:"),
+        (vec!["--views"], Some("/view "), "views:"),
+        (
+            vec!["--plans"],
+            Some("/landing-artifacts"),
+            "landing plans:",
+        ),
+    ] {
+        let root = unique_temp_dir();
+        let workspace = reconcile_scaffold(&root, &["backend"]);
+        let (url, _, requests) = spawn_membership_sync_remote_with_failure(
+            r#"{"errors":{"detail":"export unavailable"}}"#.to_string(),
+            403,
+            failed_path,
+        );
+        knit(&workspace, ["remote", "add", "hosted", &url]);
+        let mut args = vec!["sync", "pull"];
+        args.extend(flags);
+        let output = knit_fails_with_env(&workspace, args, &[("KNIT_REMOTE_TOKEN", "test-token")]);
+        assert!(
+            output.contains("Sync pull failed for 1 target(s)"),
+            "{output}"
+        );
+        assert!(output.contains(expected), "{output}");
+        if let Some(path) = failed_path {
+            assert!(requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|request| request.contains(path)));
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
+fn sync_pull_scoped_summary_ignores_omissions_but_reports_checkout_and_removal() {
+    for view_kind in ["personal", "template", "missing"] {
+        for damaged in [false, true] {
+            let root = unique_temp_dir();
+            let repos = if damaged {
+                vec!["backend", "oldrepo"]
+            } else {
+                vec!["backend"]
+            };
+            let workspace = reconcile_scaffold(&root, &repos);
+            scope_workspace(&workspace, &["backend"]);
+            let views_path = workspace.join(".knit/views/demo.views.json");
+            let mut views: serde_json::Value =
+                serde_json::from_slice(&fs::read(&views_path).unwrap()).unwrap();
+            if view_kind != "personal" {
+                let scope = views["views"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("scope")
+                    .unwrap();
+                if view_kind == "template" {
+                    views["templates"] = serde_json::json!({"scope": scope});
+                }
+                fs::write(&views_path, serde_json::to_vec_pretty(&views).unwrap()).unwrap();
+            }
+            if damaged {
+                fs::remove_dir_all(root.join("backend")).unwrap();
+            }
+            let export = membership_export(
+                serde_json::json!([
+                    {"id":"backend", "path":"", "baseBranch":"main"},
+                    {"id":"frontend", "path":"", "baseBranch":"main"}
+                ]),
+                serde_json::json!([]),
+                0,
+            );
+            let (url, _) = spawn_membership_sync_remote(export);
+            knit(&workspace, ["remote", "add", "hosted", &url]);
+            let before = fs::read(workspace.join(".knit/projects/demo.project.json")).unwrap();
+            let output = knit_with_env(
+                &workspace,
+                ["sync", "pull", "--bundles"],
+                &[("KNIT_REMOTE_TOKEN", "test-token")],
+            );
+            assert!(!output.contains("frontend"), "{view_kind}: {output}");
+            assert!(!output.contains("scope view"), "{view_kind}: {output}");
+            if damaged {
+                assert!(output.contains("1 repo(s) not set up here (backend) and 1 local repo(s) it no longer lists (oldrepo). Run `knit sync pull --repos` to apply."), "{view_kind}: {output}");
+            } else {
+                assert!(!output.contains("--repos"), "{view_kind}: {output}");
+                assert!(
+                    !output.contains("Remote project lists"),
+                    "{view_kind}: {output}"
+                );
+            }
+            assert_eq!(
+                before,
+                fs::read(workspace.join(".knit/projects/demo.project.json")).unwrap()
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+}
+
+#[test]
 fn sync_push_history_retries_tail_after_rejected_batch() {
     assert_history_batch_retry("rejected", 2000);
 }
@@ -4053,7 +4626,7 @@ fn assert_history_batch_retry(failure: &str, event_count: usize) {
         "{retry}"
     );
     assert!(
-        retry.contains(&format!("{event_count} event(s)")),
+        retry.contains(&format!("{} new event(s)", event_count - 500)),
         "{retry}"
     );
     let pushes = recorded_history_pushes(&fake_dir);

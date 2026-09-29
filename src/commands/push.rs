@@ -77,6 +77,7 @@ pub fn push_repos(
     force: PushForce,
     remote: &[String],
     no_remote: bool,
+    no_history: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     if active.bundle.repos.is_empty() {
@@ -186,7 +187,13 @@ pub fn push_repos(
     // configured sync remote (default on; see `knit config set push-sync`).
     // The force mode carries over: a forced branch push implies the ledger
     // rewrite must be forced onto the sync remote too.
-    crate::commands::remote::maybe_sync_bundle_to_remote(&mut active, remote, no_remote, force)?;
+    crate::commands::remote::maybe_sync_bundle_to_remote_with_history(
+        &mut active,
+        remote,
+        no_remote,
+        force,
+        !no_history,
+    )?;
 
     Ok(())
 }

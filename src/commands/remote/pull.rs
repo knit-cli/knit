@@ -1011,6 +1011,15 @@ pub(super) fn workspace_scope(
     local_project_id: &str,
     membership: &KnitProject,
 ) -> Result<Option<WorkspaceScope>> {
+    resolve_workspace_scope(root, local_project_id, membership, true)
+}
+
+fn resolve_workspace_scope(
+    root: &Path,
+    local_project_id: &str,
+    membership: &KnitProject,
+    warn_missing: bool,
+) -> Result<Option<WorkspaceScope>> {
     let config = crate::store::load_config(root)?;
     let Some(view_name) = config.scope_view else {
         return Ok(None);
@@ -1021,12 +1030,14 @@ pub(super) fn workspace_scope(
     // shared template, so resolution uses the effective overlay.
     let views = crate::store::load_views(root, local_project_id)?;
     let Some(view) = views.effective_view(&view_name) else {
-        println!(
-            "{} scope view {} is not saved locally; no project repos will be added until it is restored (`knit sync pull --views`) or recreated (`knit view save {} --base none --include <repo>...`).",
-            out::warn("warning:"),
-            out::repo(&view_name),
-            view_name
-        );
+        if warn_missing {
+            println!(
+                "{} scope view {} is not saved locally; no project repos will be added until it is restored (`knit sync pull --views`) or recreated (`knit view save {} --base none --include <repo>...`).",
+                out::warn("warning:"),
+                out::repo(&view_name),
+                view_name
+            );
+        }
         return Ok(Some(WorkspaceScope {
             view_name,
             repo_ids: BTreeSet::new(),
@@ -1054,7 +1065,18 @@ pub(super) fn workspace_scope(
 /// bundle's repos, so without this the same artifact would be downloaded on
 /// every sync just to be skipped again — and a scoped workspace is exactly
 /// where several such bundles live.
-type SkippedArtifacts = BTreeMap<String, String>;
+#[derive(serde::Deserialize, Serialize)]
+#[serde(untagged)]
+enum SkippedArtifact {
+    Current {
+        artifact_hash: String,
+        missing_repos: Vec<String>,
+    },
+    // Old caches lack repository identities. Re-fetch once to upgrade them.
+    Legacy(String),
+}
+
+type SkippedArtifacts = BTreeMap<String, SkippedArtifact>;
 
 fn skipped_artifacts_path(root: &Path) -> std::path::PathBuf {
     root.join(".knit/sync-skipped.json")
@@ -1081,8 +1103,13 @@ fn save_skipped_artifacts(root: &Path, skipped: &SkippedArtifacts) -> Result<()>
 }
 
 /// Repo ids `bundle` references that the local project does not carry.
-fn repos_missing_locally(bundle: &ChangeGroup, project: &KnitProject) -> Vec<String> {
-    let available: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
+fn repos_missing_locally(root: &Path, bundle: &ChangeGroup, project: &KnitProject) -> Vec<String> {
+    let available: BTreeSet<&str> = project
+        .repos
+        .iter()
+        .filter(|repo| crate::git::is_git_worktree(&root.join(&repo.path)))
+        .map(|repo| repo.id.as_str())
+        .collect();
     super::clone::missing_bundle_repos(bundle, &available)
 }
 
@@ -1615,6 +1642,99 @@ pub fn fetch_bundles_from_remote(
     config: &KnitConfig,
     remote_name: Option<&str>,
 ) -> Result<()> {
+    fetch_bundles_with_options(root, config, remote_name, None, true)
+}
+
+pub(super) fn sync_project_from_remote(
+    root: &Path,
+    config: &KnitConfig,
+    remote_name: Option<&str>,
+    repos: bool,
+    bundles: bool,
+) -> Result<()> {
+    fetch_bundles_with_options(root, config, remote_name, Some(repos), bundles)
+}
+
+fn print_membership_discrepancies(
+    root: &Path,
+    project: &KnitProject,
+    export: &RemoteProjectExport,
+) {
+    let remote_membership = export.knit_project.as_ref().filter(|p| !p.repos.is_empty());
+    let membership = remote_membership.unwrap_or(project);
+    // Keep diagnostics quiet and best-effort, while sharing reconciliation's
+    // personal/template overlay and conservative missing-view semantics.
+    let Ok(scope) = resolve_workspace_scope(root, &project.id, membership, false) else {
+        return;
+    };
+    let missing: BTreeSet<&str> = membership
+        .repos
+        .iter()
+        .filter(|remote| {
+            project
+                .repos
+                .iter()
+                .find(|local| local.id == remote.id)
+                .map_or_else(
+                    || {
+                        scope
+                            .as_ref()
+                            .is_none_or(|scope| scope.repo_ids.contains(&remote.id))
+                    },
+                    |local| {
+                        let path = root.join(&local.path);
+                        !path.exists() || !crate::git::is_git_worktree(&path)
+                    },
+                )
+        })
+        .map(|repo| repo.id.as_str())
+        .collect();
+    let removed: BTreeSet<&str> =
+        if remote_membership.is_some() && export.omitted_repository_count.unwrap_or(0) == 0 {
+            project
+                .repos
+                .iter()
+                .filter(|local| !membership.repos.iter().any(|remote| remote.id == local.id))
+                .map(|repo| repo.id.as_str())
+                .collect()
+        } else {
+            BTreeSet::new()
+        };
+    let mut fragments = Vec::new();
+    if !missing.is_empty() {
+        fragments.push(format!(
+            "{} repo(s) not set up here ({})",
+            missing.len(),
+            missing.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if !removed.is_empty() {
+        fragments.push(format!(
+            "{} local repo(s) it no longer lists ({})",
+            removed.len(),
+            removed.into_iter().collect::<Vec<_>>().join(", ")
+        ));
+    }
+    if !fragments.is_empty() {
+        let subject = if remote_membership.is_some() {
+            "Remote project lists"
+        } else {
+            "Local project lists"
+        };
+        println!(
+            "{subject} {}. Run `knit sync pull --repos` to apply.",
+            fragments.join(" and ")
+        );
+    }
+}
+
+fn fetch_bundles_with_options(
+    root: &Path,
+    config: &KnitConfig,
+    remote_name: Option<&str>,
+    repos: Option<bool>,
+    bundles: bool,
+) -> Result<()> {
     let project_id = config
         .active_project
         .clone()
@@ -1629,15 +1749,32 @@ pub fn fetch_bundles_from_remote(
                 fetch_project_export(remote, Some(token), &project_id)?,
             ))
         })?;
+
+    let Some(mut local_project) = load_project_if_present(root, &project_id)? else {
+        bail!("No local project `{project_id}` found. Cannot localize bundles.");
+    };
+
+    match repos {
+        Some(true) => {
+            reconcile_known_pending(root, &local_project, &export)?;
+            reconcile_project_auth(root, &mut local_project, &export)?;
+            reconcile_project_repositories(root, &mut local_project, &export)?;
+            reconcile_known_pending(root, &local_project, &export)?;
+            // Reconsider previously skipped artifacts after repositories become available.
+            save_skipped_artifacts(root, &SkippedArtifacts::new())?;
+        }
+        Some(false) => print_membership_discrepancies(root, &local_project, &export),
+        None => {}
+    }
+    if !bundles {
+        return Ok(());
+    }
+
     crate::history::append_history_events(
         root,
         &project_id,
         &export.decoded_history_events(&project_id),
     )?;
-
-    let Some(local_project) = load_project_if_present(root, &project_id)? else {
-        bail!("No local project `{project_id}` found. Cannot localize bundles.");
-    };
 
     let bundles_dir = root.join(".knit/bundles");
     fs::create_dir_all(&bundles_dir).with_context(|| {
@@ -1718,14 +1855,35 @@ pub fn fetch_bundles_from_remote(
             }
         }
 
-        // Skipped last time for touching repos not cloned here, and unchanged
-        // since: nothing to download, the answer would be the same.
-        if skipped_artifacts.get(&remote_bundle.slug) == Some(&artifact.artifact_hash) {
+        // An unchanged artifact is still unusable only while a previously
+        // missing repository remains unavailable. Restoring a checkout or
+        // reconciling membership must make it eligible without a new hash.
+        if skipped_artifacts
+            .get(&remote_bundle.slug)
+            .is_some_and(|cached| match cached {
+                SkippedArtifact::Current {
+                    artifact_hash,
+                    missing_repos,
+                } => {
+                    artifact_hash == &artifact.artifact_hash
+                        && missing_repos.iter().any(|id| {
+                            !local_project.repos.iter().any(|repo| {
+                                repo.id == *id
+                                    && crate::git::is_git_worktree(&root.join(&repo.path))
+                            })
+                        })
+                }
+                SkippedArtifact::Legacy(_) => false,
+            })
+        {
             println!(
                 "  {} {} [{}]",
                 out::node(&remote_bundle.slug),
                 out::muted(&remote_bundle.lifecycle_state),
-                out::muted("skipped: touches repos not cloned here (unchanged)")
+                out::muted(format!(
+                    "skipped: touches repos not cloned here (unchanged); run `knit bundle pull {}`",
+                    remote_bundle.slug
+                ))
             );
             continue;
         }
@@ -1739,7 +1897,7 @@ pub fn fetch_bundles_from_remote(
         // clone, or a repo that failed to clone) cannot be localized. That is
         // expected for a scoped workspace, so skip it and keep going: the
         // remaining bundles must still sync.
-        let missing = repos_missing_locally(&bundle, &local_project);
+        let missing = repos_missing_locally(root, &bundle, &local_project);
         if !missing.is_empty() {
             println!(
                 "  {} {} {} [{}]",
@@ -1747,11 +1905,18 @@ pub fn fetch_bundles_from_remote(
                 out::muted(&remote_bundle.lifecycle_state),
                 branch_mapping,
                 out::muted(format!(
-                    "skipped: repo {} not cloned here",
-                    missing.join(", ")
+                    "skipped: repo {} not cloned here; run `knit bundle pull {}`",
+                    missing.join(", "),
+                    remote_bundle.slug
                 ))
             );
-            skipped_artifacts.insert(remote_bundle.slug.clone(), artifact_hash);
+            skipped_artifacts.insert(
+                remote_bundle.slug.clone(),
+                SkippedArtifact::Current {
+                    artifact_hash,
+                    missing_repos: missing,
+                },
+            );
             continue;
         }
         skipped_artifacts.remove(&remote_bundle.slug);
