@@ -137,10 +137,8 @@ fn push_history_events(
         .iter()
         .map(|event| serde_json::to_string(event).context("failed to encode history event"))
         .collect::<Result<Vec<_>>>()?;
-    // A bundle slice is not a prefix of the project ledger. Always upsert
-    // that slice without reading or writing the project-wide cursor, so a
-    // later full push cannot skip unrelated events (or lose other remotes).
-    let state = if bundle.is_some() {
+    // A bundle slice must never read or update the project-wide cursor.
+    let mut state = if bundle.is_some() {
         HistorySyncState::new()
     } else {
         load_history_sync_state(root, project_id)?
@@ -148,7 +146,6 @@ fn push_history_events(
     let plan = plan_history_push(&encoded, state.get(remote_name));
     let to_send: &[HistoryEvent] = match plan {
         HistoryPushPlan::UpToDate => {
-            record_history_sync(root, project_id, remote_name, &encoded, state)?;
             print_history_push_size(remote_name, 0, 0);
             return Ok(events.len());
         }
@@ -158,19 +155,28 @@ fn push_history_events(
 
     let batches: Vec<&[HistoryEvent]> = to_send.chunks(HISTORY_PAGE_SIZE).collect();
     print_history_push_size(remote_name, to_send.len(), batches.len());
-    // Batched so a project ledger of thousands of events never rides in one
-    // request body; each batch upserts independently and is idempotent, so
-    // the batches go out concurrently — a full push of a large ledger is
-    // bounded by the slowest request, not their sum.
+    // Receive in completion order: a slow or failed later request must not
+    // delay saving an already accepted prefix (including before Ctrl-C).
+    let from = match plan {
+        HistoryPushPlan::Tail(from) => from,
+        _ => 0,
+    };
+    let mut progress = HistoryPushProgress::new(batches.len());
+    let mut accepted = from;
+    let mut failed = 0;
+    let mut completed = 0;
+    let mut attempted = 0;
+    let mut first_error = None;
     let path = format!("/projects/{project_slug}/history-events");
-    let outcomes: Vec<Result<RemoteHistoryPush>> = std::thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for group in batches.chunks(HISTORY_PUSH_CONCURRENCY) {
-            let started: Vec<_> = group
-                .iter()
-                .map(|batch| {
-                    let path = path.as_str();
-                    scope.spawn(move || {
+    std::thread::scope(|scope| -> Result<()> {
+        for (group_index, group) in batches.chunks(HISTORY_PUSH_CONCURRENCY).enumerate() {
+            attempted += group.iter().map(|batch| batch.len()).sum::<usize>();
+            let (sender, receiver) = std::sync::mpsc::channel();
+            for (offset, batch) in group.iter().enumerate() {
+                let sender = sender.clone();
+                let path = path.as_str();
+                scope.spawn(move || {
+                    let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         let payload = json!({ "events": batch });
                         request_json::<RemoteHistoryPush>(
                             remote,
@@ -179,39 +185,62 @@ fn push_history_events(
                             path,
                             Some(&payload),
                         )
-                    })
-                })
-                .collect();
-            for handle in started {
-                handles.push(
-                    handle
-                        .join()
-                        .unwrap_or_else(|_| Err(anyhow::anyhow!("history push thread panicked"))),
-                );
+                    }))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("history push thread panicked")));
+                    let _ = sender.send((group_index * HISTORY_PUSH_CONCURRENCY + offset, outcome));
+                });
+            }
+            drop(sender);
+            // Drain this group even after an error: an earlier batch may still
+            // complete and extend the durable prefix. Never skip over a hole.
+            for (index, outcome) in receiver {
+                completed += 1;
+                let successful = match outcome {
+                    Ok(response) => {
+                        accepted += response.inserted_count
+                            + response.updated_count
+                            + response.skipped_count;
+                        failed += response.failed_count;
+                        response.failed_count == 0
+                    }
+                    Err(error) => {
+                        first_error.get_or_insert(error);
+                        false
+                    }
+                };
+                if let Some(prefix) = progress.complete(index, successful).filter(|_| bundle.is_none()) {
+                    let end = (from + prefix * HISTORY_PAGE_SIZE).min(events.len());
+                    record_history_sync(
+                        root,
+                        project_id,
+                        remote_name,
+                        &encoded[..end],
+                        &mut state,
+                    )?;
+                }
+                if batches.len() > 1 {
+                    crate::human!("{}", out::muted(format!(
+                        "syncing history to {remote_name}: {completed}/{} request(s) completed, {accepted} event(s) accepted",
+                        batches.len()
+                    )));
+                }
+            }
+            if first_error.is_some() || failed > 0 {
+                break;
             }
         }
-        handles
-    });
-    let mut accepted = 0;
-    let mut failed = 0;
-    for outcome in outcomes {
-        let response = outcome?;
-        accepted += response.inserted_count + response.updated_count + response.skipped_count;
-        failed += response.failed_count;
-    }
-    if failed > 0 {
-        eprintln!(
-            "{} {failed} history event(s) were rejected by the sync remote and are missing there; the next push retries them",
-            out::warn("warning:")
+        Ok(())
+    })?;
+    if first_error.is_some() || failed > 0 {
+        let unattempted = to_send.len() - attempted;
+        let message = format!(
+            "incomplete history sync: {failed} event(s) rejected, {unattempted} event(s) unattempted; completed {completed}/{} request(s), {accepted} event(s) accepted; the next push resumes from the saved prefix",
+            batches.len()
         );
-    } else if bundle.is_none() {
-        // Only a fully accepted push moves the cursor: a rejected event stays
-        // ahead of it and rides again next time.
-        record_history_sync(root, project_id, remote_name, &encoded, state)?;
-    }
-    if let HistoryPushPlan::Tail(from) = plan {
-        // What the remote holds now, for the "N event(s) synced" line.
-        accepted += from;
+        return match first_error {
+            Some(error) => Err(error).context(message),
+            None => Err(anyhow::anyhow!(message)),
+        };
     }
     Ok(accepted)
 }
@@ -223,6 +252,31 @@ fn print_history_push_size(remote_name: &str, events: usize, requests: usize) {
             "syncing history to {remote_name}: {events} event(s) in {requests} request(s)…"
         ))
     );
+}
+
+/// Successful requests may arrive in any order. Only a gap-free prefix is
+/// safe to omit on retry; success beyond a failed request is replayed.
+struct HistoryPushProgress {
+    successful: Vec<bool>,
+    prefix: usize,
+}
+
+impl HistoryPushProgress {
+    fn new(batches: usize) -> Self {
+        Self {
+            successful: vec![false; batches],
+            prefix: 0,
+        }
+    }
+
+    fn complete(&mut self, index: usize, successful: bool) -> Option<usize> {
+        self.successful[index] = successful;
+        let previous = self.prefix;
+        while self.successful.get(self.prefix) == Some(&true) {
+            self.prefix += 1;
+        }
+        (self.prefix > previous).then_some(self.prefix)
+    }
 }
 
 /// How many history requests are in flight at once during a push.
@@ -309,7 +363,7 @@ fn record_history_sync(
     project_id: &str,
     remote_name: &str,
     encoded_lines: &[String],
-    mut state: HistorySyncState,
+    state: &mut HistorySyncState,
 ) -> Result<()> {
     state.insert(
         remote_name.to_string(),
@@ -325,8 +379,42 @@ fn record_history_sync(
     }
     let body =
         serde_json::to_string_pretty(&state).context("failed to encode history sync state")?;
-    std::fs::write(&path, format!("{body}\n"))
-        .with_context(|| format!("failed to write {}", path.display()))
+    // A sibling temp + rename leaves the previous cursor intact if writing
+    // fails or the process is interrupted. Never remove the old destination.
+    use std::io::Write;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static SEQUENCE: AtomicU64 = AtomicU64::new(0);
+    let temporary = path.with_extension(format!(
+        "{}.{}.tmp",
+        std::process::id(),
+        SEQUENCE.fetch_add(1, Ordering::Relaxed)
+    ));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+        .with_context(|| format!("failed to create {}", temporary.display()))?;
+    let result = (|| -> Result<()> {
+        file.write_all(format!("{body}\n").as_bytes())?;
+        file.sync_all()?;
+        drop(file);
+        std::fs::rename(&temporary, &path)?;
+        // On Unix, persist the renamed directory entry as well as the file.
+        #[cfg(unix)]
+        if let Some(parent) = path.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .with_context(|| format!("failed to sync directory {}", parent.display()))?;
+        }
+        // Non-Unix std APIs do not provide a portable directory-sync operation.
+        // There we sync the file and rename only, without claiming that the
+        // directory entry is durable across a crash.
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(&temporary);
+    }
+    result.with_context(|| format!("failed to write {}", path.display()))
 }
 
 /// How many history events ride in one request, both directions.
@@ -396,6 +484,65 @@ mod push_plan_tests {
         (0..count)
             .map(|index| format!("{{\"eventId\":\"e{index}\"}}"))
             .collect()
+    }
+
+    #[test]
+    fn second_of_four_fails_out_of_order_and_retry_starts_after_first() {
+        let root = std::env::temp_dir().join(format!(
+            "knit-history-prefix-{}",
+            crate::ids::node_id("test")
+        ));
+        let encoded = lines(2000);
+        let mut state = HistorySyncState::new();
+        // Another remote's progress must survive every replacement.
+        record_history_sync(&root, "demo", "mirror", &encoded, &mut state).unwrap();
+        let mut progress = HistoryPushProgress::new(4);
+        for (index, successful, expected) in [
+            (2, true, None),
+            (1, false, None),
+            (0, true, Some(1)),
+            (3, true, None),
+        ] {
+            let prefix = progress.complete(index, successful);
+            assert_eq!(prefix, expected);
+            if let Some(prefix) = prefix {
+                record_history_sync(
+                    &root,
+                    "demo",
+                    "hosted",
+                    &encoded[..prefix * 500],
+                    &mut state,
+                )
+                .unwrap();
+            }
+        }
+        let saved = load_history_sync_state(&root, "demo").unwrap();
+        assert_eq!(saved["hosted"].event_count, 500);
+        assert_eq!(
+            saved["hosted"].fingerprint,
+            history_fingerprint(&encoded[..500])
+        );
+        assert_eq!(saved["mirror"].event_count, 2000);
+        assert_eq!(
+            plan_history_push(&encoded, saved.get("hosted")),
+            HistoryPushPlan::Tail(500)
+        );
+        assert_eq!(
+            std::fs::read_dir(history_sync_state_path(&root, "demo").parent().unwrap())
+                .unwrap()
+                .count(),
+            1
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn out_of_order_success_advances_only_when_the_gap_closes() {
+        let mut progress = HistoryPushProgress::new(4);
+        assert_eq!(progress.complete(3, true), None);
+        assert_eq!(progress.complete(1, true), None);
+        assert_eq!(progress.complete(0, true), Some(2));
+        assert_eq!(progress.complete(2, true), Some(4));
     }
 
     #[test]

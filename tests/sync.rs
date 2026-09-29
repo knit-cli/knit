@@ -3945,3 +3945,134 @@ fn a_remote_ahead_pull_keeps_the_locally_cached_hosted_url() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_push_history_retries_tail_after_rejected_batch() {
+    assert_history_batch_retry("rejected", 2000);
+}
+
+#[test]
+fn sync_push_history_retries_tail_after_http_failure() {
+    assert_history_batch_retry("http", 2000);
+}
+
+#[test]
+fn sync_push_history_rejected_batch_stops_unattempted_groups() {
+    assert_history_batch_retry("rejected", 3000);
+}
+
+fn assert_history_batch_retry(failure: &str, event_count: usize) {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    let history_dir = workspace.join(".knit/history");
+    fs::create_dir_all(&history_dir).unwrap();
+    let events: Vec<serde_json::Value> = (0..event_count)
+        .map(|i| {
+            serde_json::json!({
+                "schemaVersion": "knit.history.event.v1",
+                "eventId": format!("e{i:04}"), "projectId": "demo", "kind": "test",
+                "recordedAt": "2026-01-01T00:00:00Z", "recordedBy": "synthetic"
+            })
+        })
+        .collect();
+    let ledger = events
+        .iter()
+        .map(|event| format!("{event}\n"))
+        .collect::<String>();
+    fs::write(history_dir.join("demo.history.jsonl"), ledger).unwrap();
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    fs::write(
+        fake_dir.join("history-batches.json"),
+        serde_json::json!({
+            "e0000": {"delayMs": 150},
+            "e0500": {"delayMs": 10, "failure": failure},
+            "e1000": {"delayMs": 40},
+            "e1500": {"delayMs": 60}
+        })
+        .to_string(),
+    )
+    .unwrap();
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "synthetic-token")];
+    let args = ["sync", "push", "--history", "--remote", "hosted"];
+    let first = knit_fails_with_env(&workspace, args, &env);
+    let batch_count = event_count / 500;
+    let rejected = usize::from(failure == "rejected");
+    assert!(first.contains("incomplete history sync"), "{first}");
+    assert!(
+        first.contains(&format!("{rejected} event(s) rejected")),
+        "{first}"
+    );
+    assert!(
+        first.contains(&format!("{} event(s) unattempted", event_count - 2000)),
+        "{first}"
+    );
+    assert!(!first.contains("pushed history"), "{first}");
+    if failure == "http" {
+        assert!(first.contains("synthetic batch failure"), "{first}");
+    }
+    assert!(
+        first.contains(&format!(
+            "syncing history to hosted: {event_count} event(s) in {batch_count} request(s)"
+        )),
+        "{first}"
+    );
+    assert!(
+        first.contains(&format!("4/{batch_count} request(s) completed")),
+        "{first}"
+    );
+    let pushes = recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 4);
+    assert!(pushes.iter().all(|batch| batch.len() == 500));
+    let mut attempted: Vec<String> = pushes.iter().flatten().cloned().collect();
+    attempted.sort();
+    assert_eq!(
+        attempted,
+        (0..2000).map(|i| format!("e{i:04}")).collect::<Vec<_>>()
+    );
+    let cursor_path = history_dir.join("demo.history-sync.json");
+    let cursor: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cursor_path).unwrap()).unwrap();
+    assert_eq!(cursor["hosted"]["eventCount"], 500);
+    assert!(cursor["hosted"]["fingerprint"]
+        .as_str()
+        .unwrap()
+        .starts_with("fnv1a64:"));
+
+    fs::remove_file(fake_dir.join("history-batches.json")).unwrap();
+    let retry = knit_with_env(&workspace, args, &env);
+    assert!(
+        retry.contains(&format!(
+            "{} event(s) in {} request(s)",
+            event_count - 500,
+            batch_count - 1
+        )),
+        "{retry}"
+    );
+    assert!(
+        retry.contains(&format!("{event_count} event(s)")),
+        "{retry}"
+    );
+    let pushes = recorded_history_pushes(&fake_dir);
+    assert_eq!(pushes.len(), 4 + batch_count - 1);
+    let mut retried: Vec<String> = pushes[4..].iter().flatten().cloned().collect();
+    retried.sort();
+    assert_eq!(
+        retried,
+        (500..event_count)
+            .map(|i| format!("e{i:04}"))
+            .collect::<Vec<_>>()
+    );
+    let cursor: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&cursor_path).unwrap()).unwrap();
+    assert_eq!(cursor["hosted"]["eventCount"], event_count);
+    knit_with_env(&workspace, args, &env);
+    assert_eq!(
+        recorded_history_pushes(&fake_dir).len(),
+        4 + batch_count - 1
+    );
+    fs::remove_dir_all(root).unwrap();
+}
