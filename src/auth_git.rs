@@ -837,7 +837,7 @@ fn raw_remote_urls(cwd: &Path, target: &str, push: bool) -> Vec<String> {
         .unwrap_or_default()
 }
 
-fn default_remote(cwd: &Path, push: bool) -> String {
+pub(crate) fn default_remote(cwd: &Path, push: bool) -> String {
     let branch = raw_git(cwd, &["symbolic-ref", "--quiet", "--short", "HEAD"]);
     if push {
         if let Some(remote) = branch

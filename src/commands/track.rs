@@ -154,6 +154,8 @@ fn apply_repo_plans(
 
         let repo_id = unique_repo_id(&active.bundle, &plan.desired_id);
         active.bundle.repos.push(RepoEntry {
+            source_remote: None,
+            target_remote: None,
             id: repo_id.clone(),
             path: plan.path,
             remote: plan.remote,

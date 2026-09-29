@@ -87,14 +87,23 @@ pub struct CheckWaitSummary {
 /// `cwd` is a git checkout used to resolve the repository. `repo_full_name` is
 /// set in artifact mode (no local feature checkout), so the adapter can target
 /// the repo explicitly (e.g. `gh --repo owner/name`).
+#[derive(Clone)]
 pub struct PrTarget {
+    /// Read-only pre-push inspection may accept the previous remote head.
+    pub verify_head: bool,
+    pub contribution: Option<crate::contribution::Identity>,
     pub cwd: PathBuf,
     pub repo_full_name: Option<String>,
+    /// Precise portable URL, when the caller has an explicit repository identity.
+    pub repo_remote: Option<String>,
 }
 
 impl PrTarget {
     pub fn checkout(cwd: impl Into<PathBuf>) -> Self {
         Self {
+            contribution: None,
+            repo_remote: None,
+            verify_head: true,
             cwd: cwd.into(),
             repo_full_name: None,
         }
@@ -102,6 +111,9 @@ impl PrTarget {
 
     pub fn explicit(cwd: impl Into<PathBuf>, repo_full_name: impl Into<String>) -> Self {
         Self {
+            contribution: None,
+            repo_remote: None,
+            verify_head: true,
             cwd: cwd.into(),
             repo_full_name: Some(repo_full_name.into()),
         }
@@ -257,16 +269,18 @@ pub fn for_remote(remote: &str) -> Option<Box<dyn Forge>> {
 /// Without assignments, detect known hosts and default to GitHub for other
 /// remotes, preserving Knit's original `gh`-backed behavior.
 pub fn for_repo(repo: &RepoEntry) -> Result<Box<dyn Forge>> {
-    if let Some(remote) = &repo.remote {
+    if crate::contribution::cross_repository(repo)? {
+        crate::contribution::identity(repo, &repo.base_branch)?;
+        return Ok(Box::new(github::GitHub));
+    }
+    if let Some(remote) = crate::contribution::destination(repo) {
         if let Some(provider) = crate::auth::provider_for_remote(&std::env::current_dir()?, remote)?
         {
             return by_id(&provider)
                 .with_context(|| format!("unsupported credential provider `{provider}`"));
         }
     }
-    Ok(repo
-        .remote
-        .as_deref()
+    Ok(crate::contribution::destination(repo)
         .and_then(for_remote)
         .unwrap_or_else(|| Box::new(github::GitHub)))
 }
@@ -449,9 +463,21 @@ pub(crate) fn target_credential(
     target: &PrTarget,
     provider: &str,
 ) -> Result<Option<crate::auth::ResolvedCredential>> {
-    let credential = match &target.repo_full_name {
-        Some(repo) => crate::auth::resolve_repository(&target.cwd, provider, repo)?,
-        None => crate::auth::resolve(&target.cwd, None)?,
+    let credential = if let Some(remote) = &target.repo_remote {
+        let (_, path) = crate::auth::remote_target(remote)?;
+        if target
+            .repo_full_name
+            .as_deref()
+            .is_none_or(|name| !name.eq_ignore_ascii_case(&path))
+        {
+            bail!("Explicit forge repository disagrees with its credential URL");
+        }
+        crate::auth::resolve(&target.cwd, Some(remote))?
+    } else {
+        match &target.repo_full_name {
+            Some(repo) => crate::auth::resolve_repository(&target.cwd, provider, repo)?,
+            None => crate::auth::resolve(&target.cwd, None)?,
+        }
     };
     if let Some(credential) = &credential {
         if credential.provider != provider {

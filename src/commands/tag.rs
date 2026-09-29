@@ -53,6 +53,7 @@ struct TagTarget {
     path: PathBuf,
     base_branch: String,
     has_origin: bool,
+    remote: String,
 }
 
 /// `knit tag <name>`: pin the freshly fetched origin bases of the resolved
@@ -279,13 +280,17 @@ fn resume_tag_set(
         if no_push {
             continue;
         }
-        match remote_ref_sha(&path, "origin", &tag_ref(name))? {
+        match remote_ref_sha(
+            &path,
+            super::merge::destination_remote(repo),
+            &tag_ref(name),
+        )? {
             None => {
                 git_output(
                     &path,
                     [
                         OsString::from("push"),
-                        OsString::from("origin"),
+                        OsString::from(super::merge::destination_remote(repo)),
                         OsString::from(tag_ref(name)),
                     ],
                 )
@@ -395,7 +400,13 @@ pub fn show_tag(name: &str) -> Result<()> {
             continue;
         }
         let local = ref_commit_sha(path, &tag_ref(name))?;
-        let remote = match remote_ref_sha(path, "origin", &tag_ref(name)) {
+        let active = load_active_bundle().ok();
+        let destination = active
+            .as_ref()
+            .and_then(|a| a.bundle.repos.iter().find(|r| &r.id == repo_id))
+            .map(super::merge::destination_remote)
+            .unwrap_or("origin");
+        let remote = match remote_ref_sha(path, destination, &tag_ref(name)) {
             Ok(remote) => remote
                 .map(|sha| short_sha(&sha))
                 .unwrap_or_else(|| "-".to_string()),
@@ -496,7 +507,9 @@ fn targets_for(
             ));
             continue;
         }
-        let has_origin = git_output_optional(&path, ["remote", "get-url", "origin"])?.is_some();
+        let remote = super::merge::destination_remote(repo).to_owned();
+        let has_origin = crate::contribution::configured(repo)
+            || git_output_optional(&path, ["remote", "get-url", "origin"])?.is_some();
         if !has_origin && !allow_local_base {
             failures.push(format!(
                 "{}: no `origin` remote configured in {} (use --no-push to tag the local configured base)",
@@ -510,6 +523,7 @@ fn targets_for(
             path,
             base_branch: repo.base_branch.clone(),
             has_origin,
+            remote,
         });
     }
     if !failures.is_empty() {
@@ -549,8 +563,16 @@ fn fetch_pins(targets: &[TagTarget]) -> Result<Vec<(String, String)>> {
 
 fn fetch_pin(target: &TagTarget) -> Result<String> {
     if target.has_origin {
-        git_output(&target.path, ["fetch", "origin"])?;
-        let remote_ref = format!("origin/{}", target.base_branch);
+        let remote_ref = if target.remote == "origin" {
+            format!("refs/remotes/origin/{}", target.base_branch)
+        } else {
+            format!("refs/knit/tag-base/{}", target.repo_id)
+        };
+        let refspec = format!("+refs/heads/{}:{remote_ref}", target.base_branch);
+        git_output(
+            &target.path,
+            ["fetch", "--no-tags", &target.remote, &refspec],
+        )?;
         return ref_commit_sha(&target.path, &remote_ref)?
             .with_context(|| format!("no `{remote_ref}` after fetch"));
     }
@@ -601,7 +623,8 @@ fn preflight_collision(target: &TagTarget, name: &str) -> Result<Vec<String>> {
     if ref_commit_sha(&target.path, &tag_ref(name))?.is_some() {
         hits.push("local".to_string());
     }
-    if target.has_origin && remote_ref_sha(&target.path, "origin", &tag_ref(name))?.is_some() {
+    if target.has_origin && remote_ref_sha(&target.path, &target.remote, &tag_ref(name))?.is_some()
+    {
         hits.push("origin".to_string());
     }
     Ok(hits)
@@ -632,7 +655,7 @@ fn collect_ci_evidence(
                 let Ok(forge) = providers::for_repo(repo) else {
                     return "unknown (no provider)".to_string();
                 };
-                let Some(remote) = repo.remote.as_deref() else {
+                let Some(remote) = crate::contribution::destination(repo) else {
                     return "unknown (no remote recorded)".to_string();
                 };
                 let Some(slug) = forge.repo_full_name(remote) else {
@@ -889,7 +912,7 @@ fn push_tags(targets: &[TagTarget], name: &str) -> Result<()> {
                         &target.path,
                         [
                             OsString::from("push"),
-                            OsString::from("origin"),
+                            OsString::from(&target.remote),
                             OsString::from(tag_ref(name)),
                         ],
                     )

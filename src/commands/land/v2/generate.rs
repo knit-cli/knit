@@ -123,7 +123,15 @@ pub(super) fn build(
         for repo in repos {
             let id = repo["id"].as_str().unwrap_or("");
             if !generation_bundle.repos.iter().any(|r| r.id == id) {
-                generation_bundle.repos.push(serde_json::from_value(json!({"id":id,"path":repo["path"].as_str().unwrap_or("."),"remote":repo["remote"],"baseBranch":repo["baseBranch"],"featureBranch":null,"worktreePath":null}))?);
+                let mut binding = json!({"id":id,"path":repo["path"].as_str().unwrap_or("."),"remote":repo["remote"],"baseBranch":repo["baseBranch"],"featureBranch":null,"worktreePath":null});
+                for key in ["sourceRemote", "targetRemote"] {
+                    if let Some(value) = repo.get(key) {
+                        binding[key] = value.clone();
+                    }
+                }
+                generation_bundle
+                    .repos
+                    .push(serde_json::from_value(binding)?);
             }
         }
     }
@@ -166,6 +174,15 @@ pub(super) fn build(
             r["baseBranch"].as_str()?.to_owned()
         )))
         .collect::<std::collections::BTreeMap<_, _>>());
+    let identities = super::graph::repository_identities(bundle, project);
+    if identities
+        .as_object()
+        .unwrap()
+        .values()
+        .any(|r| r["sourceRemote"].is_string() || r["targetRemote"].is_string())
+    {
+        plan["repositoryIdentities"] = identities;
+    }
     plan["bundleFingerprint"] = json!(bundle_fingerprint(bundle));
     plan["projectFingerprint"] = json!(project_fingerprint(project));
     plan["maxParallel"] = project["landing"]

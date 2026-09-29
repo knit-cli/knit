@@ -90,7 +90,7 @@ pub fn preflight(
     live_errors.extend(source_errors);
     if structural["valid"] == true {
         let (steps, _) = super::graph::compile(&plan)?;
-        if let Err(error) = super::branch_checkout::preflight(&steps, &roots, &bundle) {
+        if let Err(error) = super::branch_checkout::preflight(&steps, &roots, &bundle, &plan) {
             live_errors.push(format!("{error:#}"));
         }
     }

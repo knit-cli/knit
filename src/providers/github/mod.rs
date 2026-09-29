@@ -378,6 +378,8 @@ fn is_checks_permission_error(error: &anyhow::Error) -> bool {
     super::is_gh_checks_access_error(error)
 }
 
+pub(crate) use api::preflight_contribution;
+
 #[cfg(test)]
 mod tests {
     use super::*;

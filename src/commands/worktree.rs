@@ -42,6 +42,7 @@ pub fn materialize_repos(
     only_repo_ids: Option<&[String]>,
 ) -> Result<Vec<String>> {
     let bundle_id = active.bundle.id.clone();
+    crate::contribution::validate_bundle(&active.bundle)?;
     fs::create_dir_all(active.root.join(".knit/worktrees").join(&bundle_id))
         .context("failed to create bundle worktree directory")?;
 
@@ -259,11 +260,15 @@ fn materialize_one_repo(
     repo_index: usize,
     repo: &RepoEntry,
 ) -> Result<MaterializeResult> {
-    let feature_branch = format!("knit/{bundle_id}");
+    let feature_branch = repo
+        .feature_branch
+        .clone()
+        .unwrap_or_else(|| format!("knit/{bundle_id}"));
     let repo_root = PathBuf::from(&repo.path);
 
     if is_in_place(repo) {
         let update = materialize_in_place(repo_index, repo, &repo_root, &feature_branch)?;
+        crate::contribution::track_source(&repo_root, repo, &feature_branch)?;
         return Ok(update);
     }
 
@@ -292,6 +297,7 @@ fn materialize_one_repo(
                     .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
             );
             update.log = MaterializeLog::WorktreeExists(worktree_path);
+            crate::contribution::track_source(&repo_root, repo, &feature_branch)?;
             return Ok(update);
         }
         bail!(
@@ -324,19 +330,24 @@ fn materialize_one_repo(
         update.log = MaterializeLog::WorktreeFromBranch {
             contains_base: is_ancestor(&repo_root, &base_sha, &feature_branch),
         };
+        crate::contribution::track_source(&repo_root, repo, &feature_branch)?;
         return Ok(update);
     }
 
     // Another user may already have pushed this bundle's feature branch.
     // Starting from origin instead of base keeps a second workspace on the
     // same history; forking from base here would diverge immediately.
-    if let Some(remote_ref) = origin_feature_ref(&repo_root, &feature_branch) {
+    if let Some(remote_ref) = feature_ref(&repo_root, repo, &feature_branch)? {
         git_output(
             &repo_root,
             [
                 OsString::from("worktree"),
                 OsString::from("add"),
-                OsString::from("--track"),
+                OsString::from(if crate::contribution::configured(repo) {
+                    "--no-track"
+                } else {
+                    "--track"
+                }),
                 OsString::from("-b"),
                 OsString::from(&feature_branch),
                 worktree_abs.as_os_str().to_os_string(),
@@ -357,6 +368,7 @@ fn materialize_one_repo(
             contains_base: is_ancestor(&repo_root, &base_sha, &feature_branch),
             remote_ref,
         };
+        crate::contribution::track_source(&repo_root, repo, &feature_branch)?;
         return Ok(update);
     }
 
@@ -376,7 +388,18 @@ fn materialize_one_repo(
         rev_parse(&worktree_abs, "HEAD")
             .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?,
     );
+    crate::contribution::track_source(&repo_root, repo, &feature_branch)?;
     Ok(update)
+}
+
+fn feature_ref(root: &Path, repo: &RepoEntry, branch: &str) -> Result<Option<String>> {
+    if crate::contribution::configured(repo) {
+        Ok(Some(crate::contribution::fetch_ref(
+            root, repo, branch, true,
+        )?))
+    } else {
+        Ok(origin_feature_ref(root, branch))
+    }
 }
 
 /// Look for this bundle's feature branch on `origin` before creating a fresh
@@ -415,14 +438,18 @@ fn materialize_in_place(
         if branch_exists(repo_root, feature_branch) {
             git_output(repo_root, ["checkout", feature_branch])
                 .with_context(|| format!("{}: failed to checkout {feature_branch}", repo.id))?;
-        } else if let Some(remote_ref) = origin_feature_ref(repo_root, feature_branch) {
+        } else if let Some(remote_ref) = feature_ref(repo_root, repo, feature_branch)? {
             // A collaborator already pushed this bundle's branch: track it
             // instead of forking a same-named branch from base.
             git_output(
                 repo_root,
                 [
                     OsString::from("checkout"),
-                    OsString::from("--track"),
+                    OsString::from(if crate::contribution::configured(repo) {
+                        "--no-track"
+                    } else {
+                        "--track"
+                    }),
                     OsString::from("-b"),
                     OsString::from(feature_branch),
                     OsString::from(&remote_ref),
@@ -467,6 +494,17 @@ fn materialize_in_place(
 }
 
 fn materialization_base(repo_root: &Path, repo: &RepoEntry) -> Result<String> {
+    if crate::contribution::configured(repo) {
+        if let Some(sha) = &repo.base_sha {
+            if rev_parse(repo_root, sha).is_err() {
+                let url = crate::contribution::destination(repo).context("missing targetRemote")?;
+                git_output(repo_root, ["fetch", "--no-tags", url, sha])?;
+            }
+            return rev_parse(repo_root, sha);
+        }
+        let reference = crate::contribution::fetch_ref(repo_root, repo, &repo.base_branch, false)?;
+        return rev_parse(repo_root, &reference);
+    }
     if let Some(base_sha) = &repo.base_sha {
         // Verify the recorded object is available before creating a branch.
         rev_parse(repo_root, base_sha).with_context(|| {

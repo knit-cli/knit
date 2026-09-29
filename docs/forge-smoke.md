@@ -70,3 +70,12 @@ private repository per forge. One bundle created four review objects, live
 status reported all four ready, and every review body contained the URLs of all
 four reviews. Those reviews remain open intentionally; the cross-forge example
 was not landed or tagged.
+
+## Fork publication regression suite
+
+`cargo test --test contribution_publish` uses local bare Git repositories and a
+synthetic GitHub API. It covers split push URLs, repeated publication after a new
+commit, base updates, retargeting, portable artifacts, same-owner forks,
+wrong-repository PR numbers, full PR identity verification, unsupported hosts,
+source-only cleanup, and independent credentials with an unlisted fork. It makes
+no requests to a real forge.

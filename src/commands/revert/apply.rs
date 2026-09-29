@@ -182,24 +182,42 @@ pub(crate) fn create_provider_revert_prs(
             "Reverts {selector}\n\nKnit-Reverts: {target_node_id}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
             active.bundle.id
         );
-        match forge.revert_pull_request(&target, selector, &title, &body) {
-            Ok(url) => {
-                let summary = forge.view(&target, &url).unwrap_or_else(|_| PullRequest {
-                    number: pr_number_from_url(&url).unwrap_or(0),
-                    url: url.clone(),
-                    state: Some("OPEN".to_string()),
-                    title: Some(title.clone()),
-                    base_ref_name: Some(repo.base_branch.clone()),
-                    head_ref_name: None,
-                    body: None,
-                    is_draft: None,
-                    head_ref_oid: None,
-                    mergeable: None,
-                    merge_state_status: None,
-                    review_decision: None,
-                    author: None,
-                });
-                providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
+        match super::create_review(forge.as_ref(), &target, &repo, selector, &title, &body) {
+            Ok((url, review_target)) => {
+                let summary = match forge.view(&review_target, &url) {
+                    Ok(summary) => summary,
+                    Err(error) if review_target.contribution.is_some() => {
+                        failures.push(format!(
+                            "{repo_id}: compensation review {url} failed verification: {error:#}"
+                        ));
+                        continue;
+                    }
+                    Err(_) => PullRequest {
+                        number: pr_number_from_url(&url).unwrap_or(0),
+                        url: url.clone(),
+                        state: Some("OPEN".to_string()),
+                        title: Some(title.clone()),
+                        base_ref_name: Some(repo.base_branch.clone()),
+                        head_ref_name: None,
+                        body: None,
+                        is_draft: None,
+                        head_ref_oid: None,
+                        mergeable: None,
+                        merge_state_status: None,
+                        review_decision: None,
+                        author: None,
+                    },
+                };
+                // Compensation is a new contribution, not the original bundle
+                // feature. Preserve its original identity and publication pins.
+                if target.contribution.is_none() {
+                    providers::upsert_publication(
+                        &mut active.bundle,
+                        &repo,
+                        forge.as_ref(),
+                        &summary,
+                    );
+                }
                 repo_ids.insert(repo_id.clone());
                 publication_urls.insert(summary.url.clone());
                 println!(
@@ -457,6 +475,41 @@ fn provider_target(
     forge: &dyn providers::Forge,
     selector_hint: Option<&str>,
 ) -> Result<PrTarget> {
+    if crate::contribution::configured(repo) {
+        let base = providers::publication_for_repo(&active.bundle, &repo.id)
+            .map(|p| p.base_branch.as_str())
+            .unwrap_or(&repo.base_branch);
+        let cwd = checkout_dir(active, repo)
+            .filter(|p| p.is_dir())
+            .unwrap_or_else(|| {
+                if Path::new(&repo.path).is_dir() {
+                    PathBuf::from(&repo.path)
+                } else {
+                    active.root.clone()
+                }
+            });
+        let target = crate::contribution::target(&cwd, repo, forge, base, true)?;
+        if target.contribution.is_some() && forge.id() != "github" {
+            bail!("cross-repository compensation requires GitHub");
+        }
+        if forge.id() == "github" {
+            if let Some(selector) = selector_hint {
+                let target_name = target
+                    .repo_full_name
+                    .as_ref()
+                    .context("missing target repository identity")?;
+                let identity = crate::contribution::Identity {
+                    source: target_name.clone(),
+                    target: target_name.clone(),
+                    branch: String::new(),
+                    sha: String::new(),
+                    base: base.to_owned(),
+                };
+                crate::contribution::publication_url(&identity, selector)?;
+            }
+        }
+        return Ok(target);
+    }
     if let Some(full_name) = repo
         .remote
         .as_deref()

@@ -536,7 +536,15 @@ fn prepare_plan_publication_targets(active: &mut ActiveBundle, plan: &LandPlan) 
         }
         let (_, repo, cwd) = repo_context(active, repo_id)?;
         let forge = providers::for_repo(&repo)?;
-        let target = PrTarget::checkout(&cwd);
+        let mut target = crate::contribution::target(
+            &cwd,
+            &repo,
+            forge.as_ref(),
+            &publication_for_repo(&active.bundle, repo_id)
+                .context("missing review")?
+                .base_branch,
+            false,
+        )?;
         let publication = publication_for_repo(&active.bundle, repo_id)
             .with_context(|| format!("{repo_id}: missing review publication"))?
             .clone();
@@ -571,6 +579,9 @@ fn prepare_plan_publication_targets(active: &mut ActiveBundle, plan: &LandPlan) 
                     current.number
                 )
             })?;
+        if let Some(identity) = &mut target.contribution {
+            identity.base = target_branch.to_owned();
+        }
         let refreshed = forge.view(&target, &publication.url)?;
         if refreshed.base_ref_name.as_deref() != Some(target_branch) {
             bail!(
@@ -989,6 +1000,9 @@ fn ensure_provider(provider: &str) -> Result<()> {
 /// Build a forge target for artifact landing, scoping to the repo's full name
 /// when the remote is recognized so the CLI can target it without a checkout.
 fn artifact_target(cwd: &Path, forge: &dyn Forge, repo: &RepoEntry) -> Result<PrTarget> {
+    if crate::contribution::configured(repo) {
+        return crate::contribution::target(cwd, repo, forge, &repo.base_branch, true);
+    }
     match repo
         .remote
         .as_deref()

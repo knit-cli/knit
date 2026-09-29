@@ -278,3 +278,10 @@ Knit infers each repo's base from Git's remote-default metadata when available, 
 **Views and commands.** A **view** is per-user config layered over a project: a named "bundle shape" of include/exclude deltas over the project's repo set, so different people can start bundles with different subsets of the same project (`knit view save`, `knit view default`). A project can also register reusable commands that run inside a bundle's checkouts (`knit project command set dev --repo frontend -- docker compose up`, then `knit run dev`). `knit run up|status|down` additionally starts a disposable stack instance per bundle: Knit lifts the docker-compose shape the repos already run on `main` — bundle worktrees substituted for source paths, published ports reallocated, isolated compose project — or, for stacks that want precise control, runs a repo-owned compose file written against Knit's `KNIT_*` environment contract. Both are covered in full in the reference.
 
 See [reference.md](reference.md) for the complete behavior of every command and subsystem.
+
+For an existing GitHub fork, configure ordinary Git remotes and run
+`knit publish create <repo-id> --source-remote origin --target-remote upstream`.
+Knit pushes the fork and opens the review on upstream; it does not create the
+fork. A split origin push URL is detected automatically. See
+[the contribution publishing reference](reference.md) for portable artifacts and
+credential configuration.

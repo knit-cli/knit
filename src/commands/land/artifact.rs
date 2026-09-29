@@ -195,7 +195,10 @@ pub fn apply_land_from_artifact(
             continue;
         }
         let forge = providers::for_repo(repo)?;
-        let target = artifact_target(&cwd, forge.as_ref(), repo)?;
+        let mut target = artifact_target(&cwd, forge.as_ref(), repo)?;
+        if let (Some(identity), Some(publication)) = (&mut target.contribution, &publication) {
+            identity.base = publication.base_branch.clone();
+        }
 
         if repo_absent.contains(&repo.id) {
             println!(
@@ -269,6 +272,9 @@ pub fn apply_land_from_artifact(
                             repo.id, pr.number
                         )
                     })?;
+                if let Some(identity) = &mut target.contribution {
+                    identity.base = target_branch.to_owned();
+                }
                 pr = forge.view(&target, &publication.url)?;
                 if pr.base_ref_name.as_deref() != Some(target_branch) {
                     bail!(
@@ -278,6 +284,7 @@ pub fn apply_land_from_artifact(
                     );
                 }
                 providers::upsert_publication(&mut bundle, repo, forge.as_ref(), &pr);
+                write_json(out_path.unwrap_or(artifact_path), &bundle)?;
                 println!(
                     "{} {} PR #{} {} -> {}",
                     out::ok("retargeted"),
@@ -493,8 +500,13 @@ fn merge_feature_branch_into_destination(
         }
     }
 
+    let source = target
+        .contribution
+        .as_ref()
+        .map(|identity| identity.sha.as_str())
+        .unwrap_or(feature_branch);
     let status = forge
-        .merge_branch(target, destination, feature_branch)
+        .merge_branch(target, destination, source)
         .with_context(|| format!("{}: merging {feature_branch} into {destination}", repo.id))?;
     match status {
         providers::BranchMergeStatus::Merged => println!(

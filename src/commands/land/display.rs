@@ -4,7 +4,7 @@ use super::{LandPlan, LandRun, LandStep, LandStepKind};
 use crate::checkout::checkout_dir;
 use crate::model::DeployMode;
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, CheckRun, PrTarget};
+use crate::providers::{self, publication_for_repo, CheckRun};
 use crate::store::ActiveBundle;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -355,7 +355,16 @@ fn print_pr_status(active: &ActiveBundle, repo_id: &str, fallback_publication_ur
             return;
         }
     };
-    let target = PrTarget::checkout(&cwd);
+    let base = publication_for_repo(&active.bundle, repo_id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = match crate::contribution::target(&cwd, repo, forge.as_ref(), base, false) {
+        Ok(target) => target,
+        Err(error) => {
+            println!("  {repo_id}: {error:#}");
+            return;
+        }
+    };
     match forge.view(&target, publication_url) {
         Ok(pr) => {
             println!(

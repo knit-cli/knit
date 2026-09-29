@@ -10,6 +10,7 @@ use super::{
     MergeRun, MergeRunStatus, MergeRunStep, MergeStepStatus, MergeTargetKind, SourcePlan,
     TargetPlan, MERGE_RUN_KIND,
 };
+use super::{destination_remote, target_ref};
 use crate::advice;
 use crate::git::{
     branch_exists, commit_details, current_branch, git_output, is_ancestor, is_git_worktree,
@@ -421,7 +422,7 @@ fn prepare_merge_step(
         message: None,
         pushed_at: None,
         pushed_sha: None,
-        push_remote: None,
+        push_remote: Some(destination_remote(source_repo).to_owned()),
     })
 }
 
@@ -458,7 +459,7 @@ pub(crate) fn merge_branch_into_target(
     let expected_target = match expected_target {
         Some(expected) => {
             let tip =
-                crate::git::remote_ref_sha(&repo_root, "origin", &format!("refs/heads/{branch}"))
+                crate::git::remote_ref_sha(&repo_root, destination_remote(repo), &format!("refs/heads/{branch}"))
                     .map_err(|error| crate::commands::land::v2::KnownNoEffect(format!(
                         "{}: failed to read target origin/{branch} before merging: {error:#}. Reconcile the remote, then resume the landing run.",
                         repo.id
@@ -486,7 +487,7 @@ pub(crate) fn merge_branch_into_target(
     let on_origin = if expected_target.is_some() {
         true
     } else {
-        crate::git::remote_ref_sha(&repo_root, "origin", branch)
+        crate::git::remote_ref_sha(&repo_root, destination_remote(repo), branch)
             .unwrap_or(None)
             .is_some()
     };
@@ -515,7 +516,7 @@ pub(crate) fn merge_branch_into_target(
     // planned against.
     if let Some(expected) = expected_target {
         let fetched = if on_origin {
-            crate::git::ref_commit_sha(&repo_root, &format!("refs/remotes/origin/{branch}"))?
+            crate::git::ref_commit_sha(&repo_root, &target_ref(repo, branch))?
         } else {
             crate::git::ref_commit_sha(&repo_root, &format!("refs/heads/{branch}"))?
         };
@@ -535,6 +536,18 @@ pub(crate) fn merge_branch_into_target(
             ))
             .into());
         }
+    }
+    if crate::contribution::configured(repo) && !ref_exists(&checkout, source_ref) {
+        let remote = crate::contribution::source(repo).context("missing source remote")?;
+        git_output(
+            &checkout,
+            [
+                "fetch",
+                "--no-tags",
+                remote,
+                source_branch.unwrap_or(source_ref),
+            ],
+        )?;
     }
     ensure_ref_exists(&checkout, source_ref)
         .with_context(|| format!("{}: source ref {source_ref} was not found", repo.id))?;
@@ -601,7 +614,7 @@ pub(crate) fn merge_branch_into_target(
                 "--force-with-lease=refs/heads/{branch}:{expected}"
             )));
         }
-        push_args.push(OsString::from("origin"));
+        push_args.push(OsString::from(destination_remote(repo)));
         push_args.push(OsString::from(format!("HEAD:refs/heads/{branch}")));
         let push_result = git_output(&checkout, push_args);
         if let Err(error) = push_result {
@@ -651,9 +664,10 @@ fn prepare_branch_checkout(
     branch: &str,
     fetch: bool,
 ) -> Result<PathBuf> {
+    let fetch = fetch || crate::contribution::configured(repo);
     let repo_root = PathBuf::from(&repo.path);
     if fetch {
-        fetch_target_branch(&repo_root, &repo.id, branch)?;
+        fetch_target_branch(&repo_root, repo, branch)?;
     }
     let worktree_path = root
         .join(".knit/merge-worktrees")
@@ -691,7 +705,7 @@ fn prepare_branch_checkout(
             ),
         }
         if fetch {
-            fast_forward_target(&worktree_path, &repo.id, branch)?;
+            fast_forward_target(&worktree_path, repo, branch)?;
         } else if branch_exists(&repo_root, branch) {
             fast_forward_to_local_branch(&worktree_path, &repo.id, branch)?;
         }
@@ -704,7 +718,7 @@ fn prepare_branch_checkout(
     }
 
     let start_ref = if fetch {
-        format!("origin/{branch}")
+        target_ref(repo, branch)
     } else {
         resolve_base_ref(&repo_root, branch)
     };
@@ -730,18 +744,23 @@ fn prepare_branch_checkout(
     Ok(worktree_path)
 }
 
-fn fetch_target_branch(repo_root: &Path, repo_id: &str, branch: &str) -> Result<()> {
-    let refspec = format!("{branch}:refs/remotes/origin/{branch}");
-    git_output(repo_root, ["fetch", "origin", refspec.as_str()])
-        .with_context(|| format!("{repo_id}: failed to fetch origin/{branch}"))?;
+fn fetch_target_branch(repo_root: &Path, repo: &RepoEntry, branch: &str) -> Result<()> {
+    let repo_id = &repo.id;
+    let refspec = format!("+refs/heads/{branch}:{}", target_ref(repo, branch));
+    git_output(
+        repo_root,
+        ["fetch", destination_remote(repo), refspec.as_str()],
+    )
+    .with_context(|| format!("{repo_id}: failed to fetch origin/{branch}"))?;
     Ok(())
 }
 
 /// Put the detached managed checkout on the freshly fetched `origin/<branch>`.
 /// A checkout ahead of origin holds a merge Knit made and never pushed; that
 /// is named rather than discarded.
-fn fast_forward_target(checkout: &Path, repo_id: &str, branch: &str) -> Result<()> {
-    let remote = format!("origin/{branch}");
+fn fast_forward_target(checkout: &Path, repo: &RepoEntry, branch: &str) -> Result<()> {
+    let repo_id = &repo.id;
+    let remote = target_ref(repo, branch);
     let head = rev_parse(checkout, "HEAD")?;
     let fetched = rev_parse(checkout, &remote)?;
     if head != fetched {

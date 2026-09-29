@@ -182,3 +182,13 @@ Ordinary `git fetch`, `git pull`, and `git push` — no Knit wrapper — resolve
 The helper resolves per request from the checkout's own Knit context, so token rotation, `knit auth default` changes, and per-project overrides apply immediately without regeneration. Requests Knit cannot honor — a malformed request, a missing assignment the project requires, or a broken explicit credential — fail closed: the helper answers `quit=1`, stopping Git's remaining helpers and its password prompt, instead of letting a stale cached or ambient credential answer. `git credential store`/`erase` requests are ignored; the personal Knit store is the only token storage.
 
 Activation is automatic: the `knit auth` flows, `knit project add`, and bundle worktree materialization install or refresh the include. **Existing installs activate with `knit auth status`** — noninteractive, using already-saved credentials, no token re-entry; it also refreshes the helper path after a Knit upgrade. A refresh touches only the current project's source checkouts and its own materialized bundle worktrees, so two projects sharing one external repository cannot disturb each other's credentials. The installer only reads credential metadata, never tokens.
+
+## Contribution credentials
+
+Fork publication resolves source reads/pushes and target review operations
+independently from their precise repository URLs. A target assignment is never
+copied to the source. A fork absent from project membership can use the host's
+configured default; without suitable access, configure a host default or add an
+explicit repository assignment. Host-less legacy target resolution still rejects
+ambiguous host membership. No token or credential name is stored in contribution
+artifacts.

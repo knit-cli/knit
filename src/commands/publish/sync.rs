@@ -6,7 +6,7 @@ use super::pr_body::{render_knit_pr_block, upsert_knit_pr_block};
 use crate::checkout::checkout_dir;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, PrTarget, PullRequest};
+use crate::providers::{self, publication_for_repo, PullRequest};
 use crate::store::{save_active_bundle, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use std::path::Path;
@@ -42,11 +42,24 @@ fn fetch_pr_summary_for_sync(
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
     let forge = providers::for_repo(repo)?;
-    let target = PrTarget::checkout(&cwd);
+    let base = publication_for_repo(&active.bundle, &repo.id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = crate::contribution::target(&cwd, repo, forge.as_ref(), base, false)?;
 
+    let mut target = target;
+    if let Some(id) = &mut target.contribution {
+        if let Some(p) = publication_for_repo(&active.bundle, &repo.id) {
+            id.base = p.base_branch.clone();
+        }
+    }
     let summary = if let Some(pr) = publication_for_repo(&active.bundle, &repo.id) {
         forge.view(&target, &pr.url)?
-    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
+    } else if let Some(existing) = forge.find_existing(
+        &target,
+        &crate::contribution::head(repo, branch)?,
+        &repo.base_branch,
+    )? {
         existing
     } else {
         return Ok(SyncFetchResult::NoReviewObject);
@@ -70,21 +83,25 @@ fn fetch_pr_summary_for_sync_from_artifact(
             repo.id
         )
     })?;
-    let remote = repo.remote.as_deref().with_context(|| {
-        format!(
-            "{}: no git remote recorded in the bundle artifact.",
-            repo.id
-        )
-    })?;
     let forge = providers::for_repo(repo)?;
-    let repo_full_name = forge
-        .repo_full_name(remote)
-        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
-    let target = PrTarget::explicit(cwd, repo_full_name);
+    let base = publication_for_repo(bundle, &repo.id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = crate::contribution::target(cwd, repo, forge.as_ref(), base, true)?;
 
+    let mut target = target;
+    if let Some(id) = &mut target.contribution {
+        if let Some(p) = publication_for_repo(bundle, &repo.id) {
+            id.base = p.base_branch.clone();
+        }
+    }
     let summary = if let Some(pr) = publication_for_repo(bundle, &repo.id) {
         forge.view(&target, &pr.url)?
-    } else if let Some(existing) = forge.find_existing(&target, branch, &repo.base_branch)? {
+    } else if let Some(existing) = forge.find_existing(
+        &target,
+        &crate::contribution::head(repo, branch)?,
+        &repo.base_branch,
+    )? {
         existing
     } else {
         return Ok(SyncFetchResult::NoReviewObject);
@@ -105,9 +122,16 @@ fn sync_pr_body_remote(
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
     let forge = providers::for_repo(repo)?;
-    let target = PrTarget::checkout(&cwd);
+    let base = publication_for_repo(&active.bundle, &repo.id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = crate::contribution::target(&cwd, repo, forge.as_ref(), base, false)?;
     let pr = publication_for_repo(&active.bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
+    let mut target = target;
+    if let Some(id) = &mut target.contribution {
+        id.base = pr.base_branch.clone();
+    }
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
     let block = render_knit_pr_block(&active.bundle, Some(&repo.id), forge.id());
     let next_body = upsert_knit_pr_block(&current_body, &block);
@@ -124,19 +148,17 @@ fn sync_pr_body_remote_from_artifact(
     _repo_index: usize,
     repo: &RepoEntry,
 ) -> Result<SyncBodyResult> {
-    let remote = repo.remote.as_deref().with_context(|| {
-        format!(
-            "{}: no git remote recorded in the bundle artifact.",
-            repo.id
-        )
-    })?;
     let forge = providers::for_repo(repo)?;
-    let repo_full_name = forge
-        .repo_full_name(remote)
-        .with_context(|| format!("{}: invalid {} remote {remote}", repo.id, forge.id()))?;
-    let target = PrTarget::explicit(cwd, repo_full_name);
+    let base = publication_for_repo(bundle, &repo.id)
+        .map(|p| p.base_branch.as_str())
+        .unwrap_or(&repo.base_branch);
+    let target = crate::contribution::target(cwd, repo, forge.as_ref(), base, true)?;
     let pr = publication_for_repo(bundle, &repo.id)
         .with_context(|| format!("{}: no publication recorded after sync fetch", repo.id))?;
+    let mut target = target;
+    if let Some(id) = &mut target.contribution {
+        id.base = pr.base_branch.clone();
+    }
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
     let block = render_knit_pr_block(bundle, Some(&repo.id), forge.id());
     let next_body = upsert_knit_pr_block(&current_body, &block);

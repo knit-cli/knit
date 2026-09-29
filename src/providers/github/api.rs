@@ -51,10 +51,115 @@ struct GitHubApiUser {
 
 #[derive(Debug, Default, Deserialize)]
 struct GitHubApiRef {
+    #[serde(default)]
+    repo: Option<GitHubApiRepository>,
     #[serde(rename = "ref")]
     ref_name: Option<String>,
     #[serde(default)]
     sha: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GitHubApiRepository {
+    full_name: String,
+}
+
+fn verify_review(target: &PrTarget, pr: &GitHubApiPullRequest) -> Result<()> {
+    let Some(id) = &target.contribution else {
+        return Ok(());
+    };
+    crate::contribution::publication_url(id, &pr.html_url)?;
+    if selector_pr_number(&pr.html_url) != Some(pr.number) {
+        bail!("PR URL and number disagree");
+    }
+    let head = pr.head.as_ref().context("PR has no head identity")?;
+    let base = pr.base.as_ref().context("PR has no base identity")?;
+    if !head
+        .repo
+        .as_ref()
+        .is_some_and(|r| r.full_name.eq_ignore_ascii_case(&id.source))
+        || !base
+            .repo
+            .as_ref()
+            .is_some_and(|r| r.full_name.eq_ignore_ascii_case(&id.target))
+        || head.ref_name.as_deref() != Some(&id.branch)
+        || (target.verify_head && head.sha.as_deref() != Some(&id.sha))
+        || head
+            .sha
+            .as_deref()
+            .is_none_or(|sha| sha.len() != 40 || !sha.bytes().all(|b| b.is_ascii_hexdigit()))
+        || base.ref_name.as_deref() != Some(&id.base)
+    {
+        bail!("PR source repository, branch, SHA or base contradicts the contribution");
+    }
+    Ok(())
+}
+
+fn source_target(target: &PrTarget) -> PrTarget {
+    match &target.contribution {
+        Some(id) => {
+            let mut source = PrTarget::explicit(&target.cwd, &id.source);
+            source.repo_remote = Some(format!("https://github.com/{}", id.source));
+            source
+        }
+        None => target.clone(),
+    }
+}
+
+pub(crate) fn preflight_contribution(target: &PrTarget, verify_head: bool) -> Result<()> {
+    let Some(id) = &target.contribution else {
+        return Ok(());
+    };
+    // Source access resolves independently; target credentials must not be reused for it.
+    let source_target = source_target(target);
+    let source: serde_json::Value = serde_json::from_str(&github_api_output(
+        &source_target,
+        "GET",
+        &format!("repos/{}", id.source),
+        None,
+    )?)?;
+    let target_repo: serde_json::Value = serde_json::from_str(&github_api_output(
+        target,
+        "GET",
+        &format!("repos/{}", id.target),
+        None,
+    )?)?;
+    if !source["full_name"]
+        .as_str()
+        .is_some_and(|n| n.eq_ignore_ascii_case(&id.source))
+        || !target_repo["full_name"]
+            .as_str()
+            .is_some_and(|n| n.eq_ignore_ascii_case(&id.target))
+    {
+        bail!("GitHub repository identity differs from recorded contribution");
+    }
+    if !(id.source.eq_ignore_ascii_case(&id.target)
+        || source["fork"] == true
+            && source["parent"]["id"].as_u64().is_some()
+            && source["parent"]["id"] == target_repo["id"])
+    {
+        bail!("sourceRemote is not a verified direct fork of targetRemote");
+    }
+    let base = encode_query_component(&id.base);
+    let _: serde_json::Value = serde_json::from_str(&github_api_output(
+        target,
+        "GET",
+        &format!("repos/{}/git/ref/heads/{base}", id.target),
+        None,
+    )?)?;
+    if verify_head {
+        let branch = encode_query_component(&id.branch);
+        let head: serde_json::Value = serde_json::from_str(&github_api_output(
+            &source_target,
+            "GET",
+            &format!("repos/{}/git/ref/heads/{branch}", id.source),
+            None,
+        )?)?;
+        if head["object"]["sha"].as_str() != Some(&id.sha) {
+            bail!("source branch SHA differs from recorded headSha");
+        }
+    }
+    Ok(())
 }
 
 #[derive(Debug, Deserialize)]
@@ -120,6 +225,34 @@ pub(super) fn find_existing(
     base: &str,
 ) -> Result<Option<PullRequest>> {
     let endpoint = pull_request_search_api_endpoint(repo_full_name, head, base)?;
+    if let Some(id) = &target.contribution {
+        // Owner:branch alone is ambiguous when one owner has several forks.
+        for page in 1..=100 {
+            let endpoint = format!(
+                "{}&page={page}",
+                endpoint.replace("per_page=1", "per_page=100")
+            );
+            let output = github_api_output(target, "GET", &endpoint, None)?;
+            let prs: Vec<GitHubApiPullRequest> = serde_json::from_str(&output)?;
+            let count = prs.len();
+            for pr in prs {
+                let repo = pr
+                    .head
+                    .as_ref()
+                    .and_then(|h| h.repo.as_ref())
+                    .context("PR has no source repository")?;
+                if !repo.full_name.eq_ignore_ascii_case(&id.source) {
+                    continue;
+                }
+                verify_review(target, &pr)?;
+                return Ok(Some(pr.into_pull_request()));
+            }
+            if count < 100 {
+                return Ok(None);
+            }
+        }
+        bail!("PR search exceeded the verification limit; refusing an ambiguous publication");
+    }
     let output = github_api_output(target, "GET", &endpoint, None)?;
     let prs: Vec<GitHubApiPullRequest> =
         serde_json::from_str(&output).context("failed to parse GitHub pulls API JSON")?;
@@ -138,7 +271,15 @@ pub(super) fn create(
     body: &str,
     draft: bool,
 ) -> Result<String> {
+    preflight_contribution(target, true)?;
     let payload = create_pull_request_payload(base, head, title, body, draft)?;
+    let payload = if let Some(id) = &target.contribution {
+        let mut value: serde_json::Value = serde_json::from_str(&payload)?;
+        value["head_repo"] = json!(id.source.split('/').nth(1).unwrap());
+        serde_json::to_string(&value)?
+    } else {
+        payload
+    };
     if use_native_github_api(target) {
         let output = native_github_api_output(
             target,
@@ -171,12 +312,19 @@ pub(super) fn create(
 }
 
 pub(super) fn view(target: &PrTarget, repo_full_name: &str, selector: &str) -> Result<PullRequest> {
+    if let Some(id) = &target.contribution {
+        crate::contribution::publication_url(id, selector)?;
+    }
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
     let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
     let output = github_api_output(target, "GET", &endpoint, None)?;
     let pr: GitHubApiPullRequest =
         serde_json::from_str(&output).context("failed to parse GitHub pull API JSON")?;
+    if target.contribution.is_some() && pr.number != number {
+        bail!("PR response number differs from requested review");
+    }
+    verify_review(target, &pr)?;
     Ok(pr.into_pull_request())
 }
 
@@ -214,6 +362,12 @@ pub(super) fn edit_body(
     selector: &str,
     body: &str,
 ) -> Result<()> {
+    if target.contribution.is_some() {
+        if !target.verify_head {
+            bail!("PR mutation requires exact head verification");
+        }
+        view(target, repo_full_name, selector)?;
+    }
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
     let payload = serde_json::to_string(&json!({ "body": body }))
@@ -229,6 +383,12 @@ pub(super) fn edit_base(
     selector: &str,
     base: &str,
 ) -> Result<()> {
+    if target.contribution.is_some() {
+        if !target.verify_head {
+            bail!("PR mutation requires exact head verification");
+        }
+        view(target, repo_full_name, selector)?;
+    }
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
     let payload = serde_json::to_string(&json!({ "base": base }))
@@ -297,6 +457,11 @@ pub(super) fn merge(
         None
     };
 
+    let cleanup_target = source_target(target);
+    if delete_branch {
+        // Resolve source access before merging, without borrowing target credentials.
+        crate::providers::target_credential(&cleanup_target, "github")?;
+    }
     let mut payload = json!({ "merge_method": method });
     if let Some(sha) = match_head {
         payload["sha"] = json!(sha);
@@ -315,9 +480,21 @@ pub(super) fn merge(
             .as_deref()
             .filter(|branch| !branch.is_empty())
         {
-            let endpoint = git_ref_api_endpoint(repo_full_name, "heads", branch);
-            github_api_output(target, "DELETE", &endpoint, None)
-                .with_context(|| format!("failed to delete GitHub branch `{branch}`"))?;
+            let source = cleanup_target
+                .repo_full_name
+                .as_deref()
+                .unwrap_or(repo_full_name);
+            let endpoint = git_ref_api_endpoint(source, "heads", branch);
+            if let Err(error) = github_api_output(&cleanup_target, "DELETE", &endpoint, None) {
+                let absent = error
+                    .downcast_ref::<crate::retry::HttpFailure>()
+                    .is_some_and(|failure| failure.status == 404);
+                if !absent {
+                    return Err(error).with_context(|| {
+                        format!("PR merged, but failed to delete GitHub branch `{source}:{branch}`")
+                    });
+                }
+            }
         }
     }
 

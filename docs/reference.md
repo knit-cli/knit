@@ -117,7 +117,7 @@ knit run --list
 knit check run <project-command> [--repo <repo>]... [--all]
 knit check record <name> --pass|--fail [--detail <text>]
 knit check status
-knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--target <branch>|--lane <name>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--source-remote <git-remote>] [--target-remote <git-remote>] [--target <branch>|--lane <name>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--from-artifact <path>] [--out <path>] [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
@@ -791,6 +791,37 @@ knit publish status
 `knit publish create` pushes the selected feature branches, creates or adopts their review objects, records publication metadata, and updates the managed cross-repo links. Publishing runs at most `KNIT_FORGE_JOBS` (default 4) repositories at a time. Transient forge failures are retried; a repository's failure does not stop the others, and the command reports failures with a nonzero exit status.
 
 When the configured sync remote reports a canonical web URL for the bundle, the managed section starts with `## Knit Bundle`, followed immediately by a generic `[View bundle](URL)` link. This section moves to the top of the PR description, ahead of any author prose. The CLI never derives that URL itself: it records the server-reported value under `syncTargets[].webUrl` (retained across pushes to a server that stops reporting it, dropped when the hosted identity changes) and omits the link entirely when no usable URL is known. Authors' text outside the managed block is always preserved; repeated syncs replace the link cleanly without duplicates.
+
+For an existing GitHub fork, select the Git remotes for one repository:
+
+```sh
+knit publish create backend --source-remote origin --target-remote upstream
+```
+
+The source uses the remote's push URL; the target uses its fetch URL. A split
+`origin` push URL, `branch.<branch>.pushRemote`, or `remote.pushDefault` is also
+discovered automatically against origin's fetch URL. Knit records portable
+`sourceRemote`/`targetRemote` URLs and reuses them on subsequent commands; it
+neither creates forks nor rewrites remotes. `--source-remote` and
+`--target-remote` require one selected repository and are unavailable in artifact
+mode, where the URLs must already be recorded. `--remote` still selects hosted
+bundle sync destinations, and `--target` still selects a base **branch**.
+
+Feature pushes, pulls, localization, and remote branch cleanup use the source;
+base fetching uses the target. Publication create, adoption, retargeting, renewal,
+and body sync address the target PR repository. Before changing a review, Knit
+checks its full head repository, branch, recorded SHA, base repository, and base
+branch. A pre-push inspection permits the old remote SHA; after pushing, the new
+SHA must match. A stale recorded base may reconcile to the explicitly requested
+base, but an unrelated live base is refused. Native merge cleanup deletes the
+source branch using independently resolved source credentials; an already absent
+source branch is successful cleanup.
+
+Cross-repository publication currently supports verified direct forks on
+`github.com`, including renamed forks and forks owned by the target organization.
+Other forges, cross-host pairs, unrelated repositories, ambiguous push URLs, and
+force pushes of cross-repository contributions fail explicitly. Same-repository
+artifacts and explicit same-repository fields retain ordinary forge behavior.
 
 Choose the PR destination with the same flags used for landing:
 

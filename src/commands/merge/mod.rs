@@ -328,7 +328,8 @@ fn acquire_run_locks(root: &Path, run: &MergeRun) -> Result<Vec<KnitLock>> {
 }
 
 fn load_bundle(root: &Path, bundle_id: &str) -> Result<ChangeGroup> {
-    read_json(&bundle_path(root, bundle_id))
+    let bundle = read_json(&bundle_path(root, bundle_id))?;
+    Ok(bundle)
 }
 
 fn merge_run_path(root: &Path, run_id: &str) -> PathBuf {
@@ -477,5 +478,22 @@ fn short_or_dash(sha: &str) -> &str {
         "-"
     } else {
         short_sha(sha)
+    }
+}
+
+/// Explicit destinations are URLs, never a checkout's coincidentally named origin.
+pub(crate) fn destination_remote(repo: &RepoEntry) -> &str {
+    if crate::contribution::configured(repo) {
+        crate::contribution::destination(repo).unwrap_or("origin")
+    } else {
+        "origin"
+    }
+}
+
+fn target_ref(repo: &RepoEntry, branch: &str) -> String {
+    if crate::contribution::configured(repo) {
+        format!("refs/knit/merge-target/{}/{branch}", repo.id)
+    } else {
+        format!("refs/remotes/origin/{branch}")
     }
 }

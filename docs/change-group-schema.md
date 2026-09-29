@@ -56,6 +56,17 @@ Project-wide history is stored separately from bundle artifacts. Local history e
 
 `baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When actual git `HEAD` differs from `headSha`, Knit reports unrecorded git commits and `knit sync` records them.
 
+Optional `sourceRemote` and `targetRemote` are portable repository URLs, not Git
+remote names. The source holds contribution commits and the feature branch; the
+target owns the review and base branch. Source defaults to legacy `remote`, and
+target defaults to source. Missing fields preserve legacy artifacts; explicit
+empty/null values are invalid. `remote`, repo IDs, commit history, and paths are
+not rewritten when contribution identities are configured. Both fields survive
+artifact create/sync and localization. Same-repository values are supported on
+ordinary forges; cross-repository publication requires GitHub and a full recorded
+`headSha`. An explicit publishing destination may supply an otherwise blank saved
+`baseBranch`; the saved base remains unchanged.
+
 ## Commit Group
 
 ```json

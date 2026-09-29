@@ -34,6 +34,8 @@ use sync::{sync_publications_for_indexes, sync_publications_for_indexes_from_art
 // Command entry point: these arguments are the subcommand's flags.
 #[allow(clippy::too_many_arguments)]
 pub fn create_publications(
+    source_remote: Option<&str>,
+    target_remote: Option<&str>,
     selectors: &[String],
     all: bool,
     draft: bool,
@@ -53,11 +55,36 @@ pub fn create_publications(
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
+    if source_remote.is_some() || target_remote.is_some() {
+        if indexes.len() != 1 {
+            bail!("remote selection requires exactly one selected repository");
+        }
+        let repo = &active.bundle.repos[indexes[0]];
+        let cwd =
+            crate::checkout::checkout_dir(&active, repo).context("missing feature checkout")?;
+        crate::contribution::configure(
+            &cwd,
+            &mut active.bundle.repos[indexes[0]],
+            source_remote,
+            target_remote,
+        )?;
+    }
+    let mut discovered = false;
+    for &index in &indexes {
+        if let Some(cwd) = crate::checkout::checkout_dir(&active, &active.bundle.repos[index]) {
+            discovered |= crate::contribution::discover(&cwd, &mut active.bundle.repos[index])?;
+        }
+    }
     let destination = resolve_publish_destination(&active, target, lane)?;
     let mut failures = Vec::new();
     let mut bundle_changed = false;
 
     let jobs = resolve_publish_jobs(&active.bundle.repos, &indexes, &destination)?;
+    preflight(&active.bundle, &jobs, Some(&active), renew)?;
+    if discovered || source_remote.is_some() || target_remote.is_some() {
+        save_active_bundle(&active)?;
+    }
+
     // Body sync follows what this run actually publishes: a repo the lane
     // excluded keeps its existing review and body untouched.
     let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
@@ -293,6 +320,7 @@ pub fn create_publications_from_artifact(
     let mut failures = Vec::new();
 
     let jobs = resolve_publish_jobs(&bundle.repos, &indexes, &destination)?;
+    preflight(&bundle, &jobs, None, renew)?;
     // Same rule as the worktree path: sync covers only what this run publishes.
     let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
 
@@ -386,6 +414,7 @@ pub fn sync_publications(selectors: &[String], all: bool, provider: Option<&str>
 
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
+    crate::contribution::validate_bundle(&active.bundle)?;
     let failures = sync_publications_for_indexes(&mut active, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
@@ -409,6 +438,7 @@ pub fn sync_publications_from_artifact(
     }
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
     let indexes = filter_indexes_by_provider(&bundle.repos, indexes, provider)?;
+    crate::contribution::validate_bundle(&bundle)?;
     let failures = sync_publications_for_indexes_from_artifact(&cwd, &mut bundle, &indexes)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
@@ -487,6 +517,71 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
     }
 }
 
+fn preflight(
+    bundle: &ChangeGroup,
+    jobs: &[PublishJob],
+    active: Option<&crate::store::ActiveBundle>,
+    renew: bool,
+) -> Result<()> {
+    crate::contribution::validate_bundle(bundle)?;
+    for job in jobs {
+        let repo = &job.repo;
+        if !crate::contribution::configured(repo) {
+            continue;
+        }
+
+        let cwd = match active {
+            Some(active) => crate::checkout::checkout_dir(active, repo)
+                .context("missing contribution checkout")?,
+            None => std::env::current_dir()?,
+        };
+        if active.is_some() {
+            crate::contribution::push_remote(&cwd, repo)?;
+            if crate::contribution::cross_repository(repo)?
+                && crate::git::rev_parse(&cwd, "HEAD")? != repo.head_sha.as_deref().unwrap_or("")
+            {
+                bail!(
+                    "{}: HEAD differs from recorded headSha; run knit sync",
+                    repo.id
+                );
+            }
+        }
+        let forge = crate::providers::for_repo(repo)?;
+        let target = crate::contribution::target(
+            &cwd,
+            repo,
+            forge.as_ref(),
+            &job.base_branch,
+            active.is_none(),
+        )?;
+        crate::providers::github::preflight_contribution(&target, active.is_none())?;
+        if let Some(p) = publication_for_repo(bundle, &repo.id) {
+            let mut previous = target.clone();
+            previous.verify_head = false;
+            if let Some(id) = &mut previous.contribution {
+                id.base = p.base_branch.clone();
+            }
+            let pr = forge.view(&previous, &p.url).or_else(|error| {
+                if p.base_branch == job.base_branch {
+                    return Err(error);
+                }
+                let mut intended = target.clone();
+                intended.verify_head = false;
+                forge.view(&intended, &p.url)
+            })?;
+            if renew
+                && pr
+                    .state
+                    .as_deref()
+                    .is_some_and(|s| s.eq_ignore_ascii_case("OPEN"))
+            {
+                bail!("{}: open review cannot be renewed", repo.id);
+            }
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::pr_body::{
@@ -520,6 +615,8 @@ mod tests {
 
     fn repo(id: &str) -> RepoEntry {
         RepoEntry {
+            source_remote: None,
+            target_remote: None,
             id: id.to_string(),
             path: format!("/tmp/{id}"),
             remote: None,
