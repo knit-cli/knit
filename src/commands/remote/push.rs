@@ -767,6 +767,16 @@ fn push_active_bundle_to_remote_impl(
     }
 
     let pushed_bundle = upsert_bundle(remote, &token, &pushed_project.slug, &active.bundle)?;
+    active
+        .bundle
+        .sync_targets
+        .iter_mut()
+        .filter(|target| {
+            target.remote == remote_name
+                && (target.bundle_id != pushed_bundle.id
+                    || target.api_url.trim_end_matches('/') != remote.url.trim_end_matches('/'))
+        })
+        .for_each(|target| target.artifact_hash = None);
     if active.bundle.record_sync_target_with_web_url(
         remote_name,
         &pushed_bundle.id,
@@ -776,7 +786,23 @@ fn push_active_bundle_to_remote_impl(
     ) {
         save_active_bundle(active)?;
     }
-    let artifact = push_bundle_artifact(remote, &token, &pushed_bundle.id, &active.bundle, force)?;
+    let artifact = push_bundle_artifact(
+        remote_name,
+        remote,
+        &token,
+        &pushed_bundle.id,
+        &active.bundle,
+        force,
+    )?;
+    if active.bundle.record_sync_target_with_web_url(
+        remote_name,
+        &pushed_bundle.id,
+        &remote.url,
+        pushed_bundle.web_url.as_deref(),
+        Some(&artifact.artifact_hash),
+    ) {
+        save_active_bundle(active)?;
+    }
     super::landing::push_plans_scoped_at(
         &active.root,
         &config,
@@ -1311,8 +1337,8 @@ enum ArtifactPushOutcome {
 /// remote's contract: `force: true` alone is an unconditional replace;
 /// `force: true` plus `expectedArtifactHash` is a compare-and-swap against the
 /// remote's current artifact. A lease force with no known remote artifact
-/// sends a plain body: there is nothing to overwrite, so the normal
-/// fast-forward check is the safest gate for that first push.
+/// sends a plain body: without a saved expectation, only the normal
+/// fast-forward gate can safely authorize the write.
 fn apply_artifact_force_fields(payload: &mut Value, force: PushForce, lease: Option<&str>) {
     let Some(fields) = payload.as_object_mut() else {
         return;
@@ -1334,28 +1360,6 @@ fn apply_artifact_force_fields(payload: &mut Value, force: PushForce, lease: Opt
     }
 }
 
-/// Fetch the hash of the remote bundle's current artifact for a force lease.
-/// Uses the per-bundle artifact index, which the server returns newest-first;
-/// the newest record is the current artifact. `None` means the bundle has no
-/// artifact yet.
-fn fetch_current_artifact_hash(
-    remote: &KnitRemote,
-    token: &str,
-    bundle_id: &str,
-) -> Result<Option<String>> {
-    let artifacts: Vec<RemoteArtifact> = request_json(
-        remote,
-        token,
-        "GET",
-        &format!("/bundles/{bundle_id}/artifacts"),
-        None,
-    )?;
-    Ok(artifacts
-        .into_iter()
-        .next()
-        .map(|artifact| artifact.artifact_hash))
-}
-
 /// The error envelope a sync remote sends with a refused artifact push. Only
 /// the `kind` and lease details matter here; unknown shapes decode to `None`s
 /// and fall back to the plain fast-forward interpretation.
@@ -1375,14 +1379,26 @@ struct RemotePushError {
 }
 
 fn push_bundle_artifact_outcome(
+    remote_name: &str,
     remote: &KnitRemote,
     token: &str,
     bundle_id: &str,
     bundle: &ChangeGroup,
     force: PushForce,
 ) -> Result<ArtifactPushOutcome> {
+    // Lease only state accepted by a previous push/pull. The artifact index
+    // includes tool artifacts and does not identify the current bundle pointer;
+    // even fetching that pointer here would authorize overwriting unseen work.
     let lease = if force.wants_lease() {
-        fetch_current_artifact_hash(remote, token, bundle_id)?
+        bundle
+            .sync_targets
+            .iter()
+            .find(|target| {
+                target.remote == remote_name
+                    && target.bundle_id == bundle_id
+                    && target.api_url.trim_end_matches('/') == remote.url.trim_end_matches('/')
+            })
+            .and_then(|target| target.artifact_hash.clone())
     } else {
         None
     };
@@ -1405,7 +1421,7 @@ fn push_bundle_artifact_outcome(
     // current remote artifact records: another user (or another machine)
     // pushed work this workspace has not seen yet. Under a force lease the
     // same status instead means the remote artifact changed since the lease
-    // hash was fetched.
+    // hash was last pushed or pulled.
     if response.status == 409 {
         let envelope: RemotePushErrorEnvelope =
             serde_json::from_str(&response.body).unwrap_or(RemotePushErrorEnvelope { error: None });
@@ -1428,27 +1444,34 @@ fn lease_mismatch_message(bundle_id: &str, current: Option<&str>) -> String {
         .map(|hash| format!(" (remote artifact is now {hash})"))
         .unwrap_or_default();
     format!(
-        "{bundle_id}: remote artifact changed since fetch{current}. Run `knit sync pull --bundles` to see the new state, then force-push again."
+        "{bundle_id}: remote artifact changed since the last successful push or pull{current}. Run `knit sync pull --bundles` to see the new state, then force-push again."
     )
 }
 
 fn push_bundle_artifact(
+    remote_name: &str,
     remote: &KnitRemote,
     token: &str,
     bundle_id: &str,
     bundle: &ChangeGroup,
     force: PushForce,
 ) -> Result<RemoteArtifact> {
-    match push_bundle_artifact_outcome(remote, token, bundle_id, bundle, force)? {
+    match push_bundle_artifact_outcome(remote_name, remote, token, bundle_id, bundle, force)? {
         ArtifactPushOutcome::Pushed(artifact) => Ok(artifact),
-        ArtifactPushOutcome::RemoteAhead => bail!(
-            "{}: the remote has recorded bundle work this workspace does not include. Run `knit pull` to fast-forward (or `knit pull --merge` if the ledgers diverged), then push again, or overwrite the remote ledger with `knit sync push --bundles --force-with-lease`.",
-            bundle.id
-        ),
+        ArtifactPushOutcome::RemoteAhead => bail!("{}", rejected_artifact_message(bundle)),
         ArtifactPushOutcome::LeaseMismatch { current } => {
             bail!("{}", lease_mismatch_message(&bundle.id, current.as_deref()))
         }
     }
+}
+
+fn rejected_artifact_message(bundle: &ChangeGroup) -> String {
+    let reason = if super::has_local_rewrite(bundle) {
+        "local rewrite: the remote ledger still contains nodes missing locally"
+    } else {
+        "the remote ledger contains nodes missing locally; a local rewrite or intentionally removed ledger nodes can cause this"
+    };
+    format!("{}: {reason}. To publish an intentional rewrite, run `knit sync push --bundles --force-with-lease`. Otherwise run `knit sync pull --bundles` to fast-forward, or `knit pull --merge` to combine divergent histories.", bundle.id)
 }
 
 /// Push every local bundle artifact — open, landed, and archived alike — to a
@@ -1544,6 +1567,16 @@ pub fn push_all_bundles_to_remote(
         };
         let outcome =
             upsert_bundle(remote, &token, &project_slug, &bundle).and_then(|remote_bundle| {
+                bundle
+                    .sync_targets
+                    .iter_mut()
+                    .filter(|target| {
+                        target.remote == remote_name
+                            && (target.bundle_id != remote_bundle.id
+                                || target.api_url.trim_end_matches('/')
+                                    != remote.url.trim_end_matches('/'))
+                    })
+                    .for_each(|target| target.artifact_hash = None);
                 if bundle.record_sync_target_with_web_url(
                     remote_name,
                     &remote_bundle.id,
@@ -1554,7 +1587,26 @@ pub fn push_all_bundles_to_remote(
                     crate::store::write_json(&path, &bundle)?;
                     crate::history::record_bundle_history(&root, &bundle)?;
                 }
-                push_bundle_artifact_outcome(remote, &token, &remote_bundle.id, &bundle, force)
+                let outcome = push_bundle_artifact_outcome(
+                    remote_name,
+                    remote,
+                    &token,
+                    &remote_bundle.id,
+                    &bundle,
+                    force,
+                )?;
+                if let ArtifactPushOutcome::Pushed(artifact) = &outcome {
+                    bundle.record_sync_target_with_web_url(
+                        remote_name,
+                        &remote_bundle.id,
+                        &remote.url,
+                        remote_bundle.web_url.as_deref(),
+                        Some(&artifact.artifact_hash),
+                    );
+                    crate::store::write_json(&path, &bundle)?;
+                    crate::history::record_bundle_history(&root, &bundle)?;
+                }
+                Ok(outcome)
             });
         match outcome {
             Ok(ArtifactPushOutcome::Pushed(_)) => {
@@ -1575,7 +1627,9 @@ pub fn push_all_bundles_to_remote(
                     );
                 }
             }
-            Ok(ArtifactPushOutcome::RemoteAhead) => remote_ahead.push(bundle.id.clone()),
+            Ok(ArtifactPushOutcome::RemoteAhead) => {
+                remote_ahead.push(rejected_artifact_message(&bundle))
+            }
             Ok(ArtifactPushOutcome::LeaseMismatch { current }) => {
                 failures.push(lease_mismatch_message(&bundle.id, current.as_deref()));
             }
@@ -1584,12 +1638,8 @@ pub fn push_all_bundles_to_remote(
     }
 
     println!("{} {pushed} bundle artifact(s)", out::movement("pushed"));
-    if !remote_ahead.is_empty() {
-        println!(
-            "{} {}: the remote ledger is ahead; run `knit sync pull --bundles` to fast-forward, then push again, or overwrite the remote ledger with `knit sync push --bundles --force-with-lease`",
-            out::warn("Skipped"),
-            remote_ahead.join(", ")
-        );
+    for message in remote_ahead {
+        println!("{} {message}", out::warn("Skipped"));
     }
     if !failures.is_empty() {
         bail!(
@@ -1934,9 +1984,9 @@ mod tests {
     }
 
     #[test]
-    fn lease_force_without_a_remote_artifact_sends_a_plain_push() {
-        // Nothing to lease against: the plain fast-forward check is the
-        // safest gate for what is effectively a first push.
+    fn lease_force_without_a_saved_hash_sends_a_plain_push() {
+        // No known lease: never fetch an unseen remote hash to authorize
+        // an overwrite. The plain fast-forward gate remains authoritative.
         let mut payload = base_payload();
         apply_artifact_force_fields(&mut payload, PushForce::WithLease, None);
         assert!(payload.get("force").is_none());
@@ -1946,9 +1996,10 @@ mod tests {
     #[test]
     fn lease_mismatch_message_names_the_bundle_and_current_hash() {
         let message = lease_mismatch_message("feature-a", Some("abc123"));
-        assert!(message.contains("feature-a: remote artifact changed since fetch"));
+        assert!(message
+            .contains("feature-a: remote artifact changed since the last successful push or pull"));
         assert!(message.contains("abc123"));
         let without = lease_mismatch_message("feature-a", None);
-        assert!(without.contains("remote artifact changed since fetch"));
+        assert!(without.contains("remote artifact changed since the last successful push or pull"));
     }
 }

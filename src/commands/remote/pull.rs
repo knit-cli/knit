@@ -1199,7 +1199,8 @@ pub fn pull_bundle_remote_state(
         }
         LedgerRelation::Diverged if !merge => {
             return Ok(RemoteBundleOutcome::Skipped(format!(
-                "bundle {bundle_id}: local and remote ledgers have diverged; run `knit pull --merge` to combine them"
+                "bundle {bundle_id}: {}",
+                super::divergence_message(&local)
             )));
         }
         LedgerRelation::Diverged => {
@@ -1955,10 +1956,7 @@ fn fetch_bundles_with_options(
                     status = out::muted("local ahead").to_string();
                 }
                 LedgerRelation::Diverged => {
-                    status = out::warn(
-                        "diverged; kept local (run `knit pull --merge` to combine the ledgers)",
-                    )
-                    .to_string()
+                    status = out::warn(super::divergence_message(&local)).to_string()
                 }
                 LedgerRelation::RemoteAhead => {
                     bundle = localize_bundle(bundle, &local_project).with_context(|| {
@@ -2177,9 +2175,22 @@ fn pull_bundle_by_slug_classified(
                 out::muted("bundle artifact")
             );
         } else {
-            let local: ChangeGroup = read_json(&path).map_err(other)?;
+            let mut local: ChangeGroup = read_json(&path).map_err(other)?;
             match ledger_relation(&local.node_id_sequence(), &bundle.node_id_sequence()) {
                 LedgerRelation::Equal | LedgerRelation::LocalAhead => {
+                    // The downloaded artifact is an accepted synchronization
+                    // base even when the local ledger already contains it.
+                    // Persist its receipt for the next force-with-lease push.
+                    if local.record_sync_target_with_web_url(
+                        &remote_name,
+                        &remote_bundle.id,
+                        &remote.url,
+                        remote_bundle.web_url.as_deref(),
+                        Some(&artifact_hash),
+                    ) {
+                        write_json(&path, &local).map_err(other)?;
+                    }
+
                     crate::human!(
                         "{} {}",
                         out::node(&bundle_id),
@@ -2190,9 +2201,7 @@ fn pull_bundle_by_slug_classified(
                     crate::human!(
                         "{} {}",
                         out::node(&bundle_id),
-                        out::warn(
-                            "local and remote ledgers have diverged; kept local (run `knit pull --merge` to combine them)"
-                        )
+                        out::warn(super::divergence_message(&local))
                     );
                 }
                 LedgerRelation::RemoteAhead => {

@@ -95,7 +95,7 @@ pub fn push_repos(
     for &index in &indexes {
         let repo = &active.bundle.repos[index];
         if crate::contribution::configured(repo) {
-            if force.is_force() && crate::contribution::cross_repository(repo)? {
+            if force == PushForce::Unconditional && crate::contribution::cross_repository(repo)? {
                 bail!("force push is not supported for cross-repository contributions");
             }
             let cwd = checkout_dir(&active, repo).context("missing contribution checkout")?;
@@ -183,6 +183,19 @@ pub fn push_repos(
         );
     }
 
+    // A successful push may publish commits authored or rewritten outside
+    // Knit. Record those heads before uploading the bundle artifact, so its
+    // ledger and contribution identity describe the branches just published.
+    let repo_ids: Vec<String> = indexes
+        .iter()
+        .map(|&index| active.bundle.repos[index].id.clone())
+        .collect();
+    let changes =
+        crate::tracking::sync_observed_changes_for_repo_ids(&mut active, Some(&repo_ids))?;
+    if !changes.is_empty() {
+        save_active_bundle(&active)?;
+    }
+
     // After git branches are pushed, also sync the bundle artifact to the
     // configured sync remote (default on; see `knit config set push-sync`).
     // The force mode carries over: a forced branch push implies the ledger
@@ -221,12 +234,13 @@ fn push_repo(
     let sha = rev_parse(&cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature branch HEAD", repo.id))?;
     let remote = crate::contribution::push_remote(&cwd, repo)?;
-    if remote == "origin" {
-        run_push(&cwd, branch, set_upstream, force)
+    let fork_source = if crate::contribution::cross_repository(repo)? {
+        crate::contribution::source(repo)
     } else {
-        run_push_to(&cwd, &remote, branch, set_upstream, force)
-    }
-    .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+        None
+    };
+    run_push_to_source(&cwd, &remote, branch, set_upstream, force, fork_source)
+        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
 
     if set_upstream {
         crate::contribution::track_source(&cwd, repo, branch)?;
@@ -274,15 +288,6 @@ fn ensure_origin(repo: &RepoEntry, cwd: &Path) -> Result<()> {
 /// is retried up to [`crate::retry::GIT_PUSH_ATTEMPTS`] times. A push the
 /// remote *answered* (rejected, stale lease, refused credentials) is returned
 /// immediately: that is an answer, and repeating it only delays it.
-pub(crate) fn run_push(
-    cwd: &Path,
-    branch: &str,
-    set_upstream: bool,
-    force: PushForce,
-) -> Result<()> {
-    run_push_to(cwd, "origin", branch, set_upstream, force)
-}
-
 pub(crate) fn run_push_to(
     cwd: &Path,
     remote: &str,
@@ -290,7 +295,33 @@ pub(crate) fn run_push_to(
     set_upstream: bool,
     force: PushForce,
 ) -> Result<()> {
+    run_push_to_source(cwd, remote, branch, set_upstream, force, None)
+}
+
+fn run_push_to_source(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    set_upstream: bool,
+    force: PushForce,
+    recorded_source: Option<&str>,
+) -> Result<()> {
     let timeout = crate::retry::git_push_timeout()?;
+    // Snapshot the source lease once, before any push attempt or retry.
+    let tracking = crate::contribution::push_tracking(cwd, remote, branch, recorded_source)?;
+    let lease = tracking
+        .as_ref()
+        .filter(|tracking| force.wants_lease() && tracking.explicit_lease)
+        .map(|tracking| {
+            format!(
+                "--force-with-lease=refs/heads/{branch}:{}",
+                tracking.expected.as_deref().unwrap_or_default()
+            )
+        });
+    let pushed_sha = tracking
+        .as_ref()
+        .map(|_| rev_parse(cwd, &format!("refs/heads/{branch}")))
+        .transpose()?;
     crate::retry::retry_transient(
         "push",
         crate::retry::GIT_PUSH_ATTEMPTS,
@@ -300,7 +331,7 @@ pub(crate) fn run_push_to(
             if set_upstream {
                 args.push(OsString::from("--set-upstream"));
             }
-            if let Some(force_arg) = force.git_arg() {
+            if let Some(force_arg) = lease.as_deref().or_else(|| force.git_arg()) {
                 args.push(OsString::from(force_arg));
             }
             args.push(OsString::from(remote));
@@ -309,7 +340,11 @@ pub(crate) fn run_push_to(
             git_output_with_timeout(cwd, args, timeout)?;
             Ok(())
         },
-    )
+    )?;
+    if let (Some(tracking), Some(sha)) = (tracking, pushed_sha) {
+        git_output(cwd, ["update-ref", &tracking.reference, &sha])?;
+    }
+    Ok(())
 }
 
 fn read_upstream(cwd: &Path) -> Option<String> {

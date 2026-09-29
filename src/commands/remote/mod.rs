@@ -273,6 +273,27 @@ struct RemoteBundleDetail {
     current_artifact: Option<RemoteExportArtifact>,
 }
 
+/// A rewrite must not be presented solely as work to union back into the ledger.
+fn divergence_message(local: &crate::model::ChangeGroup) -> &'static str {
+    if has_local_rewrite(local) {
+        "local and remote ledgers have diverged after a local rewrite; kept local. To publish the rewrite, run `knit sync push --force-with-lease`; use `knit pull --merge` only to combine both histories"
+    } else {
+        "local and remote ledgers have diverged; kept local. If local ledger nodes were intentionally removed in a local rewrite, run `knit sync push --force-with-lease`; otherwise run `knit pull --merge` to combine them"
+    }
+}
+
+fn has_local_rewrite(local: &crate::model::ChangeGroup) -> bool {
+    local.nodes.iter().any(|node| {
+        node.node_type == "git.observed"
+            && node.repo_changes.iter().any(|change| {
+                matches!(
+                    change.movement,
+                    crate::model::Movement::Rewound | crate::model::Movement::Diverged
+                )
+            })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::{decode_history_events, RemoteViews};
@@ -328,5 +349,37 @@ mod tests {
         assert_eq!(events[0].event_id, "evt-complete");
         assert_eq!(events[1].event_id, "review-decision:abc");
         assert_eq!(events[1].project_id, "demo");
+    }
+}
+
+#[cfg(test)]
+mod rewrite_diagnostic_tests {
+    use super::divergence_message;
+    use crate::model::{BundleNode, ChangeGroup};
+
+    #[test]
+    fn observed_rewinds_and_divergence_name_local_rewrite() {
+        for movement in ["rewound", "diverged"] {
+            let mut bundle = ChangeGroup::new("work".into(), "Work".into(), "now".into());
+            let node: BundleNode = serde_json::from_value(serde_json::json!({
+                "id": "rewrite", "type": "git.observed", "createdAt": "now",
+                "repoChanges": [{"repoId": "repo", "movement": movement,
+                    "beforeSha": "old", "afterSha": "new", "commits": []}]
+            }))
+            .unwrap();
+            bundle.nodes.push(node);
+            let message = divergence_message(&bundle);
+            assert!(message.contains("after a local rewrite"));
+            assert!(message.contains("knit sync push --force-with-lease"));
+        }
+    }
+
+    #[test]
+    fn missing_nodes_do_not_claim_a_confirmed_rewrite() {
+        let bundle = ChangeGroup::new("work".into(), "Work".into(), "now".into());
+        let message = divergence_message(&bundle);
+        assert!(message.contains("If local ledger nodes were intentionally removed"));
+        assert!(message.contains("knit sync push --force-with-lease"));
+        assert!(message.contains("knit pull --merge"));
     }
 }

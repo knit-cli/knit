@@ -234,21 +234,130 @@ pub fn fetch_ref(cwd: &Path, repo: &RepoEntry, branch: &str, feature: bool) -> R
             &format!("+refs/heads/{branch}:{reference}"),
         ],
     )?;
+    if feature {
+        let sha = crate::git::rev_parse(cwd, &reference)?;
+        record_source_observation(cwd, url, branch, &sha)?;
+    }
     Ok(reference)
 }
 
+/// Save the exact fork tip fetched by Knit, not a local merge/rebase result.
+pub(crate) fn record_source_observation(
+    cwd: &Path,
+    url: &str,
+    branch: &str,
+    sha: &str,
+) -> Result<()> {
+    let reference = tracking_ref(url, branch);
+    crate::git::git_output(cwd, ["update-ref", &reference, sha])?;
+    let names = crate::git::git_output(cwd, ["remote"])?;
+    for name in names.lines() {
+        let Ok(fetch_url) = remote_url(cwd, name, false) else {
+            continue;
+        };
+        if same_repository(&fetch_url, url)? {
+            if let Some(native_ref) = native_tracking_ref(cwd, name, branch)? {
+                crate::git::git_output(cwd, ["update-ref", &native_ref, sha])?;
+            }
+        }
+    }
+    Ok(())
+}
+
 pub fn role_ref(repo: &RepoEntry, branch: &str, feature: bool) -> Result<String> {
-    use sha2::{Digest, Sha256};
     let url = if feature {
         source(repo)
     } else {
         destination(repo)
     }
     .context("missing contribution remote")?;
-    Ok(format!(
+    Ok(tracking_ref(url, branch))
+}
+
+fn tracking_ref(url: &str, branch: &str) -> String {
+    // Match same_repository: transport spelling and case do not identify a
+    // different repository. Keep local/non-forge URLs compatible with old refs.
+    let identity = crate::auth::remote_target(url)
+        .map(|(host, path)| {
+            format!(
+                "{}/{}",
+                host.to_ascii_lowercase(),
+                path.to_ascii_lowercase()
+            )
+        })
+        .unwrap_or_else(|_| url.to_owned());
+    legacy_tracking_ref(&identity, branch)
+}
+
+fn legacy_tracking_ref(url: &str, branch: &str) -> String {
+    use sha2::{Digest, Sha256};
+    format!(
         "refs/knit/contributions/{:x}",
         Sha256::digest(format!("{url}\0{branch}").as_bytes())
-    ))
+    )
+}
+
+/// Only mirror the standard, sole branch mapping. Custom or negative refspecs
+/// stay on the canonical source ref rather than guessing a tracking destination.
+fn native_tracking_ref(cwd: &Path, remote: &str, branch: &str) -> Result<Option<String>> {
+    let mapping = crate::git::git_output_optional(
+        cwd,
+        ["config", "--get-all", &format!("remote.{remote}.fetch")],
+    )?;
+    let standard = format!("refs/heads/*:refs/remotes/{remote}/*");
+    Ok(mapping
+        .filter(|value| value.strip_prefix('+').unwrap_or(value) == standard)
+        .map(|_| format!("refs/remotes/{remote}/{branch}")))
+}
+
+pub(crate) struct PushTracking {
+    pub reference: String,
+    pub expected: Option<String>,
+    pub explicit_lease: bool,
+}
+
+/// Read the fork observation without fetching. Dedicated source remotes use
+/// tracking refs shared by native Git and Knit; split remotes use the role ref.
+pub(crate) fn push_tracking(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    recorded_source: Option<&str>,
+) -> Result<Option<PushTracking>> {
+    let Ok(push_url) = remote_url(cwd, remote, true) else {
+        return Ok(None);
+    };
+    let fetch_url = remote_url(cwd, remote, false)?;
+    let split = !same_repository(&push_url, &fetch_url)?;
+    let reference = tracking_ref(&push_url, branch);
+    let mut candidates = Vec::new();
+    if !split {
+        if let Some(native_ref) = native_tracking_ref(cwd, remote, branch)? {
+            candidates.push(native_ref);
+        }
+    }
+    candidates.push(reference.clone());
+    // Older Knit versions keyed observations by raw URL. Only consider legacy
+    // keys for this source, never the target repository's observation.
+    if let Some(source) = recorded_source {
+        if !same_repository(source, &push_url)? {
+            bail!("push remote contradicts recorded sourceRemote");
+        }
+        candidates.push(legacy_tracking_ref(source, branch));
+    }
+    candidates.push(legacy_tracking_ref(&push_url, branch));
+    let mut expected = None;
+    for candidate in candidates {
+        expected = crate::git::ref_commit_sha(cwd, &candidate)?;
+        if expected.is_some() {
+            break;
+        }
+    }
+    Ok(Some(PushTracking {
+        reference,
+        expected,
+        explicit_lease: split || recorded_source.is_some(),
+    }))
 }
 
 pub fn track_source(cwd: &Path, repo: &RepoEntry, branch: &str) -> Result<()> {
