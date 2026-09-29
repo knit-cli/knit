@@ -705,7 +705,8 @@ pub struct SyncTargetArgs {
     /// Sync the bundle artifact for the resolved bundle.
     #[arg(long)]
     pub bundles: bool,
-    /// Sync project commit history events.
+    /// Sync project commit history events. For a history-only push, --bundle selects only
+    /// that bundle's events (no base events) without changing the project cursor.
     #[arg(long)]
     pub history: bool,
     /// Sync your saved views for the project.

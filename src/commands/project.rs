@@ -598,6 +598,9 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
         )?;
         project.auth = incoming.auth;
     }
+    if incoming.history.is_some() {
+        project.history = incoming.history;
+    }
     if incoming.runtime.is_some() {
         project.runtime = incoming.runtime;
     }

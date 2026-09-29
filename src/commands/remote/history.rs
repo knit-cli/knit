@@ -4,7 +4,9 @@ use super::client::{
     effective_workspace_config, load_project_if_present, request_json, resolve_project_id,
     resolve_remote, resolve_token, with_first_available_remote,
 };
-use crate::history::{append_history_events, load_history_events, refresh_project_history};
+use crate::history::{
+    append_history_events, load_history_events, record_bundle_history, refresh_project_history,
+};
 use crate::model::{HistoryEvent, KnitRemote};
 use crate::output as out;
 use anyhow::{Context, Result};
@@ -26,6 +28,15 @@ struct RemoteHistoryPush {
 
 pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Result<()> {
     let (root, config) = effective_workspace_config()?;
+    // Only an explicit CLI selector scopes an upload. A cwd/workspace bundle
+    // must not silently turn an ordinary project history push into a subset.
+    let selected_bundle = crate::store::explicit_bundle_override()
+        .map(|_| crate::store::load_active_bundle().map(|active| active.bundle))
+        .transpose()?;
+    let project = selected_bundle
+        .as_ref()
+        .and_then(|bundle| bundle.project_id.as_deref())
+        .or(project);
     let project_id = resolve_project_id(&root, &config, project)?;
     let remote = resolve_remote(&config, remote_name)?;
     let token = resolve_token(remote_name, remote)?;
@@ -51,13 +62,14 @@ pub fn push_history_to_remote(project: Option<&str>, remote_name: &str) -> Resul
             &project.repos,
         )?;
     }
-    let pushed = push_project_history_events(
+    let pushed = push_history_events(
         remote,
         &token,
         &remote_project.slug,
         &root,
         &project_id,
         remote_name,
+        selected_bundle.as_ref(),
     )?;
     println!(
         "{} {} {}",
@@ -92,20 +104,52 @@ pub(super) fn push_project_history_events(
     project_id: &str,
     remote_name: &str,
 ) -> Result<usize> {
-    refresh_project_history(root, project_id)?;
-    let events = load_history_events(root, project_id)?;
-    if events.is_empty() {
-        return Ok(0);
+    push_history_events(
+        remote,
+        token,
+        project_slug,
+        root,
+        project_id,
+        remote_name,
+        None,
+    )
+}
+
+fn push_history_events(
+    remote: &KnitRemote,
+    token: &str,
+    project_slug: &str,
+    root: &Path,
+    project_id: &str,
+    remote_name: &str,
+    bundle: Option<&crate::model::ChangeGroup>,
+) -> Result<usize> {
+    if let Some(bundle) = bundle {
+        record_bundle_history(root, bundle)?;
+    } else {
+        refresh_project_history(root, project_id)?;
     }
+    let events = load_history_events(root, project_id)?
+        .into_iter()
+        .filter(|event| bundle.is_none_or(|bundle| event.bundle_id.as_deref() == Some(&bundle.id)))
+        .collect::<Vec<_>>();
     let encoded = events
         .iter()
         .map(|event| serde_json::to_string(event).context("failed to encode history event"))
         .collect::<Result<Vec<_>>>()?;
-    let state = load_history_sync_state(root, project_id)?;
+    // A bundle slice is not a prefix of the project ledger. Always upsert
+    // that slice without reading or writing the project-wide cursor, so a
+    // later full push cannot skip unrelated events (or lose other remotes).
+    let state = if bundle.is_some() {
+        HistorySyncState::new()
+    } else {
+        load_history_sync_state(root, project_id)?
+    };
     let plan = plan_history_push(&encoded, state.get(remote_name));
     let to_send: &[HistoryEvent] = match plan {
         HistoryPushPlan::UpToDate => {
             record_history_sync(root, project_id, remote_name, &encoded, state)?;
+            print_history_push_size(remote_name, 0, 0);
             return Ok(events.len());
         }
         HistoryPushPlan::Tail(from) => &events[from..],
@@ -113,16 +157,7 @@ pub(super) fn push_project_history_events(
     };
 
     let batches: Vec<&[HistoryEvent]> = to_send.chunks(HISTORY_PAGE_SIZE).collect();
-    if batches.len() > 1 {
-        println!(
-            "{}",
-            out::muted(format!(
-                "syncing history to {remote_name}: {} event(s) in {} request(s)…",
-                to_send.len(),
-                batches.len()
-            ))
-        );
-    }
+    print_history_push_size(remote_name, to_send.len(), batches.len());
     // Batched so a project ledger of thousands of events never rides in one
     // request body; each batch upserts independently and is idempotent, so
     // the batches go out concurrently — a full push of a large ledger is
@@ -169,7 +204,7 @@ pub(super) fn push_project_history_events(
             "{} {failed} history event(s) were rejected by the sync remote and are missing there; the next push retries them",
             out::warn("warning:")
         );
-    } else {
+    } else if bundle.is_none() {
         // Only a fully accepted push moves the cursor: a rejected event stays
         // ahead of it and rides again next time.
         record_history_sync(root, project_id, remote_name, &encoded, state)?;
@@ -179,6 +214,15 @@ pub(super) fn push_project_history_events(
         accepted += from;
     }
     Ok(accepted)
+}
+
+fn print_history_push_size(remote_name: &str, events: usize, requests: usize) {
+    crate::human!(
+        "{}",
+        out::muted(format!(
+            "syncing history to {remote_name}: {events} event(s) in {requests} request(s)…"
+        ))
+    );
 }
 
 /// How many history requests are in flight at once during a push.

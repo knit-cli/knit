@@ -165,7 +165,14 @@ pagination. Repository visibility still applies to every matching entry and
 companion event. The local SQLite cache is not uploaded: local inspection uses
 the locally preserved ledger, while the hosted page uses synchronized history.
 Run `knit sync push --history` or `knit sync pull --history` explicitly to move
-records between them.
+records between them. To upload only one bundle, use
+`knit sync push --history --bundle <slug>` (the existing global flag also works
+before `sync`). This sends only events with that bundle ID, with no base events,
+and leaves `.knit/history/<project>.history-sync.json` untouched. A subset is
+not a prefix of the project ledger, so it cannot advance the project-wide
+incremental cursor; repeated subset pushes safely upsert the same event IDs.
+Cwd, environment, and workspace bundle context alone do not request a subset.
+Before uploading, Knit reports the event and request counts for this push.
 
 ## Boolean expressions
 
@@ -237,6 +244,21 @@ its activity as open bundle work, not proof that every commit is still unmerged.
 `knit history refresh` and history sync record `base.commit` events from each
 project repository's cached `origin/<baseBranch>` first-parent Git history.
 Repositories without a configured remote use their local configured base.
+By default, the walk includes the oldest usable recorded bundle `baseSha` for
+that repository and all newer first-parent commits. Open, landed, and archived
+bundles all contribute. A usable anchor must be present on the observed
+first-parent chain; unavailable or rewritten-away anchors are ignored. With no
+usable anchor, only the latest 200 commits are observed. Project repositories
+currently do not record a separate base tip at the time they are added.
+
+Override this rule in `.knit/projects/<project>.project.json` with `"history": { "baseCommitDepth": 50 }`
+for the latest 50 first-parent commits, or `"history": { "baseCommitDepth": "all" }`
+for an unbounded walk. The number overrides bundle anchors; zero disables new
+base observations; integer values range from 0 to 2147483647. The setting can
+also be imported from `knit.project.json` with `knit project pull`.
+Existing ledger events are never deleted by a narrower
+bound and can still be uploaded by a project-wide push. Event IDs are unchanged.
+
 This includes direct commits and merges outside Knit. A missing remote ref
 never falls back to unpushed local commits. Inspection and refresh do not fetch;
 refresh Git explicitly when current remote state is needed. Shallow clones can

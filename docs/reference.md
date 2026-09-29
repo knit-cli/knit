@@ -864,6 +864,7 @@ When sync remotes are configured, `knit publish create` and `knit push` also pus
 knit sync push                 # push bundle + history + views + architecture for the resolved project/bundle
 knit sync push --bundles       # push bundle artifacts (open bundles push their feature branches first)
 knit sync push --history       # push only project history events
+knit sync push --history --bundle feature-a  # only this bundle; preserve project cursor
 knit sync push --views         # push only your saved views
 knit sync push --kg            # push the knowledge-graph viz slice (explicit only)
 knit sync pull                 # pull bundle + history + views + architecture
