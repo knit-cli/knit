@@ -107,7 +107,7 @@ knit workspace status
 knit diff [--stat] [repo-id-or-path...]
 knit fetch [--mode all|git|knit] [--remote <name>] [repo-id-or-path...]
 knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [--remote <name>] [--no-remote] [--merge] [repo-id-or-path...]
-knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [--no-history] [repo-id-or-path...]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run up|status                             # bundle runtime stack
@@ -154,7 +154,7 @@ knit doctor
 knit migrate [--check]
 knit sync                                      # record git commits made outside Knit (local reconcile)
 knit sync push [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
-knit sync pull [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
+knit sync pull [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--repos] [--remote <name>]...
 knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--kind <kind>]... [--project <project>]
 knit history refresh [--rebuild] [--project <project>]
 knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
@@ -342,8 +342,8 @@ A view can also decide what a machine clones in the first place. `knit clone own
 A scoped workspace stays compatible with the whole project. Bundle artifacts, history and views are identical to a full clone's; only the local project's repo list is shorter, and the parts of Knit that would otherwise assume every repo is present respect the scope instead:
 
 - Pushes never shrink the shared project. The remote treats the pushed project's repo list as the membership every collaborator reconciles against, so a scoped workspace merges its entries over the remote's current membership before any push (`knit push`, `knit project push`, `knit sync push --history`), and publishes no project shape at all when that membership cannot be read. `knit project push --prune` is refused outright, because it would delete the other repos' records.
-- Remote pulls reconcile project membership only inside the scope: a repo added to the project on the remote is cloned here only when the scope view resolves to it. Repos outside the scope are named, never cloned, and never treated as removals.
-- `knit sync pull --bundles` skips a remote bundle that touches a repo not cloned here (printed as `skipped: repo <id> not cloned here`) and keeps syncing the rest, so a teammate working elsewhere in the project cannot break your sync. Skipped artifacts are remembered in `.knit/sync-skipped.json` and not downloaded again until they change. Such bundles still show up on the remote.
+- `knit pull` and `knit sync pull --repos` reconcile project membership only inside the scope: a repo added to the project on the remote is cloned here only when the scope view resolves to it. Repos outside the scope are named, never cloned, and never treated as removals.
+- `knit sync pull --bundles` skips a remote bundle that touches a repo not cloned here (printed as `skipped: repo <id> not cloned here`) and keeps syncing the rest, so a teammate working elsewhere in the project cannot break your sync. Skipped artifacts are remembered in `.knit/sync-skipped.json` and not downloaded again until they change. Each skipped bundle is named with `knit bundle pull <slug>` to fetch it explicitly. Such bundles still show up on the remote.
 - `knit bundle pull <slug>` and `knit handoff in` name a bundle explicitly, so they do clone its missing repos — and record them in the scope view, printing `scope view <name> extended with <repo>`.
 - `knit bundle` refuses a repo selection that includes a repo with no checkout here, naming the fix. `knit land plan` accepts landing lanes and deployments that name repos absent from a scoped workspace.
 
@@ -820,8 +820,23 @@ source branch is successful cleanup.
 Cross-repository publication currently supports verified direct forks on
 `github.com`, including renamed forks and forks owned by the target organization.
 Other forges, cross-host pairs, unrelated repositories, ambiguous push URLs, and
-force pushes of cross-repository contributions fail explicitly. Same-repository
-artifacts and explicit same-repository fields retain ordinary forge behavior.
+unconditional `knit push --force` of cross-repository contributions fail explicitly.
+Same-repository artifacts and explicit same-repository fields retain ordinary
+forge behavior.
+
+After rewriting contribution commits, use `knit push --force-with-lease`. The Git
+lease checks the fork's feature branch against its last pushed or fetched state,
+including when `origin` fetches upstream and pushes to the fork. A concurrent
+fork update refuses the push. A successful push records the contribution identity
+and any commits authored or rewritten outside Knit, then carries the same lease mode into configured hosted bundle syncs.
+
+`knit sync push --force-with-lease` publishes a rewritten bundle ledger using the
+artifact hash recorded by this workspace's last successful push or pull to that
+sync destination. Each successful upload refreshes that receipt, including an
+implicit sync from `knit push`. An unseen hosted update refuses the overwrite;
+inspect and reconcile it before retrying. Without a recorded receipt, Knit uses
+the ordinary fast-forward gate rather than an unguarded overwrite. For intentional
+rewrites, use the lease path instead of merging removed ledger nodes back in.
 
 Choose the PR destination with the same flags used for landing:
 
@@ -854,7 +869,7 @@ uses `KNIT_FORGEJO_TOKEN`, then `CODEBERG_TOKEN`, then `GITEA_TOKEN`.
 self-hosted base from the remote or defaults artifact operations to
 `https://codeberg.org/api/v1`.
 
-When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
+When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. `knit push --no-history` skips only the history upload while still pushing branches and the bundle artifact. History uploads print the pending event count before sending; the final count includes only events sent by this invocation. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
 
 ### Syncing artifacts with sync remotes
 
@@ -864,14 +879,18 @@ When sync remotes are configured, `knit publish create` and `knit push` also pus
 knit sync push                 # push bundle + history + views + architecture for the resolved project/bundle
 knit sync push --bundles       # push bundle artifacts (open bundles push their feature branches first)
 knit sync push --history       # push only project history events
+knit sync push --history --bundle feature-a  # only this bundle; preserve project cursor
 knit sync push --views         # push only your saved views
 knit sync push --kg            # push the knowledge-graph viz slice (explicit only)
 knit sync pull                 # pull bundle + history + views + architecture
+knit sync pull --repos         # also reconcile project repos and clone missing members
 knit sync pull --history       # pull only project history events
 knit sync pull --architecture  # pull only the architecture artifact
 knit sync pull --kg            # pull the explicit knowledge-graph viz slice
 knit sync push --remote hosted    # use an explicit remote
 ```
+
+`knit sync pull` moves artifacts only by default, for every target selection. It does not clone repositories, change project repo membership, or prune saved views for removed members. When membership metadata is available, it summarizes membership changes and missing checkouts, excluding repositories intentionally omitted by the workspace scope. For narrow artifact selections without `--repos`, an unavailable membership export only skips this diagnostic; it does not fail an otherwise successful artifact pull. Pass `--repos` to apply membership changes and clone missing members within the workspace scope. `--artifacts-only` remains accepted as a compatibility alias for the default. The git-style `knit pull` and `knit pull --bundles` keep their existing reconciliation behavior.
 
 With no target flag (`--bundles`/`--history`/`--views`/`--architecture`/`--all`), `knit sync push`/`pull` move every routine artifact family. The knowledge-graph viz slice (produced by `urdir kg viz`, often several MB) is deliberately excluded from `--all` and bare invocations — push it with an explicit `knit sync push --kg` after regenerating it. By default every configured remote is a sync remote — the remotes list itself is the sync set, and names carry no special meaning. `knit config set sync-remotes ...` (or the legacy `sync-remote`) narrows that set when some remotes should stay out of routine sync; override per invocation with one or more `--remote <name>`. Push-style syncs fan out to every sync remote and keep going past a failing one, reporting each failure at the end. Pull-style syncs walk the sync remotes in priority order and use the first one that responds. A pull first reads the project's bundle list, which carries each bundle's artifact metadata but no payloads, and then downloads the payloads it actually needs — one bundle at a time, only where the remote's artifact hash differs from the one the local artifact was last reconciled with (recorded per remote under `syncTargets`). Bundle payloads are never requested in one bulk response.
 

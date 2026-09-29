@@ -44,6 +44,7 @@ pub fn pull_repos(
             let repo = &active.bundle.repos[*index];
             let cwd = pull_cwd(&active, repo, feature)?;
             Ok(PullTarget {
+                feature,
                 repo_index: *index,
                 repo_id: repo.id.clone(),
                 cwd,
@@ -134,6 +135,7 @@ pub fn pull_repos(
 }
 
 struct PullTarget {
+    feature: bool,
     explicit: Option<(String, String)>,
     repo_index: usize,
     repo_id: String,
@@ -159,6 +161,10 @@ fn run_pull_target(target: &PullTarget, rebase: bool) -> Result<PullOutcome> {
                 branch,
             ],
         )?;
+        if target.feature {
+            let fetched = rev_parse(&target.cwd, "FETCH_HEAD")?;
+            crate::contribution::record_source_observation(&target.cwd, remote, branch, &fetched)?;
+        }
     } else {
         run_pull(&target.cwd, rebase)
             .with_context(|| format!("{}: git pull failed", target.repo_id))?;

@@ -244,7 +244,9 @@ Once a sync remote is configured, publish and land keep the hosted artifacts in
 sync automatically, hosted dashboards show bundles and project history, and
 an absolute `knit clone https://<host>/<owner>/<project>` can rebuild a working
 workspace on another machine. `knit related --pull` and `knit sync pull` read
-the same hosted history back.
+the same hosted history back. `knit sync pull` moves artifacts without cloning
+repositories or changing project membership; use `knit sync pull --repos` to
+apply remote membership changes and clone missing members.
 
 Projects can also be cloned through Knit. Prefer the absolute, owner-qualified
 project URL: it identifies the service and project in one GitHub-like reference.

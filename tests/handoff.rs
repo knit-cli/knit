@@ -106,11 +106,15 @@ fn checkpoint_round_trip_and_idempotent_acceptance() {
     let f = Fixture::new();
     let source_tree = f.source.join(".knit/worktrees/travel/backend");
     fs::write(source_tree.join("wip.txt"), "laptop work\n").unwrap();
-    let out = f.ok(
+    let (stdout, stderr, success) = f.run(
         &f.source,
         &["handoff", "out", "--to", "vps", "--json"],
         "laptop",
     );
+    assert!(success, "{stderr}\n{stdout}");
+    assert!(stderr.contains("syncing history to hosted:"), "{stderr}");
+    assert!(!stdout.contains("syncing history to"), "{stdout}");
+    let out: Value = serde_json::from_str(&stdout).expect("handoff stdout must remain JSON");
     assert_eq!(out["checkpointCommitGroupIds"].as_array().unwrap().len(), 1);
     assert_eq!(git(&source_tree, ["status", "--porcelain"]).trim(), "");
     let (_, error, success) = f.run(&f.source, &["handoff", "out", "--json"], "laptop");

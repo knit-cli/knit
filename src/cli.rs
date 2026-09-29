@@ -413,6 +413,9 @@ pub enum Commands {
         /// Also push the bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
+        /// Skip history upload, including implicit bundle history; still push branches and artifacts.
+        #[arg(long)]
+        no_history: bool,
         /// Skip the remote bundle sync for this push.
         #[arg(long)]
         no_remote: bool,
@@ -679,7 +682,7 @@ pub enum SyncCommand {
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
         /// Force-push bundle artifacts, overwriting the remote ledger only when it
-        /// still matches the state fetched for the lease. Applies to bundle targets only.
+        /// still matches this workspace's last successful push or pull. Applies to bundle targets only.
         #[arg(long)]
         force_with_lease: bool,
         /// Force-push bundle artifacts unconditionally. Prefer --force-with-lease.
@@ -687,11 +690,15 @@ pub enum SyncCommand {
         force: bool,
     },
     /// Pull artifacts from the sync remotes. With no target flags, pulls bundle, history,
-    /// and views for the resolved project/bundle.
+    /// and views for the resolved project/bundle. Repository membership and checkouts
+    /// are unchanged unless --repos is passed.
     Pull {
-        /// Only sync artifacts; do not fetch branches, create worktrees, or update checkouts.
+        /// Compatibility no-op: artifact-only pull is already the default.
         #[arg(long)]
         artifacts_only: bool,
+        /// Reconcile repository membership and clone missing repositories from the remote.
+        #[arg(long)]
+        repos: bool,
         #[command(flatten)]
         targets: SyncTargetArgs,
         /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
@@ -705,7 +712,8 @@ pub struct SyncTargetArgs {
     /// Sync the bundle artifact for the resolved bundle.
     #[arg(long)]
     pub bundles: bool,
-    /// Sync project commit history events.
+    /// Sync project commit history events. For a history-only push, --bundle selects only
+    /// that bundle's events (no base events) without changing the project cursor.
     #[arg(long)]
     pub history: bool,
     /// Sync your saved views for the project.

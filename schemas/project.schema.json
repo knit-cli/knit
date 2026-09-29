@@ -11,6 +11,19 @@
     "repos"
   ],
   "properties": {
+    "history": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baseCommitDepth": {
+          "description": "Override the inclusive oldest recorded bundle base anchor; without a usable anchor the default is 200. Zero disables new base observation; all opts into unbounded history. Existing ledger events are retained.",
+          "oneOf": [
+            { "type": "integer", "minimum": 0, "maximum": 2147483647 },
+            { "const": "all" }
+          ]
+        }
+      }
+    },
     "requirements": {
       "type": "object",
       "additionalProperties": false,

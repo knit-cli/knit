@@ -206,14 +206,9 @@ pub fn sync_push(
 /// Pull selected artifact families from the sync remotes for the resolved project/bundle.
 ///
 /// `knit sync pull` and `knit sync pull --bundles/--history/--views` route here,
-/// as does `knit pull --remote`/`knit fetch --knit` (bundles only). Bundle pull
-/// for the active bundle is delegated to the existing localize/refresh path in
-/// `remote::pull`; this module does not reimplement that logic.
-pub fn sync_pull(
-    targets: SyncTargets,
-    remote_overrides: &[String],
-    artifacts_only: bool,
-) -> Result<()> {
+/// with artifact-only behavior by default. Repository membership reconciliation
+/// is opt-in and does not change the separate `knit pull` paths.
+pub fn sync_pull(targets: SyncTargets, remote_overrides: &[String], repos: bool) -> Result<()> {
     let remotes = resolve_remotes(remote_overrides)?;
     let multiple = remotes.len() > 1;
     let mut failures = Vec::new();
@@ -233,36 +228,23 @@ pub fn sync_pull(
         if multiple {
             println!("{} {}", out::heading("Remote:"), out::repo(remote));
         }
-        if targets.bundles {
-            // Deep refresh (feature branches, worktree checkouts) for the
-            // resolved bundle when one resolves. From the workspace root with
-            // several open bundles there is no resolvable bundle — that is
-            // fine, the project-wide artifact sync below still runs. Order
-            // matters: the artifact-only sync would fast-forward the active
-            // bundle's artifact first and turn this into a skip, leaving its
-            // checkouts stale.
-            if !artifacts_only && crate::store::load_active_bundle().is_ok() {
-                if let Err(error) = super::pull::pull_remote_state(Some(remote), false, false) {
-                    failures.push(format!("{remote} bundle: {error:#}"));
-                }
+        let membership_result = effective_workspace_config().and_then(|(root, mut config)| {
+            if let Some(project) = project {
+                config.active_project = Some(project.to_string());
             }
-            // Project-wide: localize remote bundles absent locally and
-            // fast-forward stale artifacts, so bundles (and their recorded
-            // PRs) created on other machines appear here without knowing
-            // their slugs. Diverged ledgers are reported, not merged;
-            // `knit pull --merge` is the explicit door for that.
-            match effective_workspace_config() {
-                Ok((root, mut config)) => {
-                    if let Some(project) = project {
-                        config.active_project = Some(project.to_string());
-                    }
-                    if let Err(error) =
-                        super::pull::fetch_bundles_from_remote(&root, &config, Some(remote))
-                    {
-                        failures.push(format!("{remote} bundles: {error:#}"));
-                    }
-                }
-                Err(error) => failures.push(format!("{remote} bundles: {error:#}")),
+            super::pull::sync_project_from_remote(
+                &root,
+                &config,
+                Some(remote),
+                repos,
+                targets.bundles,
+            )
+        });
+        // Narrow artifact pulls use the export only for optional membership
+        // diagnostics. Its availability must not decide their success.
+        if targets.bundles || repos {
+            if let Err(error) = membership_result {
+                failures.push(format!("{remote} bundles: {error:#}"));
             }
         }
         if targets.history {

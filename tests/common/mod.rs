@@ -1966,20 +1966,38 @@ fn handle_fake_remote_push_request(
             fs::write(&record, existing).unwrap();
             (200, format!("{{\"data\":{{\"id\":\"{repo_id}\"}}}}"))
         }
+        ("PUT", ["api", "v1", "projects", _, "view"]) => (200, json!({"data": body}).to_string()),
         ("POST", ["api", "v1", "projects", _, "history-events"]) => {
-            // Every history push is recorded, one line per request, so a
-            // test can see how many requests a sync made and which events
-            // rode in each.
-            let record = dir.join("history-pushes.jsonl");
-            let mut existing = fs::read_to_string(&record).unwrap_or_default();
-            existing.push_str(&body.to_string());
-            existing.push('\n');
-            fs::write(&record, existing).unwrap();
+            // Serialize append operations: the client sends four batches in
+            // parallel, so read/modify/write can silently lose recordings.
+            static HISTORY_RECORD_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            {
+                let _guard = HISTORY_RECORD_LOCK.lock().unwrap();
+                let mut record = fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(dir.join("history-pushes.jsonl"))?;
+                writeln!(record, "{body}")?;
+            }
             let count = body["events"].as_array().map(Vec::len).unwrap_or(0);
-            (
-                201,
-                format!("{{\"data\":{{\"insertedCount\":{count},\"skippedCount\":0}}}}"),
-            )
+            // Key knobs by first event, never nondeterministic arrival order.
+            // {"e0500":{"failure":"rejected"|"http", "delayMs":10}}
+            let knobs: Value = fs::read_to_string(dir.join("history-batches.json"))
+                .ok()
+                .and_then(|text| serde_json::from_str(&text).ok())
+                .unwrap_or_default();
+            let first = body["events"][0]["eventId"].as_str().unwrap_or_default();
+            let knob = &knobs[first];
+            if let Some(delay) = knob["delayMs"].as_u64() {
+                std::thread::sleep(std::time::Duration::from_millis(delay));
+            }
+            match knob["failure"].as_str() {
+                Some("http") => (500, r#"{"errors":{"detail":"synthetic batch failure"}}"#.to_string()),
+                Some("rejected") => (201, json!({"data": {
+                    "insertedCount": count.saturating_sub(1), "skippedCount": 0, "failedCount": 1
+                }}).to_string()),
+                _ => (201, json!({"data": {"insertedCount": count, "skippedCount": 0}}).to_string()),
+            }
         }
         ("POST", ["api", "v1", "projects", _, "bundles"]) => {
             let slug = body["slug"].as_str().unwrap_or("unknown").to_string();
@@ -2001,6 +2019,22 @@ fn handle_fake_remote_push_request(
                 201,
                 format!("{{\"data\":{{\"id\":\"rb-{slug}\",\"slug\":\"{slug}\"{web_url}}}}}"),
             )
+        }
+        ("GET", ["api", "v1", "bundles", bundle_id, "artifacts"])
+            if dir.join("stateful-artifacts").exists() =>
+        {
+            let history = fs::read_to_string(dir.join(format!("{bundle_id}.artifact-history")))
+                .unwrap_or_default();
+            // Deliberately oldest-first: an artifact index is not a lease receipt.
+            let artifacts: Vec<Value> = history
+                .lines()
+                .map(|hash| {
+                    json!({
+                        "id": hash, "artifactHash": hash
+                    })
+                })
+                .collect();
+            (200, json!({"data": artifacts}).to_string())
         }
         ("GET", ["api", "v1", "bundles", _, "artifacts"]) => {
             match fs::read_to_string(dir.join("current-artifact-hash")) {
@@ -2030,12 +2064,26 @@ fn handle_fake_remote_push_request(
 
             let force = body["force"].as_bool().unwrap_or(false);
             let expected = body["expectedArtifactHash"].as_str();
-            let server_hash = fs::read_to_string(dir.join("post-current-artifact-hash"))
-                .or_else(|_| fs::read_to_string(dir.join("current-artifact-hash")))
-                .ok()
-                .map(|hash| hash.trim().to_string());
-            let accepted =
-                "{\"data\":{\"id\":\"art-1\",\"artifactHash\":\"fakehash\"}}".to_string();
+            let stateful = dir.join("stateful-artifacts").exists();
+            let state_path = dir.join(format!("{bundle_id}.artifact-current"));
+            let server_hash = if stateful {
+                fs::read_to_string(&state_path).ok()
+            } else {
+                fs::read_to_string(dir.join("post-current-artifact-hash"))
+                    .or_else(|_| fs::read_to_string(dir.join("current-artifact-hash")))
+                    .ok()
+                    .map(|hash| hash.trim().to_string())
+            };
+            let next_hash = if stateful {
+                use sha2::{Digest, Sha256};
+                format!(
+                    "{:x}",
+                    Sha256::digest(serde_json::to_vec(&body["payload"]).unwrap())
+                )
+            } else {
+                "fakehash".to_string()
+            };
+            let accepted = json!({"data": {"id": "art-1", "artifactHash": next_hash}}).to_string();
             let rejected_node = fs::read_to_string(dir.join("reject-node-type")).ok();
             let reject = rejected_node.as_deref().is_some_and(|kind| {
                 body["payload"]["nodes"].as_array().is_some_and(|nodes| {
@@ -2044,7 +2092,7 @@ fn handle_fake_remote_push_request(
                         .any(|node| node["type"].as_str() == Some(kind.trim()))
                 })
             });
-            if reject {
+            let result = if reject {
                 (503, r#"{"error":{"kind":"unavailable","message":"injected artifact publication failure"}}"#.to_string())
             } else if let Some(expected) = expected {
                 // Compare-and-swap: accept only when the lease matches the
@@ -2070,7 +2118,20 @@ fn handle_fake_remote_push_request(
                 )
             } else {
                 (201, accepted)
+            };
+            if stateful && result.0 == 201 {
+                fs::write(&state_path, &next_hash)?;
+                let history_path = dir.join(format!("{bundle_id}.artifact-history"));
+                let mut history = fs::read_to_string(&history_path).unwrap_or_default();
+                history.push_str(&next_hash);
+                history.push('\n');
+                fs::write(history_path, history)?;
+                fs::write(
+                    dir.join(format!("{bundle_id}.artifact-payload")),
+                    serde_json::to_vec(&body["payload"]).unwrap(),
+                )?;
             }
+            result
         }
         _ => (
             404,

@@ -26,6 +26,8 @@ pub struct KnitProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<ProjectRuntime>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<ProjectHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<ProjectLandingPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements: Option<ProjectRequirements>,
@@ -49,11 +51,46 @@ impl KnitProject {
             repos: Vec::new(),
             commands: BTreeMap::new(),
             runtime: None,
+            history: None,
             landing: None,
             requirements: None,
             auth: None,
         }
     }
+}
+
+/// Controls newly observed base history; existing ledger entries are never pruned.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectHistory {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_commit_depth: Option<BaseCommitDepth>,
+}
+
+/// An explicit count (zero disables observation), or the opt-in unbounded walk.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum BaseCommitDepth {
+    Count(#[serde(deserialize_with = "base_commit_count")] u64),
+    All(AllBaseCommits),
+}
+
+// Git's --max-count parser accepts nonnegative signed 32-bit integers.
+// Reject larger authored values instead of failing later during refresh.
+fn base_commit_count<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<u64, D::Error> {
+    let count = u64::deserialize(deserializer)?;
+    if count > i32::MAX as u64 {
+        return Err(serde::de::Error::custom(
+            "baseCommitDepth exceeds Git's maximum count (2147483647)",
+        ));
+    }
+    Ok(count)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AllBaseCommits {
+    #[serde(rename = "all")]
+    All,
 }
 
 /// Token kinds each forge offers. A project auth group declares one or more
