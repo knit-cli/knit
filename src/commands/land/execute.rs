@@ -450,6 +450,7 @@ fn execute_step(active: &ActiveBundle, plan: &LandPlan, step: &LandStep) -> Resu
         LandStepKind::MergeBranch => execute_merge_branch(active, step),
         LandStepKind::WaitChecks => execute_wait_checks(active, step),
         LandStepKind::Manual => bail!("manual steps require schemaVersion 0.2"),
+        LandStepKind::AwaitUpdate => bail!("await_update steps require schemaVersion 0.2"),
         LandStepKind::Run => execute_run_command(active, step),
         LandStepKind::Deploy => execute_deployment(active, step),
     }

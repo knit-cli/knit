@@ -1162,3 +1162,178 @@ fn review_corrections_executor_protocol_and_no_merge_display() {
     );
     assert!(!f.root.join(".knit/land-runs").exists());
 }
+
+#[test]
+fn resumable_manual_gate_pauses_without_terminal_and_releases_local_ownership() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"recover","steps":[
+        {"id":"release","type":"manual","acknowledge":"resume","instructions":"Publish a synthetic release."},
+        {"id":"verify","type":"run","repoId":"service","effect":"read_only","needs":["release"],"command":[python_executable(),"-c","print('verified')"]}
+    ]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan", "--out", "gate.json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let plan = read(&f.root.join("gate.json"));
+    assert_eq!(plan["requiredExecutorVersion"], "0.6");
+    let applied = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "gate.json",
+        "--no-remote",
+        "--json",
+    ]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let run: Value = serde_json::from_slice(&applied.stdout).unwrap();
+    assert_eq!(run["status"], "paused");
+    assert!(run.get("recoveryStartedAt").is_none());
+    assert_eq!(read(&f.bundle)["state"], "open");
+    let resumed = f.cmd(&["land", "resume", "--no-remote", "--json"]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    let again: Value = serde_json::from_slice(&resumed.stdout).unwrap();
+    assert_eq!(again["id"], run["id"]);
+    assert_eq!(again["status"], "paused");
+    let completed = f.cmd(&[
+        "land",
+        "resume",
+        "--acknowledge",
+        "release",
+        "--note",
+        "Published",
+        "--no-remote",
+        "--keep-worktrees",
+        "--json",
+    ]);
+    assert!(
+        completed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&completed.stderr)
+    );
+    let done: Value = serde_json::from_slice(&completed.stdout).unwrap();
+    assert_eq!(done["status"], "succeeded");
+    assert_eq!(done["planHash"], run["planHash"]);
+}
+
+#[test]
+fn artifact_runner_refuses_noninteractive_gates_before_effects() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"steps":[{"id":"release","type":"manual","acknowledge":"resume","instructions":"Publish."}]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan", "--out", "gate.json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "gate.json",
+        "--from-artifact",
+        f.bundle.to_str().unwrap(),
+        "--project-file",
+        f.project.to_str().unwrap(),
+        "--repo-roots",
+        "roots.json",
+        "--run-out",
+        "run.json",
+        "--out",
+        "out.json",
+    ]);
+    assert!(!output.status.success());
+    assert!(String::from_utf8_lossy(&output.stderr).contains("locally"));
+    assert!(!f.root.join("run.json").exists());
+}
+
+#[test]
+fn parallel_command_failure_outranks_a_paused_gate() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{"id":"release","type":"manual","acknowledge":"resume","instructions":"Publish."},{"id":"failure","type":"run","repoId":"service","effect":"read_only","command":[python_executable(),"-c","raise SystemExit(7)"]}]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan", "--out", "gate.json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let output = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "gate.json",
+        "--no-remote",
+        "--json",
+    ]);
+    assert!(!output.status.success());
+    let run: Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(run["status"], "failed");
+    assert!(run.get("pause").is_none());
+    assert!(run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|s| s["status"] != "running"));
+}
+
+#[test]
+fn paused_run_cannot_resume_after_a_newer_local_generation() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"steps":[{"id":"release","type":"manual","acknowledge":"resume","instructions":"Confirm release."}]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan", "--out", "gate.json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let first = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "gate.json",
+        "--no-remote",
+        "--json",
+    ]);
+    assert!(first.status.success());
+    let run: Value = serde_json::from_slice(&first.stdout).unwrap();
+    let path = fs::read_dir(f.root.join(".knit/land-runs"))
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "json") && read(p)["id"] == run["id"])
+        .unwrap();
+    let second = f.cmd(&["land", "apply", "--plan", "gate.json", "--no-remote"]);
+    assert!(
+        second.status.success(),
+        "{}",
+        String::from_utf8_lossy(&second.stderr)
+    );
+    let refused = f.cmd(&[
+        "land",
+        "resume",
+        "--run",
+        path.to_str().unwrap(),
+        "--acknowledge",
+        "release",
+        "--no-remote",
+    ]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("superseded"));
+    assert_eq!(read(&path), run);
+}

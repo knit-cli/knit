@@ -1626,6 +1626,15 @@ pub enum LandCommand {
     },
     /// Resume a failed or incomplete landing run.
     Resume {
+        /// Confirm a landing gate. Repeat for multiple gates.
+        #[arg(long, value_name = "STEP")]
+        acknowledge: Vec<String>,
+        /// Record a note with the acknowledgements.
+        #[arg(long, requires = "acknowledge")]
+        note: Option<String>,
+        /// Emit the run receipt as JSON, including paused state.
+        #[arg(long)]
+        json: bool,
         /// Resume even when required checks are missing, red, or stale.
         #[arg(long)]
         skip_checks: bool,

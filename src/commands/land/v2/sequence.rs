@@ -82,7 +82,7 @@ pub(crate) fn compile_workflow(steps: &[Value], repo_order: &[String]) -> Result
             Some(repo) => *position
                 .get(repo)
                 .with_context(|| format!(
-                    "execution repository_sequence does not declare repository {repo} for step {id}; add it to execution.repoOrder"
+                    "execution repository_sequence does not declare repository {repo} for step {id}; add it to execution.repoOrder. For a bundle-only repository, first register it with `knit project add {repo} <path> --observe`"
                 ))?,
             None => repo_order.len(),
         };

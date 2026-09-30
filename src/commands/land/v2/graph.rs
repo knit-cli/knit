@@ -115,7 +115,8 @@ pub(super) fn effect(step: &Value) -> &str {
         .as_str()
         .unwrap_or_else(|| match step["type"].as_str() {
             Some("merge_pr" | "merge_branch") => "source",
-            Some("wait_checks") => "read_only",
+            Some("wait_checks" | "await_update") => "read_only",
+            Some("manual") if step["acknowledge"] == "resume" => "read_only",
             Some("run")
                 if matches!(step["role"].as_str(), Some("build" | "verify" | "capture")) =>
             {
@@ -320,7 +321,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             }
             if matches!(
                 plan["requiredExecutorVersion"].as_str(),
-                Some("0.4" | "0.5")
+                Some("0.4" | "0.5" | "0.6")
             ) {
                 bail!("requiredExecutorVersion 0.4 or later requires a schema 0.2 plan");
             }
@@ -340,7 +341,10 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 bail!("targetBranch and lane are mutually exclusive");
             }
             if let Some(version) = plan.get("requiredExecutorVersion") {
-                if version != "0.2" && version != "0.3" && version != "0.4" && version != "0.5" {
+                if !matches!(
+                    version.as_str(),
+                    Some("0.2" | "0.3" | "0.4" | "0.5" | "0.6")
+                ) {
                     bail!("unsupported requiredExecutorVersion");
                 }
             }
@@ -349,7 +353,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 .any(|step| step["interactive"] == true || step["type"] == "manual")
                 && !matches!(
                     plan["requiredExecutorVersion"].as_str(),
-                    Some("0.3" | "0.4" | "0.5")
+                    Some("0.3" | "0.4" | "0.5" | "0.6")
                 )
             {
                 bail!("interactive and manual operations require requiredExecutorVersion 0.3");
@@ -370,7 +374,7 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
             if !required_04.is_empty()
                 && !matches!(
                     plan["requiredExecutorVersion"].as_str(),
-                    Some("0.4" | "0.5")
+                    Some("0.4" | "0.5" | "0.6")
                 )
             {
                 bail!(
@@ -388,6 +392,10 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                     );
                 }
             }
+            if let Some(project) = project {
+                super::gates::validate_project(project)?;
+            }
+            super::gates::validate_gates(plan, &steps)?;
             super::sequence::validate_plan_execution(plan)?;
             super::mergeability::validate_plan_preflight(plan)?;
             super::mergeability::validate_plan_integration_sources(plan, bundle)?;
@@ -465,6 +473,8 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                         bail!("{id}: manual steps cannot have a command");
                     }
                 }
+                // Structure is checked by gates::validate_gates below.
+                Some("await_update") if v2 => {}
                 Some("run" | "deploy") if s["deploymentMode"] != "push" => {
                     if v2 {
                         check_spec(s, id)?;
@@ -488,8 +498,10 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                     bail!("{id}: interactive requires a run or command deployment and a boolean");
                 }
             }
-            if (s["interactive"] == true || s["type"] == "manual") && s["runner"] == "hosted" {
-                bail!("{id}: interactive/manual steps require a local runner");
+            if (s["interactive"] == true || s["type"] == "manual" || s["type"] == "await_update")
+                && s["runner"] == "hosted"
+            {
+                bail!("{id}: interactive/manual steps and landing gates require a local runner");
             }
             if (s["type"] != "manual" || recovery(s)["mode"] == "command")
                 && s["repoId"].as_str().is_none_or(|r| r.trim().is_empty())

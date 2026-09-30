@@ -51,7 +51,8 @@
         "succeeded",
         "failed",
         "skipped",
-        "rolled_back"
+        "rolled_back",
+        "paused"
       ]
     },
     "lane": {
@@ -118,7 +119,8 @@
               "wait_checks",
               "run",
               "deploy",
-              "manual"
+              "manual",
+              "await_update"
             ]
           },
           "status": {
@@ -209,6 +211,9 @@
           },
           "error": {
             "type": "string"
+          },
+          "waiting": {
+            "type": "object"
           }
         }
       }
@@ -267,7 +272,77 @@
     },
     "checksSkipped": {
       "type": "boolean"
+    },
+    "pause": {
+      "type": "object",
+      "required": [
+        "step",
+        "instructions",
+        "since"
+      ],
+      "properties": {
+        "step": {
+          "type": "string"
+        },
+        "instructions": {
+          "type": "string"
+        },
+        "since": {
+          "type": "string"
+        },
+        "waitingFor": {
+          "type": "string"
+        },
+        "next": {
+          "type": "string"
+        }
+      }
+    },
+    "acknowledgements": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": [
+          "at"
+        ],
+        "properties": {
+          "at": {
+            "type": "string"
+          },
+          "notes": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 4096
+          }
+        }
+      }
     }
   },
-  "additionalProperties": false
+  "additionalProperties": false,
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "paused"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "required": [
+          "pause"
+        ],
+        "properties": {
+          "schemaVersion": {
+            "const": "0.2"
+          }
+        }
+      }
+    }
+  ]
 }

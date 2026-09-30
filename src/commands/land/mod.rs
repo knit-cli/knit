@@ -242,7 +242,11 @@ pub fn apply_land_plan(
     target_branch: Option<&str>,
     lane_name: Option<&str>,
     expected_plan_hash: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
+    if json_output {
+        crate::output::route_human_lines_to_stderr();
+    }
     let active = crate::store::load_active_bundle()?;
     let destination = v2::destination_path(&active, target_branch, lane_name);
     let candidate = if plan_path.is_none() && destination.exists() {
@@ -269,11 +273,16 @@ pub fn apply_land_plan(
                 keep_worktrees,
                 tag,
                 no_tag,
+                acknowledge: &[],
+                note: None,
             }),
             skip_checks,
-            false,
+            json_output,
             expected_plan_hash,
         );
+    }
+    if json_output {
+        bail!("JSON apply requires a saved schema 0.2 plan");
     }
     if expected_plan_hash.is_some() {
         bail!("--expected-plan-hash requires a saved schema 0.2 plan");
@@ -323,6 +332,8 @@ pub fn apply_land_plan(
             keep_worktrees,
             tag,
             no_tag,
+            acknowledge: &[],
+            note: None,
         },
     )
 }
@@ -346,6 +357,10 @@ struct FinishLandOptions<'a> {
     keep_worktrees: bool,
     tag: Option<String>,
     no_tag: bool,
+    /// Landing gates the operator confirms for this invocation, with an
+    /// optional note recorded on each acknowledgement.
+    acknowledge: &'a [String],
+    note: Option<&'a str>,
 }
 
 /// Everything that happens after the last step succeeds.
@@ -626,7 +641,7 @@ fn tag_landed_bundle(
             .unwrap_or(false);
     if alternate_target && tag.is_none() {
         if auto_tag {
-            println!(
+            crate::human!(
                 "{} skipped automatic tag because this landing targeted an alternate review branch; `knit tag` pins configured project bases.",
                 out::warn("warning:")
             );
@@ -634,7 +649,7 @@ fn tag_landed_bundle(
         return;
     }
     if alternate_target && tag.is_some() {
-        println!(
+        crate::human!(
             "{} explicit --tag records the configured project bases, not the alternate review target.",
             out::warn("warning:")
         );
@@ -665,7 +680,7 @@ fn tag_landed_bundle(
         remote,
         no_remote,
     ) {
-        println!(
+        crate::human!(
             "{} land succeeded but tagging failed: {error:#}",
             out::warn("warning:")
         );
@@ -679,6 +694,7 @@ fn tag_landed_bundle(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn resume_land_run(
     run_path: Option<&Path>,
     remote: &[String],
@@ -687,7 +703,13 @@ pub fn resume_land_run(
     keep_worktrees: bool,
     tag: Option<String>,
     no_tag: bool,
+    acknowledge: &[String],
+    note: Option<&str>,
+    json_output: bool,
 ) -> Result<()> {
+    if json_output {
+        crate::output::route_human_lines_to_stderr();
+    }
     let mut active = load_active_bundle_for_update()?;
     let path = resolve_land_run_path(&active, run_path)?
         .with_context(|| "No land run found. Run `knit land apply` first.")?;
@@ -705,11 +727,16 @@ pub fn resume_land_run(
                 keep_worktrees,
                 tag,
                 no_tag,
+                acknowledge,
+                note,
             }),
             skip_checks,
-            false,
+            json_output,
             None,
         );
+    }
+    if !acknowledge.is_empty() || note.is_some() || json_output {
+        bail!("gate acknowledgements and JSON resume require a schema 0.2 run");
     }
     ensure_no_executor04_semantics_on_legacy(&raw)?;
     let mut run: LandRun = read_json(&path)?;
@@ -743,6 +770,8 @@ pub fn resume_land_run(
                 keep_worktrees,
                 tag,
                 no_tag,
+                acknowledge: &[],
+                note: None,
             },
         );
     }
@@ -766,6 +795,8 @@ pub fn resume_land_run(
             keep_worktrees,
             tag,
             no_tag,
+            acknowledge: &[],
+            note: None,
         },
     )
 }
@@ -823,7 +854,10 @@ fn ensure_no_executor04_semantics_on_legacy(raw: &serde_json::Value) -> Result<(
             bail!("landing plan field {key} requires a schema 0.2 plan with requiredExecutorVersion 0.4; this plan would silently discard it");
         }
     }
-    if matches!(raw["requiredExecutorVersion"].as_str(), Some("0.4" | "0.5")) {
+    if matches!(
+        raw["requiredExecutorVersion"].as_str(),
+        Some("0.4" | "0.5" | "0.6")
+    ) {
         bail!("requiredExecutorVersion 0.4 or later requires a schema 0.2 plan");
     }
     if raw["steps"]

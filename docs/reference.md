@@ -385,6 +385,91 @@ A plan's `workflow` is either `{ "step": "id" }`, `{ "sequence": [...] }` or `{ 
 
 Project `landing.deployments[]` supports `build`, `verify`, `label` and `recovery`; `landing.steps[]` adds explicit command operations. Target and lane overrides support the same recipes. `whenChanged` selects a recipe, while `needs` declares execution dependencies. A consumer repository can have a deployment triggered by another repository even when the consumer is absent from the bundle; it still needs a runner binding. Generation freezes the recipe and its source fingerprint. Target/lane plans have separate `<bundle>--<destination-hash>.land.json` files; the default destination retains `<bundle>.land.json`.
 
+Library release order and conditional gates use one immutable plan and run:
+
+```json
+"landing": {
+  "dependencies": [{
+    "library": "core-lib",
+    "consumers": "*",
+    "release": { "instructions": "Publish the library release." },
+    "bump": {
+      "instructions": "Update the dependency, commit and push.",
+      "paths": ["Cargo.toml", "Cargo.lock", "**/Cargo.toml"]
+    }
+  }]
+}
+```
+
+When the library changed and the plan merges its review, generation adds
+`merge-core-lib → release-core-lib → bump-<consumer> → merge-<consumer>`.
+`release` and `bump` are optional; omitting them keeps the corresponding ordering
+edge. `consumers` is `"*"` for every other repository this plan merges, including
+bundle-only repositories, or a nonempty list of project repository IDs. Dependency
+cycles are refused, including cycles implied by wildcards. Multiple libraries
+feeding one consumer share a bump gate after all relevant releases; their allowed
+paths are combined (a dependency without a path restriction leaves that combined
+gate unrestricted). Intermediate branch-only integration generates no release gates.
+
+Custom `landing.steps[]`, target steps and lane steps accept `whenChanged`.
+A nonempty list selects the step when any named repository changed; `["*"]`
+always selects it. Generation drops `needs`/`requires` that refer to configured
+steps absent from this bundle, including unselected merges and release gates.
+An unknown step ID remains an error. Names in project recipes must identify
+project members, even in inactive scopes. To name a bundle-only repository,
+register it with `knit project add <id> <path> --observe`. Wildcards include it
+without registration. `merge.repoOrder` leaves unlisted repositories after listed
+ones; strict `execution.repoOrder` requires every participating repository to be
+listed and registered.
+
+Generated release steps are `manual` with `acknowledge: "resume"`; generated bump
+steps are `await_update` with `repoId`, `instructions`, and optional `paths`.
+Both observe completion (`effect: "read_only"`) and pause instead of occupying a
+terminal. A plain manual step still uses its terminal prompt. Gates require a
+local runner, executor `0.6`, and the `landing-gates` capability. Artifact runners
+refuse gate plans before executing effects. Update gates require an atomic
+head-conditional forge merge: GitHub or GitLab API merge/squash. Other adapter
+routes (including GitLab CLI/rebase, Forgejo and Bitbucket) refuse the plan in
+preflight rather than relying on a racy head read.
+
+```sh
+knit land apply --plan reviewed.land.json
+knit land resume --acknowledge release-core-lib --note "Release published"
+# Commit and push consumer dependency updates, then:
+knit land resume
+```
+
+Apply/resume exit successfully when paused. The run has `status: "paused"` and
+`pause: {step, instructions, since}`; `--json` emits that receipt. Receipts persist,
+parallel work settles, and local locks and hosted ownership are released. Resume
+claims ownership again and continues the same immutable plan hash, retaining
+completed steps. A concurrent failure outranks a pause and follows normal recovery
+policy. A pause alone never triggers recovery or bundle finalization. If another
+landing supersedes this run, resume refuses; generate and review a fresh plan.
+
+`--acknowledge <step>` is repeatable and `--note` records up to 4096 bytes with the
+acknowledgements. An unchanged `await_update` head pauses unless explicitly
+acknowledged as already containing the bump. A changed head must append to the
+reviewed history, regardless of acknowledgement. Every path touched by every
+added commit must match an allowed glob, including reverted changes and both
+sides of renames. `*`/`?` match within a path component, `**` crosses components,
+and a pattern without `/` matches that filename anywhere. Verification requires
+complete, ungrafted history and UTF-8 paths; replacement refs cannot manufacture
+ancestry. A rejected update never becomes an accepted pin.
+
+The accepted SHA and commits are saved in the gate receipt and `git.observed`
+ledger. Later operations use the accepted SHA, named checks must be fresh for it,
+and the forge merge is conditional on that exact head. Resume permits head changes
+only while an update gate has not yet accepted its head; the accepted head is
+immutable thereafter. Local checkout commits must be contained in that accepted
+history, so unpushed work is never silently discarded. Base, branch, review
+identity and scope remain pinned. Resume and the final pre-merge read revalidate
+live review identity, including its source repository. Only an explicitly planned
+retarget is authorized; a confirmed retarget remains pinned on retry. New commands
+use the accepted head rather than another step's older source receipt; replaying
+a command keeps its own receipt, and explicit checkout/merge sources retain their
+precedence. Editing the plan is never a way to continue its existing run.
+
 Discover destinations without generating or executing a plan:
 
 ```sh

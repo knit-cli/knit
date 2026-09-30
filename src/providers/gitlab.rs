@@ -16,6 +16,8 @@ pub struct GitLab;
 
 #[derive(Debug, Deserialize)]
 struct GlabMr {
+    #[serde(default)]
+    source_project_id: Option<u64>,
     iid: u64,
     web_url: String,
     #[serde(default)]
@@ -825,6 +827,7 @@ fn into_pull_request(mr: GlabMr) -> PullRequest {
     let draft = mr.draft.or(mr.work_in_progress).unwrap_or(false);
     let merge_status = mr.detailed_merge_status.or(mr.merge_status);
     PullRequest {
+        source_repository: mr.source_project_id.map(|id| format!("project:{id}")),
         number: mr.iid,
         url: mr.web_url,
         state: Some(normalize_state(mr.state.as_deref())),
@@ -922,10 +925,11 @@ mod tests {
 
     #[test]
     fn maps_mr_json_to_pull_request() {
-        let json = r#"{"iid":12,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/12","state":"opened","title":"t","target_branch":"main","source_branch":"knit/x","description":"body","draft":true,"sha":"deadbeef","head_pipeline":{"status":"running"}}"#;
+        let json = r#"{"source_project_id":42,"iid":12,"web_url":"https://gitlab.com/acme/backend/-/merge_requests/12","state":"opened","title":"t","target_branch":"main","source_branch":"knit/x","description":"body","draft":true,"sha":"deadbeef","head_pipeline":{"status":"running"}}"#;
         let mr: GlabMr = serde_json::from_str(json).unwrap();
         let pr = into_pull_request(mr);
         assert_eq!(pr.number, 12);
+        assert_eq!(pr.source_repository.as_deref(), Some("project:42"));
         assert_eq!(pr.state.as_deref(), Some("OPEN"));
         assert_eq!(pr.base_ref_name.as_deref(), Some("main"));
         assert_eq!(pr.is_draft, Some(true));

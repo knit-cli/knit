@@ -423,9 +423,67 @@ pub struct ProjectRunCommand {
     pub env: BTreeMap<String, String>,
 }
 
+/// A library's release and dependency updates precede consumer review merges.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ProjectLandingDependency {
+    pub library: String,
+    pub consumers: ProjectLandingConsumers,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub release: Option<ProjectLandingRelease>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bump: Option<ProjectLandingBump>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum ProjectLandingConsumers {
+    Wildcard(ProjectLandingWildcard),
+    Repositories(Vec<String>),
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum ProjectLandingWildcard {
+    #[serde(rename = "*")]
+    All,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLandingRelease {
+    pub instructions: String,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectLandingBump {
+    pub instructions: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paths: Option<Vec<String>>,
+}
+
+fn landing_steps<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ProjectLandingStep>, D::Error> {
+    Ok(Option::<Vec<ProjectLandingStep>>::deserialize(deserializer)?.unwrap_or_default())
+}
+
+/// Custom operations retain the versioned plan fields during project edits.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectLandingStep {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when_changed: Option<Vec<String>>,
+    #[serde(flatten)]
+    pub operation: BTreeMap<String, serde_json::Value>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingPlan {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<ProjectLandingDependency>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(deserialize_with = "landing_steps")]
+    pub steps: Vec<ProjectLandingStep>,
     /// Versioned recipe extensions are preserved across project edits and export.
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
@@ -458,6 +516,9 @@ pub struct ProjectLandingPlan {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingLane {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(deserialize_with = "landing_steps")]
+    pub steps: Vec<ProjectLandingStep>,
     /// Versioned recipe extensions are preserved across project edits and export.
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,
@@ -487,6 +548,9 @@ pub struct ProjectLandingLane {
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ProjectLandingTarget {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(deserialize_with = "landing_steps")]
+    pub steps: Vec<ProjectLandingStep>,
     /// Versioned recipe extensions are preserved across project edits and export.
     #[serde(flatten)]
     pub extensions: BTreeMap<String, serde_json::Value>,

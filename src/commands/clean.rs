@@ -55,18 +55,18 @@ pub fn clean_generated(
 fn clean_revert_plans(active: &ActiveBundle) -> Result<()> {
     let path = active.root.join(".knit/revert-plans");
     if !path.exists() {
-        println!("{}", out::muted("No revert plans to clean."));
+        crate::human!("{}", out::muted("No revert plans to clean."));
         return Ok(());
     }
 
     fs::remove_dir_all(&path).with_context(|| format!("failed to remove {}", path.display()))?;
-    println!("{} {}", out::movement("removed"), out::path(path.display()));
+    crate::human!("{} {}", out::movement("removed"), out::path(path.display()));
     Ok(())
 }
 
 pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool) -> Result<usize> {
     if active.bundle.repos.is_empty() {
-        println!("{}", out::muted("No repos are tracked in this bundle."));
+        crate::human!("{}", out::muted("No repos are tracked in this bundle."));
         // Still sweep the container: a checkout for a repo that was since
         // removed from the bundle is exactly the leftover this catches.
         let removed = clean_bundle_container_leftovers(&active.root, &active.bundle.id, force)?;
@@ -79,7 +79,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
     // stacks, but keep cleanup best-effort: Docker may be unavailable during
     // archive/land and must not block a terminal bundle transition.
     if let Err(error) = crate::commands::runtime::purge_active_runtime(active) {
-        println!(
+        crate::human!(
             "{} bundle runtime resources were not removed: {error:#}. Retry with `knit --bundle {} run down --purge`.",
             out::warn("Warn:"),
             active.bundle.id
@@ -90,7 +90,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
     let mut failures = Vec::new();
     for repo in &mut active.bundle.repos {
         if is_in_place(repo) {
-            println!(
+            crate::human!(
                 "{}: {}",
                 out::repo(&repo.id),
                 out::muted("in-place checkout preserved")
@@ -99,7 +99,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         }
 
         let Some(path) = cleanable_worktree_path(&active.root, &active.bundle.id, repo) else {
-            println!(
+            crate::human!(
                 "{}: {}",
                 out::repo(&repo.id),
                 out::muted("no generated worktree recorded")
@@ -108,7 +108,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
         };
 
         if !path.exists() {
-            println!(
+            crate::human!(
                 "{}: {} {}",
                 out::repo(&repo.id),
                 out::muted("worktree already missing"),
@@ -136,7 +136,7 @@ pub(crate) fn clean_worktrees_for_bundle(active: &mut ActiveBundle, force: bool)
 
         match remove_git_worktree(&repo_root, &path, force) {
             Ok(()) => {
-                println!(
+                crate::human!(
                     "{}: {} {}",
                     out::repo(&repo.id),
                     out::movement("removed"),
@@ -187,7 +187,7 @@ fn clean_bundle_container_leftovers(root: &Path, bundle_id: &str, force: bool) -
         if path.join(".git").exists() && crate::git::is_git_worktree(&path) {
             match remove_git_worktree_from_self(&path, force) {
                 Ok(()) => {
-                    println!(
+                    crate::human!(
                         "{} {}",
                         out::movement("removed leftover worktree"),
                         out::path(path.display())
@@ -202,7 +202,7 @@ fn clean_bundle_container_leftovers(root: &Path, bundle_id: &str, force: bool) -
             continue;
         }
         if !force {
-            println!(
+            crate::human!(
                 "{} {} {}",
                 out::warn("stray files preserved:"),
                 out::path(path.display()),
@@ -212,7 +212,7 @@ fn clean_bundle_container_leftovers(root: &Path, bundle_id: &str, force: bool) -
         }
         fs::remove_dir_all(&path)
             .with_context(|| format!("failed to remove {}", path.display()))?;
-        println!(
+        crate::human!(
             "{} {}",
             out::movement("removed stray files"),
             out::path(path.display())
@@ -253,12 +253,12 @@ fn remove_runtime_run_dir(root: &Path, bundle_id: &str) {
         return;
     }
     match std::fs::remove_dir_all(&run_dir) {
-        Ok(()) => println!(
+        Ok(()) => crate::human!(
             "{} {}",
             out::movement("removed"),
             out::path(run_dir.display())
         ),
-        Err(error) => println!(
+        Err(error) => crate::human!(
             "{} could not remove {}: {error:#}",
             out::warn("Warn:"),
             run_dir.display()
@@ -276,7 +276,7 @@ pub(crate) fn remove_repo_worktree(
     force: bool,
 ) -> Result<()> {
     if is_in_place(repo) {
-        println!(
+        crate::human!(
             "{}: {}",
             out::repo(&repo.id),
             out::muted("in-place checkout preserved")
@@ -303,7 +303,7 @@ pub(crate) fn remove_repo_worktree(
             repo.id
         )
     })?;
-    println!(
+    crate::human!(
         "{}: {} {}",
         out::repo(&repo.id),
         out::movement("removed"),
@@ -412,7 +412,7 @@ fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let dir = root.join(".knit/bundles");
     if !dir.exists() {
-        println!("{}", out::muted("No bundles."));
+        crate::human!("{}", out::muted("No bundles."));
         return Ok(());
     }
     let mut cleaned = 0usize;
@@ -440,7 +440,7 @@ fn clean_archived_bundle_worktrees(force: bool) -> Result<()> {
         cleaned += 1;
     }
     if cleaned == 0 {
-        println!("{}", out::muted("No archived bundle worktrees to clean."));
+        crate::human!("{}", out::muted("No archived bundle worktrees to clean."));
     }
     Ok(())
 }
@@ -450,7 +450,7 @@ fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let runs_dir = root.join(".knit/merge-runs");
     if !runs_dir.exists() {
-        println!("{}", out::muted("No merge runs to clean."));
+        crate::human!("{}", out::muted("No merge runs to clean."));
         return Ok(());
     }
     let mut removed = 0usize;
@@ -485,7 +485,7 @@ fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
             }
             let status = git_output(&checkout, ["status", "--porcelain"])?;
             if !status.trim().is_empty() && !force {
-                println!(
+                crate::human!(
                     "{} {}",
                     out::warn("dirty merge worktree preserved:"),
                     out::path(checkout.display())
@@ -493,7 +493,7 @@ fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
                 continue;
             }
             remove_git_worktree(std::path::Path::new(repo_path), &checkout, force)?;
-            println!(
+            crate::human!(
                 "{} {}",
                 out::movement("removed"),
                 out::path(checkout.display())
@@ -503,7 +503,7 @@ fn clean_merge_worktrees_for_completed_runs(force: bool) -> Result<()> {
     }
     remove_empty_dirs(root.join(".knit/merge-worktrees"));
     if removed == 0 {
-        println!("{}", out::muted("No clean merge worktrees to remove."));
+        crate::human!("{}", out::muted("No clean merge worktrees to remove."));
     }
     Ok(())
 }

@@ -438,6 +438,7 @@ fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<Pull
         })
     });
     Ok(PullRequest {
+        source_repository: None,
         number: pr.number,
         url: pr.html_url,
         state: Some(if pr.merged {
@@ -662,6 +663,7 @@ fn encode_path_component(input: &str) -> String {
 
 fn into_pull_request(pr: TeaPr) -> PullRequest {
     PullRequest {
+        source_repository: None,
         number: pr.index.unwrap_or(0),
         url: pr.url.unwrap_or_default(),
         state: Some(normalize_state(pr.state.as_deref())),

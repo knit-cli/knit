@@ -195,6 +195,7 @@ pub(crate) fn create_provider_revert_prs(
                         continue;
                     }
                     Err(_) => PullRequest {
+                        source_repository: None,
                         number: pr_number_from_url(&url).unwrap_or(0),
                         url: url.clone(),
                         state: Some("OPEN".to_string()),

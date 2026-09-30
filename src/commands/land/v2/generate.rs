@@ -71,6 +71,7 @@ pub(super) fn build(
     target: Option<&str>,
     lane: Option<&str>,
 ) -> Result<Value> {
+    super::gates::validate_project(project)?;
     if target.is_none() && lane.is_none() {
         for publication in &active.bundle.publications {
             let recorded_target = &project["landing"]["targets"][&publication.base_branch];
@@ -348,13 +349,21 @@ pub(super) fn build(
             .cloned()
             .unwrap_or_default();
     }
-    for mut s in custom {
+    let changed = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
+    for mut s in super::gates::select_conditional_steps(custom, &changed, project)? {
         if s.get("type").is_none() {
             s["type"] = json!("run");
         }
         s["recovery"] = recovery(&s);
         steps.push(s);
     }
+    // Library → consumer edges become ordinary steps; needs on steps this
+    // bundle did not produce are dropped, unknown ids are still refused.
+    super::gates::expand_dependencies(&mut steps, project, &changed)?;
+    super::gates::prune_conditional_needs(
+        &mut steps,
+        &super::gates::known_step_ids(project, bundle)?,
+    )?;
     for step in &mut steps {
         step["effect"] = json!(effect(step));
     }
@@ -418,6 +427,7 @@ pub(super) fn build(
         plan["requiredCapabilities"] = json!(capabilities);
     }
     super::branch_checkout::configure(&mut plan)?;
+    super::gates::require_executor(&mut plan);
     let result = validation(&plan, Some(bundle), Some(project));
     if result["valid"] != true {
         bail!("{}", result["errors"]);
@@ -528,7 +538,20 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
         if step["interactive"] == true {
             println!("{}: attached local terminal required", step["id"]);
         }
-        if step["type"] == "manual" {
+        if super::gates::is_gate(&step) {
+            println!(
+                "{}: pauses until resumed — {}",
+                step["id"],
+                step["instructions"].as_str().unwrap_or("")
+            );
+            if step["type"] == "await_update" {
+                println!(
+                    "{} allowed paths: {}",
+                    step["id"],
+                    step.get("paths").unwrap_or(&json!("any"))
+                );
+            }
+        } else if step["type"] == "manual" {
             println!(
                 "{}: manual acknowledgement required — {}",
                 step["id"],

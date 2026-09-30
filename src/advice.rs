@@ -4,7 +4,7 @@ use std::path::Path;
 
 pub fn print(root: &Path, message: impl AsRef<str>) {
     if enabled(root) {
-        println!("{} {}", out::heading("Next:"), message.as_ref());
+        crate::human!("{} {}", out::heading("Next:"), message.as_ref());
     }
 }
 

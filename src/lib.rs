@@ -783,9 +783,8 @@ pub fn run(cli: Cli) -> Result<()> {
                             || run_out.is_some()
                             || out.is_some()
                             || resume
-                            || json
                         {
-                            anyhow::bail!("--project-file/--repo-roots/--run-out/--out/--resume/--json are artifact execution flags; pass --from-artifact, or use local `knit land resume --run FILE`.");
+                            anyhow::bail!("--project-file/--repo-roots/--run-out/--out/--resume are artifact execution flags; pass --from-artifact, or use local `knit land resume --run FILE`.");
                         }
                         if !repo_targets.is_empty() || !repo_absent.is_empty() {
                             anyhow::bail!(
@@ -803,6 +802,7 @@ pub fn run(cli: Cli) -> Result<()> {
                             target.as_deref(),
                             lane.as_deref(),
                             expected_plan_hash.as_deref(),
+                            json,
                         )
                     }
                 },
@@ -817,6 +817,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::rollback_land_run(run.as_deref(), apply)
                 }
                 Some(LandCommand::Resume {
+                    acknowledge,
+                    note,
+                    json,
                     run,
                     remote,
                     no_remote,
@@ -840,6 +843,9 @@ pub fn run(cli: Cli) -> Result<()> {
                         keep_worktrees,
                         tag,
                         no_tag,
+                        &acknowledge,
+                        note.as_deref(),
+                        json,
                     )
                 }
                 Some(LandCommand::Status { run }) => {
