@@ -30,7 +30,7 @@ enum PushEvent {
 }
 
 /// How `git push` may move the remote branch. Mirrors git's own flags:
-/// `WithLease` refuses when the remote moved since the last fetch.
+/// `WithLease` pins an accepted remote tip before the first push attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PushForce {
     No,
@@ -50,7 +50,7 @@ impl PushForce {
     fn git_arg(self) -> Option<&'static str> {
         match self {
             Self::No => None,
-            Self::WithLease => Some("--force-with-lease"),
+            Self::WithLease => None, // Resolved explicitly before the retry loop.
             Self::Unconditional => Some("--force"),
         }
     }
@@ -177,10 +177,12 @@ pub fn push_repos(
     });
 
     if !failures.is_empty() {
-        bail!(
-            "push failed:\n{}\n\nre-run the same `knit push` to retry only these repos; branches already on origin are up to date.",
-            failures.join("\n")
-        );
+        let advice = if force.wants_lease() {
+            "Fetch and inspect the remote branch before retrying a rejected lease; integrate any unrecorded work before forcing."
+        } else {
+            "re-run the same `knit push` to retry only these repos; branches already on origin are up to date."
+        };
+        bail!("push failed:\n{}\n\n{advice}", failures.join("\n"));
     }
 
     // A successful push may publish commits authored or rewritten outside
@@ -239,8 +241,16 @@ fn push_repo(
     } else {
         None
     };
-    run_push_to_source(&cwd, &remote, branch, set_upstream, force, fork_source)
-        .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
+    run_push_to_source(
+        &cwd,
+        &remote,
+        branch,
+        set_upstream,
+        force,
+        fork_source,
+        Some((&active.bundle, repo)),
+    )
+    .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
 
     if set_upstream {
         crate::contribution::track_source(&cwd, repo, branch)?;
@@ -295,7 +305,7 @@ pub(crate) fn run_push_to(
     set_upstream: bool,
     force: PushForce,
 ) -> Result<()> {
-    run_push_to_source(cwd, remote, branch, set_upstream, force, None)
+    run_push_to_source(cwd, remote, branch, set_upstream, force, None, None)
 }
 
 fn run_push_to_source(
@@ -305,24 +315,27 @@ fn run_push_to_source(
     set_upstream: bool,
     force: PushForce,
     recorded_source: Option<&str>,
+    context: Option<(&ChangeGroup, &RepoEntry)>,
 ) -> Result<()> {
     let timeout = crate::retry::git_push_timeout()?;
-    // Snapshot the source lease once, before any push attempt or retry.
     let tracking = crate::contribution::push_tracking(cwd, remote, branch, recorded_source)?;
-    let lease = tracking
-        .as_ref()
-        .filter(|tracking| force.wants_lease() && tracking.explicit_lease)
-        .map(|tracking| {
-            format!(
-                "--force-with-lease=refs/heads/{branch}:{}",
-                tracking.expected.as_deref().unwrap_or_default()
-            )
-        });
+    // Resolve and validate once: a retry must never acquire a newer lease.
+    let lease = if force.wants_lease() {
+        Some(resolve_push_lease(
+            cwd,
+            remote,
+            branch,
+            tracking.as_ref(),
+            context,
+        )?)
+    } else {
+        None
+    };
     let pushed_sha = tracking
         .as_ref()
         .map(|_| rev_parse(cwd, &format!("refs/heads/{branch}")))
         .transpose()?;
-    crate::retry::retry_transient(
+    let result = crate::retry::retry_transient(
         "push",
         crate::retry::GIT_PUSH_ATTEMPTS,
         crate::retry::classify_git_push,
@@ -331,7 +344,11 @@ fn run_push_to_source(
             if set_upstream {
                 args.push(OsString::from("--set-upstream"));
             }
-            if let Some(force_arg) = lease.as_deref().or_else(|| force.git_arg()) {
+            if let Some(force_arg) = lease
+                .as_ref()
+                .map(|lease| lease.argument.as_str())
+                .or_else(|| force.git_arg())
+            {
                 args.push(OsString::from(force_arg));
             }
             args.push(OsString::from(remote));
@@ -340,11 +357,116 @@ fn run_push_to_source(
             git_output_with_timeout(cwd, args, timeout)?;
             Ok(())
         },
-    )?;
+    );
+    result.map_err(|error| {
+        if let Some(lease) = &lease {
+            let message = format!("{error:#}");
+            let lower = message.to_ascii_lowercase();
+            if lower.contains("stale info") || lower.contains("cannot lock ref")
+                || lower.contains("lease rejected") || lower.contains("lease rejection")
+            {
+                return anyhow!(
+                    "remote branch {branch} changed; fetch and inspect it with `git fetch {} {branch}` and integrate it before forcing: {}",
+                    lease.push_url,
+                    message.replace(&lease.raw_push_url, &lease.push_url)
+                );
+            }
+        }
+        error
+    })?;
     if let (Some(tracking), Some(sha)) = (tracking, pushed_sha) {
         git_output(cwd, ["update-ref", &tracking.reference, &sha])?;
+        git_output(cwd, ["update-ref", &tracking.role_reference, &sha])?;
     }
     Ok(())
+}
+
+struct PushLease {
+    argument: String,
+    raw_push_url: String,
+    push_url: String,
+}
+
+fn resolve_push_lease(
+    cwd: &Path,
+    remote: &str,
+    branch: &str,
+    tracking: Option<&crate::contribution::PushTracking>,
+    context: Option<(&ChangeGroup, &RepoEntry)>,
+) -> Result<PushLease> {
+    let raw_push_url = crate::contribution::git_remote_url(cwd, remote, true)?;
+    let push_url = sanitized_push_url(&raw_push_url);
+    let reference = format!("refs/heads/{branch}");
+    let tip = remote_ref_sha(cwd, &raw_push_url, &reference)
+        .map_err(|error| anyhow!("{}", format!("{error:#}").replace(&raw_push_url, &push_url)))?;
+    if let Some(tip) = tip.as_deref() {
+        let receipt = tracking.and_then(|tracking| tracking.expected.as_deref());
+        if receipt != Some(tip) {
+            let recorded =
+                context.is_some_and(|(bundle, repo)| bundle_recorded_tip(bundle, repo, tip));
+            let had_tip = if recorded {
+                false
+            } else {
+                git_output(cwd, ["log", "-g", "--format=%H", &reference])?
+                    .lines()
+                    .any(|sha| sha == tip)
+            };
+            if !recorded && !had_tip {
+                let repo_id = context.map(|(_, repo)| repo.id.as_str()).unwrap_or(remote);
+                bail!("{repo_id}: {branch} on {push_url} is at {tip}, which this bundle never recorded and this checkout never had — someone else may have pushed. Inspect it with `git fetch {push_url} {branch}` and integrate it before forcing.");
+            }
+            crate::retry::note(format!(
+                "no Knit push receipt for {branch}; leasing against the remote tip {} this bundle recorded",
+                short_sha(tip)
+            ));
+        }
+    }
+    Ok(PushLease {
+        argument: format!(
+            "--force-with-lease={reference}:{}",
+            tip.as_deref().unwrap_or_default()
+        ),
+        raw_push_url,
+        push_url,
+    })
+}
+
+fn bundle_recorded_tip(bundle: &ChangeGroup, repo: &RepoEntry, tip: &str) -> bool {
+    repo.head_sha.as_deref() == Some(tip)
+        || repo.base_sha.as_deref() == Some(tip)
+        || bundle
+            .commit_groups
+            .iter()
+            .flat_map(|group| &group.commits)
+            .any(|commit| commit.repo_id == repo.id && commit.sha == tip)
+        || bundle.nodes.iter().any(|node| {
+            node.commits
+                .iter()
+                .any(|commit| commit.repo_id == repo.id && commit.sha == tip)
+                || node.repo_changes.iter().any(|change| {
+                    change.repo_id == repo.id
+                        && (change.before_sha.as_deref() == Some(tip)
+                            || change.after_sha == tip
+                            || change
+                                .commits
+                                .iter()
+                                .chain(&change.dropped_commits)
+                                .any(|sha| sha == tip))
+                })
+        })
+}
+
+fn sanitized_push_url(remote: &str) -> String {
+    if let Ok(mut url) = url::Url::parse(remote) {
+        if url.has_host() {
+            let _ = url.set_username("");
+            let _ = url.set_password(None);
+            url.set_query(None);
+            url.set_fragment(None);
+            return url.to_string();
+        }
+    }
+    remote.to_owned()
 }
 
 fn read_upstream(cwd: &Path) -> Option<String> {
@@ -507,7 +629,131 @@ fn verify_branch_at_recorded_head(
 
 #[cfg(test)]
 mod tests {
-    use super::PushForce;
+    use super::{bundle_recorded_tip, sanitized_push_url, PushForce};
+    use crate::model::ChangeGroup;
+    use serde_json::json;
+
+    const TIP: &str = "1111111111111111111111111111111111111111";
+    const LEDGER_LOCATIONS: &[&str] = &[
+        "headSha",
+        "baseSha",
+        "commitGroups",
+        "nodeCommits",
+        "commits",
+        "droppedCommits",
+        "beforeSha",
+        "afterSha",
+    ];
+
+    fn recorded_tip_fixture(location: &str, recording_repo: &str) -> ChangeGroup {
+        let repo = |id| {
+            json!({
+                "id": id,
+                "path": "",
+                "remote": null,
+                "baseBranch": "main",
+                "featureBranch": "knit/example",
+                "worktreePath": null
+            })
+        };
+        let mut bundle = json!({
+            "schemaVersion": "0.1",
+            "kind": "ChangeGroup",
+            "id": "example",
+            "title": "Example",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "updatedAt": "2026-01-01T00:00:00Z",
+            "repos": [repo("api"), repo("web")],
+            "commitGroups": [],
+            "nodes": []
+        });
+        let commit = json!({"repoId": recording_repo, "sha": TIP});
+        let mut node = json!({
+            "id": "observation",
+            "type": "repo.observed",
+            "createdAt": "2026-01-01T00:00:00Z",
+            "commits": [],
+            "repoChanges": []
+        });
+        match location {
+            "headSha" | "baseSha" => {
+                let index = if recording_repo == "api" { 0 } else { 1 };
+                bundle["repos"][index][location] = json!(TIP);
+            }
+            "commitGroups" => {
+                bundle["commitGroups"] = json!([{
+                    "id": "group",
+                    "message": "Recorded commit",
+                    "createdAt": "2026-01-01T00:00:00Z",
+                    "commits": [commit]
+                }]);
+            }
+            "nodeCommits" => node["commits"] = json!([commit]),
+            "commits" | "droppedCommits" | "beforeSha" | "afterSha" => {
+                let mut change = json!({
+                    "repoId": recording_repo,
+                    "beforeSha": null,
+                    "afterSha": "2222222222222222222222222222222222222222",
+                    "commits": [],
+                    "droppedCommits": []
+                });
+                change[location] = if matches!(location, "commits" | "droppedCommits") {
+                    json!([TIP])
+                } else {
+                    json!(TIP)
+                };
+                node["repoChanges"] = json!([change]);
+            }
+            _ => panic!("unknown ledger location: {location}"),
+        }
+        bundle["nodes"] = json!([node]);
+        serde_json::from_value(bundle).unwrap()
+    }
+
+    #[test]
+    fn recorded_tip_accepts_each_ledger_location() {
+        for &location in LEDGER_LOCATIONS {
+            let bundle = recorded_tip_fixture(location, "api");
+            assert!(
+                bundle_recorded_tip(&bundle, &bundle.repos[0], TIP),
+                "did not accept {location}"
+            );
+            assert!(
+                !bundle_recorded_tip(&bundle, &bundle.repos[0], "unrecorded"),
+                "accepted an unrecorded tip in {location}"
+            );
+        }
+    }
+
+    #[test]
+    fn recorded_tip_rejects_each_ledger_location_for_another_repo() {
+        for &location in LEDGER_LOCATIONS {
+            let bundle = recorded_tip_fixture(location, "web");
+            assert!(
+                !bundle_recorded_tip(&bundle, &bundle.repos[0], TIP),
+                "accepted another repo's {location}"
+            );
+        }
+    }
+
+    #[test]
+    fn push_url_sanitization_removes_credentials_and_query() {
+        for remote in [
+            "https://username@example.test/team/repo.git",
+            "https://:password@example.test/team/repo.git",
+            "https://example.test/team/repo.git?token=secret",
+            "https://username:password@example.test/team/repo.git?token=secret#secret",
+        ] {
+            assert_eq!(
+                sanitized_push_url(remote),
+                "https://example.test/team/repo.git"
+            );
+        }
+        assert_eq!(
+            sanitized_push_url("git@example.test:team/repo.git"),
+            "git@example.test:team/repo.git"
+        );
+    }
 
     #[test]
     fn from_flags_maps_the_flag_pair() {

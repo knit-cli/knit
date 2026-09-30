@@ -91,6 +91,35 @@ impl Fixture {
             "--no-remote",
         ]);
     }
+    fn clear_push_receipts(&self) {
+        let refs = git(
+            &self.checkout,
+            [
+                "for-each-ref",
+                "--format=%(refname)",
+                "refs/knit/contributions/",
+            ],
+        );
+        for reference in refs.lines() {
+            git(&self.checkout, ["update-ref", "-d", reference]);
+        }
+    }
+    fn foreign_fork_commit(&self) -> String {
+        // Create an object without ever recording it in the bundle or the
+        // feature branch's reflog. The base itself is a known, allowed tip.
+        configure_git_user(&self.fork);
+        git(
+            &self.fork,
+            [
+                "commit-tree",
+                "main^{tree}",
+                "-p",
+                "main",
+                "-m",
+                "Foreign fork contribution",
+            ],
+        )
+    }
     fn artifact(&self) -> PathBuf {
         self.workspace
             .join(".knit/bundles/contribution.bundle.json")
@@ -816,7 +845,7 @@ fn fork_force_with_lease_uses_source_tracking_and_preserves_identity() {
 }
 
 #[test]
-fn fork_force_with_lease_rejects_stale_source_even_when_origin_matches() {
+fn fork_force_with_lease_rejects_unknown_source_even_when_origin_matches() {
     let f = Fixture::new();
     f.run(&["push", "--no-remote"]);
     let before = f.bundle();
@@ -824,47 +853,69 @@ fn fork_force_with_lease_rejects_stale_source_even_when_origin_matches() {
     let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
     let observed = git(&f.checkout, ["rev-parse", &reference]);
     // Another writer changes the fork, then an upstream fetch matches that tip.
-    let moved = git(&f.fork, ["rev-parse", "main"]);
+    let moved = f.foreign_fork_commit();
     git(
         &f.fork,
         ["update-ref", "refs/heads/knit/contribution", moved.trim()],
     );
-    git(&f.upstream, ["branch", "knit/contribution", "main"]);
+    git(
+        &f.upstream,
+        [
+            "fetch",
+            f.fork.to_str().unwrap(),
+            "refs/heads/knit/contribution:refs/heads/knit/contribution",
+        ],
+    );
     git(&f.checkout, ["fetch", "origin"]);
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-parse", "refs/remotes/origin/knit/contribution"]
+        ),
+        moved
+    );
     git(
         &f.checkout,
         ["commit", "--amend", "-m", "Rewritten contribution"],
     );
     let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
-    assert!(error.contains("stale info"), "{error}");
+    assert!(error.contains("this bundle never recorded"), "{error}");
+    assert!(error.contains(moved.trim()), "{error}");
+    assert!(
+        error.contains(&format!("git fetch {SOURCE} knit/contribution")),
+        "{error}"
+    );
     assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), moved);
     assert_eq!(git(&f.checkout, ["rev-parse", &reference]), observed);
     assert_eq!(f.bundle(), before);
 }
 
 #[test]
-fn fork_force_with_lease_without_observation_only_creates_missing_branch() {
+fn fork_force_with_lease_without_receipt_creates_missing_branch_and_accepts_recorded_tip() {
     let f = Fixture::new();
     f.run(&["push", "--force-with-lease", "--no-remote"]);
     let repo: knit::model::RepoEntry =
         serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
     let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
     let first = git(&f.fork, ["rev-parse", "knit/contribution"]);
-    git(&f.checkout, ["update-ref", "-d", &reference]);
+    f.clear_push_receipts();
     git(
         &f.checkout,
         ["commit", "--amend", "-m", "Rewritten contribution"],
     );
-    let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
-    assert!(error.contains("stale info"), "{error}");
-    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), first);
-    // An explicit source fetch establishes the expectation for older bundles.
-    knit::contribution::fetch_ref(&f.checkout, &repo, "knit/contribution", true).unwrap();
-    f.run(&["push", "--force-with-lease", "--no-remote"]);
-    assert_eq!(
-        git(&f.fork, ["rev-parse", "knit/contribution"]),
-        git(&f.checkout, ["rev-parse", "HEAD"])
+    assert_eq!(f.bundle()["repos"][0]["headSha"], first.trim());
+    let output = f.run(&["push", "--force-with-lease", "--no-remote"]);
+    assert!(output.contains("no Knit push receipt"), "{output}");
+    assert!(
+        output.contains("leasing against the remote tip"),
+        "{output}"
     );
+    assert!(output.contains(&first.trim()[..7]), "{output}");
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]);
+    assert_ne!(rewritten, first);
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), rewritten);
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), rewritten);
+    assert_eq!(f.bundle()["repos"][0]["headSha"], rewritten.trim());
 }
 
 #[test]
@@ -934,7 +985,7 @@ fn fork_force_with_lease_uses_dedicated_fork_remote_tracking() {
         ),
         observed
     );
-    let moved = git(&f.fork, ["rev-parse", "main"]);
+    let moved = f.foreign_fork_commit();
     git(
         &f.fork,
         ["update-ref", "refs/heads/knit/contribution", moved.trim()],
@@ -950,7 +1001,12 @@ fn fork_force_with_lease_uses_dedicated_fork_remote_tracking() {
         ],
     );
     let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
-    assert!(error.contains("stale info"), "{error}");
+    assert!(error.contains("this bundle never recorded"), "{error}");
+    assert!(error.contains(moved.trim()), "{error}");
+    assert!(
+        error.contains(&format!("git fetch {SOURCE} knit/contribution")),
+        "{error}"
+    );
     assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), moved);
 }
 
@@ -973,12 +1029,12 @@ fn check_fork_lease_transport_spelling(legacy: bool) {
     let reference = knit::contribution::role_ref(&repo, "knit/contribution", true).unwrap();
     let observed = git(&f.fork, ["rev-parse", "knit/contribution"]);
     if legacy {
+        f.clear_push_receipts();
         let old_ref = format!(
             "refs/knit/contributions/{:x}",
             Sha256::digest(format!("{SOURCE}\0knit/contribution").as_bytes())
         );
         git(&f.checkout, ["update-ref", &old_ref, observed.trim()]);
-        git(&f.checkout, ["update-ref", "-d", &reference]);
     } else {
         f.run(&["pull", "--feature", "--no-remote"]);
     }
@@ -1011,7 +1067,10 @@ fn check_fork_lease_transport_spelling(legacy: bool) {
             "Rewritten transport contribution",
         ],
     );
-    f.run(&["push", "--force-with-lease", "--no-remote"]);
+    let output = f.run(&["push", "--force-with-lease", "--no-remote"]);
+    if legacy {
+        assert!(output.contains("no Knit push receipt"), "{output}");
+    }
     assert_eq!(
         git(&f.fork, ["rev-parse", "knit/contribution"]),
         git(&f.checkout, ["rev-parse", "HEAD"])
@@ -1028,6 +1087,24 @@ fn check_fork_lease_transport_spelling(legacy: bool) {
         f.bundle()["repos"][0]["targetRemote"],
         before["repos"][0]["targetRemote"]
     );
+    // Transport aliases and migrated receipts must still reject an unknown tip.
+    let before_rejection = f.bundle();
+    let receipt = git(&f.checkout, ["rev-parse", &reference]);
+    let moved = f.foreign_fork_commit();
+    git(
+        &f.fork,
+        ["update-ref", "refs/heads/knit/contribution", moved.trim()],
+    );
+    let error = f.fail(&["push", "--force-with-lease", "--no-remote"]);
+    assert!(error.contains("this bundle never recorded"), "{error}");
+    assert!(error.contains(moved.trim()), "{error}");
+    assert!(
+        error.contains(&format!("git fetch {ssh_source} knit/contribution")),
+        "{error}"
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", "knit/contribution"]), moved);
+    assert_eq!(git(&f.checkout, ["rev-parse", &reference]), receipt);
+    assert_eq!(f.bundle(), before_rejection);
 }
 
 #[test]
@@ -1061,7 +1138,7 @@ fn fork_force_with_lease_observes_native_then_knit_fetch_after_canonical_receipt
         assert_ne!(git(&f.checkout, ["rev-parse", &reference]), latest);
         if native {
             git(&f.checkout, ["fetch", "fork"]);
-            // A native observation must win over the older canonical receipt.
+            // Native fetching leaves the canonical receipt unchanged.
             assert_ne!(git(&f.checkout, ["rev-parse", &reference]), latest);
         } else {
             // The next Knit observation must refresh the older native receipt.
@@ -1081,6 +1158,8 @@ fn fork_force_with_lease_observes_native_then_knit_fetch_after_canonical_receipt
             ),
             latest
         );
+        // Recording the fetched tip in the feature reflog makes it safe to
+        // lease even when the canonical receipt still names an older tip.
         git(&f.checkout, ["reset", "--hard", latest.trim()]);
         git(
             &f.checkout,

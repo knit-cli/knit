@@ -824,11 +824,23 @@ unconditional `knit push --force` of cross-repository contributions fail explici
 Same-repository artifacts and explicit same-repository fields retain ordinary
 forge behavior.
 
-After rewriting contribution commits, use `knit push --force-with-lease`. The Git
-lease checks the fork's feature branch against its last pushed or fetched state,
-including when `origin` fetches upstream and pushes to the fork. A concurrent
-fork update refuses the push. A successful push records the contribution identity
-and any commits authored or rewritten outside Knit, then carries the same lease mode into configured hosted bundle syncs.
+After rewriting commits, use `knit push --force-with-lease`. Knit reads the
+feature branch's current tip from the push URL and always sends an explicit Git
+lease, including when `origin` fetches upstream and pushes to a fork or has no
+feature-branch tracking ref. Git's `pushInsteadOf` URL rewrites are honored.
+It first compares that tip with its recorded push receipt (or native tracking
+ref for a non-split remote). Receipts are bound to Git's resolved destination;
+portable HTTPS/SSH identities alone never authorize borrowing a fetch receipt.
+Older unbound role receipts require the bundle/reflog check below. Without a
+matching receipt, Knit accepts the tip only if this bundle's ledger recorded it
+or this checkout's feature-branch reflog contains it, and prints a note. Otherwise it
+refuses before pushing: fetch the branch from the push URL, inspect it, and
+integrate the unexpected commits before forcing. Upstream tracking refs never
+supply a fork lease. An absent remote branch uses a must-not-exist lease, and a
+remote change after inspection is rejected by Git. A successful push refreshes
+the receipt, records the contribution identity and any commits authored or
+rewritten outside Knit, then carries the same lease mode into configured hosted
+bundle syncs.
 
 `knit sync push --force-with-lease` publishes a rewritten bundle ledger using the
 artifact hash recorded by this workspace's last successful push or pull to that
