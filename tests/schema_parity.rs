@@ -975,3 +975,47 @@ fn release_policy_shapes_match_across_root_lane_and_target() {
         }
     }
 }
+
+#[test]
+fn gate_schema_versions_config_shapes_and_typed_roundtrips() {
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/project.schema.json")).unwrap();
+    let mut project = serde_json::to_value(knit::model::KnitProject::new(
+        "synthetic".into(),
+        "2026-01-01T00:00:00Z".into(),
+    ))
+    .unwrap();
+    project["repos"] = json!([{"id":"library","path":"library","baseBranch":"main"},{"id":"consumer","path":"consumer","baseBranch":"main"}]);
+    project["landing"] = json!({"dependencies":[{"library":"library","consumers":"*","release":{"instructions":"Publish"},"bump":{"instructions":"Bump","paths":["Cargo.toml"]}}],"steps":[{"id":"gate","type":"manual","acknowledge":"resume","instructions":"Confirm","whenChanged":["library"]}],"targets":{"production":{"steps":[{"id":"confirm","type":"manual","acknowledge":"resume","instructions":"Confirm","whenChanged":["*"]}]}}});
+    assert_valid(&schema, &project, "gate recipes");
+    let typed: knit::model::KnitProject = serde_json::from_value(project.clone()).unwrap();
+    let roundtrip = serde_json::to_value(typed).unwrap();
+    assert_eq!(
+        roundtrip["landing"]["dependencies"],
+        project["landing"]["dependencies"]
+    );
+    assert_eq!(roundtrip["landing"]["steps"], project["landing"]["steps"]);
+    for consumers in [
+        json!([]),
+        json!(["*"]),
+        json!(["consumer", "consumer"]),
+        json!("consumer"),
+    ] {
+        let mut invalid = project.clone();
+        invalid["landing"]["dependencies"][0]["consumers"] = consumers;
+        assert_invalid(&schema, &invalid, "invalid consumer selection");
+    }
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/land-plan.schema.json")).unwrap();
+    let plan = json!({"schemaVersion":"0.2","kind":"KnitLandPlan","id":"plan","bundleId":"synthetic","provider":"github","bundleFingerprint":"0".repeat(64),"projectFingerprint":"1".repeat(64),"requiredExecutorVersion":"0.6","requiredCapabilities":["landing-gates"],"steps":[{"id":"gate","type":"manual","acknowledge":"resume","instructions":"Confirm"}]});
+    assert_valid(&schema, &plan, "gate executor");
+    let mut old = plan.clone();
+    old["requiredExecutorVersion"] = json!("0.5");
+    assert_invalid(&schema, &old, "old gate executor");
+    let mut missing = plan.clone();
+    missing["requiredCapabilities"] = json!([]);
+    assert_invalid(&schema, &missing, "missing gate capability");
+    let mut hosted = plan;
+    hosted["steps"][0]["runner"] = json!("hosted");
+    assert_invalid(&schema, &hosted, "hosted gate");
+}

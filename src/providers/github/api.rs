@@ -196,6 +196,7 @@ impl GitHubApiPullRequest {
         let base = self.base.unwrap_or_default();
         let merged = self.merged.unwrap_or(false);
         PullRequest {
+            source_repository: head.repo.map(|r| r.full_name),
             number: self.number,
             url: self.html_url,
             state: github_api_state(self.state.as_deref(), merged),

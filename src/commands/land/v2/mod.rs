@@ -2,6 +2,7 @@
 //! workflow compilation never mutates that document or its hash.
 mod branch_checkout;
 mod destinations;
+mod gates;
 mod generate;
 pub use destinations::destinations;
 mod graph;

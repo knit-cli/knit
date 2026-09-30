@@ -98,6 +98,28 @@ impl Journal {
         let mut typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
         let run_id = run["id"].as_str().context("run id required")?;
         for s in run["steps"].as_array().context("run steps required")? {
+            if s["type"] == "await_update"
+                && s["status"] == "succeeded"
+                && s["output"]["observation"].is_object()
+            {
+                let node_id = format!("gate-{}", canonical_hash(&json!([run_id, s["id"]])));
+                if !typed.nodes.iter().any(|node| node.id == node_id) {
+                    let change: crate::model::RepoChange =
+                        serde_json::from_value(s["output"]["observation"].clone())?;
+                    typed.nodes.push(crate::model::BundleNode::git_observed(
+                        node_id,
+                        now_iso(),
+                        vec![change],
+                    ));
+                    if let Some(repo) = typed
+                        .repos
+                        .iter_mut()
+                        .find(|repo| Some(repo.id.as_str()) == s["repoId"].as_str())
+                    {
+                        repo.head_sha = s["output"]["revision"].as_str().map(str::to_owned);
+                    }
+                }
+            }
             if s["type"] == "merge_pr" {
                 if let Some(base) = s["reviewBefore"]["targetBranch"].as_str() {
                     for publication in &mut typed.publications {
@@ -293,6 +315,7 @@ fn preflight(
     roots: &Roots,
     bundle: &Value,
     skip_checks: bool,
+    existing: Option<&Value>,
 ) -> Result<()> {
     // Required checks must speak for the sources actually being integrated;
     // see effective_required_checks_bundle.
@@ -356,6 +379,7 @@ fn preflight(
                 "mergeability-preflight",
                 "integration-sources",
                 super::branch_checkout::CAPABILITY,
+                super::gates::CAPABILITY,
             ]
             .contains(&cap.as_str())
             {
@@ -404,7 +428,7 @@ fn preflight(
                 .find(|r| r.id == id)
                 .context("unknown repo")?;
             let forge = crate::providers::for_repo(repo)?;
-            let target = provider_target(
+            let mut target = provider_target(
                 roots,
                 forge.as_ref(),
                 repo,
@@ -412,13 +436,51 @@ fn preflight(
                     .map(|p| p.base_branch.as_str())
                     .unwrap_or(&repo.base_branch),
             )?;
+            gate_merge_target(plan, step, repo, forge.as_ref(), &mut target)?;
+            restore_gated_target_base(plan, existing, id, &mut target);
+            if super::gates::gated_repos(plan).contains(id) {
+                // Before acceptance the gate owns SHA validation. Contribution
+                // adapters still validate repository, branch and base identity.
+                let accepted = existing.and_then(|run| accepted_gate_pin(run, id));
+                target.verify_head = accepted.is_some();
+                if let (Some(identity), Some(pin)) = (target.contribution.as_mut(), accepted) {
+                    identity.sha = pin;
+                }
+            }
+            if existing.is_some_and(|run| {
+                run["steps"].as_array().into_iter().flatten().any(|s| {
+                    s["type"] == "await_update" && s["repoId"] == id && s["status"] == "succeeded"
+                })
+            }) {
+                let root = roots.get(id).context("update gate needs a checkout")?;
+                let local = update_git(root, &["rev-parse", "HEAD"])?;
+                let pin = plan["bundleHeads"][id]
+                    .as_str()
+                    .context("accepted update pin required")?;
+                update_changes(root, local.trim(), pin)
+                    .context("local checkout changed after the update gate accepted its head")?;
+            }
             let pub_ = crate::providers::publication_for_repo(&typed, id)
                 .context("missing publication")?;
             let pr = forge.view(&target, &pub_.url)?;
+            gated_review_identity(plan, repo, pub_, &pr, existing)?;
             if !super::super::state_is_merged(&pr) {
                 super::super::ensure_open_and_ready(id, &pr)?;
             }
-            if let Some(pin) = plan["bundleHeads"][id].as_str() {
+            // A gated repository's head legitimately moves when its update
+            // lands; the gate verifies it and the merge is pinned to it.
+            if let Some(pin) = plan["bundleHeads"][id].as_str().filter(|_| {
+                !super::gates::gated_repos(plan).contains(id)
+                    || existing.is_some_and(|run| {
+                        run["steps"].as_array().is_some_and(|steps| {
+                            steps.iter().any(|s| {
+                                s["type"] == "await_update"
+                                    && s["repoId"] == id
+                                    && s["status"] == "succeeded"
+                            })
+                        })
+                    })
+            }) {
                 if pr.head_ref_oid.as_deref().is_some_and(|head| head != pin) {
                     bail!("{id}: live review head differs from reviewed plan");
                 }
@@ -479,20 +541,6 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
                 revisions.insert(producer["repoId"].as_str().unwrap().into(), json!(revision));
             }
         }
-        // A consumer's first resolved revision is immutable for this whole run.
-        // The pin mutex covers resolution and durable publication across parallel steps.
-        if let Some(repo) = step["repoId"].as_str() {
-            if !revisions.contains_key(repo) {
-                if let Some(rev) = snapshot["steps"]
-                    .as_array()
-                    .unwrap()
-                    .iter()
-                    .find_map(|s| s["sourceRevisions"][repo].as_str())
-                {
-                    revisions.insert(repo.into(), json!(rev));
-                }
-            }
-        }
         if let Some(branch) = step["checkout"]["branch"].as_str() {
             let repo = step["repoId"]
                 .as_str()
@@ -511,7 +559,17 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         }
         if let Some(repo) = step["repoId"].as_str() {
             if !revisions.contains_key(repo) {
-                if let Some(rev) = snapshot["plan"]["bundleHeads"][repo].as_str() {
+                // A new command follows an accepted gate rather than another
+                // step's older pin. Its own receipt and authored/merge sources
+                // have already taken precedence above.
+                let accepted = accepted_gate_pin(&snapshot, repo);
+                let previous = snapshot["steps"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .find_map(|s| s["sourceRevisions"][repo].as_str());
+                let fallback = effective_pin(&snapshot["plan"], journal, repo);
+                if let Some(rev) = accepted.as_deref().or(previous).or(fallback.as_deref()) {
                     revisions.insert(repo.into(), json!(rev));
                 }
             }
@@ -547,28 +605,30 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
                 .unwrap()
                 .iter()
                 .find_map(|s| s["sourceRevisions"][&repo].as_str());
-            let revision =
-                if let Some(rev) = previous.or(snapshot["plan"]["bundleHeads"][&repo].as_str()) {
-                    rev.to_owned()
-                } else {
-                    let branch = snapshot["plan"]["recipeBases"][&repo]
-                        .as_str()
-                        .context("sourceRepos requires an immutable source or project base")?;
-                    git(
-                        root,
-                        &[
-                            "fetch",
-                            "--no-tags",
-                            super::mergeability::recorded_remote(
-                                &snapshot["plan"]["repositoryIdentities"][&repo],
-                                Some(branch),
-                                false,
-                            ),
-                            branch,
-                        ],
-                    )?;
-                    git(root, &["rev-parse", "FETCH_HEAD"])?
-                };
+            let accepted = effective_pin(&snapshot["plan"], journal, &repo);
+            let gated = accepted_gate_pin(&snapshot, &repo);
+            let revision = if let Some(rev) = gated.as_deref().or(previous).or(accepted.as_deref())
+            {
+                rev.to_owned()
+            } else {
+                let branch = snapshot["plan"]["recipeBases"][&repo]
+                    .as_str()
+                    .context("sourceRepos requires an immutable source or project base")?;
+                git(
+                    root,
+                    &[
+                        "fetch",
+                        "--no-tags",
+                        super::mergeability::recorded_remote(
+                            &snapshot["plan"]["repositoryIdentities"][&repo],
+                            Some(branch),
+                            false,
+                        ),
+                        branch,
+                    ],
+                )?;
+                git(root, &["rev-parse", "FETCH_HEAD"])?
+            };
             revisions.insert(repo, json!(revision));
         }
         journal.edit_step(id, |s| s["sourceRevisions"] = json!(revisions))?;
@@ -721,7 +781,7 @@ fn run_command_inner(
     // branch (the repository's own merge destination for this plan).
     if matches!(
         snapshot["plan"]["requiredExecutorVersion"].as_str(),
-        Some("0.4" | "0.5")
+        Some("0.4" | "0.5" | "0.6")
     ) {
         if let Some(repo) = step["repoId"].as_str() {
             let resolved = journal.step(id);
@@ -866,6 +926,132 @@ fn provider_target(
     }
 }
 
+/// A gate may change only the reviewed SHA, never the review's identity.
+fn gated_review_identity(
+    plan: &Value,
+    repo: &crate::model::RepoEntry,
+    publication: &crate::model::PublicationEntry,
+    pr: &crate::providers::PullRequest,
+    run: Option<&Value>,
+) -> Result<()> {
+    if !super::gates::gated_repos(plan).contains(&repo.id) {
+        return Ok(());
+    }
+    let check = || -> Result<()> {
+        let id = &repo.id;
+        if pr.number != publication.number
+            || pr.url != publication.url
+            || pr.head_ref_name.as_deref() != Some(publication.head_branch.as_str())
+        {
+            bail!("{id}: gated review identity or source branch changed");
+        }
+        let desired = plan["steps"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .find(|s| s["type"] == "merge_pr" && s["repoId"] == *id)
+            .and_then(|s| s["targetBranch"].as_str())
+            .or(plan["targetBranches"][id].as_str())
+            .or(plan["targetBranch"].as_str())
+            .unwrap_or(&publication.base_branch);
+        let retargeted = run
+            .and_then(|r| r["steps"].as_array())
+            .and_then(|steps| {
+                steps
+                    .iter()
+                    .find(|s| s["type"] == "merge_pr" && s["repoId"] == *id)
+            })
+            .and_then(|s| s["reviewBefore"]["targetBranch"].as_str());
+        let base = pr
+            .base_ref_name
+            .as_deref()
+            .context("gated review has no base identity")?;
+        if retargeted.is_some_and(|b| base != b)
+            || (retargeted.is_none() && base != publication.base_branch && base != desired)
+        {
+            bail!("{id}: gated review base changed outside the authorized landing destination");
+        }
+        let source = pr
+            .source_repository
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .context("gated review has no source repository identity")?;
+        if publication.provider == "github" {
+            if let Some((_, name)) = crate::contribution::source(repo)
+                .and_then(|remote| crate::auth::remote_target(remote).ok())
+            {
+                if !source.eq_ignore_ascii_case(&name) {
+                    bail!(
+                        "{id}: gated review source repository differs from the recorded repository"
+                    );
+                }
+            }
+        }
+        if let Some(receipt) = run.and_then(|r| r["steps"].as_array()).and_then(|steps| {
+            steps.iter().find(|s| {
+                s["type"] == "await_update" && s["repoId"] == *id && s["status"] == "succeeded"
+            })
+        }) {
+            if receipt["output"]["sourceRepository"].as_str() != Some(source) {
+                bail!("{id}: gated review source repository changed after acceptance");
+            }
+        }
+        Ok(())
+    };
+    check().map_err(|e| super::mergeability::KnownNoEffect(format!("{e:#}")).into())
+}
+
+// Contribution adapters validate the base while reading the review. On resume,
+// use the confirmed retarget receipt, never an unverified live destination.
+fn restore_gated_target_base(
+    plan: &Value,
+    run: Option<&Value>,
+    repo: &str,
+    target: &mut crate::providers::PrTarget,
+) {
+    if !super::gates::gated_repos(plan).contains(repo) {
+        return;
+    }
+    if let (Some(identity), Some(base)) = (
+        target.contribution.as_mut(),
+        run.and_then(|r| r["steps"].as_array())
+            .and_then(|steps| {
+                steps
+                    .iter()
+                    .find(|s| s["type"] == "merge_pr" && s["repoId"] == repo)
+            })
+            .and_then(|s| s["reviewBefore"]["targetBranch"].as_str()),
+    ) {
+        identity.base = base.to_owned();
+    }
+}
+
+/// Require adapters that send the accepted head in the host's merge operation.
+fn gate_merge_target(
+    plan: &Value,
+    step: &Value,
+    repo: &crate::model::RepoEntry,
+    forge: &dyn crate::providers::Forge,
+    target: &mut crate::providers::PrTarget,
+) -> Result<()> {
+    if step["type"] != "merge_pr" || !super::gates::gated_repos(plan).contains(&repo.id) {
+        return Ok(());
+    }
+    if forge.id() == "github" {
+        return Ok(());
+    }
+    if forge.id() == "gitlab" && step["method"] != "rebase" {
+        if target.repo_full_name.is_none() {
+            target.repo_full_name = crate::contribution::destination(repo)
+                .and_then(|remote| forge.repo_full_name(remote));
+        }
+        if target.repo_full_name.is_some() {
+            return Ok(());
+        }
+    }
+    bail!("{}: await_update requires atomic head-conditional merge support; supported routes are GitHub and GitLab API merge/squash, not this {} route", repo.id, forge.id())
+}
+
 fn provider_step(
     step: &Value,
     plan: &Value,
@@ -890,6 +1076,16 @@ fn provider_step(
             .map(|p| p.base_branch.as_str())
             .unwrap_or(&repo.base_branch),
     )?;
+    gate_merge_target(plan, step, repo, forge.as_ref(), &mut target)?;
+    restore_gated_target_base(plan, Some(&journal.snapshot()), id, &mut target);
+    if super::gates::gated_repos(plan).contains(id) {
+        if let (Some(identity), Some(pin)) = (
+            target.contribution.as_mut(),
+            effective_pin(plan, journal, id),
+        ) {
+            identity.sha = pin;
+        }
+    }
     let sid = step["id"].as_str().unwrap();
     if matches!(step["type"].as_str(), Some("merge_pr" | "merge_branch")) {
         let branch = step["targetBranch"]
@@ -1009,6 +1205,7 @@ fn provider_step(
     }
     let pub_ = crate::providers::publication_for_repo(&typed, id).context("missing review")?;
     let mut pr = forge.view(&target, &pub_.url)?;
+    gated_review_identity(plan, repo, pub_, &pr, Some(&journal.snapshot()))?;
     let desired = step["targetBranch"]
         .as_str()
         .or(plan["targetBranches"][id].as_str())
@@ -1025,6 +1222,13 @@ fn provider_step(
         return Ok(json!({"attribution":"already_satisfied"}));
     }
     if super::super::state_is_merged(&pr) {
+        if super::gates::gated_repos(plan).contains(id)
+            && effective_pin(plan, journal, id)
+                .as_deref()
+                .is_some_and(|pin| pr.head_ref_oid.as_deref() != Some(pin))
+        {
+            bail!("{id}: merged review head differs from accepted landing head");
+        }
         if pr.base_ref_name.as_deref().unwrap_or(&pub_.base_branch) != desired {
             bail!("review merged into another destination");
         }
@@ -1038,6 +1242,7 @@ fn provider_step(
             identity.base = desired.to_owned();
         }
         pr = forge.view(&target, &pub_.url)?;
+        gated_review_identity(plan, repo, pub_, &pr, Some(&journal.snapshot()))?;
         if pr.base_ref_name.as_deref() != Some(desired) {
             bail!("review retarget not confirmed");
         }
@@ -1045,19 +1250,86 @@ fn provider_step(
         // land update must fetch the base the review actually targets.
         journal.edit_step(sid, |s| s["reviewBefore"] = json!({"publicationUrl":pub_.url,"state":pr.state,"source":pr.head_ref_oid,"targetBranch":desired}))?;
     }
-    super::super::ensure_open_and_ready(id, &pr)?;
-    if step["waitForChecks"].as_bool().unwrap_or(true) {
-        forge.wait_for_checks(
-            &target,
-            &pub_.url,
-            step["requiredChecksOnly"].as_bool().unwrap_or(true),
-            step["timeoutSeconds"].as_u64().unwrap_or(1800),
-            step["intervalSeconds"].as_u64().unwrap_or(10),
-        )?;
+    let gated = super::gates::gated_repos(plan).contains(id);
+    let no_merge_effect = |error: anyhow::Error| -> anyhow::Error {
+        if gated {
+            super::mergeability::KnownNoEffect(format!("{error:#}")).into()
+        } else {
+            error
+        }
+    };
+    super::super::ensure_open_and_ready(id, &pr).map_err(no_merge_effect)?;
+    let effective = effective_pin(plan, journal, id);
+    if super::gates::gated_repos(plan).contains(id)
+        && effective
+            .as_deref()
+            .is_some_and(|pin| pr.head_ref_oid.as_deref() != Some(pin))
+    {
+        return Err(super::mergeability::KnownNoEffect(format!(
+            "{id}: live review head differs from accepted landing head"
+        ))
+        .into());
     }
-    let pin = plan["bundleHeads"][id]
-        .as_str()
-        .or(pr.head_ref_oid.as_deref());
+    if step["waitForChecks"].as_bool().unwrap_or(true) {
+        forge
+            .wait_for_checks(
+                &target,
+                &pub_.url,
+                step["requiredChecksOnly"].as_bool().unwrap_or(true),
+                step["timeoutSeconds"].as_u64().unwrap_or(1800),
+                step["intervalSeconds"].as_u64().unwrap_or(10),
+            )
+            .map_err(no_merge_effect)?;
+    }
+    if super::gates::gated_repos(plan).contains(id) {
+        let mut checked = plan.clone();
+        let current = journal.bundle.lock().unwrap().clone();
+        let run = journal.snapshot();
+        for repo in super::gates::gated_repos(plan) {
+            let accepted = run["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|s| {
+                    s["type"] == "await_update" && s["repoId"] == repo && s["status"] == "succeeded"
+                })
+                .and_then(|s| s["output"]["revision"].as_str());
+            let recorded = current["repos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["id"] == repo)
+                .and_then(|r| r["headSha"].as_str());
+            if let Some(pin) = accepted.or(recorded) {
+                checked["bundleHeads"][&repo] = json!(pin);
+            }
+        }
+        let check_bundle =
+            super::mergeability::effective_required_checks_bundle(&checked, &current);
+        let active = crate::store::ActiveBundle::unlocked(
+            journal.workspace.clone(),
+            PathBuf::new(),
+            serde_json::from_value(check_bundle)?,
+        );
+        super::super::validate::preflight_required_checks(
+            &active,
+            &strings(&plan["requireChecks"]),
+            journal.snapshot()["checksSkipped"] == true,
+        )
+        .map_err(no_merge_effect)?;
+    }
+    if gated {
+        let refreshed = forge.view(&target, &pub_.url).map_err(no_merge_effect)?;
+        gated_review_identity(plan, repo, pub_, &refreshed, Some(&journal.snapshot()))?;
+        super::super::ensure_open_and_ready(id, &refreshed).map_err(no_merge_effect)?;
+        if refreshed.head_ref_oid.as_deref() != effective.as_deref() {
+            return Err(super::mergeability::KnownNoEffect(format!(
+                "{id}: live review head changed after checks"
+            ))
+            .into());
+        }
+    }
+    let pin = effective.as_deref().or(pr.head_ref_oid.as_deref());
     journal.edit_step(sid,|s|s["reviewBefore"]=json!({"publicationUrl":pub_.url,"state":pr.state,"source":pin,"targetBranch":desired}))?;
     forge.merge(
         &target,
@@ -1073,6 +1345,353 @@ fn provider_step(
         s["output"] = output.clone();
     })?;
     Ok(output)
+}
+
+/// The revision a repository's review merge must land: the head a satisfied
+/// `await_update` gate accepted, otherwise the reviewed head.
+fn effective_pin(plan: &Value, journal: &Journal, repo: &str) -> Option<String> {
+    accepted_gate_pin(&journal.snapshot(), repo)
+        .or_else(|| plan["bundleHeads"][repo].as_str().map(str::to_owned))
+}
+
+fn accepted_gate_pin(run: &Value, repo: &str) -> Option<String> {
+    run["steps"]
+        .as_array()
+        .and_then(|steps| {
+            steps.iter().find(|s| {
+                s["type"] == "await_update" && s["repoId"] == repo && s["status"] == "succeeded"
+            })
+        })
+        .and_then(|s| s["output"]["revision"].as_str().map(str::to_owned))
+}
+
+/// Evaluate a landing gate. A satisfied gate succeeds with a receipt; an
+/// unsatisfied one pauses the run and leaves the step pending.
+fn gate(
+    step: &Value,
+    plan: &Value,
+    bundle: &Value,
+    roots: &Roots,
+    journal: &Journal,
+) -> Result<()> {
+    let id = step["id"].as_str().unwrap();
+    journal.edit_step(id, |s| {
+        s["status"] = json!("running");
+        s["startedAt"] = json!(now_iso());
+    })?;
+    match gate_outcome(step, plan, bundle, roots, journal) {
+        Ok(output) => journal.edit_step(id, |s| {
+            s["status"] = json!("succeeded");
+            s["attribution"] = json!("already_satisfied");
+            s["quiesced"] = json!(true);
+            s["output"] = output;
+            s["finishedAt"] = json!(now_iso());
+            if let Some(record) = s.as_object_mut() {
+                record.remove("waiting");
+                record.remove("error");
+            }
+        }),
+        Err(e) => {
+            let paused = e.downcast_ref::<super::gates::LandingPaused>().is_some();
+            journal.edit_step(id, |s| {
+                if paused {
+                    s["status"] = json!("pending");
+                    s.as_object_mut().unwrap().remove("error");
+                    s.as_object_mut().unwrap().remove("finishedAt");
+                    s["waiting"] = json!({"since": now_iso(), "reason": format!("{e}")});
+                } else {
+                    s["status"] = json!("failed");
+                    s["error"] = json!(format!("{e:#}"));
+                    s["finishedAt"] = json!(now_iso());
+                }
+            })?;
+            Err(e)
+        }
+    }
+}
+
+fn gate_outcome(
+    step: &Value,
+    plan: &Value,
+    bundle: &Value,
+    roots: &Roots,
+    journal: &Journal,
+) -> Result<Value> {
+    let id = step["id"].as_str().unwrap();
+    let instructions = step["instructions"].as_str().unwrap_or_default().to_owned();
+    let acknowledgement = journal.snapshot()["acknowledgements"][id].clone();
+    let acknowledged = acknowledgement.is_object();
+    if step["type"] == "manual" {
+        if acknowledged {
+            return Ok(
+                json!({"acknowledged":true,"notes":acknowledgement["notes"],"acknowledgedAt":acknowledgement["at"]}),
+            );
+        }
+        return Err(super::gates::LandingPaused {
+            step: id.to_owned(),
+            instructions,
+            waiting_for: "a person to confirm it".to_owned(),
+            next: format!("When that is done, run `knit land resume --acknowledge {id}`."),
+        }
+        .into());
+    }
+    let repo_id = step["repoId"]
+        .as_str()
+        .context("await_update requires repoId")?;
+    let typed: crate::model::ChangeGroup =
+        serde_json::from_value(journal.bundle.lock().unwrap().clone())?;
+    let repo = typed
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .with_context(|| format!("{repo_id}: not tracked by this bundle"))?;
+    let publication =
+        crate::providers::publication_for_repo(&typed, repo_id).with_context(|| {
+            format!("{repo_id}: {id} watches the repository's review, but none is recorded")
+        })?;
+    let forge = crate::providers::for_repo(repo)?;
+    let mut target = provider_target(roots, forge.as_ref(), repo, &publication.base_branch)?;
+    // Read the proposed SHA, then validate ancestry and paths below. Keep the
+    // contribution adapter's source repository, branch and base checks enabled.
+    target.verify_head = false;
+    let pr = forge.view(&target, &publication.url)?;
+    gated_review_identity(plan, repo, publication, &pr, Some(&journal.snapshot()))?;
+    if super::super::state_is_merged(&pr) {
+        bail!("{repo_id}: the review merged before {id} accepted an update; reconcile the landing by hand");
+    }
+    super::super::ensure_open_and_ready(repo_id, &pr)?;
+    if pr.head_ref_name.as_deref() != Some(publication.head_branch.as_str()) {
+        bail!("{repo_id}: review source branch differs from the recorded publication");
+    }
+    let planned_base = plan["steps"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .find(|s| s["type"] == "merge_pr" && s["repoId"] == repo_id)
+        .and_then(|s| s["targetBranch"].as_str())
+        .or(plan["targetBranches"][repo_id].as_str())
+        .or(plan["targetBranch"].as_str())
+        .unwrap_or(&publication.base_branch);
+    if !pr
+        .base_ref_name
+        .as_deref()
+        .is_some_and(|base| base == publication.base_branch || base == planned_base)
+    {
+        bail!("{repo_id}: review base differs from the recorded or planned destination");
+    }
+    let live = pr
+        .head_ref_oid
+        .clone()
+        .with_context(|| format!("{repo_id}: the provider did not report the review head"))?;
+    let reviewed = plan["bundleHeads"][repo_id]
+        .as_str()
+        .with_context(|| format!("{repo_id}: the plan has no reviewed head"))?
+        .to_owned();
+    if !super::mergeability::is_commit_sha(&live) || !super::mergeability::is_commit_sha(&reviewed)
+    {
+        bail!("{repo_id}: exact review commit SHAs are required");
+    }
+    if live == reviewed {
+        if crate::tracking::latest_recorded_head_sha(&typed, repo)
+            .is_some_and(|head| head != reviewed)
+        {
+            bail!("{repo_id}: recorded bundle head differs from the unchanged review; push and verify the recorded update first");
+        }
+        if acknowledged {
+            let root = roots.get(repo_id).context("update gate needs a checkout")?;
+            let local = update_git(root, &["rev-parse", "HEAD"])?;
+            update_changes(root, local.trim(), &live)
+                .context("local checkout contains work outside the accepted review head")?;
+            return Ok(
+                json!({"sourceRepository":pr.source_repository,"previous":reviewed,"revision":reviewed,"commits":[],"files":[],"acknowledged":true,"notes":acknowledgement["notes"]}),
+            );
+        }
+        let branch = repo
+            .feature_branch
+            .as_deref()
+            .unwrap_or("the feature branch");
+        return Err(super::gates::LandingPaused {
+            step: id.to_owned(),
+            instructions,
+            waiting_for: format!(
+                "a new commit on {repo_id}'s review (its head is still the reviewed {})",
+                crate::ids::short_sha(&reviewed)
+            ),
+            next: format!(
+                "Push the update to {branch} (for example `knit commit` then `knit push` in the {repo_id} checkout), then run `knit land resume`. If the reviewed head already contains it, run `knit land resume --acknowledge {id}`."
+            ),
+        }
+        .into());
+    }
+    let root = roots
+        .get(repo_id)
+        .with_context(|| format!("{repo_id}: {id} needs a checkout to verify the update"))?;
+    if git(root, &["cat-file", "-e", &format!("{live}^{{commit}}")]).is_err() {
+        let remote = super::mergeability::bundle_remote(bundle, repo_id, None, true);
+        if git(root, &["fetch", "--no-tags", remote, &live]).is_err() {
+            let branch = repo
+                .feature_branch
+                .as_deref()
+                .context("feature branch required to fetch the update")?;
+            git(
+                root,
+                &[
+                    "fetch",
+                    "--no-tags",
+                    remote,
+                    &format!("refs/heads/{branch}"),
+                ],
+            )?;
+        }
+    }
+    let local = update_git(root, &["rev-parse", "HEAD"])?;
+    update_changes(root, local.trim(), &live)
+        .context("local checkout contains work outside the accepted review head")?;
+    let (commits, files) = update_changes(root, &reviewed, &live)?;
+    if let Some(patterns) = step["paths"].as_array() {
+        let patterns: Vec<&str> = patterns.iter().filter_map(Value::as_str).collect();
+        let outside: Vec<&String> = files
+            .iter()
+            .filter(|f| !patterns.iter().any(|p| super::gates::path_matches(p, f)))
+            .collect();
+        if !outside.is_empty() {
+            bail!(
+                "{repo_id}: the update touches files outside the allowed paths ({}): {}",
+                patterns.join(", "),
+                outside
+                    .iter()
+                    .map(|f| f.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    let observation = gate_observation(journal, root, repo_id, &reviewed, &live, &commits)?;
+    Ok(
+        json!({"sourceRepository":pr.source_repository,"previous":reviewed,"revision":live,"commits":commits,"files":files,"observation":observation,"acknowledged":acknowledged}),
+    )
+}
+
+/// Security-sensitive local plumbing: preserve path delimiters and refuse
+/// non-UTF-8 names instead of lossily matching them against allowed globs.
+fn update_git(root: &Path, args: &[&str]) -> Result<String> {
+    let output = Command::new("git")
+        .arg("--no-replace-objects")
+        .args(args)
+        .current_dir(root)
+        .output()?;
+    if !output.status.success() {
+        bail!(
+            "update verification failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    String::from_utf8(output.stdout).context("update paths must be valid UTF-8")
+}
+
+fn update_changes(root: &Path, reviewed: &str, live: &str) -> Result<(Vec<String>, Vec<String>)> {
+    for sha in [reviewed, live] {
+        if !super::mergeability::is_commit_sha(sha) {
+            bail!("update requires exact commit SHAs");
+        }
+    }
+    let grafts = update_git(root, &["rev-parse", "--git-path", "info/grafts"])?;
+    if root.join(grafts.trim()).exists() || std::env::var_os("GIT_GRAFT_FILE").is_some() {
+        bail!("update verification refuses grafted history");
+    }
+    if update_git(root, &["rev-parse", "--is-shallow-repository"])?.trim() == "true" {
+        bail!("update verification requires complete history; unshallow the checkout first");
+    }
+    update_git(root, &["merge-base", "--is-ancestor", reviewed, live]).context(
+        "update must contain the reviewed head and append commits, not rewrite reviewed work",
+    )?;
+    let commits: Vec<String> = update_git(
+        root,
+        &["rev-list", "--reverse", &format!("{reviewed}..{live}")],
+    )?
+    .lines()
+    .map(str::to_owned)
+    .collect();
+    let mut touched = BTreeSet::new();
+    for commit in &commits {
+        let output = update_git(
+            root,
+            &[
+                "diff-tree",
+                "--root",
+                "-m",
+                "--no-commit-id",
+                "--name-only",
+                "--no-renames",
+                "-r",
+                "-z",
+                commit,
+            ],
+        )?;
+        touched.extend(
+            output
+                .split('\0')
+                .filter(|path| !path.is_empty())
+                .map(str::to_owned),
+        );
+    }
+    Ok((commits, touched.into_iter().collect()))
+}
+
+/// Record commits a gate accepted in the bundle ledger when this workspace
+/// has not recorded them yet (the update may come from another machine).
+fn gate_observation(
+    journal: &Journal,
+    root: &Path,
+    repo_id: &str,
+    reviewed: &str,
+    live: &str,
+    commits: &[String],
+) -> Result<Value> {
+    let bundle = journal.bundle.lock().unwrap();
+    let typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
+    let Some(repo) = typed.repos.iter().find(|r| r.id == repo_id) else {
+        return Ok(Value::Null);
+    };
+    let recorded = crate::tracking::latest_recorded_head_sha(&typed, repo)
+        .unwrap_or_else(|| reviewed.to_owned());
+    if recorded == live {
+        return Ok(Value::Null);
+    }
+    update_changes(root, reviewed, &recorded)
+        .context("recorded bundle head rewrote reviewed work")?;
+    let (remaining, _) = update_changes(root, &recorded, live)
+        .context("live review does not contain the recorded bundle head")?;
+    let commits = if recorded == reviewed {
+        commits
+    } else {
+        &remaining
+    };
+    Ok(json!({
+        "repoId": repo_id, "movement": "advanced", "beforeSha": recorded,
+        "afterSha": live, "commits": commits, "droppedCommits": [],
+        "commitDetails": crate::git::commit_details(root, commits),
+    }))
+}
+
+// Reconciliation and recovery must verify the source actually merged, which
+// may be an update gate's accepted SHA rather than the immutable plan's SHA.
+fn restore_review_receipt_target(
+    target: &mut crate::providers::PrTarget,
+    output: &Value,
+) -> Result<()> {
+    if let Some(identity) = target.contribution.as_mut() {
+        if let Some(base) = output["targetBranch"].as_str() {
+            identity.base = base.to_owned();
+        }
+        if let Some(source) = output["source"].as_str() {
+            if !super::mergeability::is_commit_sha(source) {
+                bail!("merge receipt source must be an exact commit SHA");
+            }
+            identity.sha = source.to_owned();
+        }
+    }
+    Ok(())
 }
 
 fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Value) -> Result<()> {
@@ -1101,11 +1720,7 @@ fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Va
         )?;
         let publication =
             crate::providers::publication_for_repo(&typed, id).context("missing review")?;
-        if let (Some(identity), Some(base)) =
-            (&mut target.contribution, output["targetBranch"].as_str())
-        {
-            identity.base = base.to_owned();
-        }
+        restore_review_receipt_target(&mut target, output)?;
         if target.contribution.is_some() {
             forge.view(&target, &publication.url)?;
         }
@@ -1136,12 +1751,15 @@ fn pin_merge_result(step: &Value, bundle: &Value, roots: &Roots, output: &mut Va
 }
 
 fn needs_terminal(step: &Value) -> bool {
-    step["interactive"] == true || step["type"] == "manual"
+    step["interactive"] == true || (step["type"] == "manual" && !super::gates::is_gate(step))
 }
 
 fn terminal_preflight(plan: &Value, local: bool) -> Result<()> {
     use std::io::IsTerminal;
     let (steps, _) = compile(plan)?;
+    if !local && super::gates::uses_gates(plan) {
+        bail!("landing gates pause the run for a person; run this plan locally with `knit land apply` and continue it with `knit land resume`");
+    }
     if steps.iter().any(needs_terminal) {
         if !local {
             bail!("interactive/manual steps require local execution; hosted/artifact runners cannot acknowledge them");
@@ -1303,6 +1921,9 @@ fn forward_step_inner(
         } else {
             bail!("{id}: uncertain effect cannot be retried without an authoritative probe");
         }
+    }
+    if super::gates::is_gate(step) {
+        return gate(step, plan, bundle, roots, journal);
     }
     journal.edit_step(id, |s| {
         s["status"] = json!("running");
@@ -1471,7 +2092,9 @@ fn forward(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) -> Re
                     .map(|s| {
                         scope.spawn(move || {
                             let result = forward_step(s, plan, bundle, roots, journal);
-                            if let Err(e) = &result {
+                            if let Some(e) = result.as_ref().err().filter(|e| {
+                                e.downcast_ref::<super::gates::LandingPaused>().is_none()
+                            }) {
                                 journal.edit_step(s["id"].as_str().unwrap(), |r| {
                                     r["status"] = json!("failed");
                                     r["error"] = json!(format!("{e:#}"));
@@ -1489,9 +2112,20 @@ fn forward(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) -> Re
                     })
                     .collect::<Vec<_>>()
             });
-            // Joining the entire batch is mandatory before compensation.
+            // Joining the entire batch is mandatory before compensation. A
+            // real failure outranks a gate that paused in the same batch.
+            let mut paused = None;
             for result in results {
-                result?;
+                if let Err(e) = result {
+                    if e.downcast_ref::<super::gates::LandingPaused>().is_some() {
+                        paused.get_or_insert(e);
+                    } else {
+                        return Err(e);
+                    }
+                }
+            }
+            if let Some(paused) = paused {
+                return Err(paused);
             }
             if super::super::process::cancellation_requested() {
                 bail!("landing cancelled");
@@ -1673,12 +2307,7 @@ fn compensation(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) 
                             .map(|p| p.base_branch.as_str())
                             .unwrap_or(&repo.base_branch),
                     )?;
-                    if let (Some(identity), Some(base)) = (
-                        &mut target.contribution,
-                        record["output"]["targetBranch"].as_str(),
-                    ) {
-                        identity.base = base.to_owned();
-                    }
+                    restore_review_receipt_target(&mut target, &record["output"])?;
                     let pub_ = crate::providers::publication_for_repo(&typed, &repo.id)
                         .context("missing publication")?;
                     // A crash while proposing a revert requires explicit reconciliation;
@@ -1954,6 +2583,26 @@ fn execute(
     skip_checks: bool,
 ) -> Result<()> {
     terminal_preflight(plan, local.is_some())?;
+    let (acknowledge, note) = local
+        .as_ref()
+        .and_then(|(_, options)| *options)
+        .map(|options| (options.acknowledge, options.note))
+        .unwrap_or((&[], None));
+    if note.is_some_and(|note| note.len() > 4096) {
+        bail!("acknowledgement note exceeds 4096 bytes");
+    }
+    if note.is_some() && acknowledge.is_empty() {
+        bail!("--note requires --acknowledge");
+    }
+    for id in acknowledge {
+        if !plan["steps"].as_array().is_some_and(|steps| {
+            steps
+                .iter()
+                .any(|step| step["id"] == *id && super::gates::is_gate(step))
+        }) {
+            bail!("{id}: --acknowledge must name a landing gate in this immutable plan");
+        }
+    }
     if json_output {
         crate::output::route_human_lines_to_stderr();
     }
@@ -2022,6 +2671,43 @@ fn execute(
                             publication["baseBranch"] = original["baseBranch"].clone();
                         }
                     }
+                }
+            }
+        }
+    }
+    if resume {
+        for receipt in existing
+            .as_ref()
+            .into_iter()
+            .flat_map(|run| run["steps"].as_array().into_iter().flatten())
+            .filter(|s| s["type"] == "await_update" && s["status"] == "succeeded")
+        {
+            let id = receipt["repoId"].as_str().context("gate repo required")?;
+            if let Some(repo) = bundle["repos"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .find(|r| r["id"] == id)
+            {
+                if repo["headSha"] != receipt["output"]["revision"]
+                    && repo["headSha"] != plan["bundleHeads"][id]
+                {
+                    bail!("{id}: bundle head changed after the update gate accepted its immutable head; review a new plan");
+                }
+            }
+        }
+        // Only the reviewed head is mutable at an update gate. All other
+        // repository, publication and changed-scope identity remains pinned.
+        for repo in comparable["repos"].as_array_mut().into_iter().flatten() {
+            if let Some(id) = repo["id"]
+                .as_str()
+                .filter(|id| super::gates::gated_repos(plan).contains(*id))
+            {
+                if let Some(original) = source["repos"]
+                    .as_array()
+                    .and_then(|repos| repos.iter().find(|r| r["id"] == id))
+                {
+                    repo["headSha"] = original["headSha"].clone();
                 }
             }
         }
@@ -2108,7 +2794,39 @@ fn execute(
             );
         }
         pending_expectations = checks;
-        preflight(&execution_plan, &steps, &roots, &bundle, skip_checks)?;
+        let mut checked_plan = execution_plan.clone();
+        if let Some(run) = &existing {
+            // Pending gates validate these incoming heads themselves. Named
+            // checks refreshed after a recorded bump must not be compared to
+            // the old plan head before the gate can accept that bump.
+            for repo in bundle["repos"].as_array().into_iter().flatten() {
+                if let Some(id) = repo["id"]
+                    .as_str()
+                    .filter(|id| super::gates::gated_repos(plan).contains(*id))
+                {
+                    checked_plan["bundleHeads"][id] = repo["headSha"].clone();
+                }
+            }
+            for receipt in run["steps"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter(|s| s["type"] == "await_update" && s["status"] == "succeeded")
+            {
+                let id = receipt["repoId"]
+                    .as_str()
+                    .context("gate receipt repo required")?;
+                checked_plan["bundleHeads"][id] = receipt["output"]["revision"].clone();
+            }
+        }
+        preflight(
+            &checked_plan,
+            &steps,
+            &roots,
+            &bundle,
+            skip_checks,
+            existing.as_ref(),
+        )?;
     }
     let _locks = lock_resources(plan, &roots)?;
     let current = std::env::current_dir()?;
@@ -2164,9 +2882,12 @@ fn execute(
     };
     journal.edit(|r| {
         r["finalization"]["synchronization"] = json!("pending");
-        if skip_checks {
-            r["checksSkipped"] = json!(true);
+        for id in acknowledge {
+            if r["acknowledgements"][id].is_null() {
+                r["acknowledgements"][id] = json!({"at":now_iso(),"notes":note});
+            }
         }
+        r["checksSkipped"] = json!(skip_checks);
     })?;
     // Pin the tips the mergeability preflight planned against onto the run's
     // step receipts, durably, before the first merge executes. The drift
@@ -2190,10 +2911,23 @@ fn execute(
     let result = if recovering {
         compensation(&execution_plan, &bundle, &roots, &journal)
     } else {
-        journal.edit(|r| r["status"] = json!("running"))?;
+        journal.edit(|r| {
+            r["status"] = json!("running");
+            r.as_object_mut().unwrap().remove("pause");
+            r.as_object_mut().unwrap().remove("error");
+        })?;
         let forward_result = forward(&execution_plan, &bundle, &roots, &journal);
         match forward_result {
             Ok(()) => finalize(plan, &mut bundle, &journal, out),
+            Err(e) if e.downcast_ref::<super::gates::LandingPaused>().is_some() => {
+                let pause = e.downcast_ref::<super::gates::LandingPaused>().unwrap();
+                journal.edit(|r| {
+                    r["status"] = json!("paused");
+                    r["pause"] = json!({"step":pause.step,"instructions":pause.instructions,
+                        "since":now_iso(),"waitingFor":pause.waiting_for,"next":pause.next});
+                })?;
+                Ok(())
+            }
             Err(e) => {
                 journal.edit(|r| {
                     r["status"] = json!("failed");
@@ -2219,7 +2953,7 @@ fn execute(
         })
     });
     let result = result.and_then(|()| {
-        if !recovering {
+        if !recovering && journal.snapshot()["status"] != "paused" {
             if let Some((active, options)) = local {
                 finish_local(active, plan, &journal, options)?;
             }
@@ -2237,7 +2971,8 @@ fn execute(
     durable(out, &journal.bundle.lock().unwrap().clone())?;
     let snapshot = journal.snapshot();
     let quiescent = snapshot["steps"].as_array().unwrap().iter().all(|s| {
-        (s["attribution"] != "uncertain" || s["quiesced"] == true)
+        s["status"] != "running"
+            && (s["attribution"] != "uncertain" || s["quiesced"] == true)
             && !matches!(
                 s["recovery"]["status"].as_str(),
                 Some("running" | "uncertain")
@@ -2276,6 +3011,14 @@ fn execute(
             journal.snapshot()["id"],
             journal.snapshot()["status"],
             run_out.display()
+        );
+    }
+    if !json_output && journal.snapshot()["status"] == "paused" {
+        let pause = journal.snapshot()["pause"].clone();
+        eprintln!(
+            "{}\n{}",
+            pause["instructions"].as_str().unwrap_or(""),
+            pause["next"].as_str().unwrap_or("")
         );
     }
     result.and(completion)
@@ -2426,7 +3169,10 @@ pub(crate) fn local_apply(
                 .is_some_and(|steps| steps.iter().all(|s| s["status"] == "succeeded"))
         });
     if !recovering && !finalization_only {
-        let live = super::branch_checkout::live_sources(&plan);
+        let mut live = super::branch_checkout::live_sources(&plan);
+        if run_path.is_some() {
+            live.extend(super::gates::gated_repos(&plan));
+        }
         let unrecorded: Vec<_> = crate::tracking::detect_unrecorded_changes(active)?
             .into_iter()
             .filter(|change| !live.contains(&change.repo_id))
@@ -2534,4 +3280,48 @@ fn finish_local(
         }
     }
     journal.edit(|r| r["finalized"] = json!(true))
+}
+
+#[cfg(test)]
+mod gate_history_tests {
+    use super::*;
+    #[test]
+    fn updates_include_transient_edits_rename_sources_and_newline_names_and_refuse_rewrites() {
+        let root = std::env::temp_dir().join(unique_id("gate-history"));
+        fs::create_dir_all(&root).unwrap();
+        let run = |args: &[&str]| update_git(&root, args).unwrap().trim().to_owned();
+        run(&["init", "-b", "main"]);
+        run(&["config", "user.name", "Synthetic Test"]);
+        run(&["config", "user.email", "test@example.invalid"]);
+        run(&["config", "commit.gpgsign", "false"]);
+        fs::write(root.join("source.txt"), "original").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "Reviewed work"]);
+        let reviewed = run(&["rev-parse", "HEAD"]);
+        fs::write(root.join("source.txt"), "temporary forbidden edit").unwrap();
+        run(&["commit", "-am", "Transient edit"]);
+        fs::write(root.join("source.txt"), "original").unwrap();
+        run(&["commit", "-am", "Revert transient edit"]);
+        run(&["mv", "source.txt", "Cargo.toml"]);
+        #[cfg(unix)]
+        fs::write(root.join("Cargo.lock\nsource.rs"), "not a manifest").unwrap();
+        run(&["add", "."]);
+        run(&["commit", "-m", "Rename to manifest"]);
+        let live = run(&["rev-parse", "HEAD"]);
+        let (commits, paths) = update_changes(&root, &reviewed, &live).unwrap();
+        assert_eq!(commits.len(), 3);
+        assert!(paths.contains(&"source.txt".into()));
+        assert!(paths.contains(&"Cargo.toml".into()));
+        #[cfg(unix)]
+        assert!(paths.contains(&"Cargo.lock\nsource.rs".into()));
+        run(&["checkout", "--orphan", "rewritten"]);
+        run(&["commit", "-am", "Unrelated replacement"]);
+        let replacement = run(&["rev-parse", "HEAD"]);
+        assert!(update_changes(&root, &reviewed, &replacement).is_err());
+        // A replacement ref must not manufacture the required ancestry.
+        run(&["replace", "--graft", &replacement, &reviewed]);
+        assert!(update_changes(&root, &reviewed, &replacement).is_err());
+        assert!(update_changes(&root, "HEAD", &live).is_err());
+        fs::remove_dir_all(root).unwrap();
+    }
 }

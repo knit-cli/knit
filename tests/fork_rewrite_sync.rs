@@ -13,6 +13,7 @@ struct Fixture {
     home: PathBuf,
     workspace: PathBuf,
     checkout: PathBuf,
+    local: PathBuf,
     upstream: PathBuf,
     fork: PathBuf,
     server: PathBuf,
@@ -44,6 +45,7 @@ impl Fixture {
             root,
             home,
             workspace,
+            local: local.clone(),
             upstream,
             fork,
             server,
@@ -104,6 +106,54 @@ impl Fixture {
     fn last_body(&self) -> Value {
         let bodies = fs::read_to_string(self.server.join("artifact-rewrite.bodies")).unwrap();
         serde_json::from_str(bodies.lines().last().unwrap()).unwrap()
+    }
+
+    fn set_fetch_refspec(&self, narrow: bool) {
+        let refspec = if narrow {
+            "+refs/heads/main:refs/remotes/origin/main"
+        } else {
+            "+refs/heads/*:refs/remotes/origin/*"
+        };
+        git(
+            &self.local,
+            ["config", "--replace-all", "remote.origin.fetch", refspec],
+        );
+    }
+
+    fn plain_push(&self) -> String {
+        git(&self.checkout, ["push", "origin", BRANCH]);
+        let receipts = git(&self.checkout, ["for-each-ref", "refs/knit/contributions/"]);
+        assert!(
+            receipts.trim().is_empty(),
+            "unexpected Knit receipt: {receipts}"
+        );
+        git(&self.fork, ["rev-parse", BRANCH])
+    }
+
+    fn foreign_fork_commit(&self) -> String {
+        let old_head = git(&self.fork, ["rev-parse", BRANCH]);
+        let tree = git(&self.fork, ["rev-parse", &format!("{BRANCH}^{{tree}}")]);
+        configure_git_user(&self.fork);
+        let concurrent = git(
+            &self.fork,
+            [
+                "commit-tree",
+                tree.trim(),
+                "-p",
+                old_head.trim(),
+                "-m",
+                "Concurrent change",
+            ],
+        );
+        git(
+            &self.fork,
+            [
+                "update-ref",
+                &format!("refs/heads/{BRANCH}"),
+                concurrent.trim(),
+            ],
+        );
+        concurrent
     }
 
     fn rewrite(&self) {
@@ -167,32 +217,11 @@ fn fork_rewrite_refuses_a_concurrent_fork_update_before_artifact_publication() {
     let f = Fixture::new();
     f.run(&["push"]);
     let artifact_hash = f.remote_hash();
-    let old_head = git(&f.fork, ["rev-parse", BRANCH]);
-    let tree = git(&f.fork, ["rev-parse", &format!("{BRANCH}^{{tree}}")]);
-    configure_git_user(&f.fork);
-    let concurrent = git(
-        &f.fork,
-        [
-            "commit-tree",
-            tree.trim(),
-            "-p",
-            old_head.trim(),
-            "-m",
-            "Concurrent change",
-        ],
-    );
-    git(
-        &f.fork,
-        [
-            "update-ref",
-            &format!("refs/heads/{BRANCH}"),
-            concurrent.trim(),
-        ],
-    );
+    let concurrent = f.foreign_fork_commit();
     f.rewrite();
     let failure = f.fail(&["push", "--force-with-lease"]);
     assert!(
-        failure.contains("stale info") || failure.contains("lease"),
+        failure.contains("never recorded") && failure.contains(concurrent.trim()),
         "{failure}"
     );
     assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), concurrent);
@@ -215,5 +244,616 @@ fn fork_rewrite_refuses_a_concurrent_hosted_artifact_update() {
     assert_eq!(f.last_body()["expectedArtifactHash"], known_hash);
     assert_eq!(f.remote_hash(), "concurrent-artifact");
     assert_eq!(f.bundle()["syncTargets"][0]["artifactHash"], known_hash);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+fn check_plain_fork_rewrite(narrow: bool, fetch_upstream: bool) {
+    let f = Fixture::new();
+    f.set_fetch_refspec(narrow);
+    let old_head = f.plain_push();
+    let native = git(
+        &f.checkout,
+        [
+            "for-each-ref",
+            "--format=%(objectname)",
+            &format!("refs/remotes/origin/{BRANCH}"),
+        ],
+    );
+    if narrow {
+        assert!(native.trim().is_empty());
+    } else {
+        assert_eq!(native, old_head);
+    }
+    if fetch_upstream {
+        git(&f.checkout, ["fetch", "origin"]);
+        assert_eq!(
+            git(
+                &f.checkout,
+                ["rev-parse", &format!("refs/remotes/origin/{BRANCH}")]
+            ),
+            git(&f.upstream, ["rev-parse", "main"])
+        );
+    }
+    f.rewrite();
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]);
+    assert_ne!(old_head, rewritten);
+    let output = f.run(&["push", "--force-with-lease"]);
+    assert!(
+        output.contains("leasing against the remote tip"),
+        "{output}"
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), rewritten);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn fork_rewrite_after_plain_push_without_feature_tracking_ref() {
+    check_plain_fork_rewrite(true, false);
+}
+
+#[test]
+fn fork_rewrite_after_plain_push_with_feature_tracking_ref() {
+    check_plain_fork_rewrite(false, false);
+}
+
+#[test]
+fn fork_rewrite_after_plain_push_ignores_upstream_tracking_ref() {
+    check_plain_fork_rewrite(false, true);
+}
+
+#[test]
+fn fork_rewrite_without_receipt_refuses_a_concurrent_fork_update() {
+    let f = Fixture::new();
+    f.plain_push();
+    let concurrent = f.foreign_fork_commit();
+    f.rewrite();
+    let failure = f.fail(&["push", "--force-with-lease"]);
+    assert!(failure.contains("never recorded"), "{failure}");
+    assert!(failure.contains(concurrent.trim()), "{failure}");
+    assert!(failure.contains("git fetch"), "{failure}");
+    assert!(
+        !failure.contains("re-run the same `knit push`"),
+        "{failure}"
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), concurrent);
+    assert!(!f.server.join("artifact-rewrite.bodies").exists());
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+fn check_plain_origin_rewrite_without_tracking_ref(local_url: bool) {
+    let f = Fixture::new();
+    f.set_fetch_refspec(true);
+    git(&f.local, ["config", "--unset-all", "remote.origin.pushurl"]);
+    if local_url {
+        git(
+            &f.local,
+            ["remote", "set-url", "origin", f.upstream.to_str().unwrap()],
+        );
+    }
+    git(&f.checkout, ["push", "origin", BRANCH]);
+    assert!(git(
+        &f.checkout,
+        ["for-each-ref", &format!("refs/remotes/origin/{BRANCH}")]
+    )
+    .trim()
+    .is_empty());
+    assert!(
+        git(&f.checkout, ["for-each-ref", "refs/knit/contributions/"])
+            .trim()
+            .is_empty()
+    );
+    f.rewrite();
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]);
+    f.run(&["push", "--force-with-lease"]);
+    assert_eq!(git(&f.upstream, ["rev-parse", BRANCH]), rewritten);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn fork_rewrite_accepts_plain_git_head_from_worktree_branch_reflog() {
+    let f = Fixture::new();
+    // This head never entered the Knit ledger: both the commit and push use Git.
+    append_line(&f.checkout.join("app.txt"), "unrecorded local change");
+    git(&f.checkout, ["commit", "-am", "Local change"]);
+    let old_head = f.plain_push();
+    assert!(!serde_json::to_string(&f.bundle())
+        .unwrap()
+        .contains(old_head.trim()));
+    f.rewrite();
+    let reflog = git(
+        &f.checkout,
+        ["log", "-g", "--format=%H", &format!("refs/heads/{BRANCH}")],
+    );
+    assert!(reflog.lines().any(|sha| sha == old_head.trim()));
+    f.run(&["push", "--force-with-lease"]);
+    assert_eq!(
+        git(&f.fork, ["rev-parse", BRANCH]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn fork_rewrite_accepts_ledger_tip_after_branch_reflog_expired() {
+    let f = Fixture::new();
+    f.plain_push();
+    f.rewrite();
+    git(
+        &f.checkout,
+        [
+            "reflog",
+            "expire",
+            "--expire=all",
+            &format!("refs/heads/{BRANCH}"),
+        ],
+    );
+    assert!(git(
+        &f.checkout,
+        ["log", "-g", "--format=%H", &format!("refs/heads/{BRANCH}")]
+    )
+    .trim()
+    .is_empty());
+    f.run(&["push", "--force-with-lease"]);
+    assert_eq!(
+        git(&f.fork, ["rev-parse", BRANCH]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn fork_rewrite_refuses_tip_changed_after_lease_resolution_with_inspection_hint() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    let old_head = f.plain_push();
+    let concurrent = f.foreign_fork_commit();
+    git(
+        &f.fork,
+        [
+            "update-ref",
+            &format!("refs/heads/{BRANCH}"),
+            old_head.trim(),
+        ],
+    );
+    f.rewrite();
+    // Git runs this hook after Knit snapshots the lease and before sending updates.
+    let hooks = f.root.join("hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let hook = hooks.join("pre-push");
+    fs::write(
+        &hook,
+        format!(
+            "#!/bin/sh\ngit --git-dir='{}' update-ref refs/heads/{BRANCH} {}\n",
+            f.fork.display(),
+            concurrent.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.checkout,
+        ["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let failure = f.fail(&["push", "--force-with-lease"]);
+    assert!(failure.contains("git fetch"), "{failure}");
+    assert!(
+        !failure.contains("re-run the same `knit push`"),
+        "{failure}"
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), concurrent);
+    assert!(!f.server.join("artifact-rewrite.bodies").exists());
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn plain_origin_rewrite_without_feature_tracking_ref() {
+    check_plain_origin_rewrite_without_tracking_ref(false);
+}
+
+#[test]
+fn local_origin_rewrite_without_feature_tracking_ref() {
+    check_plain_origin_rewrite_without_tracking_ref(true);
+}
+
+fn push_rewrite_fixture() -> Fixture {
+    let f = Fixture::new();
+    git(&f.local, ["config", "--unset-all", "remote.origin.pushurl"]);
+    git(
+        &f.local,
+        ["remote", "set-url", "origin", f.upstream.to_str().unwrap()],
+    );
+    git(
+        &f.local,
+        [
+            "config",
+            &format!("url.{}.pushInsteadOf", f.fork.display()),
+            f.upstream.to_str().unwrap(),
+        ],
+    );
+    f
+}
+
+#[test]
+fn fork_rewrite_with_push_instead_of_leases_actual_push_destination() {
+    let f = push_rewrite_fixture();
+    let first = f.plain_push();
+    f.rewrite();
+    f.run(&["push", "--force-with-lease"]);
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]);
+    assert_ne!(first, rewritten);
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), rewritten);
+    assert_eq!(
+        git(&f.upstream, ["rev-parse", BRANCH]),
+        git(&f.upstream, ["rev-parse", "main"])
+    );
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn fork_rewrite_with_push_instead_of_ignores_foreign_upstream_tracking_tip() {
+    let f = push_rewrite_fixture();
+    f.plain_push();
+    let concurrent = f.foreign_fork_commit();
+    git(
+        &f.upstream,
+        [
+            "fetch",
+            f.fork.to_str().unwrap(),
+            &format!("+refs/heads/{BRANCH}:refs/heads/{BRANCH}"),
+        ],
+    );
+    git(&f.checkout, ["fetch", "origin"]);
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-parse", &format!("refs/remotes/origin/{BRANCH}")]
+        ),
+        concurrent
+    );
+    f.rewrite();
+    let failure = f.fail(&["push", "--force-with-lease"]);
+    assert!(failure.contains("never recorded"), "{failure}");
+    assert!(failure.contains(concurrent.trim()), "{failure}");
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), concurrent);
+    assert!(!f.server.join("artifact-rewrite.bodies").exists());
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[cfg(unix)]
+fn check_split_transport_aliases_refuse_unknown_tip(with_role_receipt: bool) {
+    use std::os::unix::fs::PermissionsExt;
+
+    let f = Fixture::new();
+    // These spellings share a portable identity, but Git sends them to different repos.
+    let ssh_alias = "git@github.com:upstream/widget.git";
+    git(
+        &f.local,
+        ["remote", "set-url", "--push", "origin", ssh_alias],
+    );
+    git(
+        &f.local,
+        [
+            "config",
+            "--add",
+            &format!("url.{}.insteadOf", f.fork.display()),
+            ssh_alias,
+        ],
+    );
+    f.plain_push();
+    let unknown = f.foreign_fork_commit();
+    git(
+        &f.upstream,
+        [
+            "fetch",
+            f.fork.to_str().unwrap(),
+            &format!("+refs/heads/{BRANCH}:refs/heads/{BRANCH}"),
+        ],
+    );
+    git(&f.checkout, ["fetch", "origin"]);
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-parse", &format!("refs/remotes/origin/{BRANCH}")]
+        ),
+        unknown
+    );
+    assert!(!serde_json::to_string(&f.bundle())
+        .unwrap()
+        .contains(unknown.trim()));
+    let reflog = git(
+        &f.checkout,
+        ["log", "-g", "--format=%H", &format!("refs/heads/{BRANCH}")],
+    );
+    assert!(!reflog.lines().any(|sha| sha == unknown.trim()));
+    if with_role_receipt {
+        let mut repo: knit::model::RepoEntry =
+            serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+        repo.source_remote = Some(TARGET.into());
+        repo.target_remote = Some(TARGET.into());
+        let upstream_role =
+            knit::contribution::fetch_ref(&f.checkout, &repo, BRANCH, true).unwrap();
+        repo.source_remote = Some(ssh_alias.into());
+        assert_eq!(
+            upstream_role,
+            knit::contribution::role_ref(&repo, BRANCH, true).unwrap()
+        );
+        assert_eq!(git(&f.checkout, ["rev-parse", &upstream_role]), unknown);
+        // Isolate the role receipt: no native feature tracking ref remains.
+        git(
+            &f.checkout,
+            ["update-ref", "-d", &format!("refs/remotes/origin/{BRANCH}")],
+        );
+    }
+    f.rewrite();
+    let hooks = f.root.join("rejection-hooks");
+    fs::create_dir_all(&hooks).unwrap();
+    let marker = f.root.join("pre-push-reached");
+    let hook = hooks.join("pre-push");
+    fs::write(
+        &hook,
+        format!("#!/bin/sh\ntouch '{}'\nexit 1\n", marker.display()),
+    )
+    .unwrap();
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(
+        &f.checkout,
+        ["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
+    let before = f.bundle();
+    let failure = f.fail(&["push", "--force-with-lease"]);
+    assert!(failure.contains("never recorded"), "{failure}");
+    assert!(failure.contains(unknown.trim()), "{failure}");
+    assert!(!marker.exists(), "push hook was reached: {failure}");
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), unknown);
+    assert_eq!(git(&f.upstream, ["rev-parse", BRANCH]), unknown);
+    assert_eq!(f.bundle(), before);
+    assert!(!f.server.join("artifact-rewrite.bodies").exists());
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn split_transport_aliases_do_not_borrow_native_upstream_receipt() {
+    check_split_transport_aliases_refuse_unknown_tip(false);
+}
+
+#[cfg(unix)]
+#[test]
+fn split_transport_aliases_do_not_borrow_upstream_role_receipt() {
+    check_split_transport_aliases_refuse_unknown_tip(true);
+}
+
+fn check_same_destination_alias_observation(native: bool) {
+    let f = Fixture::new();
+    let ssh_alias = "git@github.com:contributor/widget.git";
+    git(&f.local, ["remote", "set-url", "origin", SOURCE]);
+    git(
+        &f.local,
+        ["remote", "set-url", "--push", "origin", ssh_alias],
+    );
+    git(
+        &f.local,
+        [
+            "config",
+            "--add",
+            &format!("url.{}.insteadOf", f.fork.display()),
+            ssh_alias,
+        ],
+    );
+    f.plain_push();
+    let unknown = f.foreign_fork_commit();
+    if native {
+        git(&f.checkout, ["fetch", "origin"]);
+    } else {
+        f.set_fetch_refspec(true);
+        git(
+            &f.checkout,
+            ["update-ref", "-d", &format!("refs/remotes/origin/{BRANCH}")],
+        );
+        let mut repo: knit::model::RepoEntry =
+            serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+        repo.source_remote = Some(SOURCE.into());
+        repo.target_remote = Some(SOURCE.into());
+        knit::contribution::fetch_ref(&f.checkout, &repo, BRANCH, true).unwrap();
+    }
+    assert!(!serde_json::to_string(&f.bundle())
+        .unwrap()
+        .contains(unknown.trim()));
+    let reflog = git(
+        &f.checkout,
+        ["log", "-g", "--format=%H", &format!("refs/heads/{BRANCH}")],
+    );
+    assert!(!reflog.lines().any(|sha| sha == unknown.trim()));
+    f.rewrite();
+    let output = f.run(&["push", "--force-with-lease"]);
+    assert!(!output.contains("no Knit push receipt"), "{output}");
+    assert_eq!(
+        git(&f.fork, ["rev-parse", BRANCH]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn same_destination_transport_aliases_share_native_observations() {
+    check_same_destination_alias_observation(true);
+}
+
+#[test]
+fn same_destination_transport_aliases_share_knit_observations() {
+    check_same_destination_alias_observation(false);
+}
+
+#[test]
+fn split_alias_source_observation_does_not_overwrite_upstream_tracking_ref() {
+    let f = Fixture::new();
+    let ssh_alias = "git@github.com:upstream/widget.git";
+    git(
+        &f.local,
+        ["remote", "set-url", "--push", "origin", ssh_alias],
+    );
+    git(
+        &f.local,
+        [
+            "config",
+            "--add",
+            &format!("url.{}.insteadOf", f.fork.display()),
+            ssh_alias,
+        ],
+    );
+    f.plain_push();
+    let unknown = f.foreign_fork_commit();
+    git(&f.checkout, ["fetch", "origin"]);
+    let native = format!("refs/remotes/origin/{BRANCH}");
+    let upstream_tip = git(&f.checkout, ["rev-parse", &native]);
+    assert_ne!(upstream_tip, unknown);
+    let mut repo: knit::model::RepoEntry =
+        serde_json::from_value(f.bundle()["repos"][0].clone()).unwrap();
+    repo.source_remote = Some(ssh_alias.into());
+    repo.target_remote = Some(TARGET.into());
+    knit::contribution::fetch_ref(&f.checkout, &repo, BRANCH, true).unwrap();
+    assert_eq!(git(&f.checkout, ["rev-parse", &native]), upstream_tip);
+    assert!(!serde_json::to_string(&f.bundle())
+        .unwrap()
+        .contains(unknown.trim()));
+    f.rewrite();
+    let output = f.run(&["push", "--force-with-lease"]);
+    assert!(!output.contains("no Knit push receipt"), "{output}");
+    assert_eq!(
+        git(&f.fork, ["rev-parse", BRANCH]),
+        git(&f.checkout, ["rev-parse", "HEAD"])
+    );
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn fork_rebase_uses_upstream_target_not_fork_source_base() {
+    let f = Fixture::new();
+    // Capture contribution roles using only the fixture's local remotes/server.
+    f.run(&["push"]);
+    let before = f.bundle();
+    // Advance the two remotes independently: choosing the fork's main would
+    // produce a valid rebase with the wrong base, which must be detected.
+    let mut bases = Vec::new();
+    for (name, remote) in [("target", &f.upstream), ("source", &f.fork)] {
+        let writer = f.root.join(format!("{name}-writer"));
+        git(
+            &f.root,
+            ["clone", remote.to_str().unwrap(), writer.to_str().unwrap()],
+        );
+        configure_git_user(&writer);
+        fs::write(
+            writer.join(format!("{name}.txt")),
+            format!("{name} content\n"),
+        )
+        .unwrap();
+        git(&writer, ["add", "."]);
+        git(&writer, ["commit", "-m", &format!("Advance {name} base")]);
+        git(&writer, ["push", "origin", "main"]);
+        bases.push(git(&writer, ["rev-parse", "HEAD"]).trim().to_owned());
+    }
+    f.run(&["rebase"]);
+    let after = f.bundle();
+    let head = git(&f.checkout, ["rev-parse", "HEAD"]);
+    assert_ne!(after["repos"][0]["headSha"], before["repos"][0]["headSha"]);
+    assert_eq!(after["repos"][0]["headSha"], head.trim());
+    assert_eq!(after["repos"][0]["baseSha"], bases[0]);
+    assert_ne!(after["repos"][0]["baseSha"], bases[1]);
+    assert!(f.checkout.join("target.txt").exists());
+    assert!(!f.checkout.join("source.txt").exists());
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-list", "--count", &format!("{}..HEAD", bases[0])]
+        )
+        .trim(),
+        "1"
+    );
+    assert_eq!(after["repos"][0]["sourceRemote"], SOURCE);
+    assert_eq!(after["repos"][0]["targetRemote"], TARGET);
+    let changes: Vec<_> = after["nodes"].as_array().unwrap()
+        [before["nodes"].as_array().unwrap().len()..]
+        .iter()
+        .flat_map(|n| n["repoChanges"].as_array().into_iter().flatten())
+        .collect();
+    let movement = changes
+        .iter()
+        .find(|c| c["repoId"] == "widget" && c["baseAfterSha"] == bases[0])
+        .unwrap();
+    assert_eq!(movement["baseBeforeSha"], before["repos"][0]["baseSha"]);
+    let recorded: Vec<_> = changes
+        .iter()
+        .filter(|c| c["repoId"] == "widget")
+        .flat_map(|c| c["commits"].as_array().into_iter().flatten())
+        .map(|sha| sha.as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, vec![head.trim()]);
+    f.run(&["bundle", "validate"]);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn manual_fork_rebase_ignores_feature_work_in_fallback_base_refs() {
+    let f = Fixture::new();
+    f.run(&["push"]);
+    let before = f.bundle();
+    let repo: knit::model::RepoEntry = serde_json::from_value(before["repos"][0].clone()).unwrap();
+    let destination = knit::contribution::role_ref(&repo, "main", false).unwrap();
+    let writer = f.root.join("target-writer");
+    git(
+        &f.root,
+        [
+            "clone",
+            f.upstream.to_str().unwrap(),
+            writer.to_str().unwrap(),
+        ],
+    );
+    configure_git_user(&writer);
+    fs::write(writer.join("upstream.txt"), "Upstream work\n").unwrap();
+    git(&writer, ["add", "."]);
+    git(&writer, ["commit", "-m", "Upstream work"]);
+    git(&writer, ["push", "origin", "main"]);
+    let base = git(&writer, ["rev-parse", "HEAD"]).trim().to_owned();
+    git(
+        &f.checkout,
+        [
+            "fetch",
+            f.upstream.to_str().unwrap(),
+            &format!("+refs/heads/main:{destination}"),
+        ],
+    );
+    git(&f.checkout, ["rebase", &destination]);
+    let head = git(&f.checkout, ["rev-parse", "HEAD"]).trim().to_owned();
+    for reference in ["refs/heads/main", "refs/remotes/origin/main"] {
+        git(&f.checkout, ["update-ref", reference, &head]);
+    }
+    f.run(&["sync"]);
+    let after = f.bundle();
+    assert_eq!(after["repos"][0]["baseSha"], base);
+    assert_eq!(after["commitGroups"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        after["commitGroups"][0]["message"],
+        before["commitGroups"][0]["message"]
+    );
+    assert_eq!(after["commitGroups"][0]["commits"][0]["sha"], head);
+    let observation = after["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|n| n["type"] == "git.observed")
+        .unwrap();
+    assert_eq!(observation["repoChanges"][0]["baseAfterSha"], base);
+    assert_eq!(
+        observation["repoChanges"][0]["commits"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        observation["rewrite"]["supersededGroups"][0],
+        before["commitGroups"][0]
+    );
+    f.run(&["bundle", "validate"]);
     fs::remove_dir_all(f.root).unwrap();
 }

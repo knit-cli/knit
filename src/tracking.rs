@@ -1,10 +1,11 @@
 use crate::checkout::checkout_dir;
-use crate::git::{commit_details, is_ancestor, merge_base, rev_list, rev_parse};
+use crate::git::{commit_details, git_output, is_ancestor, merge_base, rev_list, rev_parse};
 use crate::ids::node_id;
-use crate::model::{BundleNode, ChangeGroup, Movement, RepoChange, RepoEntry};
+use crate::model::{BundleNode, ChangeGroup, Movement, NodeRewrite, RepoChange, RepoEntry};
+use crate::rewrite::{record_rewrite, RepoRewrite, RewriteKind};
 use crate::store::ActiveBundle;
 use crate::time::now_iso;
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
@@ -15,6 +16,9 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
         let Some(worktree_dir) = repo_worktree_dir(active, repo) else {
             continue;
         };
+        if rebase_in_progress(&worktree_dir)? {
+            continue;
+        }
         let after_sha = rev_parse(&worktree_dir, "HEAD")
             .with_context(|| format!("{}: failed to read worktree HEAD", repo.id))?;
         let before_sha = latest_recorded_head_sha(&active.bundle, repo);
@@ -44,11 +48,6 @@ pub fn ledger_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Optio
     let mut head = None;
 
     for node in &bundle.nodes {
-        for change in &node.repo_changes {
-            if change.repo_id == repo.id {
-                head = Some(change.after_sha.clone());
-            }
-        }
         for commit in &node.commits {
             if commit.repo_id == repo.id {
                 head = Some(commit.sha.clone());
@@ -67,6 +66,11 @@ pub fn ledger_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Optio
                         }
                     }
                 }
+            }
+        }
+        for change in &node.repo_changes {
+            if change.repo_id == repo.id {
+                head = Some(change.after_sha.clone());
             }
         }
     }
@@ -119,6 +123,23 @@ pub fn sync_observed_changes_for_repo_ids(
     active: &mut ActiveBundle,
     repo_ids: Option<&[String]>,
 ) -> Result<Vec<RepoChange>> {
+    // A multi-repository command can have completed some Git rebases while
+    // others are still pending. Its recovery record owns the entire ledger.
+    if active
+        .root
+        .join(".knit/rebase")
+        .join(format!("{}.json", active.bundle.id))
+        .exists()
+    {
+        bail!("A bundle rebase is pending; run knit rebase --continue or knit rebase --abort before recording more work");
+    }
+    for repo in &active.bundle.repos {
+        if let Some(path) = repo_worktree_dir(active, repo) {
+            if rebase_in_progress(&path)? {
+                bail!("{}: a Git rebase is pending; run git rebase --continue or git rebase --abort before recording more work", repo.id);
+            }
+        }
+    }
     let changes = detect_unrecorded_changes(active)?;
     let changes = match repo_ids {
         Some(repo_ids) => changes
@@ -131,25 +152,129 @@ pub fn sync_observed_changes_for_repo_ids(
         return Ok(changes);
     }
 
+    let mut rewrites = Vec::new();
     for change in &changes {
-        if let Some(repo) = active
+        if change.movement == Movement::Advanced {
+            continue;
+        }
+        let repo = active
             .bundle
             .repos
-            .iter_mut()
-            .find(|repo| repo.id == change.repo_id)
-        {
-            repo.head_sha = Some(change.after_sha.clone());
+            .iter()
+            .find(|r| r.id == change.repo_id)
+            .unwrap();
+        let path = repo_worktree_dir(active, repo).context("missing changed checkout")?;
+        let old_head = change
+            .before_sha
+            .clone()
+            .context("rewrite has no previous head")?;
+        let old_base = repo
+            .base_sha
+            .clone()
+            .or(merge_base(&path, &old_head, &change.after_sha)?)
+            .context("rewrite has no recorded or common base")?;
+        let new_base = if change.movement == Movement::Diverged {
+            observed_base(&path, repo, &old_base, &change.after_sha)?
+        } else {
+            old_base.clone()
+        };
+        // Ordinary divergence (amends, resets and unrelated replacement work)
+        // keeps the existing observation semantics. Only an advanced upstream
+        // merge base identifies a manual rebase that can recreate groups.
+        if change.movement == Movement::Diverged && new_base == old_base {
+            continue;
         }
+        rewrites.push(RepoRewrite {
+            repo_id: repo.id.clone(),
+            old_head,
+            new_head: change.after_sha.clone(),
+            old_base,
+            new_base,
+        });
     }
-
-    let now = now_iso();
-    active.bundle.nodes.push(BundleNode::git_observed(
-        node_id("git"),
-        now,
-        changes.clone(),
-    ));
-    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
-    active.bundle.updated_at = now_iso();
+    let first_new_node = active.bundle.nodes.len();
+    record_rewrite(active, &rewrites, RewriteKind::Observed, None)?;
+    let rewritten_changes: Vec<_> = active.bundle.nodes[first_new_node..]
+        .iter()
+        .filter(|node| node.node_type == "git.observed")
+        .flat_map(|node| node.repo_changes.iter().cloned())
+        .collect();
+    let ordinary: Vec<_> = changes
+        .iter()
+        .filter(|c| !rewrites.iter().any(|r| r.repo_id == c.repo_id))
+        .cloned()
+        .collect();
+    if !ordinary.is_empty() {
+        for change in &ordinary {
+            if let Some(repo) = active
+                .bundle
+                .repos
+                .iter_mut()
+                .find(|r| r.id == change.repo_id)
+            {
+                repo.head_sha = Some(change.after_sha.clone());
+            }
+        }
+        // Preserve ordinary observation additions/drops, but active groups
+        // cannot keep members made unreachable by an amend or replacement.
+        let mut unreachable = std::collections::BTreeSet::new();
+        for change in &ordinary {
+            if change.movement != Movement::Diverged {
+                continue;
+            }
+            let repo = active
+                .bundle
+                .repos
+                .iter()
+                .find(|r| r.id == change.repo_id)
+                .unwrap();
+            let path = repo_worktree_dir(active, repo).context("missing changed checkout")?;
+            for commit in active.bundle.commit_groups.iter().flat_map(|g| &g.commits) {
+                if commit.repo_id == change.repo_id
+                    && !is_ancestor(&path, &commit.sha, &change.after_sha)
+                {
+                    unreachable.insert((commit.repo_id.clone(), commit.sha.clone()));
+                }
+            }
+        }
+        let mut superseded_groups = Vec::new();
+        for group in &mut active.bundle.commit_groups {
+            if group
+                .commits
+                .iter()
+                .any(|c| unreachable.contains(&(c.repo_id.clone(), c.sha.clone())))
+            {
+                superseded_groups.push(group.clone());
+                group
+                    .commits
+                    .retain(|c| !unreachable.contains(&(c.repo_id.clone(), c.sha.clone())));
+            }
+        }
+        active
+            .bundle
+            .commit_groups
+            .retain(|g| !g.commits.is_empty());
+        let mut node = BundleNode::git_observed(node_id("git"), now_iso(), ordinary);
+        if !superseded_groups.is_empty() {
+            node.rewrite = Some(NodeRewrite {
+                kind: "observed".into(),
+                superseded_groups,
+            });
+        }
+        active.bundle.nodes.push(node);
+        active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
+        active.bundle.updated_at = now_iso();
+    }
+    let changes = changes
+        .into_iter()
+        .map(|change| {
+            rewritten_changes
+                .iter()
+                .find(|c| c.repo_id == change.repo_id)
+                .cloned()
+                .unwrap_or(change)
+        })
+        .collect();
 
     Ok(changes)
 }
@@ -170,6 +295,8 @@ fn build_repo_change(
             RepoChange {
                 repo_id,
                 movement: Movement::Advanced,
+                base_before_sha: None,
+                base_after_sha: None,
                 before_sha,
                 after_sha: after_sha.clone(),
                 commits: vec![after_sha],
@@ -185,6 +312,8 @@ fn build_repo_change(
             RepoChange {
                 repo_id,
                 movement: Movement::Advanced,
+                base_before_sha: None,
+                base_after_sha: None,
                 before_sha,
                 after_sha: after_sha.clone(),
                 commits: rev_list(worktree_dir, &before, &after_sha)
@@ -201,6 +330,8 @@ fn build_repo_change(
             RepoChange {
                 repo_id,
                 movement: Movement::Rewound,
+                base_before_sha: None,
+                base_after_sha: None,
                 before_sha,
                 after_sha: after_sha.clone(),
                 commits: Vec::new(),
@@ -227,6 +358,8 @@ fn build_repo_change(
         RepoChange {
             repo_id,
             movement: Movement::Diverged,
+            base_before_sha: None,
+            base_after_sha: None,
             before_sha,
             after_sha,
             commits,
@@ -248,4 +381,53 @@ fn described(worktree_dir: &Path, mut change: RepoChange) -> RepoChange {
         .collect::<Vec<_>>();
     change.commit_details = commit_details(worktree_dir, &shas);
     change
+}
+
+/// A detached, intermediate rebase HEAD must never become durable ledger state.
+fn rebase_in_progress(path: &Path) -> Result<bool> {
+    for name in ["rebase-merge", "rebase-apply"] {
+        let state = git_output(path, ["rev-parse", "--git-path", name])?;
+        let state = PathBuf::from(state.trim());
+        if (if state.is_absolute() {
+            state
+        } else {
+            path.join(state)
+        })
+        .exists()
+        {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn observed_base(path: &Path, repo: &RepoEntry, recorded: &str, head: &str) -> Result<String> {
+    let mut refs = vec![
+        format!("refs/remotes/origin/{}", repo.base_branch),
+        format!("refs/heads/{}", repo.base_branch),
+    ];
+    if crate::contribution::configured(repo) {
+        let destination = crate::contribution::role_ref(repo, &repo.base_branch, false)?;
+        // A cached destination is authoritative even when it has not advanced.
+        // Origin/local branches may contain feature work, not upstream work.
+        if crate::git::ref_commit_sha(path, &destination)?.is_some() {
+            refs = vec![destination];
+        }
+    }
+    let mut newest = recorded.to_owned();
+    for reference in refs {
+        let Some(target) = crate::git::ref_commit_sha(path, &reference)? else {
+            continue;
+        };
+        let Some(candidate) = merge_base(path, head, &target)? else {
+            continue;
+        };
+        if candidate != recorded
+            && is_ancestor(path, recorded, &candidate)
+            && is_ancestor(path, &newest, &candidate)
+        {
+            newest = candidate;
+        }
+    }
+    Ok(newest)
 }

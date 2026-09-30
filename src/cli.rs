@@ -608,6 +608,24 @@ pub enum Commands {
         #[arg(short = 'a', long = "all", alias = "stage")]
         all: bool,
     },
+    /// Squash bundle commits into one commit per repository and one ledger group.
+    Squash {
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+    /// Rebase bundle branches onto their refreshed configured bases.
+    Rebase {
+        #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
+        squash: bool,
+        #[arg(short, long, requires = "squash")]
+        message: Option<String>,
+        #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
+        offline: bool,
+        #[arg(long = "continue", conflicts_with = "abort")]
+        continue_rebase: bool,
+        #[arg(long)]
+        abort: bool,
+    },
     /// Show bundle ledger entries.
     Log {
         #[command(flatten)]
@@ -1608,6 +1626,15 @@ pub enum LandCommand {
     },
     /// Resume a failed or incomplete landing run.
     Resume {
+        /// Confirm a landing gate. Repeat for multiple gates.
+        #[arg(long, value_name = "STEP")]
+        acknowledge: Vec<String>,
+        /// Record a note with the acknowledgements.
+        #[arg(long, requires = "acknowledge")]
+        note: Option<String>,
+        /// Emit the run receipt as JSON, including paused state.
+        #[arg(long)]
+        json: bool,
         /// Resume even when required checks are missing, red, or stale.
         #[arg(long)]
         skip_checks: bool,

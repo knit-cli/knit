@@ -19,6 +19,8 @@ Knit stores local state under the directory where `knit init`, or `knit bundle` 
     <project-hash>.sqlite
   locks/
     <bundle>.lock
+  rebase/
+    <bundle-id>.json
   merge-runs/
     <run-id>.json
   merge-worktrees/
@@ -101,6 +103,8 @@ knit bundle print
 knit bundle validate
 knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
+knit squash [-m <message>]
+knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status [--json]
 knit workspace status
@@ -381,6 +385,91 @@ A plan's `workflow` is either `{ "step": "id" }`, `{ "sequence": [...] }` or `{ 
 
 Project `landing.deployments[]` supports `build`, `verify`, `label` and `recovery`; `landing.steps[]` adds explicit command operations. Target and lane overrides support the same recipes. `whenChanged` selects a recipe, while `needs` declares execution dependencies. A consumer repository can have a deployment triggered by another repository even when the consumer is absent from the bundle; it still needs a runner binding. Generation freezes the recipe and its source fingerprint. Target/lane plans have separate `<bundle>--<destination-hash>.land.json` files; the default destination retains `<bundle>.land.json`.
 
+Library release order and conditional gates use one immutable plan and run:
+
+```json
+"landing": {
+  "dependencies": [{
+    "library": "core-lib",
+    "consumers": "*",
+    "release": { "instructions": "Publish the library release." },
+    "bump": {
+      "instructions": "Update the dependency, commit and push.",
+      "paths": ["Cargo.toml", "Cargo.lock", "**/Cargo.toml"]
+    }
+  }]
+}
+```
+
+When the library changed and the plan merges its review, generation adds
+`merge-core-lib → release-core-lib → bump-<consumer> → merge-<consumer>`.
+`release` and `bump` are optional; omitting them keeps the corresponding ordering
+edge. `consumers` is `"*"` for every other repository this plan merges, including
+bundle-only repositories, or a nonempty list of project repository IDs. Dependency
+cycles are refused, including cycles implied by wildcards. Multiple libraries
+feeding one consumer share a bump gate after all relevant releases; their allowed
+paths are combined (a dependency without a path restriction leaves that combined
+gate unrestricted). Intermediate branch-only integration generates no release gates.
+
+Custom `landing.steps[]`, target steps and lane steps accept `whenChanged`.
+A nonempty list selects the step when any named repository changed; `["*"]`
+always selects it. Generation drops `needs`/`requires` that refer to configured
+steps absent from this bundle, including unselected merges and release gates.
+An unknown step ID remains an error. Names in project recipes must identify
+project members, even in inactive scopes. To name a bundle-only repository,
+register it with `knit project add <id> <path> --observe`. Wildcards include it
+without registration. `merge.repoOrder` leaves unlisted repositories after listed
+ones; strict `execution.repoOrder` requires every participating repository to be
+listed and registered.
+
+Generated release steps are `manual` with `acknowledge: "resume"`; generated bump
+steps are `await_update` with `repoId`, `instructions`, and optional `paths`.
+Both observe completion (`effect: "read_only"`) and pause instead of occupying a
+terminal. A plain manual step still uses its terminal prompt. Gates require a
+local runner, executor `0.6`, and the `landing-gates` capability. Artifact runners
+refuse gate plans before executing effects. Update gates require an atomic
+head-conditional forge merge: GitHub or GitLab API merge/squash. Other adapter
+routes (including GitLab CLI/rebase, Forgejo and Bitbucket) refuse the plan in
+preflight rather than relying on a racy head read.
+
+```sh
+knit land apply --plan reviewed.land.json
+knit land resume --acknowledge release-core-lib --note "Release published"
+# Commit and push consumer dependency updates, then:
+knit land resume
+```
+
+Apply/resume exit successfully when paused. The run has `status: "paused"` and
+`pause: {step, instructions, since}`; `--json` emits that receipt. Receipts persist,
+parallel work settles, and local locks and hosted ownership are released. Resume
+claims ownership again and continues the same immutable plan hash, retaining
+completed steps. A concurrent failure outranks a pause and follows normal recovery
+policy. A pause alone never triggers recovery or bundle finalization. If another
+landing supersedes this run, resume refuses; generate and review a fresh plan.
+
+`--acknowledge <step>` is repeatable and `--note` records up to 4096 bytes with the
+acknowledgements. An unchanged `await_update` head pauses unless explicitly
+acknowledged as already containing the bump. A changed head must append to the
+reviewed history, regardless of acknowledgement. Every path touched by every
+added commit must match an allowed glob, including reverted changes and both
+sides of renames. `*`/`?` match within a path component, `**` crosses components,
+and a pattern without `/` matches that filename anywhere. Verification requires
+complete, ungrafted history and UTF-8 paths; replacement refs cannot manufacture
+ancestry. A rejected update never becomes an accepted pin.
+
+The accepted SHA and commits are saved in the gate receipt and `git.observed`
+ledger. Later operations use the accepted SHA, named checks must be fresh for it,
+and the forge merge is conditional on that exact head. Resume permits head changes
+only while an update gate has not yet accepted its head; the accepted head is
+immutable thereafter. Local checkout commits must be contained in that accepted
+history, so unpushed work is never silently discarded. Base, branch, review
+identity and scope remain pinned. Resume and the final pre-merge read revalidate
+live review identity, including its source repository. Only an explicitly planned
+retarget is authorized; a confirmed retarget remains pinned on retry. New commands
+use the accepted head rather than another step's older source receipt; replaying
+a command keeps its own receipt, and explicit checkout/merge sources retain their
+precedence. Editing the plan is never a way to continue its existing run.
+
 Discover destinations without generating or executing a plan:
 
 ```sh
@@ -593,7 +682,7 @@ knit merge feature-x --into x-y-compat
 knit merge feature-y --into x-y-compat --manual
 ```
 
-When a bundle has grown messy or a previously used PR head branch is no longer a good publishing unit, start a fresh bundle and cherry-pick the commits worth keeping instead of continuing to pile onto the old one:
+To select only part of an existing bundle for a separate publishing unit, start a fresh bundle and cherry-pick the commits worth keeping:
 
 ```sh
 knit bundle "feature x clean follow-up" --repo backend
@@ -824,11 +913,23 @@ unconditional `knit push --force` of cross-repository contributions fail explici
 Same-repository artifacts and explicit same-repository fields retain ordinary
 forge behavior.
 
-After rewriting contribution commits, use `knit push --force-with-lease`. The Git
-lease checks the fork's feature branch against its last pushed or fetched state,
-including when `origin` fetches upstream and pushes to the fork. A concurrent
-fork update refuses the push. A successful push records the contribution identity
-and any commits authored or rewritten outside Knit, then carries the same lease mode into configured hosted bundle syncs.
+After rewriting commits, use `knit push --force-with-lease`. Knit reads the
+feature branch's current tip from the push URL and always sends an explicit Git
+lease, including when `origin` fetches upstream and pushes to a fork or has no
+feature-branch tracking ref. Git's `pushInsteadOf` URL rewrites are honored.
+It first compares that tip with its recorded push receipt (or native tracking
+ref for a non-split remote). Receipts are bound to Git's resolved destination;
+portable HTTPS/SSH identities alone never authorize borrowing a fetch receipt.
+Older unbound role receipts require the bundle/reflog check below. Without a
+matching receipt, Knit accepts the tip only if this bundle's ledger recorded it
+or this checkout's feature-branch reflog contains it, and prints a note. Otherwise it
+refuses before pushing: fetch the branch from the push URL, inspect it, and
+integrate the unexpected commits before forcing. Upstream tracking refs never
+supply a fork lease. An absent remote branch uses a must-not-exist lease, and a
+remote change after inspection is rejected by Git. A successful push refreshes
+the receipt, records the contribution identity and any commits authored or
+rewritten outside Knit, then carries the same lease mode into configured hosted
+bundle syncs.
 
 `knit sync push --force-with-lease` publishes a rewritten bundle ledger using the
 artifact hash recorded by this workspace's last successful push or pull to that
@@ -870,6 +971,48 @@ self-hosted base from the remote or defaults artifact operations to
 `https://codeberg.org/api/v1`.
 
 When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. `knit push --no-history` skips only the history upload while still pushing branches and the bundle artifact. History uploads print the pending event count before sending; the final count includes only events sent by this invocation. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
+
+### Rewriting a bundle
+
+Run rewrites from the bundle worktree, with clean tracked files and each repo on
+its recorded feature branch:
+
+```sh
+knit squash -m "Add widget support"
+knit rebase
+knit rebase --squash -m "Add widget support"
+```
+
+`knit squash` combines the bundle's work into one commit per repository and one
+commit group. Without `-m`, it uses the only existing group's message or the
+bundle title. `knit rebase` fetches each repository's base and replays the bundle
+commits on it, preserving group messages where possible. Contribution repos use
+the upstream destination base. `--offline` uses cached base refs, falling back to
+the local base branch. `--squash` combines the work before rebasing.
+
+On a conflict, resolve files in the printed checkout and stage the resolution:
+
+```sh
+git add <resolved-files>
+knit rebase --continue
+# Or restore every participating repo to its original head:
+knit rebase --abort
+```
+
+Knit records the completed rewrite once all repositories finish. Pending state
+lives in `.knit/rebase/<bundle-id>.json`; abort leaves the ledger unchanged.
+
+Manual rebases are also supported: run `git rebase origin/main` in the feature
+checkout, then `knit sync`. Reconciliation recognizes the newer upstream base,
+updates `baseSha`, and maps bundle groups by patch ID without treating upstream
+commits as bundle work. A soft reset followed by `knit commit` retires the dropped
+groups. Historical nodes remain available with their superseded commit records.
+
+Publish rewritten branches with the lease-protected push:
+
+```sh
+knit push --force-with-lease
+```
 
 ### Syncing artifacts with sync remotes
 

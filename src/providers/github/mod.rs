@@ -16,7 +16,7 @@ use transport::use_native_github_api;
 
 pub(super) const CLI: &str = "gh";
 const PR_JSON_FIELDS: &str =
-    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,mergeable,mergeStateStatus,reviewDecision,author";
+    "number,url,state,title,baseRefName,headRefName,body,isDraft,headRefOid,headRepository,mergeable,mergeStateStatus,reviewDecision,author";
 
 /// `gh --json author` reports only the login and name. The avatar and the
 /// profile page follow from the PR's host.
@@ -422,11 +422,12 @@ mod tests {
 
     #[test]
     fn parses_pr_view_json() {
-        let json = r#"{"number":7,"url":"https://github.com/acme/backend/pull/7","state":"OPEN","title":"t","baseRefName":"main","headRefName":"knit/x","isDraft":false,"headRefOid":"abc"}"#;
+        let json = r#"{"number":7,"url":"https://github.com/acme/backend/pull/7","state":"OPEN","title":"t","baseRefName":"main","headRefName":"knit/x","isDraft":false,"headRefOid":"abc","headRepository":{"nameWithOwner":"example/source"}}"#;
         let pr: PullRequest = serde_json::from_str(json).unwrap();
         assert_eq!(pr.number, 7);
         assert_eq!(pr.base_ref_name.as_deref(), Some("main"));
         assert_eq!(pr.head_ref_oid.as_deref(), Some("abc"));
+        assert_eq!(pr.source_repository.as_deref(), Some("example/source"));
     }
 
     #[test]

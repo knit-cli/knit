@@ -997,3 +997,66 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
         fs::remove_dir_all(dir).unwrap();
     }
 }
+
+#[test]
+fn paused_gate_uploads_quiescent_receipt_releases_and_reclaims_hosted_ownership() {
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    let root = unique_temp_dir();
+    setup(&root, &server.url);
+    let mut bundle = serde_json::to_value(knit::model::ChangeGroup::new(
+        "demo".into(),
+        "Synthetic gate".into(),
+        "2026-01-01T00:00:00Z".into(),
+    ))
+    .unwrap();
+    bundle["projectId"] = json!("demo");
+    write(&root.join(".knit/bundles/demo.bundle.json"), &bundle);
+    let config_path = root.join(".knit/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["activeBundle"] = json!("demo");
+    write(&config_path, &config);
+    let project_path = root.join(".knit/projects/demo.project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["landing"] = json!({"merge":{"enabled":false},"steps":[{"id":"release","type":"manual","acknowledge":"resume","instructions":"Publish the release."}]});
+    write(&project_path, &project);
+    {
+        let mut state = server.state.lock().unwrap();
+        state["execution"] = json!(true);
+        state["uploads"] = json!([]);
+        state["landing"] = project["landing"].clone();
+    }
+    knit(&root, ["land", "plan"]);
+    knit(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+    knit(&root, ["land", "apply", "--no-remote"]);
+    let initial = {
+        let state = server.state.lock().unwrap();
+        assert!(state["ownership"].is_null());
+        assert_eq!(state["releases"], 1);
+        let run = state["runs"][0]["run"].clone();
+        assert_eq!(run["status"], "paused");
+        assert!(run.get("finalized").is_none());
+        run
+    };
+    knit(
+        &root,
+        [
+            "land",
+            "resume",
+            "--acknowledge",
+            "release",
+            "--no-remote",
+            "--keep-worktrees",
+        ],
+    );
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state["ownership"].is_null());
+        assert_eq!(state["releases"], 2);
+        let run = &state["runs"][0]["run"];
+        assert_eq!(run["status"], "succeeded");
+        assert_eq!(run["id"], initial["id"]);
+        assert_eq!(run["planHash"], initial["planHash"]);
+    }
+    fs::remove_dir_all(root).unwrap();
+}

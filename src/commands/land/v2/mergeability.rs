@@ -112,7 +112,10 @@ pub(crate) fn effective_required_checks_bundle(plan: &Value, bundle: &Value) -> 
         .as_object()
         .cloned()
         .unwrap_or_default();
-    for repo in super::branch_checkout::live_sources(plan) {
+    for repo in super::branch_checkout::live_sources(plan)
+        .into_iter()
+        .chain(super::gates::gated_repos(plan))
+    {
         sources.insert(repo.clone(), json!({"sha":plan["bundleHeads"][&repo]}));
     }
     for (repo, pin) in &sources {

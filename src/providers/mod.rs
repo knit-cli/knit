@@ -27,6 +27,13 @@ pub const MERGE_REQUEST_KIND: &str = "merge_request";
 #[derive(Clone, Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PullRequest {
+    /// Host-reported source repository identity (not the review destination).
+    #[serde(
+        default,
+        rename = "headRepository",
+        deserialize_with = "review_source_repository"
+    )]
+    pub source_repository: Option<String>,
     pub number: u64,
     pub url: String,
     #[serde(default)]
@@ -56,6 +63,13 @@ pub struct PullRequest {
     /// own user object onto this.
     #[serde(default)]
     pub author: Option<ForgeAuthor>,
+}
+
+fn review_source_repository<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<Option<String>, D::Error> {
+    let value = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(value.and_then(|v| v["nameWithOwner"].as_str().map(str::to_owned)))
 }
 
 impl PullRequest {

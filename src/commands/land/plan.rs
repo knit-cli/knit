@@ -264,14 +264,7 @@ pub(super) fn build_plan_with_project(
         &mut deployments_skipped,
     )?;
 
-    if steps.is_empty()
-        && !landing.is_some_and(|l| {
-            l.extensions
-                .get("steps")
-                .and_then(serde_json::Value::as_array)
-                .is_some_and(|s| !s.is_empty())
-        })
-    {
+    if steps.is_empty() && landing.is_none_or(|l| l.steps.is_empty()) {
         bail!(
             "No PR publications or project landing deployments are available for this bundle. Run `knit publish create` first or configure project landing deployments."
         );

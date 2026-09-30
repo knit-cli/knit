@@ -101,7 +101,7 @@ pub(crate) fn create_tag_on_active(
 
     if let Some(node) = find_tag_node(&active.bundle, name) {
         if note.is_some() || !selectors.is_empty() {
-            println!(
+            crate::human!(
                 "{}",
                 out::muted(format!(
                     "tag `{}` is already recorded on this bundle — resuming; -m/--repo are ignored.",
@@ -133,7 +133,7 @@ pub(crate) fn create_tag_set_on(
 ) -> Result<()> {
     let partial = indexes.len() < active.bundle.repos.len();
     if partial {
-        println!(
+        crate::human!(
             "{}",
             out::muted("note: tagging a subset — a partial set weakens the known-good claim.")
         );
@@ -173,7 +173,7 @@ pub(crate) fn create_tag_set_on(
     active.bundle.updated_at = now_iso();
     save_active_bundle(active)?;
 
-    println!(
+    crate::human!(
         "{} {} {}",
         out::heading("Tag:"),
         out::branch(local_tag_name(name)),
@@ -181,7 +181,7 @@ pub(crate) fn create_tag_set_on(
     );
     let movement = if no_git { "recorded" } else { "tagged" };
     for (repo_id, sha) in &pins {
-        println!(
+        crate::human!(
             "  {} {} {}",
             out::repo(repo_id),
             out::movement(movement),
@@ -259,7 +259,7 @@ fn resume_tag_set(
                     ],
                 )
                 .with_context(|| format!("{}: failed to recreate tag", repo.id))?;
-                println!(
+                crate::human!(
                     "{}: {} {}",
                     out::repo(&repo.id),
                     out::movement("recreated"),
@@ -296,7 +296,7 @@ fn resume_tag_set(
                 )
                 .with_context(|| format!("{}: failed to push tag", repo.id))?;
                 pushed_any = true;
-                println!(
+                crate::human!(
                     "{}: {} {}",
                     out::repo(&repo.id),
                     out::movement("pushed"),
@@ -312,7 +312,7 @@ fn resume_tag_set(
                 short_sha(&pin.sha)
             ),
             Some(_) => {
-                println!("{}: {}", out::repo(&repo.id), out::muted("up to date"));
+                crate::human!("{}: {}", out::repo(&repo.id), out::muted("up to date"));
             }
         }
     }
@@ -351,12 +351,12 @@ pub fn list_tags() -> Result<()> {
     }
 
     if tags.is_empty() {
-        println!("{}", out::muted("No knit/* tags found."));
+        crate::human!("{}", out::muted("No knit/* tags found."));
         return Ok(());
     }
 
     let width = tags.keys().map(|tag| tag.len()).max().unwrap_or(3).max(3);
-    println!(
+    crate::human!(
         "{}  {}",
         out::header_field("tag", width),
         out::heading("repos")
@@ -369,9 +369,9 @@ pub fn list_tags() -> Result<()> {
             .collect();
         let coverage = format!("{}/{}", repos.len(), targets.len());
         if missing.is_empty() {
-            println!("{}  {}", out::repo_field(tag, width), coverage);
+            crate::human!("{}  {}", out::repo_field(tag, width), coverage);
         } else {
-            println!(
+            crate::human!(
                 "{}  {}   {}",
                 out::repo_field(tag, width),
                 coverage,
@@ -389,14 +389,14 @@ pub fn show_tag(name: &str) -> Result<()> {
     let mut found_git = false;
     let mut subject: Option<String> = None;
 
-    println!(
+    crate::human!(
         "{} {}",
         out::heading("Tag:"),
         out::branch(local_tag_name(name))
     );
     for (repo_id, path) in &targets {
         if !path.exists() {
-            println!("  {} {}", out::repo(repo_id), out::muted("(missing path)"));
+            crate::human!("  {} {}", out::repo(repo_id), out::muted("(missing path)"));
             continue;
         }
         let local = ref_commit_sha(path, &tag_ref(name))?;
@@ -426,7 +426,7 @@ pub fn show_tag(name: &str) -> Result<()> {
                 )?;
             }
         }
-        println!(
+        crate::human!(
             "  {} local {} remote {}",
             out::repo(repo_id),
             out::sha(
@@ -438,15 +438,15 @@ pub fn show_tag(name: &str) -> Result<()> {
         );
     }
     if let Some(subject) = subject {
-        println!("{} {}", out::heading("Subject:"), subject);
+        crate::human!("{} {}", out::heading("Subject:"), subject);
     }
 
     let provenance = scan_tag_provenance(&root, name)?;
     for (bundle_id, node_ref, message) in &provenance {
-        println!("{} {}", out::heading("Bundle:"), out::repo(bundle_id));
-        println!("{} {}", out::heading("Node:"), out::node(node_ref));
+        crate::human!("{} {}", out::heading("Bundle:"), out::repo(bundle_id));
+        crate::human!("{} {}", out::heading("Node:"), out::node(node_ref));
         for line in message.lines() {
-            println!("  {}", out::muted(line));
+            crate::human!("  {}", out::muted(line));
         }
     }
 
@@ -821,7 +821,7 @@ fn print_honesty_warnings(
 ) {
     for (check_name, node) in super::check::latest_checks(&active.bundle) {
         if !super::check::check_passed(node) {
-            println!(
+            crate::human!(
                 "{} check {} is red ({})",
                 out::warn("warning:"),
                 out::repo(check_name),
@@ -832,7 +832,7 @@ fn print_honesty_warnings(
 
     for (repo_id, verdict) in evidence {
         if verdict == "failed" || verdict == "pending" {
-            println!(
+            crate::human!(
                 "{} {}: configured-base CI is {} for the tagged commit",
                 out::warn("warning:"),
                 out::repo(repo_id),
@@ -858,7 +858,7 @@ fn print_honesty_warnings(
             continue;
         }
         if !is_ancestor(path, &head, pin) {
-            println!(
+            crate::human!(
                 "{} {}: landed feature head {} is not an ancestor of tagged {} \
                  (expected for squash or rebase merges)",
                 out::warn("warning:"),
@@ -930,14 +930,14 @@ fn push_tags(targets: &[TagTarget], name: &str) -> Result<()> {
     let mut failures = Vec::new();
     for (repo_id, result) in results {
         match result {
-            Ok(()) => println!(
+            Ok(()) => crate::human!(
                 "{}: {} {}",
                 out::repo(&repo_id),
                 out::movement("pushed"),
                 out::branch(local_tag_name(name))
             ),
             Err(error) => {
-                println!("{}: {}", out::repo(&repo_id), out::danger("push failed"));
+                crate::human!("{}: {}", out::repo(&repo_id), out::danger("push failed"));
                 failures.push(format!("{repo_id}: {error:#}"));
             }
         }

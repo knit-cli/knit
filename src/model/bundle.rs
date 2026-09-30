@@ -556,6 +556,10 @@ pub struct RepoChange {
     pub repo_id: String,
     #[serde(default)]
     pub movement: Movement,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_before_sha: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub base_after_sha: Option<String>,
     pub before_sha: Option<String>,
     pub after_sha: String,
     pub commits: Vec<String>,
@@ -719,9 +723,19 @@ impl ChangeGroup {
     }
 }
 
+/// Provenance for a rewrite; retired groups remain available to offline readers.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NodeRewrite {
+    pub kind: String,
+    pub superseded_groups: Vec<CommitGroup>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BundleNode {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rewrite: Option<NodeRewrite>,
     pub id: String,
     #[serde(rename = "type")]
     pub node_type: String,
@@ -837,6 +851,7 @@ impl BundleNode {
             actor: ambient_actor(),
             origin: Some(ambient_origin()),
             handoff: None,
+            rewrite: None,
             title: None,
             repo_ids: None,
             commit_group_id: None,

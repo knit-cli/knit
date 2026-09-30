@@ -166,7 +166,10 @@ pub(super) fn validate(plan: &Value, steps: &[Value]) -> Result<()> {
             continue;
         }
         if plan["schemaVersion"] != "0.2"
-            || plan["requiredExecutorVersion"] != "0.5"
+            || !matches!(
+                plan["requiredExecutorVersion"].as_str(),
+                Some("0.5" | "0.6")
+            )
             || !super::graph::strings(&plan["requiredCapabilities"]).contains(&CAPABILITY.into())
         {
             bail!("branch checkout requires schema 0.2, requiredExecutorVersion 0.5 and branch-checkout capability");

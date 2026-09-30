@@ -160,8 +160,56 @@ pub fn validate_bundle(bundle: &ChangeGroup) -> Result<()> {
     Ok(())
 }
 
-/// Resolve a configured Git remote, including its pushurl, without rewriting it.
+/// Resolve a configured forge remote, retaining strict contribution validation.
 pub fn remote_url(cwd: &Path, name: &str, push: bool) -> Result<String> {
+    let url = configured_remote_url(cwd, name, push)?;
+    crate::auth::remote_target(&url)?;
+    Ok(url)
+}
+
+/// Resolve a configured Git transport without imposing forge identity rules.
+/// Local paths, file URLs and custom transports remain Git's responsibility.
+pub(crate) fn git_remote_url(cwd: &Path, name: &str, push: bool) -> Result<String> {
+    let raw = configured_remote_url(cwd, name, push)?;
+    if !push {
+        return Ok(raw);
+    }
+    // Both probes are local config expansion, never network requests. Keep the
+    // raw identity for ordinary insteadOf transport aliases, but detect when
+    // pushInsteadOf sends pushes somewhere a query of that raw URL would not go.
+    let effective = effective_remote_url(cwd, name, true)?;
+    let ordinary = crate::git::git_output(cwd, ["ls-remote", "--get-url", &raw])?;
+    Ok(push_transport_url(&raw, &effective, &ordinary))
+}
+
+fn effective_remote_url(cwd: &Path, name: &str, push: bool) -> Result<String> {
+    let mut args = vec!["remote", "get-url", "--all"];
+    if push {
+        args.push("--push");
+    }
+    args.push(name);
+    configured_git_url(&crate::git::git_output(cwd, args)?)
+}
+
+fn effective_url(cwd: &Path, url: &str) -> Result<String> {
+    crate::git::git_output(cwd, ["ls-remote", "--get-url", url])
+}
+
+/// Portable forge identities cannot prove that Git transports reach the same
+/// destination. Keep lease observations keyed by the exact expanded URL.
+fn destination_ref(destination: &str, branch: &str) -> String {
+    legacy_tracking_ref(&format!("destination\0{destination}"), branch)
+}
+
+fn push_transport_url(raw: &str, effective: &str, ordinary: &str) -> String {
+    if effective == ordinary {
+        raw.to_owned()
+    } else {
+        effective.to_owned()
+    }
+}
+
+fn configured_remote_url(cwd: &Path, name: &str, push: bool) -> Result<String> {
     let key = format!("remote.{name}.{}", if push { "pushurl" } else { "url" });
     let mut urls = crate::git::git_output_optional(cwd, ["config", "--get-all", &key])?;
     if push && urls.is_none() {
@@ -170,12 +218,14 @@ pub fn remote_url(cwd: &Path, name: &str, push: bool) -> Result<String> {
             ["config", "--get-all", &format!("remote.{name}.url")],
         )?;
     }
-    let urls = urls.context("Git remote has no configured URL")?;
+    configured_git_url(&urls.context("Git remote has no configured URL")?)
+}
+
+fn configured_git_url(urls: &str) -> Result<String> {
     let urls: Vec<_> = urls.lines().filter(|s| !s.is_empty()).collect();
     if urls.len() != 1 {
-        bail!("contribution requires exactly one Git remote URL");
+        bail!("push requires exactly one Git remote URL");
     }
-    crate::auth::remote_target(urls[0])?;
     Ok(urls[0].into())
 }
 
@@ -248,14 +298,19 @@ pub(crate) fn record_source_observation(
     branch: &str,
     sha: &str,
 ) -> Result<()> {
+    let destination = effective_url(cwd, url)?;
     let reference = tracking_ref(url, branch);
     crate::git::git_output(cwd, ["update-ref", &reference, sha])?;
+    crate::git::git_output(
+        cwd,
+        ["update-ref", &destination_ref(&destination, branch), sha],
+    )?;
     let names = crate::git::git_output(cwd, ["remote"])?;
     for name in names.lines() {
-        let Ok(fetch_url) = remote_url(cwd, name, false) else {
+        let Ok(fetch_url) = effective_remote_url(cwd, name, false) else {
             continue;
         };
-        if same_repository(&fetch_url, url)? {
+        if fetch_url == destination {
             if let Some(native_ref) = native_tracking_ref(cwd, name, branch)? {
                 crate::git::git_output(cwd, ["update-ref", &native_ref, sha])?;
             }
@@ -275,8 +330,9 @@ pub fn role_ref(repo: &RepoEntry, branch: &str, feature: bool) -> Result<String>
 }
 
 fn tracking_ref(url: &str, branch: &str) -> String {
-    // Match same_repository: transport spelling and case do not identify a
-    // different repository. Keep local/non-forge URLs compatible with old refs.
+    // Portable identity for role readers, not proof of a Git destination:
+    // insteadOf can route these aliases to distinct repositories. Lease
+    // authorization uses destination_ref rather than this compatibility ref.
     let identity = crate::auth::remote_target(url)
         .map(|(host, path)| {
             format!(
@@ -312,40 +368,38 @@ fn native_tracking_ref(cwd: &Path, remote: &str, branch: &str) -> Result<Option<
 
 pub(crate) struct PushTracking {
     pub reference: String,
+    // Compatibility for role-ref readers, never an independent lease receipt.
+    pub role_reference: String,
     pub expected: Option<String>,
-    pub explicit_lease: bool,
 }
 
-/// Read the fork observation without fetching. Dedicated source remotes use
-/// tracking refs shared by native Git and Knit; split remotes use the role ref.
+/// Read push receipt candidates without fetching. Native tracking refs are
+/// candidates only when fetch and push address the same repository.
 pub(crate) fn push_tracking(
     cwd: &Path,
     remote: &str,
     branch: &str,
     recorded_source: Option<&str>,
 ) -> Result<Option<PushTracking>> {
-    let Ok(push_url) = remote_url(cwd, remote, true) else {
+    let Ok(push_url) = git_remote_url(cwd, remote, true) else {
         return Ok(None);
     };
-    let fetch_url = remote_url(cwd, remote, false)?;
-    let split = !same_repository(&push_url, &fetch_url)?;
-    let reference = tracking_ref(&push_url, branch);
-    let mut candidates = Vec::new();
-    if !split {
-        if let Some(native_ref) = native_tracking_ref(cwd, remote, branch)? {
-            candidates.push(native_ref);
-        }
-    }
-    candidates.push(reference.clone());
-    // Older Knit versions keyed observations by raw URL. Only consider legacy
-    // keys for this source, never the target repository's observation.
+    let push_destination = effective_remote_url(cwd, remote, true)?;
+    let fetch_destination = effective_remote_url(cwd, remote, false)?;
     if let Some(source) = recorded_source {
         if !same_repository(source, &push_url)? {
             bail!("push remote contradicts recorded sourceRemote");
         }
-        candidates.push(legacy_tracking_ref(source, branch));
     }
-    candidates.push(legacy_tracking_ref(&push_url, branch));
+    let reference = destination_ref(&push_destination, branch);
+    let mut candidates = Vec::new();
+    if push_destination == fetch_destination {
+        candidates.extend(native_tracking_ref(cwd, remote, branch)?);
+    }
+    candidates.push(reference.clone());
+    // Portable role refs and legacy URL keys have no destination provenance:
+    // an upstream alias may have populated the same normalized role ref.
+    // Older observations can still be accepted through the bundle/reflog check.
     let mut expected = None;
     for candidate in candidates {
         expected = crate::git::ref_commit_sha(cwd, &candidate)?;
@@ -355,8 +409,8 @@ pub(crate) fn push_tracking(
     }
     Ok(Some(PushTracking {
         reference,
+        role_reference: tracking_ref(&push_url, branch),
         expected,
-        explicit_lease: split || recorded_source.is_some(),
     }))
 }
 
@@ -433,4 +487,64 @@ pub fn discover(cwd: &Path, repo: &mut RepoEntry) -> Result<bool> {
         }
     }
     Ok(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{configured_git_url, destination_ref, push_transport_url, tracking_ref};
+
+    #[test]
+    fn destination_receipts_do_not_normalize_forge_aliases() {
+        let https = "https://example.test/team/repo.git";
+        let ssh = "git@example.test:team/repo.git";
+        assert_eq!(tracking_ref(https, "feature"), tracking_ref(ssh, "feature"));
+        assert_ne!(
+            destination_ref(https, "feature"),
+            destination_ref(ssh, "feature")
+        );
+        assert_ne!(
+            destination_ref(https, "feature"),
+            tracking_ref(https, "feature")
+        );
+        assert_ne!(
+            destination_ref("/tmp/fork.git", "feature"),
+            destination_ref("/tmp/upstream.git", "feature")
+        );
+    }
+
+    #[test]
+    fn ordinary_rewrite_preserves_raw_identity() {
+        let raw = "https://example.test/team/repo.git";
+        assert_eq!(
+            push_transport_url(raw, "/tmp/repo.git", "/tmp/repo.git"),
+            raw
+        );
+    }
+
+    #[test]
+    fn push_only_rewrite_overrides_an_ordinary_fetch_transport() {
+        assert_eq!(
+            push_transport_url(
+                "https://example.test/team/repo.git",
+                "/tmp/fork.git",
+                "/tmp/upstream.git"
+            ),
+            "/tmp/fork.git"
+        );
+    }
+
+    #[test]
+    fn configured_git_url_accepts_non_forge_transports_and_requires_one_destination() {
+        for url in [
+            "/tmp/example.git",
+            "../example.git",
+            "file:///tmp/example.git",
+            "ssh://git@example.test:2222/team/repo.git",
+            "custom::example-repository",
+        ] {
+            assert_eq!(configured_git_url(url).unwrap(), url);
+        }
+        assert!(configured_git_url("").is_err());
+        assert!(configured_git_url("/tmp/one.git\n/tmp/two.git").is_err());
+    }
 }

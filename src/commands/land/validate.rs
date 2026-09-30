@@ -122,6 +122,7 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
                 required_repo_id(step)?;
             }
             LandStepKind::Manual => bail!("manual steps require schemaVersion 0.2"),
+            LandStepKind::AwaitUpdate => bail!("await_update steps require schemaVersion 0.2"),
             LandStepKind::Run => {
                 if step.command.is_empty() {
                     bail!("run step `{}` must provide command", step.id);
@@ -430,7 +431,7 @@ pub(super) fn preflight_required_checks(
         return Ok(());
     }
     if skip {
-        println!(
+        crate::human!(
             "{}",
             out::warn(format!(
                 "Skipping required checks ({}) because --skip-checks was passed.",

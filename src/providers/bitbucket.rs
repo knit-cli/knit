@@ -334,6 +334,7 @@ impl BitbucketPullRequest {
             .iter()
             .any(|participant| participant.approved);
         PullRequest {
+            source_repository: None,
             number: self.id,
             url: self.links.html.href,
             state: Some(normalize_state(self.state.as_deref())),

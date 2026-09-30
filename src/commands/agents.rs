@@ -121,6 +121,12 @@ knit related --repo <repo-id> path/inside/repo --pull
 ```
 
 Knit uses Git history to find commits for the path, then expands matching Knit history into the related bundle, commit group, and companion repo commits. Inspect the printed `git show --stat` commands before changing risky areas.
+
+## Useful Commands
+
+- `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
+- `knit rebase [--squash] [--offline]` replays work onto upstream bases; use `--continue` after resolving conflicts or `--abort` to restore original heads.
+
 {runtime_section}{checks_section}For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
 
 Tracked checkouts for this bundle:
@@ -563,6 +569,8 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
     format!(
         r#"
 This project defines a default landing template. `knit land` expands it into `.knit/land-plans/<bundle>.land.json` for the default destination; target/lane plans use separate destination files. New canonical plans use schema `0.2` and execute the same saved document locally and hosted. Edit visually or as raw JSON in the hosted plan editor, or edit local JSON; validate with `knit land validate --plan <path> --json` before `knit land apply --plan <path>`.
+
+Library release order can be declared with `landing.dependencies`: `library`, `consumers` (`"*"` includes bundle-only repositories), optional `release.instructions`, and optional `bump.instructions`/`bump.paths`. When the library review lands, generated release and update gates pause one immutable run. Continue with `knit land resume --acknowledge release-<library> --note "Released"`, then push consumer dependency updates and resume again. Update gates accept only append-only, path-constrained commits and pin subsequent merges to the accepted SHA with fresh checks. Pauses persist receipts and release ownership without finalizing the bundle. Gates require local executor 0.6 and `landing-gates`; artifact runners refuse them. Custom `landing.steps[]` also accepts `whenChanged`; omitted configured prerequisites are dropped, unknown IDs fail. Named repositories must be project members (`knit project add <id> <path> --observe`); wildcard rules include bundle-only repositories.
 
 Project/repository recipes in `landing.deployments[]` support build, deploy, verify and recovery commands; `landing.steps[]` adds explicit operations. Edit recipes in the hosted recipe editor or local project JSON, preserving unrelated fields. `knit sync push --plans` and `knit sync pull --plans` exchange plan revisions, run receipts and associated recipes. Source or recipe changes require a new reviewed plan revision.
 

@@ -636,3 +636,78 @@ fn artifact_intermediate_merge_uses_exact_source_sha_not_target_branch_collision
     );
     assert_eq!(payload["base"], "staging");
 }
+
+#[test]
+fn local_update_gate_accepts_new_fork_head_without_relaxing_source_identity() {
+    let f = Fixture::new();
+    let project = read(&f.project);
+    write(
+        &f.root.join(format!(
+            ".knit/projects/{}.project.json",
+            project["id"].as_str().unwrap()
+        )),
+        &project,
+    );
+    let mut bundle = read(&f.bundle);
+    bundle["projectId"] = project["id"].clone();
+    write(&f.bundle, &bundle);
+    f.ok(&["land", "plan", "--out", "gate.json"]);
+    let mut plan = read(&f.root.join("gate.json"));
+    plan["requiredExecutorVersion"] = json!("0.6");
+    plan["requiredCapabilities"]
+        .as_array_mut()
+        .unwrap()
+        .push(json!("landing-gates"));
+    let steps = plan["steps"].as_array_mut().unwrap();
+    steps.iter_mut().find(|s| s["type"] == "merge_pr").unwrap()["needs"] = json!(["bump"]);
+    steps.push(json!({"id":"bump","type":"await_update","repoId":"service","instructions":"Push dependency update","paths":["Cargo.toml"],"effect":"read_only"}));
+    write(&f.root.join("gate.json"), &plan);
+    let paused: Value = serde_json::from_str(&f.ok(&[
+        "land",
+        "apply",
+        "--plan",
+        "gate.json",
+        "--no-remote",
+        "--keep-worktrees",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(paused["status"], "paused");
+    fs::write(
+        f.checkout.join("Cargo.toml"),
+        "# synthetic dependency bump\n",
+    )
+    .unwrap();
+    git(&f.checkout, ["add", "Cargo.toml"]);
+    git(&f.checkout, ["commit", "-m", "Dependency bump"]);
+    git(&f.checkout, ["push", "origin", "feature"]);
+    let accepted = git(&f.checkout, ["rev-parse", "HEAD"]).trim().to_owned();
+    *f.wrong_head.lock().unwrap() = true;
+    let refused = f.cmd(&["land", "resume", "--no-remote"]);
+    assert!(!refused.status.success());
+    assert!(String::from_utf8_lossy(&refused.stderr).contains("contradicts"));
+    assert!(!fs::read_to_string(f.root.join("api.log"))
+        .unwrap()
+        .contains("PUT "));
+    *f.wrong_head.lock().unwrap() = false;
+    let run: Value = serde_json::from_str(&f.ok(&[
+        "land",
+        "resume",
+        "--no-remote",
+        "--keep-worktrees",
+        "--json",
+    ]))
+    .unwrap();
+    assert_eq!(run["status"], "succeeded");
+    let gate = run["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|s| s["id"] == "bump")
+        .unwrap();
+    assert_eq!(gate["output"]["revision"], accepted);
+    assert_eq!(gate["output"]["sourceRepository"], "contributor/service");
+    let log = fs::read_to_string(f.root.join("api.log")).unwrap();
+    let merge = log.lines().find(|line| line.starts_with("PUT ")).unwrap();
+    assert!(merge.contains(&format!("\"sha\":\"{accepted}\"")));
+}

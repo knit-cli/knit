@@ -1012,7 +1012,7 @@ fn sync_active_bundle_to_remote_names(
             continue;
         }
         if multiple {
-            println!("{} {}", out::heading("Remote:"), out::repo(remote_name));
+            crate::human!("{} {}", out::heading("Remote:"), out::repo(remote_name));
         }
         if let Err(error) = push_active_bundle_to_remote(remote_name, None, active, PushForce::No) {
             failures.push(format!("{remote_name}: {error:#}"));
@@ -1057,7 +1057,7 @@ pub(super) fn publishable_project(
         .and_then(|export| export.knit_project)
         .filter(|membership| !membership.repos.is_empty());
     let Some(membership) = membership else {
-        println!(
+        crate::human!(
             "{} this workspace is scoped to view {} and the remote's project membership could not be read; the local repo list is partial, so the project shape was not pushed.",
             out::warn("project shape not pushed:"),
             out::repo(&scope_view)

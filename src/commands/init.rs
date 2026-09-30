@@ -809,6 +809,8 @@ knit land recover --run execution.run.json --apply
 
 `--plans` syncs plan revisions, run receipts and associated project landing recipes; routine sync includes them too. Pull materializes `.knit/land-plans/` and `.knit/land-runs/`. Preserve both sides of a sync conflict, adopt the remote candidate as the shared base, then reapply local edits. Runs pin the complete immutable plan hash: saving a new revision never changes an existing run. Resume uses the original plan and completed receipts; recovery previews without `--apply` and blocks further forward resume once started. A superseded run cannot restore over a newer execution generation.
 
+Library release order can be declared with `landing.dependencies`: `library`, `consumers` (`"*"` includes bundle-only repositories), optional `release.instructions`, and optional `bump.instructions`/`bump.paths`. When the library review lands, generated release and update gates pause one immutable run. Continue with `knit land resume --acknowledge release-<library> --note "Released"`, then push consumer dependency updates and resume again. Update gates accept only append-only, path-constrained commits and pin subsequent merges to the accepted SHA with fresh checks. Pauses persist receipts and release ownership without finalizing the bundle. Gates require local executor 0.6 and `landing-gates`; artifact runners refuse them. Custom `landing.steps[]` also accepts `whenChanged`; omitted configured prerequisites are dropped, unknown IDs fail. Named repositories must be project members (`knit project add <id> <path> --observe`); wildcard rules include bundle-only repositories.
+
 Synchronized execution requires hosted ownership as well as local locking; an unavailable authority blocks execution. Ownership conservatively serializes the project across destination aliases and does not expire automatically. Keep ownership tokens and raw captures private; release ownership only after receipts persist and processes are quiescent. Resolve interrupted ownership through verified reconciliation, never by stealing a lock.
 
 For v0.2, `onFailure: "stop"` is the default; `onFailure: "recover"` requires capture, idempotent restoration and verification for every deployment/external effect. Recovery restores captured state in reverse dependency order and reports service restoration separately from source revert proposals. Legacy `knit land --schema-version 0.1 plan` preserves v0.1 behavior: `knit land rollback --apply` or `onFailure: "rollback"` creates source revert PRs; it does not restore deployed services.
@@ -840,6 +842,9 @@ knit cherrypick --from feature-a --repo backend abc123
 ```
 
 ## Useful Commands
+
+- `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one commit group; publish with `knit push --force-with-lease`.
+- `knit rebase [--squash] [--offline]` replays bundle work onto newer upstream bases; resolve conflicts with `--continue` or restore original heads with `--abort`.
 
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).

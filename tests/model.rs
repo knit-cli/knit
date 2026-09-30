@@ -201,6 +201,8 @@ fn repo_changes_without_commit_details_round_trip_unchanged() {
 #[test]
 fn recorded_commit_details_survive_a_round_trip() {
     let change = RepoChange {
+        base_before_sha: None,
+        base_after_sha: None,
         repo_id: "backend".to_string(),
         movement: Movement::Advanced,
         before_sha: Some("abc123".to_string()),

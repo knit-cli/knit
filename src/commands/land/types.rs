@@ -24,6 +24,9 @@ pub(super) enum LandStepKind {
     Run,
     Deploy,
     Manual,
+    /// Landing gate: wait for a follow-up commit on a repository's review
+    /// (schema 0.2 plans only).
+    AwaitUpdate,
 }
 
 impl LandStepKind {
@@ -35,6 +38,7 @@ impl LandStepKind {
             LandStepKind::Run => "run",
             LandStepKind::Deploy => "deploy",
             LandStepKind::Manual => "manual",
+            LandStepKind::AwaitUpdate => "await_update",
         }
     }
 }
