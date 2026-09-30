@@ -891,6 +891,8 @@ fn finalize_target_bundle(
             repo.head_sha = Some(after_sha.clone());
         }
         changes.push(RepoChange {
+            base_before_sha: None,
+            base_after_sha: None,
             repo_id: step.repo_id.clone(),
             movement: Movement::Advanced,
             before_sha: Some(step.before_sha.clone()),

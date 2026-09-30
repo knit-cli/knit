@@ -25,6 +25,7 @@ pub mod push;
 pub mod remote;
 pub mod remove;
 pub mod revert;
+pub mod rewrite;
 pub mod run;
 pub mod runtime;
 pub mod schema;

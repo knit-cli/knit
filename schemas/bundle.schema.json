@@ -44,6 +44,27 @@
       "items": {
         "type": "object",
         "properties": {
+          "rewrite": {
+            "type": "object",
+            "required": ["kind", "supersededGroups"],
+            "properties": {
+              "kind": { "enum": ["squash", "rebase", "observed"] },
+              "supersededGroups": {
+                "type": "array",
+                "items": { "$ref": "#/properties/commitGroups/items" }
+              }
+            }
+          },
+          "repoChanges": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "baseBeforeSha": { "type": "string" },
+                "baseAfterSha": { "type": "string" }
+              }
+            }
+          },
           "origin": {
             "type": "object",
             "required": [

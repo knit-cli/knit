@@ -87,6 +87,8 @@ pub(super) fn apply_local_revert(
             sha: sha.clone(),
         });
         repo_changes.push(RepoChange {
+            base_before_sha: None,
+            base_after_sha: None,
             repo_id: repo_plan.repo_id.clone(),
             movement: Movement::Advanced,
             before_sha: Some(before_sha),

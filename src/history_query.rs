@@ -1006,6 +1006,8 @@ mod tests {
             "observed".into(),
             "2026-01-04T00:00:00Z".into(),
             vec![crate::model::RepoChange {
+                base_before_sha: None,
+                base_after_sha: None,
                 repo_id: "backend".into(),
                 movement: crate::model::Movement::Advanced,
                 before_sha: None,
@@ -1398,6 +1400,8 @@ mod tests {
             "node-observed".into(),
             "2026-01-03T12:00:00Z".into(),
             vec![RepoChange {
+                base_before_sha: None,
+                base_after_sha: None,
                 repo_id: "api".into(),
                 movement: Movement::Advanced,
                 before_sha: None,

@@ -153,7 +153,7 @@ fn print_bundle_entries(
                 .iter()
                 .find(|node| node.id == entry.id && is_loggable_node(node))
             {
-                print_node(node);
+                print_node(node, &active.bundle.nodes);
                 continue;
             }
         }
@@ -253,7 +253,61 @@ fn resolve_limit(limit: Option<usize>, shorthand_limit: Option<&str>) -> Result<
     Ok(Some(count.parse()?))
 }
 
-fn print_node(node: &BundleNode) {
+/// Replacement groups immediately follow their rewrite observation in the ledger.
+fn rewrite_summary(node: &BundleNode, nodes: &[BundleNode]) -> Option<String> {
+    let rewrite = node.rewrite.as_ref()?;
+    let kind = &rewrite.kind;
+    let groups = nodes
+        .iter()
+        .position(|candidate| candidate.id == node.id)
+        .map(|index| {
+            nodes[index + 1..]
+                .iter()
+                .take_while(|candidate| candidate.node_type == "commit.group")
+                .filter(|candidate| {
+                    !candidate.commits.is_empty()
+                        && candidate.commits.iter().all(|commit| {
+                            node.repo_changes.iter().any(|rewritten| {
+                                rewritten.repo_id == commit.repo_id
+                                    && rewritten.commit_details.contains_key(&commit.sha)
+                            })
+                        })
+                })
+                .filter_map(|candidate| candidate.commit_group_id.as_deref())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let target = if groups.is_empty() {
+        if node
+            .repo_changes
+            .iter()
+            .any(|change| !change.commits.is_empty())
+        {
+            "observed work".to_string()
+        } else {
+            "0 replacement groups".to_string()
+        }
+    } else {
+        groups.join(", ")
+    };
+    let mut summary = format!(
+        "rewrote ({kind}): {} group(s) → {target}",
+        rewrite.superseded_groups.len()
+    );
+    for change in &node.repo_changes {
+        if let (Some(before), Some(after)) = (&change.base_before_sha, &change.base_after_sha) {
+            summary.push_str(&format!(
+                "; {} base {} → {}",
+                change.repo_id,
+                short_sha(before),
+                short_sha(after)
+            ));
+        }
+    }
+    Some(summary)
+}
+
+fn print_node(node: &BundleNode, nodes: &[BundleNode]) {
     match node.node_type.as_str() {
         "commit.group" => {
             println!(
@@ -287,11 +341,13 @@ fn print_node(node: &BundleNode) {
             }
         }
         "git.observed" | "land.update" => {
-            let heading = if node.node_type == "land.update" {
-                "updated from base"
-            } else {
-                "observed git changes"
-            };
+            let heading = rewrite_summary(node, nodes).unwrap_or_else(|| {
+                if node.node_type == "land.update" {
+                    "updated from base".to_string()
+                } else {
+                    "observed git changes".to_string()
+                }
+            });
             println!("{}  {}", out::node(&node.id), out::heading(heading));
             for change in &node.repo_changes {
                 match change.movement {
@@ -695,7 +751,7 @@ fn print_entry_metadata(entry: &HistoryEntry) {
 }
 
 fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
-    print_show_header(node);
+    print_show_header(node, &active.bundle.nodes);
 
     match node.node_type.as_str() {
         "commit.group" | "revert.group" | "tag.created" => show_commit_refs(active, &node.commits),
@@ -738,7 +794,7 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
     }
 }
 
-fn print_show_header(node: &BundleNode) {
+fn print_show_header(node: &BundleNode, nodes: &[BundleNode]) {
     println!("{} {}", out::heading("Node:"), out::node(&node.id));
     println!("{} {}", out::heading("Type:"), node.node_type);
     if let Some(group_id) = &node.commit_group_id {
@@ -750,7 +806,9 @@ fn print_show_header(node: &BundleNode) {
     if let Some(title) = &node.title {
         println!("{} {}", out::heading("Title:"), title);
     }
-    if let Some(message) = &node.message {
+    if let Some(summary) = rewrite_summary(node, nodes) {
+        println!("{} {}", out::heading("Message:"), summary);
+    } else if let Some(message) = &node.message {
         println!("{} {}", out::heading("Message:"), message);
     } else if node.node_type == "git.observed" {
         println!("{} observed git changes", out::heading("Message:"));
@@ -907,4 +965,41 @@ fn repo_dir_for_show(active: &ActiveBundle, repo_id: &str) -> Option<PathBuf> {
 
 fn print_commit_group_header(group: &CommitGroup) {
     println!("{}  {}\n", out::node(&group.id), group.message);
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::rewrite_summary;
+    use crate::model::BundleNode;
+    use serde_json::json;
+
+    #[test]
+    fn rewrite_summary_names_replacement_groups_and_base_movement() {
+        let observed: BundleNode = serde_json::from_value(json!({
+            "id": "rewrite", "type": "git.observed", "createdAt": "2026-09-01T00:00:00Z",
+            "rewrite": {"kind": "rebase", "supersededGroups": [{
+                "id": "old", "message": "Widget", "createdAt": "2026-09-01T00:00:00Z", "commits": []
+            }]},
+            "repoChanges": [{
+                "repoId": "backend", "movement": "diverged", "beforeSha": "old-head",
+                "afterSha": "new-head", "baseBeforeSha": "11111111", "baseAfterSha": "22222222",
+                "commits": [], "commitDetails": {"new-head": {"subject": "Widget", "authoredAt": "2026-09-01T00:00:00Z"}}
+            }]
+        })).unwrap();
+        let group: BundleNode = serde_json::from_value(json!({
+            "id": "kg_new", "type": "commit.group", "createdAt": "2026-09-01T00:00:00Z",
+            "commitGroupId": "kg_new", "commits": [{"repoId": "backend", "sha": "new-head"}]
+        }))
+        .unwrap();
+        let later: BundleNode = serde_json::from_value(json!({
+            "id": "kg_later", "type": "commit.group", "createdAt": "2026-09-01T00:01:00Z",
+            "commitGroupId": "kg_later", "commits": [{"repoId": "backend", "sha": "later-head"}]
+        }))
+        .unwrap();
+        let nodes = vec![observed.clone(), group, later];
+        assert_eq!(
+            rewrite_summary(&observed, &nodes).unwrap(),
+            "rewrote (rebase): 1 group(s) → kg_new; backend base 1111111 → 2222222"
+        );
+    }
 }

@@ -19,6 +19,8 @@ Knit stores local state under the directory where `knit init`, or `knit bundle` 
     <project-hash>.sqlite
   locks/
     <bundle>.lock
+  rebase/
+    <bundle-id>.json
   merge-runs/
     <run-id>.json
   merge-worktrees/
@@ -101,6 +103,8 @@ knit bundle print
 knit bundle validate
 knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
+knit squash [-m <message>]
+knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status [--json]
 knit workspace status
@@ -593,7 +597,7 @@ knit merge feature-x --into x-y-compat
 knit merge feature-y --into x-y-compat --manual
 ```
 
-When a bundle has grown messy or a previously used PR head branch is no longer a good publishing unit, start a fresh bundle and cherry-pick the commits worth keeping instead of continuing to pile onto the old one:
+To select only part of an existing bundle for a separate publishing unit, start a fresh bundle and cherry-pick the commits worth keeping:
 
 ```sh
 knit bundle "feature x clean follow-up" --repo backend
@@ -882,6 +886,48 @@ self-hosted base from the remote or defaults artifact operations to
 `https://codeberg.org/api/v1`.
 
 When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. `knit push --no-history` skips only the history upload while still pushing branches and the bundle artifact. History uploads print the pending event count before sending; the final count includes only events sent by this invocation. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
+
+### Rewriting a bundle
+
+Run rewrites from the bundle worktree, with clean tracked files and each repo on
+its recorded feature branch:
+
+```sh
+knit squash -m "Add widget support"
+knit rebase
+knit rebase --squash -m "Add widget support"
+```
+
+`knit squash` combines the bundle's work into one commit per repository and one
+commit group. Without `-m`, it uses the only existing group's message or the
+bundle title. `knit rebase` fetches each repository's base and replays the bundle
+commits on it, preserving group messages where possible. Contribution repos use
+the upstream destination base. `--offline` uses cached base refs, falling back to
+the local base branch. `--squash` combines the work before rebasing.
+
+On a conflict, resolve files in the printed checkout and stage the resolution:
+
+```sh
+git add <resolved-files>
+knit rebase --continue
+# Or restore every participating repo to its original head:
+knit rebase --abort
+```
+
+Knit records the completed rewrite once all repositories finish. Pending state
+lives in `.knit/rebase/<bundle-id>.json`; abort leaves the ledger unchanged.
+
+Manual rebases are also supported: run `git rebase origin/main` in the feature
+checkout, then `knit sync`. Reconciliation recognizes the newer upstream base,
+updates `baseSha`, and maps bundle groups by patch ID without treating upstream
+commits as bundle work. A soft reset followed by `knit commit` retires the dropped
+groups. Historical nodes remain available with their superseded commit records.
+
+Publish rewritten branches with the lease-protected push:
+
+```sh
+knit push --force-with-lease
+```
 
 ### Syncing artifacts with sync remotes
 

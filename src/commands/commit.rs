@@ -97,6 +97,8 @@ pub(crate) fn commit_active(
                     sha: outcome.sha.clone(),
                 });
                 repo_changes.push(RepoChange {
+                    base_before_sha: None,
+                    base_after_sha: None,
                     repo_id,
                     movement: Movement::Advanced,
                     before_sha: Some(outcome.before_sha),

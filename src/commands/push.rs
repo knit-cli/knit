@@ -70,6 +70,17 @@ impl PushForce {
     }
 }
 
+fn ensure_no_pending_rewrite(root: &Path, bundle: &ChangeGroup) -> Result<()> {
+    if root
+        .join(".knit/rebase")
+        .join(format!("{}.json", bundle.id))
+        .exists()
+    {
+        bail!("A bundle rewrite is pending. Run knit rebase --continue or knit rebase --abort before pushing.");
+    }
+    Ok(())
+}
+
 pub fn push_repos(
     selectors: &[String],
     all: bool,
@@ -80,6 +91,7 @@ pub fn push_repos(
     no_history: bool,
 ) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
+    ensure_no_pending_rewrite(&active.root, &active.bundle)?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
@@ -495,6 +507,7 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
         return Ok(Vec::new());
     }
 
+    ensure_no_pending_rewrite(root, bundle)?;
     crate::contribution::validate_bundle(bundle)?;
     for repo in &bundle.repos {
         if let Some(cwd) = branch_push_dir(root, repo) {

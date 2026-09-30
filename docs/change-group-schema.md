@@ -151,6 +151,59 @@ Rewind example:
 }
 ```
 
+## Rewrites
+
+A rewrite appends a `git.observed` node with optional `rewrite` metadata:
+
+```json
+{
+  "rewrite": {
+    "kind": "rebase",
+    "supersededGroups": [
+      {
+        "id": "kg_old",
+        "message": "Add widget",
+        "createdAt": "2026-09-01T00:00:00Z",
+        "commits": [{ "repoId": "backend", "sha": "abc123" }]
+      }
+    ]
+  },
+  "repoChanges": [{
+    "repoId": "backend",
+    "movement": "diverged",
+    "beforeSha": "abc123",
+    "afterSha": "def456",
+    "baseBeforeSha": "000aaa",
+    "baseAfterSha": "000bbb",
+    "commits": [],
+    "droppedCommits": ["abc123"]
+  }]
+}
+```
+
+`rewrite.kind` is `squash`, `rebase`, or `observed`. `supersededGroups` preserves
+full retired commit-group records, including optional authors. Groups spanning
+unaffected repositories retain those repositories' commits in `commitGroups`.
+`baseBeforeSha` and `baseAfterSha` are optional and present only when the base
+moves; `repos[].baseSha` and `headSha` then reflect the new base and head.
+
+The observation drops the old bundle commits, excluding upstream commits from
+the replacement range. Observed partial rewinds retain identical SHAs in place:
+they are omitted from both additions and drops, so replay cannot remove retained
+ungrouped work. New `commit.group` nodes follow it, each with a fresh ID,
+inline commits and captured details. Only new commits that could not be mapped
+into groups remain in the observation's `commits`. Squash creates one group;
+rebase preserves group messages and authors through patch matching, with a
+positional fallback when counts match. Explicit rebase groups any remaining
+commits under the bundle title; observed rewrites leave them as observed work.
+
+Current-work readers replay nodes in order: add referenced group commits,
+inline node commits and `repoChanges[].commits`, then remove `droppedCommits`
+for `git.observed` rewinds or divergences. Tag, check and branch-landing pins do
+not add bundle work. This preserves the historical nodes while superseding old
+SHAs. History derives `commit.recorded` events from the new group nodes and
+`commit.dropped` events from the rewrite observation.
+
 ## Publications
 
 `knit publish create` and `knit publish sync` record review-object (PR/MR) metadata in `publications`:

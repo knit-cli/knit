@@ -841,6 +841,9 @@ knit cherrypick --from feature-a --repo backend abc123
 
 ## Useful Commands
 
+- `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one commit group; publish with `knit push --force-with-lease`.
+- `knit rebase [--squash] [--offline]` replays bundle work onto newer upstream bases; resolve conflicts with `--continue` or restore original heads with `--abort`.
+
 - `knit bundle` shows the resolved bundle and where it came from.
 - `knit bundle "Feature title"` fetches configured remote bases and creates a bundle from their exact commits (the git-branch-style shorthand; `--offline` and `--from-local-base` opt out).
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.

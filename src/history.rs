@@ -1202,6 +1202,8 @@ mod tests {
 
     fn observed_change(sha: &str, detail: Option<CommitDetail>) -> RepoChange {
         RepoChange {
+            base_before_sha: None,
+            base_after_sha: None,
             repo_id: "backend".to_string(),
             movement: Movement::Advanced,
             before_sha: Some("base000".to_string()),

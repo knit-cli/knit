@@ -18,6 +18,7 @@ pub mod pending;
 pub mod providers;
 pub mod repo_selectors;
 pub mod retry;
+pub mod rewrite;
 pub mod selectors;
 pub mod status;
 pub mod store;
@@ -1006,6 +1007,14 @@ pub fn run(cli: Cli) -> Result<()> {
             remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
+        Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
+        Commands::Rebase {
+            squash,
+            message,
+            offline,
+            continue_rebase,
+            abort,
+        } => commands::rewrite::rebase(squash, message.as_deref(), offline, continue_rebase, abort),
         Commands::Log { args } => commands::show_log(&args, bundle_context.as_deref()),
         Commands::Revert {
             target,

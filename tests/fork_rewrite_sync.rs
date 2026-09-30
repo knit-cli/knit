@@ -727,3 +727,133 @@ fn split_alias_source_observation_does_not_overwrite_upstream_tracking_ref() {
     );
     fs::remove_dir_all(f.root).unwrap();
 }
+
+#[test]
+fn fork_rebase_uses_upstream_target_not_fork_source_base() {
+    let f = Fixture::new();
+    // Capture contribution roles using only the fixture's local remotes/server.
+    f.run(&["push"]);
+    let before = f.bundle();
+    // Advance the two remotes independently: choosing the fork's main would
+    // produce a valid rebase with the wrong base, which must be detected.
+    let mut bases = Vec::new();
+    for (name, remote) in [("target", &f.upstream), ("source", &f.fork)] {
+        let writer = f.root.join(format!("{name}-writer"));
+        git(
+            &f.root,
+            ["clone", remote.to_str().unwrap(), writer.to_str().unwrap()],
+        );
+        configure_git_user(&writer);
+        fs::write(
+            writer.join(format!("{name}.txt")),
+            format!("{name} content\n"),
+        )
+        .unwrap();
+        git(&writer, ["add", "."]);
+        git(&writer, ["commit", "-m", &format!("Advance {name} base")]);
+        git(&writer, ["push", "origin", "main"]);
+        bases.push(git(&writer, ["rev-parse", "HEAD"]).trim().to_owned());
+    }
+    f.run(&["rebase"]);
+    let after = f.bundle();
+    let head = git(&f.checkout, ["rev-parse", "HEAD"]);
+    assert_ne!(after["repos"][0]["headSha"], before["repos"][0]["headSha"]);
+    assert_eq!(after["repos"][0]["headSha"], head.trim());
+    assert_eq!(after["repos"][0]["baseSha"], bases[0]);
+    assert_ne!(after["repos"][0]["baseSha"], bases[1]);
+    assert!(f.checkout.join("target.txt").exists());
+    assert!(!f.checkout.join("source.txt").exists());
+    assert_eq!(
+        git(
+            &f.checkout,
+            ["rev-list", "--count", &format!("{}..HEAD", bases[0])]
+        )
+        .trim(),
+        "1"
+    );
+    assert_eq!(after["repos"][0]["sourceRemote"], SOURCE);
+    assert_eq!(after["repos"][0]["targetRemote"], TARGET);
+    let changes: Vec<_> = after["nodes"].as_array().unwrap()
+        [before["nodes"].as_array().unwrap().len()..]
+        .iter()
+        .flat_map(|n| n["repoChanges"].as_array().into_iter().flatten())
+        .collect();
+    let movement = changes
+        .iter()
+        .find(|c| c["repoId"] == "widget" && c["baseAfterSha"] == bases[0])
+        .unwrap();
+    assert_eq!(movement["baseBeforeSha"], before["repos"][0]["baseSha"]);
+    let recorded: Vec<_> = changes
+        .iter()
+        .filter(|c| c["repoId"] == "widget")
+        .flat_map(|c| c["commits"].as_array().into_iter().flatten())
+        .map(|sha| sha.as_str().unwrap())
+        .collect();
+    assert_eq!(recorded, vec![head.trim()]);
+    f.run(&["bundle", "validate"]);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
+fn manual_fork_rebase_ignores_feature_work_in_fallback_base_refs() {
+    let f = Fixture::new();
+    f.run(&["push"]);
+    let before = f.bundle();
+    let repo: knit::model::RepoEntry = serde_json::from_value(before["repos"][0].clone()).unwrap();
+    let destination = knit::contribution::role_ref(&repo, "main", false).unwrap();
+    let writer = f.root.join("target-writer");
+    git(
+        &f.root,
+        [
+            "clone",
+            f.upstream.to_str().unwrap(),
+            writer.to_str().unwrap(),
+        ],
+    );
+    configure_git_user(&writer);
+    fs::write(writer.join("upstream.txt"), "Upstream work\n").unwrap();
+    git(&writer, ["add", "."]);
+    git(&writer, ["commit", "-m", "Upstream work"]);
+    git(&writer, ["push", "origin", "main"]);
+    let base = git(&writer, ["rev-parse", "HEAD"]).trim().to_owned();
+    git(
+        &f.checkout,
+        [
+            "fetch",
+            f.upstream.to_str().unwrap(),
+            &format!("+refs/heads/main:{destination}"),
+        ],
+    );
+    git(&f.checkout, ["rebase", &destination]);
+    let head = git(&f.checkout, ["rev-parse", "HEAD"]).trim().to_owned();
+    for reference in ["refs/heads/main", "refs/remotes/origin/main"] {
+        git(&f.checkout, ["update-ref", reference, &head]);
+    }
+    f.run(&["sync"]);
+    let after = f.bundle();
+    assert_eq!(after["repos"][0]["baseSha"], base);
+    assert_eq!(after["commitGroups"].as_array().unwrap().len(), 1);
+    assert_eq!(
+        after["commitGroups"][0]["message"],
+        before["commitGroups"][0]["message"]
+    );
+    assert_eq!(after["commitGroups"][0]["commits"][0]["sha"], head);
+    let observation = after["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|n| n["type"] == "git.observed")
+        .unwrap();
+    assert_eq!(observation["repoChanges"][0]["baseAfterSha"], base);
+    assert_eq!(
+        observation["repoChanges"][0]["commits"],
+        serde_json::json!([])
+    );
+    assert_eq!(
+        observation["rewrite"]["supersededGroups"][0],
+        before["commitGroups"][0]
+    );
+    f.run(&["bundle", "validate"]);
+    fs::remove_dir_all(f.root).unwrap();
+}

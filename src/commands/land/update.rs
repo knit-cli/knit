@@ -340,6 +340,8 @@ fn advanced_change(
     let commits =
         rev_list(cwd, &before_sha, &after_sha).context("failed to list update commits")?;
     Ok(RepoChange {
+        base_before_sha: None,
+        base_after_sha: None,
         repo_id,
         movement: Movement::Advanced,
         before_sha: Some(before_sha.clone()),
