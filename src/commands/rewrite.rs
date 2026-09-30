@@ -84,7 +84,8 @@ fn state_path(active: &ActiveBundle) -> Result<PathBuf> {
 
 fn persist(path: &Path, state: &RewriteState) -> Result<()> {
     write_json(path, state)?;
-    fs::File::open(path)?.sync_all()?;
+    // Windows requires write access for FlushFileBuffers, used by sync_all.
+    fs::OpenOptions::new().write(true).open(path)?.sync_all()?;
     #[cfg(unix)]
     fs::File::open(path.parent().context("Missing recovery directory")?)?.sync_all()?;
     Ok(())
