@@ -580,6 +580,13 @@ pub struct RepoChange {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NodeLanding {
+    /// A completed plan with no source merge steps (for example deployment only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub merge_mode: Option<String>,
+    /// Explicit evidence that this run completed only branch merges, no reviews.
+    /// Omitted on older nodes and review/mixed landings.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch_only: Option<bool>,
     /// True when this destination is the bundle's last stop: the work is
     /// finished and the bundle is archived. False for an intermediate
     /// environment such as a staging lane, which leaves the bundle open.
@@ -1095,6 +1102,8 @@ impl BundleNode {
             source_commit,
             run_id: Some(run_id),
             landing: Some(NodeLanding {
+                merge_mode: None,
+                branch_only: None,
                 terminal: false,
                 lane,
                 target_branch: Some(target_branch),
@@ -1487,4 +1496,106 @@ fn contribution_remote<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Option<
         return Err(serde::de::Error::custom("empty contribution remote"));
     }
     Ok(Some(value))
+}
+
+/// Preserve extension fields across typed bundle updates. Known fields still
+/// follow the new model (including deliberate removals); identified array
+/// entries retain their own extensions across reorder, append and removal.
+pub(crate) fn preserve_bundle_extensions(
+    original: &serde_json::Value,
+    updated: serde_json::Value,
+) -> serde_json::Result<serde_json::Value> {
+    use serde_json::Value;
+    fn identity(value: &Value) -> Option<Value> {
+        if value["id"].is_string() {
+            return Some(serde_json::json!(["id", value["id"]]));
+        }
+        if value["repoId"].is_string() {
+            return Some(serde_json::json!([
+                "repoId",
+                value["repoId"],
+                value.get("url"),
+                value.get("sha")
+            ]));
+        }
+        None
+    }
+    fn preserve(original: &Value, known: &Value, updated: &mut Value) {
+        match (original, known, updated) {
+            (Value::Object(original), Value::Object(known), Value::Object(updated)) => {
+                for (key, value) in original {
+                    match known.get(key) {
+                        None => {
+                            updated.entry(key.clone()).or_insert_with(|| value.clone());
+                        }
+                        Some(known) => {
+                            if let Some(updated) = updated.get_mut(key) {
+                                preserve(value, known, updated);
+                            }
+                        }
+                    }
+                }
+            }
+            (Value::Array(original), Value::Array(known), Value::Array(updated)) => {
+                for (index, updated) in updated.iter_mut().enumerate() {
+                    let id = identity(updated);
+                    let find = |values: &[Value]| match &id {
+                        Some(id) => values.iter().position(|v| identity(v).as_ref() == Some(id)),
+                        None => (index < values.len()).then_some(index),
+                    };
+                    if let (Some(old), Some(typed)) = (find(original), find(known)) {
+                        preserve(&original[old], &known[typed], updated);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let typed: ChangeGroup = serde_json::from_value(original.clone())?;
+    let known = serde_json::to_value(typed)?;
+    let mut updated = updated;
+    preserve(original, &known, &mut updated);
+    Ok(updated)
+}
+
+#[cfg(test)]
+mod landing_record_extension_tests {
+    use super::*;
+    use serde_json::{json, Value};
+
+    #[test]
+    fn landing_record_extension_overlay_matches_ids_and_honors_known_removals() {
+        let mut original = serde_json::to_value(ChangeGroup::new(
+            "sample".into(),
+            "Synthetic bundle".into(),
+            "2026-01-01T00:00:00Z".into(),
+        ))
+        .unwrap();
+        original["repos"] = json!([
+            {"id":"api","path":"api","baseBranch":"main","worktreePath":"old","headSha":"old-head","custom":{"owner":"api"}},
+            {"id":"web","path":"web","baseBranch":"main","custom":{"owner":"web"}}
+        ]);
+        original["nodes"][0]["custom"] = json!({"owner":"created"});
+        original["nodes"].as_array_mut().unwrap().push(json!({"id":"checkpoint","type":"checkpoint","createdAt":"2026-01-01T00:00:00Z","message":"Original","custom":{"owner":"checkpoint"}}));
+        let mut typed: ChangeGroup = serde_json::from_value(original.clone()).unwrap();
+        typed.repos[0].worktree_path = None;
+        typed.repos[0].head_sha = None;
+        typed.repos.reverse();
+        typed.nodes.reverse();
+        typed.nodes.push(BundleNode::feature_archived(
+            "archive".into(),
+            "2026-01-02T00:00:00Z".into(),
+            None,
+        ));
+        let result =
+            preserve_bundle_extensions(&original, serde_json::to_value(typed).unwrap()).unwrap();
+        assert_eq!(result["repos"][0]["custom"], json!({"owner":"web"}));
+        assert_eq!(result["repos"][1]["custom"], json!({"owner":"api"}));
+        assert!(result["repos"][1]["worktreePath"].is_null());
+        assert!(result["repos"][1].get("headSha").is_none());
+        assert_eq!(result["nodes"][0]["custom"], json!({"owner":"checkpoint"}));
+        assert_eq!(result["nodes"][1]["custom"], json!({"owner":"created"}));
+        assert!(result["nodes"][2].get("custom").is_none());
+        assert_eq!(result["nodes"][2]["id"], Value::String("archive".into()));
+    }
 }

@@ -379,6 +379,8 @@ pub fn apply_land_from_artifact(
         merged_repo_ids,
         publication_urls,
         Some(crate::model::NodeLanding {
+            merge_mode: None,
+            branch_only: None,
             terminal,
             lane: lane_name.clone(),
             target_branch: target_branch.clone(),

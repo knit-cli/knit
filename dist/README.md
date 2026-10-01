@@ -17,17 +17,48 @@ Templates for publishing knit to package managers. The canonical release flow:
 git tag v0.1.0-alpha.14
 git push origin v0.1.0-alpha.14
 
-# 3. Wait for the Release workflow to finish:
-gh run watch --repo knit-cli/knit "$(gh run list --repo knit-cli/knit --workflow Release --limit 1 --json databaseId -q '.[0].databaseId')"
+# 3. Select the Release run for this tag and wait for its
+#    verified-homebrew-tap artifact, NOT for the workflow to finish.
+#    The release explicitly uses manual tap publication. Download that artifact,
+#    copy knit.rb unchanged into the tap's Formula/knit.rb in a Knit checkout,
+#    and publish + land the tap PR through Knit after tap CI passes.
+#    Complete this while the release waits (30 minutes maximum).
 
-# 4. The Release workflow then calls .github/workflows/homebrew.yml, which
-#    repackages the raw binaries into Homebrew bottles, publishes them plus
-#    the complete generated formula to the same release, verifies the
-#    published bytes, and opens the tap bump PR. Merge that PR.
+# 4. Watch that same Release run to completion. It succeeds only after the live
+#    tap's default-branch formula matches the verified bytes exactly and all
+#    other release jobs pass. An open tap PR is not completion.
+gh run watch --repo knit-cli/knit RELEASE_RUN_ID --exit-status
 
 # crates.io is deliberately not part of this flow: `knit-cli` there stops at
 # the earliest alphas, and Homebrew plus source are the supported paths.
 ```
+
+## Immutable raw release assets
+
+Release runs serialize per tag without cancelling an active run. Before building
+any matrix target, `scripts/release_assets.py` downloads its existing archive and
+checksum. A complete, checksum-valid pair is reused without rebuilding. An
+inconsistent complete pair fails immediately.
+
+The Rust binary action runs in its supported `dry-run` mode (build and compress
+only). Its normal upload path uses `--clobber` and is deliberately not used.
+Our publisher validates the local archive/checksum pair, compares every existing
+member's SHA-256 before uploading anything, and uploads only missing members,
+without overwrite. It downloads the completed pair again to verify exact bytes.
+A competing upload fails safely rather than replacing another publisher's bytes.
+
+An interrupted upload may leave a partial pair. Recovery accepts only the same
+bytes for every already-published member; if a rebuild differs (including archive
+metadata), the run fails without replacing assets. Retry publication with the
+original archive/checksum from the failing attempt's
+`raw-release-<target>-<attempt>` Actions artifact using
+`scripts/release_assets.py publish --repo knit-cli/knit --tag <tag> --target <target> --directory <download-directory>`, or
+investigate the partial state; do not delete assets, use `--clobber`, or move the
+tag to make a rerun green. Completed targets are never rebuilt on rerun.
+
+The action's [official metadata](https://github.com/taiki-e/upload-rust-binary-action/blob/v1/action.yml)
+documents build-only `dry-run`; its [upload implementation](https://github.com/taiki-e/upload-rust-binary-action/blob/v1/main.sh)
+explains why publication is handled separately.
 
 ## Homebrew tap (`knit-cli/homebrew-tap`)
 
@@ -41,34 +72,46 @@ reads the four raw release archives, verifies each `.sha256` sidecar before
 extracting anything, and writes `bottles/*.bottle.tar.gz`, the complete tap
 formula `knit.rb`, `SHA256SUMS`, and `manifest.json`.
 
+The tag release explicitly selects manual tap publication; no cross-repository
+write credential is needed. While the workflow is waiting, download the verified
+handoff from the exact release run:
+
 ```sh
-# The workflow opens the formula PR automatically once HOMEBREW_TAP_TOKEN is
-# configured with Contents:write and Pull-requests:write access to
-# knit-cli/homebrew-tap. Without the token it FAILS (loudly, after the
-# bottles are already published) so the tap can never silently stay stale.
-#
-# To backfill an already-published release without rebuilding or moving tags:
-gh workflow run "Homebrew bottles" --repo knit-cli/knit -f release_tag=v0.1.0-alpha.21
-#
-# Fully manual fallback (same bytes the workflow produces):
-gh release download v0.1.0-alpha.21 --repo knit-cli/knit \
-  --pattern 'knit-v0.1.0-alpha.21-*.tar.gz' \
-  --pattern 'knit-v0.1.0-alpha.21-*.sha256' --dir assets
-python3 scripts/homebrew_bottles.py \
-  --version 0.1.0-alpha.21 --assets-dir assets --output-dir homebrew-dist
-gh release upload v0.1.0-alpha.21 --repo knit-cli/knit homebrew-dist/bottles/*.bottle.tar.gz
-# Note: `gh release upload` rejects any existing same-name asset, even with
-# identical bytes, and --clobber would defeat immutability — for verified
-# idempotent re-publishing, re-run the workflow instead. Send
-# homebrew-dist/knit.rb to the tap as Formula/knit.rb via a PR (never a
-# direct push).
+gh run download RELEASE_RUN_ID --repo knit-cli/knit \
+  --name verified-homebrew-tap --dir verified-homebrew-tap
 ```
+
+Check `verification.json` for the intended release tag, source SHA, run ID/attempt,
+and formula SHA-256. Copy `knit.rb` unchanged to `Formula/knit.rb` in the tap's Knit
+checkout, publish the PR through Knit, and land after tap CI passes. Do this
+**before waiting for the release to finish**: the workflow polls for the exact
+live formula every 20 seconds and fails after 30 minutes without a match.
+
+Standalone/backfill calls default to automatic mode: they require
+`HOMEBREW_TAP_TOKEN` before uploading bottles unless the exact formula is already
+live. Automatic mode opens a PR and still waits for its merge; it never silently
+falls back to manual. The tag release also checks credentials before creating
+release assets if its explicit policy is changed to automatic.
+
+To backfill or recover a timeout without rebuilding binaries or moving tags,
+select manual publication explicitly and follow the same handoff/merge sequence:
+
+```sh
+gh workflow run "Homebrew bottles" --repo knit-cli/knit \
+  -f release_tag=v0.1.0-alpha.21 -f tap_publish_mode=manual
+```
+
+Use the same packaging implementation when recovering an existing release.
+Reruns replace only the run's Actions artifacts; existing GitHub release assets
+must have identical bytes and are never clobbered. A completed live tap can be
+verified again without a publishing token. See [Homebrew release completion](../docs/homebrew-packaging.md)
+for mode contracts, handoff metadata, and recovery details.
 
 ## Where each manifest goes
 
 | File | Destination | How |
 |---|---|---|
-| generated `homebrew-dist/knit.rb` | `knit-cli/homebrew-tap` repo as `Formula/knit.rb` | Workflow PR (or the manual path above); users run `brew install knit-cli/tap/knit` |
+| generated `homebrew-dist/knit.rb` | `knit-cli/homebrew-tap` repo as `Formula/knit.rb` | Verified handoff via Knit PR (automatic mode opens a PR); users run `brew install knit-cli/tap/knit` |
 | `scoop/knit.json` | `marc-merino/scoop-knit` repo as `bucket/knit.json` | Push to the bucket repo, users run `scoop bucket add marc-merino/knit <url> && scoop install knit` |
 | `winget/marc-merino.knit.yaml` | PR to `microsoft/winget-pkgs` as `manifests/m/marc-merino/knit/<version>/marc-merino.knit.yaml` | Submit PR, Microsoft reviews and merges |
 
@@ -76,9 +119,9 @@ gh release upload v0.1.0-alpha.21 --repo knit-cli/knit homebrew-dist/bottles/*.b
 
 1. Bump `version` in `Cargo.toml`, `crates/knit-runtime/Cargo.toml`, and the
    `knit-runtime` dependency entry; land it
-2. Tag `v<version>` and push; wait for the Release workflow
-3. Homebrew: merge the tap PR the workflow opened (bottles are already
-   published and verified against the release)
+2. Tag `v<version>` and push; wait for the verified handoff artifact
+3. Homebrew: publish and land the verified tap formula through Knit while the
+   Release workflow waits; then confirm the full Release run succeeds
 4. Scoop: bump version + hash (`autoupdate` handles URLs)
 5. Winget: submit a new manifest for the new version
 

@@ -269,6 +269,21 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
     if !dir.exists() {
         return Ok(());
     }
+    let run_dir = dir
+        .parent()
+        .context("bundle directory has no parent")?
+        .join("land-runs");
+    let mut runs = Vec::new();
+    if run_dir.exists() {
+        for entry in fs::read_dir(&run_dir)? {
+            let path = entry?.path();
+            if path.extension().and_then(|s| s.to_str()) == Some("json") {
+                if let Ok(run) = read_json::<Value>(&path) {
+                    runs.push(run);
+                }
+            }
+        }
+    }
     for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
         let path = entry?.path();
         if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
@@ -314,11 +329,17 @@ fn migrate_bundles(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Resul
                 }
             }
         }
-        let after = format!("{}\n", serde_json::to_string_pretty(&bundle)?);
-        if before != after {
+        // Preserve extension metadata that older typed models do not know.
+        let original: Value = serde_json::from_str(&before)?;
+        let mut document =
+            crate::model::preserve_bundle_extensions(&original, serde_json::to_value(&bundle)?)?;
+        for warning in crate::commands::land::v2::repair_landed_nodes(&mut document, &runs) {
+            eprintln!("{}: {warning}; left unchanged", path.display());
+        }
+        if original != document {
             changed.push(path.clone());
             if !check {
-                write_json(&path, &bundle)?;
+                write_json(&path, &document)?;
             }
         }
     }
@@ -364,5 +385,103 @@ fn resolve_path(root: &Path, path: &str) -> PathBuf {
         path
     } else {
         root.join(path)
+    }
+}
+
+#[cfg(test)]
+mod landing_record_tests {
+    use super::*;
+    use crate::commands::land::v2::canonical_hash;
+    use serde_json::json;
+
+    #[test]
+    fn landing_record_migrate_skips_formatting_only_changes() {
+        let root = std::env::temp_dir().join(crate::ids::node_id("migration-format"));
+        let bundles = root.join("bundles");
+        fs::create_dir_all(&bundles).unwrap();
+        let bundle = ChangeGroup::new(
+            "sample".into(),
+            "Synthetic bundle".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        let path = bundles.join("sample.bundle.json");
+        let bytes = serde_json::to_vec(&bundle).unwrap();
+        fs::write(&path, &bytes).unwrap();
+        for check in [true, false] {
+            let mut changed = Vec::new();
+            migrate_bundles(&bundles, check, &mut changed).unwrap();
+            assert!(changed.is_empty());
+            assert_eq!(fs::read(&path).unwrap(), bytes);
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn landing_record_migrate_check_apply_and_repeat_preserve_metadata_and_run_bytes() {
+        let root = std::env::temp_dir().join(crate::ids::node_id("landing-migration"));
+        let bundles = root.join("bundles");
+        let runs = root.join("land-runs");
+        fs::create_dir_all(&bundles).unwrap();
+        fs::create_dir_all(&runs).unwrap();
+        for branch in [false, true] {
+            let id = if branch { "branch" } else { "review" };
+            let mut bundle = serde_json::to_value(ChangeGroup::new(
+                id.into(),
+                "Synthetic landing".into(),
+                "2026-01-01T00:00:00Z".into(),
+            ))
+            .unwrap();
+            bundle["repos"] =
+                json!([{"id":"api","path":"api","baseBranch":"main","extension":{"keep":1}}]);
+            bundle["extension"] = json!({"keep":2});
+            bundle["nodes"].as_array_mut().unwrap().push(json!({
+                "id":"land-1","type":"feature.landed","createdAt":"2026-01-01T00:00:00Z",
+                "repoIds":["api"],"planId":"plan-1","runId":id,"provider":"github",
+                "landing":{"terminal":!branch,"extension":{"keep":3}},
+                "sessionId":"recorded-session","actor":{"session":"recorded-actor"},"extension":{"keep":4}
+            }));
+            bundle["headNodeId"] = json!("land-1");
+            let plan = json!({"id":"plan-1","bundleId":id,"schemaVersion":"0.2","kind":"KnitLandPlan","steps":[{"id":"merge","repoId":"api","type":if branch {"merge_branch"} else {"merge_pr"}}]});
+            let mut output = json!({"targetBranch":"main"});
+            if !branch {
+                output["publicationUrl"] = json!("https://example.invalid/api/pull/1");
+            }
+            let run = json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":id,"bundleId":id,"planId":"plan-1","planHash":canonical_hash(&plan),"plan":plan,"sourceBundle":bundle,"steps":[{"id":"merge","repoId":"api","type":if branch {"merge_branch"} else {"merge_pr"},"status":"succeeded","output":output}],"finalized":true});
+            let bundle_path = bundles.join(format!("{id}.bundle.json"));
+            let run_path = runs.join(format!("{id}.run.json"));
+            write_json(&bundle_path, &bundle).unwrap();
+            write_json(&run_path, &run).unwrap();
+            let bundle_before = fs::read(&bundle_path).unwrap();
+            let run_before = fs::read(&run_path).unwrap();
+            let mut changed = Vec::new();
+            migrate_bundles(&bundles, true, &mut changed).unwrap();
+            assert!(changed.contains(&bundle_path));
+            assert_eq!(fs::read(&bundle_path).unwrap(), bundle_before);
+            migrate_bundles(&bundles, false, &mut Vec::new()).unwrap();
+            let repaired: Value = read_json(&bundle_path).unwrap();
+            assert_eq!(fs::read(&run_path).unwrap(), run_before);
+            let mut expected = bundle;
+            if branch {
+                expected["nodes"][1]["landing"]["branchOnly"] = json!(true);
+            } else {
+                expected["nodes"][1]["publicationUrls"] =
+                    json!(["https://example.invalid/api/pull/1"]);
+            }
+            // Existing migration also materializes known model defaults; none
+            // of the opaque fields or original node attribution may disappear.
+            let typed_expected = serde_json::to_value(
+                serde_json::from_value::<ChangeGroup>(expected.clone()).unwrap(),
+            )
+            .unwrap();
+            expected = crate::model::preserve_bundle_extensions(&expected, typed_expected).unwrap();
+            assert_eq!(repaired, expected);
+            let typed = serde_json::from_value(repaired).unwrap();
+            assert!(crate::commands::bundle::validate_change_group(&typed).is_empty());
+            let mut repeated = Vec::new();
+            migrate_bundles(&bundles, false, &mut repeated).unwrap();
+            assert!(repeated.is_empty());
+            assert_eq!(fs::read(&run_path).unwrap(), run_before);
+        }
+        fs::remove_dir_all(root).unwrap();
     }
 }

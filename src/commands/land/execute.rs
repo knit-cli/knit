@@ -975,6 +975,8 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
         repo_ids,
         publication_urls,
         Some(crate::model::NodeLanding {
+            merge_mode: None,
+            branch_only: None,
             terminal: plan.terminal,
             lane: plan.lane.clone(),
             target_branch: plan.target_branch.clone(),
