@@ -12,6 +12,8 @@ outgoing commits, rejecting unexpected authors, and enforce signing when Git sig
 is enabled. An explicit author override allows deliberate collaboration without
 bypassing the signing requirement.
 
+Rebase and cherry-pick keep each commit's original author; only commits Knit creates (commit, squash) use the git-config identity, and branch sync checks authors only for commits it actually pushes.
+
 Workspace diagnostics allow archived bundles to retain historical source paths
 after repositories move or are removed. Missing paths in active bundles and
 invalid historical records still fail validation.

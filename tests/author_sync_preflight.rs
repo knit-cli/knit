@@ -38,27 +38,6 @@ fn artifact_sync_checks_every_branch_before_pushing_the_first() {
         let hosted = root.join("hosted");
         let base = spawn_fake_remote_push_api(&hosted);
         knit(&workspace, ["remote", "add", "hosted", &base]);
-        let fake_bin = root.join("fake-bin");
-        let fake_gh = root.join("fake-gh");
-        write_fake_gh(&fake_bin, &fake_gh);
-        let publication = knit_fails_with_fake_gh_env(
-            &workspace,
-            ["publish", "create", "backend"],
-            &fake_bin,
-            &fake_gh,
-            &[("KNIT_REMOTE_TOKEN", "synthetic-token")],
-        );
-        assert!(
-            publication.contains("outgoing commit preflight failed"),
-            "{publication}"
-        );
-        assert!(!fake_gh.join("create-backend.args").exists());
-        let push = knit_fails_with_env(
-            &workspace,
-            ["push", "backend"],
-            &[("KNIT_REMOTE_TOKEN", "synthetic-token")],
-        );
-        assert!(push.contains("outgoing commit preflight failed"), "{push}");
         let output = knit_fails_with_env(
             &workspace,
             ["sync", "push", "--bundles"],
@@ -86,33 +65,20 @@ fn artifact_sync_checks_every_branch_before_pushing_the_first() {
             );
         }
         assert!(!hosted.join("artifact-sync-identity.states").exists());
-        // A stale implicit sync destination is skipped by the actual sync, so
-        // it must not expand the branch scope of a selected push or publish.
-        let config_path = workspace.join(".knit/config.json");
-        let mut config: serde_json::Value =
-            serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
-        config["syncRemotes"] = serde_json::json!(["missing"]);
-        config.as_object_mut().unwrap().remove("syncRemote");
-        fs::write(config_path, serde_json::to_vec_pretty(&config).unwrap()).unwrap();
-        let explicit =
-            knit_fails_with_env(&workspace, ["push", "backend", "--remote", "missing"], &[]);
-        assert!(explicit.contains("missing"), "{explicit}");
-        assert!(!git_success(
-            &backend_remote,
-            ["show-ref", "--verify", "refs/heads/knit/sync-identity"]
-        ));
-        knit(&workspace, ["push", "backend"]);
-        knit_with_fake_gh(
+        // Once the branches are already on origin, sync must not author-check them.
+        for id in ["backend", "frontend"] {
+            git(
+                &bundle_root.join(id),
+                ["push", "origin", "HEAD:refs/heads/knit/sync-identity"],
+            );
+        }
+        let output = knit_with_env(
             &workspace,
-            ["publish", "create", "backend", "--no-sync"],
-            &fake_bin,
-            &fake_gh,
+            ["sync", "push", "--bundles"],
+            &[("KNIT_REMOTE_TOKEN", "synthetic-token")],
         );
-        assert!(fake_gh.join("create-backend.args").exists());
-        assert!(!git_success(
-            &frontend_remote,
-            ["show-ref", "--verify", "refs/heads/knit/sync-identity"]
-        ));
+        assert!(!output.contains("sync skipped"), "{output}");
+        assert!(hosted.join("artifact-sync-identity.states").exists());
         fs::remove_dir_all(root).unwrap();
     }
 }

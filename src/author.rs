@@ -4,7 +4,12 @@ use crate::{
     model::RepoEntry,
 };
 use anyhow::{bail, Context, Result};
-use std::{ffi::OsString, path::Path, process::Command};
+use std::{
+    ffi::OsString,
+    path::Path,
+    process::Command,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 fn identity(cwd: &Path) -> Result<(String, String)> {
     let read = |key| -> Result<String> {
@@ -19,70 +24,20 @@ fn identity(cwd: &Path) -> Result<(String, String)> {
 }
 
 /// Ignore ambient author overrides without changing process-global environment.
-/// Explicit author selection also overrides reused messages and amended authors.
-pub(crate) fn configure(cwd: &Path, args: &mut Vec<OsString>, command: &mut Command) -> Result<()> {
-    let Some(verb) = args.first().and_then(|arg| arg.to_str()) else {
-        return Ok(());
-    };
-    if !matches!(verb, "commit" | "rebase" | "cherry-pick") {
+pub(crate) fn configure(args: &[OsString], command: &mut Command) -> Result<()> {
+    if args.first().and_then(|arg| arg.to_str()) != Some("commit") {
         return Ok(());
     }
-    if std::env::var_os("GIT_AUTHOR_NAME").is_some()
-        || std::env::var_os("GIT_AUTHOR_EMAIL").is_some()
+    static WARNED: AtomicBool = AtomicBool::new(false);
+    if (std::env::var_os("GIT_AUTHOR_NAME").is_some()
+        || std::env::var_os("GIT_AUTHOR_EMAIL").is_some())
+        && !WARNED.swap(true, Ordering::Relaxed)
     {
-        eprintln!("warning: ignoring GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL; Knit uses git-config identity for commits, including rewritten commits");
+        eprintln!("warning: ignoring GIT_AUTHOR_NAME/GIT_AUTHOR_EMAIL; Knit uses git-config identity for commits it creates");
     }
     command
         .env_remove("GIT_AUTHOR_NAME")
         .env_remove("GIT_AUTHOR_EMAIL");
-    if verb == "commit" {
-        let (name, email) = identity(cwd)?;
-        command
-            .env("GIT_AUTHOR_NAME", &name)
-            .env("GIT_AUTHOR_EMAIL", &email);
-        // -C, -c and --amend otherwise reuse authors regardless of environment.
-        // Git uses the last --author option. Place ours before any pathspec
-        // separator, taking care not to interpret message/file values as flags.
-        let mut boundary = args.len();
-        let mut reset_author = false;
-        let mut i = 1;
-        while i < args.len() {
-            let arg = args[i].to_string_lossy();
-            if arg == "--" {
-                boundary = i;
-                break;
-            }
-            if arg == "--reset-author" {
-                reset_author = true;
-            }
-            let takes_value = matches!(
-                arg.as_ref(),
-                "-m" | "--message"
-                    | "-F"
-                    | "--file"
-                    | "-C"
-                    | "--reuse-message"
-                    | "-c"
-                    | "--reedit-message"
-                    | "--author"
-                    | "--date"
-                    | "-t"
-                    | "--template"
-                    | "--cleanup"
-                    | "--trailer"
-                    | "--fixup"
-                    | "--squash"
-                    | "--pathspec-from-file"
-            );
-            i += if takes_value { 2 } else { 1 };
-        }
-        if !reset_author {
-            args.insert(
-                boundary,
-                OsString::from(format!("--author={name} <{email}>")),
-            );
-        }
-    }
     Ok(())
 }
 
@@ -230,15 +185,6 @@ fn preflight(
     Ok(())
 }
 
-/// Rebase executes this after each selected pick, and retains it in its todo
-/// across conflicts. Git's sequencer supplies original-author variables, so
-/// reset them explicitly from config inside the exec, not from the parent env.
-pub(crate) const REBASE_AUTHOR_EXEC: &str = "GIT_AUTHOR_NAME=\"$(git config --get user.name)\" GIT_AUTHOR_EMAIL=\"$(git config --get user.email)\" git commit --amend --no-edit --allow-empty --reset-author";
-
-pub(crate) fn require_identity(cwd: &Path) -> Result<()> {
-    identity(cwd).map(|_| ())
-}
-
 /// Only inspect the commits selected by the rewrite range.
 pub(crate) fn needs_reauthor(cwd: &Path, base: &str, head: &str) -> Result<bool> {
     let (name, email) = identity(cwd)?;
@@ -249,13 +195,4 @@ pub(crate) fn needs_reauthor(cwd: &Path, base: &str, head: &str) -> Result<bool>
         }
     }
     Ok(false)
-}
-
-/// A dropped pick can still be followed by an exec instruction. Never amend
-/// the destination base in that case: it is not one of the selected commits.
-pub(crate) fn rebase_author_exec(base: &str) -> String {
-    let quoted = base.replace('\'', "'\\''");
-    format!(
-        "if git merge-base --is-ancestor HEAD '{quoted}'; then :; else {REBASE_AUTHOR_EXEC}; fi"
-    )
 }

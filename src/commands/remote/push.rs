@@ -881,40 +881,6 @@ pub fn maybe_sync_bundle_to_remote(
     maybe_sync_bundle_to_remote_with_history(active, remote_overrides, no_remote, force, true)
 }
 
-/// Check the extra branches automatic artifact sync will upload before the
-/// initiating command writes any selected branch. Already checked selections
-/// retain that command's explicit author override.
-pub(crate) fn preflight_automatic_sync(
-    active: &ActiveBundle,
-    remote_overrides: &[String],
-    no_remote: bool,
-    already_checked: &[String],
-) -> Result<()> {
-    if no_remote {
-        return Ok(());
-    }
-    let Ok((_, config)) = effective_workspace_config() else {
-        return Ok(());
-    };
-    if (!config.push_sync && remote_overrides.is_empty())
-        || resolve_sync_remote_names(&config, remote_overrides).is_empty()
-    {
-        return Ok(());
-    }
-    let mut available = false;
-    for name in resolve_sync_remote_names(&config, remote_overrides) {
-        match resolve_remote(&config, &name) {
-            Ok(_) => available = true,
-            Err(error) if !remote_overrides.is_empty() => return Err(error),
-            Err(_) => {}
-        }
-    }
-    if !available {
-        return Ok(());
-    }
-    crate::commands::push::preflight_sync_branches(&active.root, &active.bundle, already_checked)
-}
-
 pub fn maybe_sync_bundle_to_remote_with_history(
     active: &mut ActiveBundle,
     remote_overrides: &[String],
