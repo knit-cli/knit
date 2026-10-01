@@ -172,8 +172,6 @@ pub fn create_publications_with_options(
             options.allow_foreign_author,
         )?;
     }
-    let checked: Vec<_> = jobs.iter().map(|job| job.repo.id.clone()).collect();
-    crate::commands::remote::preflight_automatic_sync(&active, remote, no_remote, &checked)?;
     if discovered || source_remote.is_some() || target_remote.is_some() {
         save_active_bundle(&active)?;
     }

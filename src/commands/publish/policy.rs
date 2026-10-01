@@ -459,9 +459,10 @@ pub(super) fn resolve(
             }
         }
         if body_source == "knit" && fallback == Some(PublishBodyFallback::UpstreamTemplate) {
-            if let Some((source, text)) =
-                super::template::upstream_template(&job.repo, &job.base_branch, root)?
-            {
+            if let Some((source, text)) = super::template::upstream_template(
+                &job.repo,
+                checkouts.get(id).map(PathBuf::as_path),
+            )? {
                 body = text;
                 body_source = source;
             }

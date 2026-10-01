@@ -8,6 +8,7 @@ use crate::store::{bundle_path, read_json, save_active_bundle, ActiveBundle};
 use crate::tracking::{sync_note, sync_observed_changes_for_repo_ids};
 use anyhow::{bail, Context, Result};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::ffi::OsString;
 use std::path::Path;
 
 pub fn cherrypick_from_bundle(
@@ -343,21 +344,16 @@ enum PickOutcome {
 }
 
 fn cherry_pick_one(repo_id: &str, cwd: &Path, sha: &str) -> Result<PickOutcome> {
-    crate::author::require_identity(cwd)?;
-    match git_output(cwd, ["cherry-pick", "--no-commit", sha]) {
-        Ok(_) => {
-            if git_output(cwd, ["diff", "--cached", "--name-only"])?.is_empty() {
-                return Ok(PickOutcome::SkippedEmpty);
-            }
-            git_output(cwd, ["commit", "-C", sha])?;
-            Ok(PickOutcome::Picked)
-        },
+    let mut args = vec![OsString::from("cherry-pick")];
+    args.push(OsString::from(sha));
+    match git_output(cwd, args) {
+        Ok(_) => Ok(PickOutcome::Picked),
         Err(_) if is_empty_cherry_pick(cwd)? => {
             git_output(cwd, ["cherry-pick", "--skip"])?;
             Ok(PickOutcome::SkippedEmpty)
         }
         Err(error) => bail!(
-            "{}: cherry-pick {} failed in {}.\n{}\nResolve and stage the conflict there, then run `knit commit -m <message>` to finish with configured authorship and record the result.",
+            "{}: cherry-pick {} failed in {}.\n{}\nResolve the cherry-pick there, then run `knit sync` to record the result.",
             repo_id,
             short_sha(sha),
             cwd.display(),

@@ -788,8 +788,9 @@ knit publish create --title 'library=Add the shared API' --body-file consumer=co
 `--dry-run` does not push, create reviews, or sync artifacts. `knit publish sync`
 updates the managed Knit block and preserves the author's surrounding text.
 
-Knit uses Git-config authors for commits it creates, including rewrites, and
-warns when injected author environment variables are ignored. `knit push` and
+Knit uses Git-config authors for commits it creates (`commit` and `squash`) and
+warns once per process when injected author environment variables are ignored.
+Rebase and cherry-pick preserve each commit's original author. `knit push` and
 `knit publish create` check authors before publishing; use
 `--allow-foreign-author` only to deliberately permit other authors. If
 `commit.gpgsign` is enabled, signing remains required even with that override.

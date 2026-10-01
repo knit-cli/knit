@@ -921,7 +921,7 @@ knit publish create --title 'library=Add the shared API' --body-file consumer=co
 
 Before a branch push, including branch uploads required by artifact sync, Knit checks outgoing feature commits against the checkout's `user.name` and `user.email`. Before creating reviews it also checks the feature commits already present on the remote branch. Commits outside the feature's base are considered; unrelated upstream history is excluded. A mismatch lists the offending commits and stops before any selected branch is pushed. Use `--allow-foreign-author` only when publishing those authors is deliberate. When `commit.gpgsign` is true, unsigned commits are refused even with that author override.
 
-Knit-created commits use the Git-config identity, including squash, rebase, cherry-pick, and conflict completion. Injected `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` produce a warning and do not replace that identity. A rebase rewrites only the selected feature history; unrelated base commits keep their authors.
+Commits Knit creates (`commit` and `squash`) use the Git-config identity. Injected `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` are ignored for these commits, with one warning per process. Rebase and cherry-pick preserve each commit's original author.
 
 `knit publish create` pushes the selected feature branches, creates or adopts their review objects, records publication metadata, and updates the managed cross-repo links. Publishing runs at most `KNIT_FORGE_JOBS` (default 4) repositories at a time. Transient forge failures are retried; a repository's failure does not stop the others, and the command reports failures with a nonzero exit status.
 

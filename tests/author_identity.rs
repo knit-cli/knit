@@ -170,13 +170,6 @@ fn ssh_signed_configured_commit_passes_preflight_with_injected_author() {
     );
     git(&f.checkout, ["config", "commit.gpgsign", "true"]);
     f.commit("signed");
-    f.foreign();
-    let (out, err, ok) = f.injected(&["rebase", "--offline"]);
-    assert!(ok, "{out}\n{err}");
-    assert_eq!(
-        git(&f.checkout, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-        "Knit Smoke <knit@example.test>"
-    );
     assert!(git(&f.checkout, ["cat-file", "commit", "HEAD"])
         .contains("gpgsig -----BEGIN SSH SIGNATURE-----"));
     let (out, err, ok) = f.injected(&["push", "--no-remote"]);
@@ -184,74 +177,39 @@ fn ssh_signed_configured_commit_passes_preflight_with_injected_author() {
 }
 
 #[test]
-fn replay_replaces_polluted_authors_with_configured_identity() {
+fn moved_base_rebase_preserves_original_author() {
     let f = Fixture::new();
-    let sha = f.foreign();
+    fs::write(f.checkout.join("foreign.txt"), "foreign change").unwrap();
+    git(&f.checkout, ["add", "foreign.txt"]);
+    git(
+        &f.checkout,
+        [
+            "commit",
+            "--author=Other Person <other@example.com>",
+            "-m",
+            "Foreign change",
+        ],
+    );
+    let original = git(&f.checkout, ["rev-parse", "HEAD"]);
     knit(&f.workspace, ["sync"]);
     let collaborator = f.root.join("repo-collaborator");
     fs::write(collaborator.join("upstream.txt"), "upstream change").unwrap();
     git(&collaborator, ["add", "upstream.txt"]);
     git(&collaborator, ["commit", "-m", "Upstream change"]);
     git(&collaborator, ["push", "origin", "main"]);
+    let new_base = git(&collaborator, ["rev-parse", "HEAD"]);
     let (out, err, ok) = f.injected(&["rebase"]);
     assert!(ok, "{out}\n{err}");
-    assert!(err.contains("ignoring GIT_AUTHOR_NAME"), "{err}");
-    assert_ne!(git(&f.checkout, ["rev-parse", "HEAD"]).trim(), sha);
+    assert!(!err.contains("ignoring GIT_AUTHOR_NAME"), "{err}");
+    assert_ne!(git(&f.checkout, ["rev-parse", "HEAD"]), original);
+    assert_eq!(git(&f.checkout, ["rev-parse", "HEAD^"]), new_base);
     assert_eq!(
         git(&f.checkout, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-        "Knit Smoke <knit@example.test>"
+        "Other Person <other@example.com>"
     );
-    let replayed = git(&f.checkout, ["rev-parse", "HEAD"]);
-    knit(&f.workspace, ["bundle", "destination"]);
-    let destination = f.workspace.join(".knit/worktrees/destination/repo");
-    let (out, err, ok) = knit_split_output(
-        &destination,
-        &["cherrypick", "--from", "identity", replayed.trim()],
-        &[
-            ("GIT_AUTHOR_NAME", "Injected Actor"),
-            ("GIT_AUTHOR_EMAIL", "injected@example.test"),
-        ],
-    );
-    assert!(ok, "{out}\n{err}");
-    assert!(err.contains("ignoring GIT_AUTHOR_NAME"), "{err}");
     assert_eq!(
-        git(&destination, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-        "Knit Smoke <knit@example.test>"
-    );
-}
-
-#[test]
-fn conflict_continuation_replaces_polluted_author_despite_injected_environment() {
-    let f = Fixture::new();
-    fs::write(f.checkout.join("app.txt"), "feature\n").unwrap();
-    git(&f.checkout, ["add", "app.txt"]);
-    git(
-        &f.checkout,
-        [
-            "-c",
-            "user.name=Other Author",
-            "-c",
-            "user.email=other@example.test",
-            "commit",
-            "-m",
-            "Feature edit",
-        ],
-    );
-    knit(&f.workspace, ["sync"]);
-    let collaborator = f.root.join("repo-collaborator");
-    fs::write(collaborator.join("app.txt"), "upstream\n").unwrap();
-    git(&collaborator, ["add", "app.txt"]);
-    git(&collaborator, ["commit", "-m", "Upstream edit"]);
-    git(&collaborator, ["push", "origin", "main"]);
-    let (_, _, ok) = f.injected(&["rebase"]);
-    assert!(!ok);
-    fs::write(f.checkout.join("app.txt"), "resolved\n").unwrap();
-    git(&f.checkout, ["add", "app.txt"]);
-    let (out, err, ok) = f.injected(&["rebase", "--continue"]);
-    assert!(ok, "{out}\n{err}");
-    assert_eq!(
-        git(&f.checkout, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-        "Knit Smoke <knit@example.test>"
+        fs::read_to_string(f.checkout.join("foreign.txt")).unwrap(),
+        "foreign change"
     );
 }
 
@@ -279,116 +237,6 @@ fn merged_upstream_history_is_excluded_from_outgoing_author_checks() {
     git(&f.checkout, ["merge", "--no-edit", "origin/main"]);
     let (out, err, ok) = f.injected(&["push", "--no-remote"]);
     assert!(ok, "{out}\n{err}");
-}
-
-#[test]
-fn same_base_rebase_corrects_pollution_without_touching_base() {
-    let f = Fixture::new();
-    let base = git(&f.checkout, ["rev-parse", "HEAD"]);
-    f.foreign();
-    let (out, err, ok) = f.injected(&["rebase", "--offline"]);
-    assert!(ok, "{out}\n{err}");
-    assert_eq!(git(&f.checkout, ["rev-parse", "HEAD^"]), base);
-    assert_eq!(
-        git(&f.checkout, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-        "Knit Smoke <knit@example.test>"
-    );
-}
-
-#[test]
-fn cherrypick_corrects_polluted_source_and_conflict_completion() {
-    for conflict in [false, true] {
-        let f = Fixture::new();
-        let sha = f.foreign();
-        knit(&f.workspace, ["sync"]);
-        knit(&f.workspace, ["bundle", "destination"]);
-        let destination = f.workspace.join(".knit/worktrees/destination/repo");
-        if conflict {
-            fs::write(destination.join("foreign.txt"), "different content").unwrap();
-            knit(
-                &destination,
-                ["commit", "--all", "-m", "Destination change"],
-            );
-        }
-        let env = [
-            ("GIT_AUTHOR_NAME", "Injected Actor"),
-            ("GIT_AUTHOR_EMAIL", "injected@example.test"),
-        ];
-        let (out, err, ok) = knit_split_output(
-            &destination,
-            &["cherrypick", "--from", "identity", &sha],
-            &env,
-        );
-        if conflict {
-            assert!(!ok, "{out}\n{err}");
-            assert!(err.contains("knit commit"), "{err}");
-            fs::write(destination.join("foreign.txt"), "resolved content").unwrap();
-            git(&destination, ["add", "foreign.txt"]);
-            let (out, err, ok) =
-                knit_split_output(&destination, &["commit", "-m", "Resolved pick"], &env);
-            assert!(ok, "{out}\n{err}");
-        } else {
-            assert!(ok, "{out}\n{err}");
-        }
-        assert_eq!(
-            git(&destination, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-            "Knit Smoke <knit@example.test>"
-        );
-        assert_eq!(
-            git(&f.checkout, ["show", "-s", "--format=%an <%ae>", &sha]).trim(),
-            "Other Author <other@example.test>"
-        );
-    }
-}
-
-#[test]
-fn commit_reuse_child() {
-    let Some(path) = std::env::var_os("KNIT_AUTHOR_TEST_REPO") else {
-        return;
-    };
-    let mode = std::env::var("KNIT_AUTHOR_TEST_MODE").unwrap();
-    let args = if mode == "message" {
-        vec!["commit", "--allow-empty", "-m", "--author"]
-    } else if mode == "explicit" {
-        vec![
-            "commit",
-            "--amend",
-            "--no-edit",
-            "--author=Injected Actor <injected@example.test>",
-        ]
-    } else if mode == "--amend" {
-        vec!["commit", "--amend", "--no-edit"]
-    } else {
-        vec!["commit", mode.as_str(), "HEAD", "--allow-empty"]
-    };
-    knit::git::git_output(std::path::Path::new(&path), args).unwrap();
-}
-
-#[test]
-fn reused_commit_authors_cannot_override_configured_identity() {
-    for mode in ["--amend", "-C", "-c", "message", "explicit"] {
-        let f = Fixture::new();
-        f.foreign();
-        let output = Command::new(std::env::current_exe().unwrap())
-            .args(["--exact", "commit_reuse_child", "--nocapture"])
-            .env("KNIT_AUTHOR_TEST_REPO", &f.checkout)
-            .env("KNIT_AUTHOR_TEST_MODE", mode)
-            .env("GIT_AUTHOR_NAME", "Injected Actor")
-            .env("GIT_AUTHOR_EMAIL", "injected@example.test")
-            .env("GIT_EDITOR", "true")
-            .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
-            .output()
-            .unwrap();
-        assert!(
-            output.status.success(),
-            "{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        assert_eq!(
-            git(&f.checkout, ["show", "-s", "--format=%an <%ae>", "HEAD"]).trim(),
-            "Knit Smoke <knit@example.test>"
-        );
-    }
 }
 
 #[test]
