@@ -93,7 +93,11 @@ pub fn add_project_repo(
         .iter_mut()
         .find(|existing| existing.id == repo.id)
     {
+        // Re-adding refreshes location and base; publishing preferences set
+        // with `knit project set-draft` are not this command's to reset.
+        let publish = existing.publish.take();
         *existing = repo.clone();
+        existing.publish = publish;
         println!("{} {}", out::movement("updated"), out::repo(&repo.id));
     } else {
         println!("{} {}", out::movement("added"), out::repo(&repo.id));
@@ -198,6 +202,49 @@ pub fn set_project_repo_base(
             repo_id, repo_id
         );
     }
+    Ok(())
+}
+
+/// Set whether `knit publish create` opens one project repo's review as a
+/// draft. `false` removes the setting, so the repo publishes exactly as it did
+/// before it was set.
+pub fn set_project_repo_draft(
+    project_name: Option<&str>,
+    repo_id: &str,
+    draft: bool,
+) -> Result<()> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+    let project_id = project_name
+        .map(slugify)
+        .or(config.active_project)
+        .context("No project selected. Pass --project <name> or run `knit init <name>`.")?;
+    let repo_id = slugify(repo_id);
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    let mut project: KnitProject = read_json(&path)?;
+    let repo = project
+        .repos
+        .iter_mut()
+        .find(|repo| repo.id == repo_id)
+        .with_context(|| format!("Project `{project_id}` has no repo `{repo_id}`."))?;
+
+    repo.publish = draft.then_some(crate::model::ProjectRepoPublish { draft: true });
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+
+    let opens = if draft {
+        "opens as a draft"
+    } else {
+        "opens ready for review"
+    };
+    println!(
+        "{} {} {}",
+        out::heading("Project publish:"),
+        out::repo(&repo_id),
+        out::movement(opens)
+    );
     Ok(())
 }
 
@@ -693,6 +740,7 @@ fn resolve_project_repo(
             base_branch,
             checkout_mode: CheckoutMode::Worktree,
             include_by_default: !observe,
+            publish: None,
         },
         base_source,
     ))

@@ -568,6 +568,100 @@ fn pr_create_without_destination_flags_uses_the_bundle_base_branch() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// `publish.draft` on one project repo drafts only that repo's review in a
+/// single `publish create`; the repo without the setting opens ready for
+/// review, and `set-draft <repo> false` removes the setting again.
+#[test]
+fn pr_create_drafts_only_repos_whose_project_sets_publish_draft() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "drafts"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    let set = knit(&workspace, ["project", "set-draft", "frontend"]);
+    assert!(set.contains("opens as a draft"), "{set}");
+
+    let project_path = workspace.join(".knit/projects/drafts.project.json");
+    let read_project =
+        || -> Value { serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap() };
+    let project = read_project();
+    let entry = |project: &Value, id: &str| -> Value {
+        project["repos"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|repo| repo["id"] == id)
+            .unwrap()
+            .clone()
+    };
+    assert_eq!(
+        entry(&project, "frontend")["publish"],
+        json!({"draft": true})
+    );
+    assert!(entry(&project, "backend").get("publish").is_none());
+
+    // Re-adding a repo refreshes its location without dropping the setting.
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    assert_eq!(
+        entry(&read_project(), "frontend")["publish"],
+        json!({"draft": true})
+    );
+
+    let agents = knit(&workspace, ["project", "agents"]);
+    assert!(!agents.is_empty());
+    let guide = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
+    assert!(
+        guide.contains("opens these repos' reviews as drafts") && guide.contains("- `frontend`"),
+        "{guide}"
+    );
+
+    knit(&workspace, ["bundle", "draft split"]);
+    for repo_id in ["backend", "frontend"] {
+        append_line(
+            &workspace
+                .join(".knit/worktrees/draft-split")
+                .join(repo_id)
+                .join("app.txt"),
+            "draft split change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Draft split change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let create = knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(create.contains("opens as a draft"), "{create}");
+    let args =
+        |repo: &str| fs::read_to_string(fake_gh_dir.join(format!("create-{repo}.args"))).unwrap();
+    assert!(args("frontend").contains("--draft"), "{}", args("frontend"));
+    assert!(!args("backend").contains("--draft"), "{}", args("backend"));
+
+    let unset = knit(&workspace, ["project", "set-draft", "frontend", "false"]);
+    assert!(unset.contains("opens ready for review"), "{unset}");
+    assert!(entry(&read_project(), "frontend").get("publish").is_none());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A project workspace with backend/frontend/docs repos in a bundle with
 /// recorded work in all three, ready for lane publishing.
 fn lane_bundle_ready(

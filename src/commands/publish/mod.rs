@@ -24,7 +24,7 @@ use remote::{
 };
 pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
-    filter_indexes_by_provider, resolve_publish_destination,
+    filter_indexes_by_provider, project_draft_repo_ids, resolve_publish_destination,
     resolve_publish_destination_for_artifact, resolve_publish_repo_indexes,
     resolve_publish_repo_indexes_for_bundle, PublishDestination,
 };
@@ -88,6 +88,19 @@ pub fn create_publications(
     // Body sync follows what this run actually publishes: a repo the lane
     // excluded keeps its existing review and body untouched.
     let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
+
+    // `--draft` makes every review a draft; without it, only repos whose
+    // project entry sets `publish.draft` open as drafts.
+    let draft_repos = project_draft_repo_ids(&active)?;
+    if !draft {
+        for job in jobs.iter().filter(|job| draft_repos.contains(&job.repo.id)) {
+            println!(
+                "{}: {}",
+                out::repo(&job.repo.id),
+                out::muted("opens as a draft (project publish.draft)")
+            );
+        }
+    }
 
     let total = jobs.len();
     let limit = crate::parallel::forge_jobs()?;
@@ -182,6 +195,7 @@ pub fn create_publications(
     let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
         let active = &active;
         let bundle = &bundle_snapshot;
+        let draft_repos = &draft_repos;
         let sender = tx.clone();
         crate::parallel::spawn_bounded(scope, &create_jobs, limit, move |(job, pushed)| {
             let repo_id = job.repo.id.clone();
@@ -193,6 +207,7 @@ pub fn create_publications(
                     out::repo(&note_repo)
                 )));
             });
+            let draft = draft || draft_repos.contains(&job.repo.id);
             let result = publish_repo_remote(active, bundle, job, draft, renew, &pushed.sha);
             let _ = sender.send(PublishEvent::Done {
                 repo_id,

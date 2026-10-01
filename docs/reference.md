@@ -54,6 +54,7 @@ knit init <name> [--agents]
 knit agents [project]                         # refresh workspace + project AGENTS.md sections
 knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
 knit project set-base <repo-id> <branch> [--project <name>]
+knit project set-draft <repo-id> [true|false] [--project <name>]
 knit project push [name] [--remote <name>] [--prune]
 knit project pull [name] --repo <repo-id> [--agents]
 knit project agents [name]
@@ -876,6 +877,16 @@ knit publish status
 ```
 
 `knit publish create` auto-detects each repo's host (GitHub, GitLab, Forgejo/Codeberg, or Bitbucket) and publishes to all of them. Pass `--provider <id>` (or the `--github` shorthand) to restrict a run to repos on a single host. `knit request` is an alias for `knit publish`.
+
+`--draft` creates every selected repo's review object as a draft. To draft only some repos, set `publish.draft` on those repos in the project JSON — `knit project set-draft <repo-id>` writes it, and `knit project set-draft <repo-id> false` removes it:
+
+```json
+"repos": [
+  { "id": "frontend", "path": "../frontend", "baseBranch": "main", "publish": { "draft": true } }
+]
+```
+
+`knit publish create` then opens `frontend` as a draft and every other repo ready for review, in the same run. A project without the setting publishes exactly as before. The setting applies when a review object is created; an existing review is adopted as it is. Artifact publish (`--from-artifact`) reads no project, so only `--draft` applies there.
 
 `knit publish create` pushes the selected feature branches, creates or adopts their review objects, records publication metadata, and updates the managed cross-repo links. Publishing runs at most `KNIT_FORGE_JOBS` (default 4) repositories at a time. Transient forge failures are retried; a repository's failure does not stop the others, and the command reports failures with a nonzero exit status.
 

@@ -1878,6 +1878,7 @@ mod tests {
             base_branch: "release".to_string(),
             checkout_mode: crate::model::CheckoutMode::Worktree,
             include_by_default: true,
+            publish: None,
         };
         let repository = super::repository_payload(&entry);
         assert!(repository.get("default_branch").is_none());

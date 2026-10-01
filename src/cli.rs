@@ -1004,6 +1004,21 @@ pub enum ProjectCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Open one project repo's reviews as drafts in `knit publish create`.
+    ///
+    /// Stored as `publish.draft` on the repo in the project JSON. Other repos
+    /// keep opening ready for review; `knit publish create --draft` still
+    /// makes every repo a draft. `false` removes the setting.
+    SetDraft {
+        /// Stable repo id inside the project.
+        repo_id: String,
+        /// `true` (the default when omitted) or `false`.
+        #[arg(value_name = "true|false")]
+        draft: Option<bool>,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// List projects in this workspace.
     List,
     /// Print a project JSON artifact.
@@ -1360,7 +1375,9 @@ pub enum PublishCommand {
         /// Existing Git remote whose fetch URL owns the review base (one selected repo).
         #[arg(long, conflicts_with = "from_artifact")]
         target_remote: Option<String>,
-        /// Create draft review objects.
+        /// Create every selected repo's review object as a draft. Without it,
+        /// only repos whose project entry sets `publish.draft`
+        /// (`knit project set-draft <repo>`) open as drafts.
         #[arg(long)]
         draft: bool,
         /// Replace recorded merged/closed review objects with a fresh review round.
