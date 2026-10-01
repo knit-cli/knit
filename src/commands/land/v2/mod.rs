@@ -20,7 +20,9 @@ use crate::store::read_json;
 use anyhow::{bail, Result};
 pub use generate::generate;
 pub(super) use generate::{destination_path, display_plan};
-pub(crate) use graph::{canonical_hash, validation};
+#[cfg(test)]
+pub(crate) use graph::bundle_fingerprint;
+pub(crate) use graph::{bundle_fingerprint_is_stale, canonical_hash, validation};
 pub use runtime::{apply, apply_with_checks, recover};
 pub(super) use runtime::{immutable_plan_path, local_apply};
 use serde_json::Value;

@@ -261,10 +261,14 @@ fn json_files(dir: &Path, suffix: &str) -> Result<Vec<PathBuf>> {
     Ok(paths)
 }
 
-fn belongs_to_project(root: &Path, bundle: &str, project: &str) -> Result<bool> {
-    let path = root
+fn bundle_path(root: &Path, bundle: &str) -> Result<PathBuf> {
+    Ok(root
         .join(".knit/bundles")
-        .join(format!("{}.bundle.json", identifier(bundle)?));
+        .join(format!("{}.bundle.json", identifier(bundle)?)))
+}
+
+fn belongs_to_project(root: &Path, bundle: &str, project: &str) -> Result<bool> {
+    let path = bundle_path(root, bundle)?;
     if !path.exists() {
         return Ok(false);
     }
@@ -316,6 +320,24 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
         if bundle_slug.is_some_and(|slug| slug != bundle)
             || !belongs_to_project(root, bundle, &index.project)?
         {
+            continue;
+        }
+        // A plan generated before the bundle's latest commits pins old heads.
+        // The remote refuses it, so uploading it would only fail the sync of
+        // everything else; it stays local until it is regenerated.
+        let bundle_value: Value = read_json(&bundle_path(root, bundle)?)?;
+        if plan["bundleFingerprint"].is_string()
+            && crate::commands::land::v2::bundle_fingerprint_is_stale(&plan, &bundle_value)
+        {
+            if bundle_value["state"]
+                .as_str()
+                .is_none_or(|state| state == "open")
+            {
+                crate::human!(
+                    "{} {bundle}: the bundle changed after the plan was generated. Regenerate it with `knit --bundle {bundle} land plan --force`.",
+                    crate::output::warn("Landing plan not synced:")
+                );
+            }
             continue;
         }
         let key = plan_key(&plan)?;
@@ -1177,6 +1199,34 @@ mod tests {
         assert_eq!(outgoing.plans.len(), 1);
         assert_eq!(outgoing.plans[0].bundle_slug, "beta");
         assert!(outgoing.runs.is_empty());
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn stale_authored_plan_stays_local_while_current_plans_sync() {
+        let root = temp();
+        let index = SyncIndex {
+            project: "demo".into(),
+            ..Default::default()
+        };
+        let bundle = |head: &str| {
+            json!({"id":"alpha","projectId":"demo","state":"open",
+                "repos":[{"id":"backend","headSha":head}]})
+        };
+        let bundle_file = root.join(".knit/bundles/alpha.bundle.json");
+        save(&bundle_file, &bundle("aaaa")).unwrap();
+        let mut plan = record(1, "deploy").plan;
+        plan["bundleId"] = json!("alpha");
+        plan["sourceProjectId"] = json!("demo");
+        plan["bundleFingerprint"] = json!(crate::commands::land::v2::bundle_fingerprint(&bundle(
+            "aaaa"
+        )));
+        save(&root.join(".knit/land-plans/alpha.land.json"), &plan).unwrap();
+        assert_eq!(outgoing(&root, &index).unwrap().plans.len(), 1);
+
+        // A commit after generation moves the recorded head: the plan now
+        // pins old state, and the remote would refuse it.
+        save(&bundle_file, &bundle("bbbb")).unwrap();
+        assert!(outgoing(&root, &index).unwrap().plans.is_empty());
         fs::remove_dir_all(root).unwrap();
     }
     #[test]
