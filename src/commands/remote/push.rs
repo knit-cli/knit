@@ -803,14 +803,16 @@ fn push_active_bundle_to_remote_impl(
     ) {
         save_active_bundle(active)?;
     }
-    super::landing::push_plans_scoped_at(
+    // The artifact is already on the remote. A refused landing plan must not
+    // report the whole sync as skipped or stop history from following it.
+    let plans_result = super::landing::push_plans_scoped_at(
         &active.root,
         &config,
         Some(&project_id),
         remote_name,
         false,
         Some(&active.bundle.id),
-    )?;
+    );
     let history_result = if history {
         super::history::push_project_history_events(
             remote,
@@ -840,6 +842,9 @@ fn push_active_bundle_to_remote_impl(
         artifact.id,
         out::muted(artifact.artifact_hash)
     );
+    if let Err(error) = plans_result {
+        crate::human!("{} {error:#}", out::warn("Landing plans not synced:"));
+    }
     match history_result {
         Ok(history_count) if history_count > 0 => {
             crate::human!(

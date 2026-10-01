@@ -19,6 +19,14 @@ pub(crate) fn canonical_hash(value: &Value) -> String {
     )
 }
 
+/// Whether a plan pins different bundle state than `bundle` records now —
+/// typically a commit made after the plan was generated. Validation refuses
+/// such a plan as "stale bundle fingerprint"; it needs a new revision.
+pub(crate) fn bundle_fingerprint_is_stale(plan: &Value, bundle: &Value) -> bool {
+    plan["bundleFingerprint"]
+        != bundle_fingerprint(&super::branch_checkout::reviewed_identity(plan, bundle))
+}
+
 /// Portable source identity excludes machine bindings and receipt-only metadata.
 pub(crate) fn bundle_fingerprint(value: &Value) -> String {
     fn fields(v: &Value, names: &[&str]) -> Value {
@@ -626,10 +634,10 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                     }
                 }
             }
-            let reviewed_identity = super::branch_checkout::reviewed_identity(plan, bundle);
-            if v2 && plan["bundleFingerprint"] != bundle_fingerprint(&reviewed_identity) {
+            if v2 && bundle_fingerprint_is_stale(plan, bundle) {
                 bail!("stale bundle fingerprint");
             }
+            let reviewed_identity = super::branch_checkout::reviewed_identity(plan, bundle);
             let typed: crate::model::ChangeGroup = serde_json::from_value(reviewed_identity)?;
             if v2 {
                 let expected: BTreeMap<String, String> = typed
