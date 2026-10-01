@@ -414,3 +414,35 @@ Priority: optional
 Homepage: https://github.com/knit-cli/knit
 Description: Local-first CLI for coordinating cross-repo feature bundles
 
+Package: knit
+Version: 0.1.0~alpha.35
+Architecture: amd64
+Maintainer: Knit maintainers <knit-cli@users.noreply.github.com>
+Installed-Size: 20725
+Depends: git (>= 1:2.31), ca-certificates
+Filename: pool/knit_0.1.0-alpha.35_amd64.deb
+Size: 7951094
+MD5sum: 57fcc390e80760d21d2403d37c701bbe
+SHA1: fd77027e351bad7e2e317b0078ca53be11f651aa
+SHA256: 3badf5c375508b02063bfb533705c700034739ada186351a673226e7739085bf
+Section: default
+Priority: optional
+Homepage: https://github.com/knit-cli/knit
+Description: Local-first CLI for coordinating cross-repo feature bundles
+
+Package: knit
+Version: 0.1.0~alpha.35
+Architecture: arm64
+Maintainer: Knit maintainers <knit-cli@users.noreply.github.com>
+Installed-Size: 18630
+Depends: git (>= 1:2.31), ca-certificates
+Filename: pool/knit_0.1.0-alpha.35_arm64.deb
+Size: 7637008
+MD5sum: c321d64076b8c98cc555e6428bc2d219
+SHA1: 99fd6c215329800f9e17e9dae3bcfdde92655889
+SHA256: 49f48a0ebf7571edf87147a997376735c19fb27c3d3e90a6145d8a479288650a
+Section: default
+Priority: optional
+Homepage: https://github.com/knit-cli/knit
+Description: Local-first CLI for coordinating cross-repo feature bundles
+
