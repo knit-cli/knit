@@ -105,7 +105,23 @@
       "type": "string"
     },
     "repos": {
-      "type": "array"
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "publish": {
+            "description": "How `knit publish create` opens this repo's review object. Set with `knit project set-draft <repo>`.",
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "draft": {
+                "description": "Open this repo's review as a draft even without `--draft`. Other repos still open ready for review; `--draft` still makes every repo a draft.",
+                "type": "boolean"
+              }
+            }
+          }
+        }
+      }
     },
     "auth": {
       "type": "object",

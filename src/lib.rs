@@ -88,6 +88,15 @@ pub fn run(cli: Cli) -> Result<()> {
                 branch,
                 project,
             } => commands::set_project_repo_base(project.as_deref(), &repo_id, &branch),
+            ProjectCommand::SetDraft {
+                repo_id,
+                draft,
+                project,
+            } => commands::set_project_repo_draft(
+                project.as_deref(),
+                &repo_id,
+                draft.unwrap_or(true),
+            ),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
             ProjectCommand::Remove { name, repos, force } => {

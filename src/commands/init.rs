@@ -763,6 +763,15 @@ knit publish create --github
 knit publish status
 ```
 
+`knit publish create --draft` opens every review as a draft. To open only some
+repos' reviews as drafts, set it per repo in the project; the other repos keep
+opening ready for review:
+
+```sh
+knit project set-draft frontend
+knit project set-draft frontend false
+```
+
 Publish from a bundle artifact JSON (no local worktrees; branches must already exist on the host):
 
 ```sh
@@ -851,6 +860,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle "Feature title" --cd` is the long form that also accepts `--project`/`--repo`/`--view`/`--cd`.
 - `knit bundle --cd [<repo>]` starts a shell in the resolved existing bundle's worktree (or one repo checkout) without creating or switching anything.
 - `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
+- `knit project set-draft <repo> [true|false]` sets `publish.draft` on a project repo so `knit publish create` opens its review as a draft (`false` removes it); `--draft` still drafts every repo.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.

@@ -2114,6 +2114,7 @@ pub(super) fn project_repo_entry_from_export(
             _ => CheckoutMode::Worktree,
         },
         include_by_default: metadata_bool(&repository.metadata, "includeByDefault").unwrap_or(true),
+        publish: None,
     }
 }
 
@@ -2465,6 +2466,7 @@ mod tests {
             base_branch: "release".to_string(),
             checkout_mode: CheckoutMode::Worktree,
             include_by_default: true,
+            publish: None,
         });
         membership.repos.push(ProjectRepoEntry {
             id: "renamed".to_string(),
@@ -2473,6 +2475,7 @@ mod tests {
             base_branch: String::new(),
             checkout_mode: CheckoutMode::Worktree,
             include_by_default: true,
+            publish: None,
         });
 
         let mut by_id = export_repo("backend", "https://github.com/acme/backend.git");
@@ -2577,6 +2580,7 @@ mod tests {
             base_branch: "main".to_string(),
             checkout_mode: CheckoutMode::Worktree,
             include_by_default: true,
+            publish: None,
         });
         project
     }

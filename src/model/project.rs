@@ -409,6 +409,26 @@ pub struct ProjectRepoEntry {
     pub checkout_mode: CheckoutMode,
     #[serde(default = "default_include_by_default")]
     pub include_by_default: bool,
+    /// How `knit publish create` opens this repo's review object. Absent
+    /// means the defaults every repo had before the setting existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<ProjectRepoPublish>,
+}
+
+impl ProjectRepoEntry {
+    /// Whether the project asks for this repo's reviews to open as drafts.
+    pub fn publishes_as_draft(&self) -> bool {
+        self.publish.as_ref().is_some_and(|publish| publish.draft)
+    }
+}
+
+/// Per-repo publishing defaults, set with `knit project set-draft`.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ProjectRepoPublish {
+    /// Open this repo's review as a draft even without `--draft`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub draft: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -440,6 +440,20 @@ fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> Stri
             observed_repos.join("\n")
         )
     };
+    let draft_repos = project
+        .repos
+        .iter()
+        .filter(|repo| repo.publishes_as_draft())
+        .map(|repo| format!("- `{}`", repo.id))
+        .collect::<Vec<_>>();
+    let draft_section = if draft_repos.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\n`knit publish create` opens these repos' reviews as drafts (`publish.draft`; change with `knit project set-draft <repo> false`). The other repos open ready for review:\n\n{}\n",
+            draft_repos.join("\n")
+        )
+    };
     let landing_section = project_landing_agents_section(project);
     let runtime_section = project_runtime_agents_section(project);
     let teamwork_section = if include_teamwork {
@@ -469,7 +483,7 @@ knit bundle "feature title" --project {project_id}
 That command adds these default repos from the project data:
 
 {default_repos}
-{observed_section}
+{observed_section}{draft_section}
 For narrower or unusual work, inspect the project first and then choose repo ids deliberately:
 
 ```sh
@@ -494,6 +508,7 @@ Use `--pull` when you want to refresh the local history ledger from the sync rem
         project_id = project.id,
         default_repos = default_repos,
         observed_section = observed_section,
+        draft_section = draft_section,
         teamwork_section = teamwork_section,
         runtime_section = runtime_section,
         landing_section = landing_section

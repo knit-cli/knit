@@ -1019,3 +1019,32 @@ fn gate_schema_versions_config_shapes_and_typed_roundtrips() {
     hosted["steps"][0]["runner"] = json!("hosted");
     assert_invalid(&schema, &hosted, "hosted gate");
 }
+
+/// Per-repo `publish.draft` is schema-valid, survives a typed round-trip, and
+/// is omitted for repos that never set it; a misspelled key is refused.
+#[test]
+fn project_repo_publish_draft_validates_and_roundtrips() {
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/project.schema.json")).unwrap();
+    let mut project = serde_json::to_value(knit::model::KnitProject::new(
+        "synthetic".into(),
+        "2026-01-01T00:00:00Z".into(),
+    ))
+    .unwrap();
+    project["repos"] = json!([
+        {"id":"library","path":"library","baseBranch":"main"},
+        {"id":"operator","path":"operator","baseBranch":"main","publish":{"draft":true}}
+    ]);
+    assert_valid(&schema, &project, "per-repo publish draft");
+
+    let typed: knit::model::KnitProject = serde_json::from_value(project.clone()).unwrap();
+    assert!(!typed.repos[0].publishes_as_draft());
+    assert!(typed.repos[1].publishes_as_draft());
+    let roundtrip = serde_json::to_value(typed).unwrap();
+    assert!(roundtrip["repos"][0].get("publish").is_none());
+    assert_eq!(roundtrip["repos"][1]["publish"], json!({"draft": true}));
+
+    let mut typo = project.clone();
+    typo["repos"][1]["publish"] = json!({"drafts": true});
+    assert_invalid(&schema, &typo, "misspelled publish key");
+}
