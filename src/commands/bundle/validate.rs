@@ -5,7 +5,7 @@
 use crate::model::{BundleNode, ChangeGroup, CheckoutMode, CHANGE_GROUP_KIND, SCHEMA_VERSION};
 use std::collections::BTreeSet;
 
-pub(super) fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {
+pub(crate) fn validate_change_group(bundle: &ChangeGroup) -> Vec<String> {
     let mut errors = Vec::new();
 
     if bundle.schema_version != SCHEMA_VERSION {
@@ -236,7 +236,12 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
             }
         }
         "feature.landed" => {
-            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) {
+            let merge_mode = node.landing.as_ref().and_then(|l| l.merge_mode.as_deref());
+            let no_merges = merge_mode == Some("none");
+            if merge_mode.is_some() && !no_merges {
+                errors.push(format!("node `{}` has unknown landing.mergeMode", node.id));
+            }
+            if node.repo_ids.as_ref().is_none_or(Vec::is_empty) && !no_merges {
                 errors.push(format!("node `{}` must record repoIds", node.id));
             }
             if node.plan_id.as_deref().unwrap_or("").trim().is_empty() {
@@ -248,8 +253,41 @@ fn validate_node(node: &BundleNode, node_ids: &mut BTreeSet<String>, errors: &mu
             if node.provider.as_deref().unwrap_or("").trim().is_empty() {
                 errors.push(format!("node `{}` must record provider", node.id));
             }
-            if node.publication_urls.is_empty() {
-                errors.push(format!("node `{}` must record publicationUrls", node.id));
+            let branch_only = node
+                .landing
+                .as_ref()
+                .is_some_and(|landing| landing.branch_only == Some(true));
+            if no_merges
+                && (branch_only
+                    || node.repo_ids.as_ref().is_some_and(|ids| !ids.is_empty())
+                    || !node.publication_urls.is_empty())
+            {
+                errors.push(format!(
+                    "node `{}` no-merge landing must not claim source merges",
+                    node.id
+                ));
+            }
+            if node.publication_urls.is_empty() && !branch_only && !no_merges {
+                errors.push(format!(
+                    "node `{}` must record publicationUrls unless landing.branchOnly is true",
+                    node.id
+                ));
+            }
+            if branch_only && !node.publication_urls.is_empty() {
+                errors.push(format!(
+                    "node `{}` branch-only landing must not record publicationUrls",
+                    node.id
+                ));
+            }
+            if node
+                .publication_urls
+                .iter()
+                .any(|url| url.trim().is_empty())
+            {
+                errors.push(format!(
+                    "node `{}` publicationUrls must not contain empty URLs",
+                    node.id
+                ));
             }
         }
         "pr.revert" => {

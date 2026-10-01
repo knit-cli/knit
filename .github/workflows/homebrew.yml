@@ -2,9 +2,10 @@ name: Homebrew bottles
 
 # Packages the raw binaries of an existing release into real Homebrew
 # bottles, publishes the bottles plus the complete generated formula to that
-# same release, verifies the published bytes, and only then opens the tap
-# bump PR. Nothing is compiled and no tag is touched, so this same workflow
-# backfills any already-published release via workflow_dispatch.
+# same release, verifies the published bytes, and waits for the live tap
+# to match exactly. Automatic mode opens a PR; both modes require publication
+# on the default branch. Nothing is compiled and no tag is touched, so this
+# same workflow backfills an already-published release via workflow_dispatch.
 
 on:
   workflow_call:
@@ -13,12 +14,22 @@ on:
         description: Release tag to package (v<version>)
         required: true
         type: string
+      tap_publish_mode:
+        description: automatic opens a PR; manual requires an external publisher; BOTH wait for the live tap
+        type: string
+        default: automatic
   workflow_dispatch:
     inputs:
       release_tag:
         description: Existing release tag to package (v<version>); binaries are repackaged, never rebuilt
         required: true
         type: string
+
+      tap_publish_mode:
+        description: Both modes wait up to 30 minutes for the default-branch formula
+        type: choice
+        options: [automatic, manual]
+        default: automatic
 
 permissions:
   contents: write
@@ -37,12 +48,14 @@ jobs:
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ inputs.release_tag }}
+      TAP_PUBLISH_MODE: ${{ inputs.tap_publish_mode }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Validate release tag
         run: |
           set -euo pipefail
+          case "$TAP_PUBLISH_MODE" in manual|automatic) ;; *) echo "::error::invalid tap_publish_mode"; exit 1 ;; esac
           tag="${RELEASE_TAG:?release_tag is required}"
           if [[ ! "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
             echo "::error::refusing to package '${tag}': expected a v<semver> release tag" >&2
@@ -62,13 +75,22 @@ jobs:
       # Manual dispatch of this workflow bypasses the release gate, so run
       # the packager's own tests here too.
       - name: Homebrew packaging tests
-        run: python3 -m unittest discover -s scripts -p 'homebrew_bottles_test.py' -v
+        run: python3 -m unittest discover -s scripts -p 'homebrew*_test.py' -v
 
       - name: Package bottles and formula
         run: |
           set -euo pipefail
           python3 scripts/homebrew_bottles.py \
             --version "${RELEASE_TAG#v}" --assets-dir assets --output-dir homebrew-dist
+
+      # Before publishing any bottle/formula assets, automatic mode requires
+      # a credential unless this exact formula is already live (recovery).
+      - name: Preflight tap publication
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: >-
+          python3 scripts/homebrew_tap.py preflight --repo "$TAP_REPO"
+          --formula homebrew-dist/knit.rb --mode "$TAP_PUBLISH_MODE"
 
       # Release assets are immutable: upload only what is missing, and if an
       # asset already exists under the same name its published bytes must be
@@ -112,16 +134,20 @@ jobs:
         with:
           name: homebrew-bottles
           path: homebrew-dist
+          # Only Actions artifacts are replaced on rerun, never release assets.
+          overwrite: true
 
   tap-bump:
-    name: verify published bottles and bump tap
+    name: verify published bottles and complete live tap publication
     needs: bottles
     runs-on: ubuntu-latest
+    timeout-minutes: 40
     env:
       GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
       RELEASE_TAG: ${{ inputs.release_tag }}
-      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+      TAP_PUBLISH_MODE: ${{ inputs.tap_publish_mode }}
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: homebrew-bottles
@@ -172,18 +198,76 @@ jobs:
           print("verified %d bottle digests against the formula" % len(manifest["bottles"]))
           PY
 
-      # The bottles and formula are already published by the job above; a
-      # missing tap token must fail loudly instead of leaving the tap stale
-      # on a green run.
-      - name: Fail clearly when the tap token is missing
-        if: env.TAP_TOKEN == ''
+      # This receipt is created only after the published-byte checks succeed.
+      - name: Record verified handoff provenance
         run: |
-          echo "::error::HOMEBREW_TAP_TOKEN is not configured. Bottles and the formula for ${RELEASE_TAG} are published on the release, but Formula/knit.rb in ${TAP_REPO} was NOT updated, so 'brew install knit-cli/tap/knit' still serves the previous version. Configure the secret (Contents:write and Pull-requests:write on ${TAP_REPO}) and re-run 'Homebrew bottles' with release_tag=${RELEASE_TAG}."
-          exit 1
+          set -euo pipefail
+          SOURCE_SHA="$(gh api "repos/${GITHUB_REPOSITORY}/commits/${RELEASE_TAG}" --jq .sha)"
+          export SOURCE_SHA
+          python3 - <<'PYTHON'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import re
+
+          source_sha = os.environ["SOURCE_SHA"]
+          if not re.fullmatch(r"[0-9a-f]{40}", source_sha):
+              raise ValueError("release tag did not resolve to a commit SHA")
+          root = Path("homebrew-dist")
+          metadata = {
+              "release_tag": os.environ["RELEASE_TAG"],
+              "source_sha": source_sha,
+              "workflow_sha": os.environ["GITHUB_SHA"],
+              "repository": os.environ["GITHUB_REPOSITORY"],
+              "run_id": os.environ["GITHUB_RUN_ID"],
+              "run_attempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "run_url": "{}/{}/actions/runs/{}".format(
+                  os.environ["GITHUB_SERVER_URL"], os.environ["GITHUB_REPOSITORY"],
+                  os.environ["GITHUB_RUN_ID"]),
+              "formula_sha256": hashlib.sha256((root / "knit.rb").read_bytes()).hexdigest(),
+              "published_bytes_verified": True,
+          }
+          (root / "verification.json").write_text(
+              json.dumps(metadata, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+          PYTHON
+
+      - name: Upload verified tap handoff
+        uses: actions/upload-artifact@v4
+        with:
+          name: verified-homebrew-tap
+          overwrite: true
+          path: |
+            homebrew-dist/knit.rb
+            homebrew-dist/manifest.json
+            homebrew-dist/SHA256SUMS
+            homebrew-dist/verification.json
+          if-no-files-found: error
+
+      - name: Check whether the live tap already matches
+        id: live
+        run: |
+          set -euo pipefail
+          if python3 scripts/homebrew_tap.py check --repo "$TAP_REPO" --formula homebrew-dist/knit.rb; then
+            echo "matches=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "matches=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Require automatic publishing credential when needed
+        if: inputs.tap_publish_mode == 'automatic' && steps.live.outputs.matches != 'true'
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::error::Automatic publication requires HOMEBREW_TAP_TOKEN; live tap has not been verified identical."
+            exit 1
+          fi
 
       - name: Open tap formula PR
+        if: inputs.tap_publish_mode == 'automatic' && steps.live.outputs.matches != 'true'
         env:
-          GH_TOKEN: ${{ env.TAP_TOKEN }}
+          GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
           set -euo pipefail
           version="${RELEASE_TAG#v}"
@@ -191,6 +275,8 @@ jobs:
           gh auth setup-git
           git clone "https://github.com/${TAP_REPO}.git" tap
           cd tap
+          base="$(git symbolic-ref --short refs/remotes/origin/HEAD)"
+          base="${base#origin/}"
           git switch -c "$branch"
           cp "${GITHUB_WORKSPACE}/homebrew-dist/knit.rb" Formula/knit.rb
           if git diff --quiet; then
@@ -207,4 +293,19 @@ jobs:
             --title "knit ${version}" \
             --body "Automated formula bump for knit ${version}, generated from the ${RELEASE_TAG} release assets. The bottle checksums were verified against the published release before this PR was opened." \
             --head "$branch" \
-            --base main
+            --base "$base"
+
+      - name: Announce pending tap publication
+        if: steps.live.outputs.matches != 'true'
+        run: |
+          message="Tap publication pending for ${RELEASE_TAG} (${TAP_PUBLISH_MODE} mode). Publish and merge verified-homebrew-tap/knit.rb as Formula/knit.rb in ${TAP_REPO}. This run waits up to 30 minutes for exact bytes on the default branch; an open PR is not completion."
+          echo "::notice::$message"
+          echo "$message" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Require exact live tap formula
+        run: >-
+          python3 scripts/homebrew_tap.py wait --repo "$TAP_REPO"
+          --formula homebrew-dist/knit.rb --timeout 1800 --interval 20
+
+      - name: Record completed tap publication
+        run: echo "Live tap publication complete for ${RELEASE_TAG}; default-branch formula matches verified release bytes exactly." >> "$GITHUB_STEP_SUMMARY"

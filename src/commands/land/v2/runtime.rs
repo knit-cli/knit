@@ -166,7 +166,7 @@ impl Journal {
             }
         }
         typed.head_node_id = typed.nodes.last().map(|n| n.id.clone());
-        *bundle = serde_json::to_value(typed)?;
+        *bundle = crate::model::preserve_bundle_extensions(&bundle, serde_json::to_value(typed)?)?;
         durable(&self.bundle_out, &bundle)
     }
     fn snapshot(&self) -> Value {
@@ -2403,7 +2403,7 @@ fn lock_resources(plan: &Value, roots: &Roots) -> Result<Vec<Lock>> {
 fn new_run(plan: &Value, plan_path: &Path, bundle: &Value) -> Value {
     json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":unique_id("land-run"),"planId":plan["id"],"bundleId":plan["bundleId"],"provider":plan["provider"],"planPath":absolute(plan_path).unwrap_or_else(|_|plan_path.into()),"planHash":canonical_hash(plan),"plan":plan,"sourceBundle":bundle,"status":"pending","createdAt":now_iso(),"updatedAt":now_iso(),"serviceStatus":"unchanged","sourceStatus":"unchanged","finalization":{},"steps":plan["steps"].as_array().unwrap().iter().map(|s|json!({"id":s["id"],"type":s["type"],"repoId":s["repoId"],"status":"pending"})).collect::<Vec<_>>()})
 }
-fn verify_run(run: &Value, plan: &Value) -> Result<()> {
+pub(super) fn verify_run(run: &Value, plan: &Value) -> Result<()> {
     if run["schemaVersion"] != "0.2"
         || run["kind"] != "KnitLandRun"
         || !run["id"].is_string()
@@ -2454,32 +2454,87 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
     *bundle = journal.bundle.lock().unwrap().clone();
     let mut typed: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
     let run_id = r["id"].as_str().unwrap();
-    if !typed
+    let merges = super::ledger::completed_merges(&r, bundle)?;
+    let repos = super::ledger::merge_repos(&merges);
+    let urls = super::ledger::merge_urls(&merges);
+    let no_merges = super::ledger::no_source_merges(&r);
+    anyhow::ensure!(
+        !merges.is_empty() || no_merges,
+        "landing lacks completed source merge receipts"
+    );
+    if let Some(node) = typed
         .nodes
-        .iter()
-        .any(|n| n.node_type == "feature.landed" && n.run_id.as_deref() == Some(run_id))
+        .iter_mut()
+        .find(|n| n.node_type == "feature.landed" && n.run_id.as_deref() == Some(run_id))
     {
-        let repos = r["steps"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|s| matches!(s["type"].as_str(), Some("merge_pr" | "merge_branch")))
-            .filter_map(|s| s["repoId"].as_str().map(str::to_owned))
-            .collect();
-        typed.nodes.push(crate::model::BundleNode::feature_landed(
+        // A crash or old version may have persisted the summary before cleanup.
+        // Resume repairs only missing evidence; it never appends a second landing.
+        anyhow::ensure!(
+            node.plan_id.as_deref() == plan["id"].as_str(),
+            "landing node plan differs from run"
+        );
+        anyhow::ensure!(
+            node.repo_ids
+                .as_ref()
+                .map(|ids| ids.iter().collect::<BTreeSet<_>>())
+                == Some(repos.iter().collect()),
+            "landing node repositories differ from run"
+        );
+        anyhow::ensure!(
+            node.publication_urls.is_empty()
+                || node.publication_urls.iter().collect::<BTreeSet<_>>() == urls.iter().collect(),
+            "landing node publications differ from run"
+        );
+        anyhow::ensure!(
+            node.landing
+                .as_ref()
+                .is_none_or(|landing| landing.branch_only != Some(true))
+                || super::ledger::branch_only(&merges),
+            "branch-only landing node differs from review merge receipts"
+        );
+        anyhow::ensure!(
+            node.landing
+                .as_ref()
+                .and_then(|l| l.merge_mode.as_deref())
+                .is_none()
+                || (no_merges
+                    && node.landing.as_ref().and_then(|l| l.merge_mode.as_deref()) == Some("none")),
+            "landing merge mode differs from run"
+        );
+        if no_merges {
+            node.landing
+                .as_mut()
+                .context("no-merge node lacks landing destination")?
+                .merge_mode = Some("none".into());
+        }
+        if node.publication_urls.is_empty() {
+            node.publication_urls = urls;
+        }
+        if super::ledger::branch_only(&merges) {
+            let landing = node
+                .landing
+                .as_mut()
+                .context("branch-only node lacks landing destination")?;
+            landing.branch_only = Some(true);
+        }
+    } else {
+        let node = crate::model::BundleNode::feature_landed(
             unique_id("land"),
             now_iso(),
             plan["id"].as_str().unwrap().into(),
             run_id.into(),
             plan["provider"].as_str().unwrap_or("github").into(),
             repos,
-            vec![],
+            urls,
             Some(crate::model::NodeLanding {
+                merge_mode: no_merges.then(|| "none".into()),
+                branch_only: super::ledger::branch_only(&merges).then_some(true),
                 terminal: plan["terminal"] != false,
                 lane: plan["lane"].as_str().map(str::to_owned),
                 target_branch: plan["targetBranch"].as_str().map(str::to_owned),
             }),
-        ));
+        );
+        typed.nodes.push(node);
     }
     if plan["terminal"] != false && typed.state != Some(crate::model::BundleState::Archived) {
         typed.state = Some(crate::model::BundleState::Archived);
@@ -2492,7 +2547,7 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
     }
     typed.head_node_id = typed.nodes.last().map(|n| n.id.clone());
     typed.updated_at = now_iso();
-    *bundle = serde_json::to_value(typed)?;
+    *bundle = crate::model::preserve_bundle_extensions(bundle, serde_json::to_value(typed)?)?;
     *journal.bundle.lock().unwrap() = bundle.clone();
     durable(out, bundle)?;
     journal.edit(|r| {
@@ -2623,7 +2678,12 @@ fn execute(
     if let Some(result) = existing.as_ref().and_then(|r| r.get("resultBundle")) {
         let incoming: crate::model::ChangeGroup = serde_json::from_value(bundle.clone())?;
         let prior: crate::model::ChangeGroup = serde_json::from_value(result.clone())?;
-        bundle = serde_json::to_value(crate::model::merge_ledgers(&incoming, &prior, now_iso()))?;
+        let merged =
+            serde_json::to_value(crate::model::merge_ledgers(&incoming, &prior, now_iso()))?;
+        // Current extensions are authoritative. Restore them first, then fill
+        // only missing extensions from the saved result (including prior-only nodes).
+        let merged = crate::model::preserve_bundle_extensions(&bundle, merged)?;
+        bundle = crate::model::preserve_bundle_extensions(result, merged)?;
     }
     let source = existing
         .as_ref()
@@ -3217,7 +3277,11 @@ pub(crate) fn local_apply(
         ))
     });
     let resume = run_path.exists();
-    let bundle = serde_json::to_value(&active.bundle)?;
+    let raw_bundle: Value = read_json(&active.bundle_path)?;
+    let bundle = crate::model::preserve_bundle_extensions(
+        &raw_bundle,
+        serde_json::to_value(&active.bundle)?,
+    )?;
     let output = active.bundle_path.clone();
     execute(
         plan_path,
@@ -3248,7 +3312,12 @@ fn finish_local(
         if plan["terminal"] != false && !options.is_some_and(|o| o.keep_worktrees) {
             crate::commands::clean::clean_worktrees_for_bundle(active, false)?;
             crate::store::save_active_bundle(active)?;
-            *journal.bundle.lock().unwrap() = serde_json::to_value(&active.bundle)?;
+            let mut raw = journal.bundle.lock().unwrap();
+            *raw = crate::model::preserve_bundle_extensions(
+                &raw,
+                serde_json::to_value(&active.bundle)?,
+            )?;
+            durable(&active.bundle_path, &raw)?;
         }
         if plan["terminal"] != false {
             crate::commands::bundle::clear_workspace_active_if_matches(
@@ -3265,7 +3334,13 @@ fn finish_local(
                 options.remote,
                 options.no_remote,
             )?;
-            *journal.bundle.lock().unwrap() = serde_json::to_value(&active.bundle)?;
+            let mut raw = journal.bundle.lock().unwrap();
+            *raw = crate::model::preserve_bundle_extensions(
+                &raw,
+                serde_json::to_value(&active.bundle)?,
+            )?;
+            durable(&active.bundle_path, &raw)?;
+            drop(raw);
             journal.edit(|r| r["finalization"]["bundleSynchronization"] = json!("succeeded"))?;
         }
         if run["finalization"]["tag"] != "succeeded" {
@@ -3323,5 +3398,272 @@ mod gate_history_tests {
         assert!(update_changes(&root, &reviewed, &replacement).is_err());
         assert!(update_changes(&root, "HEAD", &live).is_err());
         fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod landing_record_tests {
+    use super::*;
+    use crate::commands::bundle::validate_change_group;
+
+    fn fixture(steps: Value, terminal: bool) -> (Value, Value, Journal, PathBuf) {
+        let root = std::env::temp_dir().join(unique_id("landing-record"));
+        fs::create_dir_all(&root).unwrap();
+        let mut bundle = serde_json::to_value(crate::model::ChangeGroup::new(
+            "sample".into(),
+            "Synthetic landing".into(),
+            "2026-01-01T00:00:00Z".into(),
+        ))
+        .unwrap();
+        bundle["repos"] = json!([
+            {"id":"api","path":"api","baseBranch":"main"},
+            {"id":"web","path":"web","baseBranch":"main"},
+            {"id":"docs","path":"docs","baseBranch":"main"}
+        ]);
+        let plan = json!({"id":"plan-sample","bundleId":"sample","provider":"github","terminal":terminal,"steps":steps});
+        let run = json!({"id":"run-sample","plan":plan,"steps":steps});
+        let journal = Journal {
+            value: Mutex::new(run),
+            path: root.join("run.json"),
+            bundle: Mutex::new(bundle.clone()),
+            bundle_out: root.join("bundle.json"),
+            workspace: root.clone(),
+            pins: Mutex::new(()),
+        };
+        (plan, bundle, journal, root)
+    }
+    fn assert_valid(bundle: &Value) {
+        let typed = serde_json::from_value(bundle.clone()).unwrap();
+        assert_eq!(validate_change_group(&typed), Vec::<String>::new());
+        assert!(!bundle.to_string().contains("landingMerges"));
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../../schemas/bundle.schema.json")).unwrap();
+        assert!(jsonschema::validator_for(&schema).unwrap().is_valid(bundle));
+    }
+    fn summary(bundle: &Value) -> &Value {
+        bundle["nodes"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|n| n["type"] == "feature.landed")
+            .unwrap()
+    }
+
+    #[test]
+    fn landing_record_finalize_review_and_mixed_merges_validate_and_resume_repairs() {
+        let steps = json!([
+            {"id":"web","type":"merge_pr","repoId":"web","status":"succeeded","output":{"publicationUrl":"https://example.invalid/web/pull/2","targetBranch":"main"}},
+            {"id":"api","type":"merge_pr","repoId":"api","status":"succeeded","output":{"publicationUrl":"https://example.invalid/api/pull/1","targetBranch":"main"}},
+            {"id":"api-again","type":"merge_pr","repoId":"api","status":"succeeded","output":{"publicationUrl":"https://example.invalid/api/pull/1","targetBranch":"main"}}
+        ]);
+        for mixed in [false, true] {
+            let mut steps = steps.clone();
+            if mixed {
+                steps.as_array_mut().unwrap().push(json!({"id":"docs","type":"merge_branch","repoId":"docs","status":"succeeded","output":{"targetBranch":"main"}}));
+            }
+            let (plan, mut bundle, journal, root) = fixture(steps, true);
+            finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+            assert_valid(&bundle);
+            assert_eq!(
+                summary(&bundle)["publicationUrls"],
+                json!([
+                    "https://example.invalid/api/pull/1",
+                    "https://example.invalid/web/pull/2"
+                ])
+            );
+            assert!(summary(&bundle)["landing"]["branchOnly"].is_null());
+            assert_eq!(bundle["state"], "archived");
+            let original = summary(&bundle).clone();
+            {
+                let mut prior = journal.bundle.lock().unwrap();
+                let node = prior["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|n| n["type"] == "feature.landed")
+                    .unwrap();
+                node.as_object_mut().unwrap().remove("publicationUrls");
+            }
+            finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+            assert_valid(&bundle);
+            assert_eq!(summary(&bundle), &original);
+            assert_eq!(
+                bundle["nodes"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|n| n["type"] == "feature.landed")
+                    .count(),
+                1
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn landing_record_finalize_and_resume_preserve_extensions_across_appended_nodes() {
+        let (plan, mut bundle, journal, root) = fixture(
+            json!([
+                {"id":"api","type":"merge_pr","repoId":"api","status":"succeeded","attribution":"performed","output":{"publicationUrl":"https://example.invalid/api/pull/1","targetBranch":"main"}}
+            ]),
+            true,
+        );
+        bundle["custom"] = json!({"bundle":1});
+        bundle["repos"][0]["custom"] = json!({"repo":"api"});
+        bundle["repos"][1]["custom"] = json!({"repo":"web"});
+        bundle["nodes"][0]["custom"] = json!({"node":1});
+        bundle["nodes"][0]["landing"] = json!({"terminal":false,"custom":{"nested":1}});
+        let original_node = bundle["nodes"][0].clone();
+        *journal.bundle.lock().unwrap() = bundle.clone();
+        // Receipt persistence runs before finalize and itself appends a node.
+        journal.edit(|_| {}).unwrap();
+        finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+        assert_eq!(bundle["nodes"][0], original_node);
+        assert_eq!(bundle["custom"], json!({"bundle":1}));
+        assert_eq!(bundle["repos"][0]["custom"], json!({"repo":"api"}));
+        assert_eq!(bundle["repos"][1]["custom"], json!({"repo":"web"}));
+        assert_valid(&bundle);
+        let expected;
+        {
+            let mut prior = journal.bundle.lock().unwrap();
+            let node = prior["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|n| n["type"] == "feature.landed")
+                .unwrap();
+            node["custom"] = json!({"audit":"keep"});
+            node["landing"]["custom"] = json!({"destination":"keep"});
+            expected = node.clone();
+            node.as_object_mut().unwrap().remove("publicationUrls");
+        }
+        finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+        assert_eq!(summary(&bundle), &expected);
+        assert_eq!(bundle["nodes"][0], original_node);
+        assert_eq!(bundle["custom"], json!({"bundle":1}));
+        assert_eq!(read_json::<Value>(&journal.bundle_out).unwrap(), bundle);
+        assert_valid(&bundle);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn landing_record_no_merge_completion_keeps_lifecycle_without_source_claims() {
+        for terminal in [false, true] {
+            let (plan, mut bundle, journal, root) = fixture(
+                json!([
+                    {"id":"deploy","type":"run","repoId":"api","status":"succeeded"}
+                ]),
+                terminal,
+            );
+            finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+            assert_valid(&bundle);
+            let node = summary(&bundle);
+            assert_eq!(node["landing"]["mergeMode"], "none");
+            assert_eq!(node["repoIds"], json!([]));
+            assert!(node["publicationUrls"].is_null());
+            assert!(node["landing"]["branchOnly"].is_null());
+            let typed_node = serde_json::from_value(node.clone()).unwrap();
+            assert_eq!(crate::model::is_terminal_landed_node(&typed_node), terminal);
+            assert_eq!(bundle["state"] == "archived", terminal);
+            let schema: Value =
+                serde_json::from_str(include_str!("../../../../schemas/bundle.schema.json"))
+                    .unwrap();
+            let schema = jsonschema::validator_for(&schema).unwrap();
+            for field in ["repoIds", "publicationUrls", "branchOnly", "mergeMode"] {
+                let mut bad = bundle.clone();
+                let node = bad["nodes"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|n| n["type"] == "feature.landed")
+                    .unwrap();
+                match field {
+                    "repoIds" => node[field] = json!(["api"]),
+                    "publicationUrls" => {
+                        node[field] = json!(["https://example.invalid/api/pull/1"])
+                    }
+                    "branchOnly" => node["landing"][field] = json!(true),
+                    _ => node["landing"][field] = json!("unknown"),
+                }
+                assert!(!schema.is_valid(&bad));
+                assert!(!validate_change_group(&serde_json::from_value(bad).unwrap()).is_empty());
+            }
+            fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    #[test]
+    fn landing_record_validation_rejects_missing_review_urls_and_contradictory_mode() {
+        let (plan, mut bundle, journal, root) = fixture(
+            json!([
+                {"id":"api","type":"merge_pr","repoId":"api","status":"succeeded","output":{"publicationUrl":"https://example.invalid/api/pull/1","targetBranch":"main"}}
+            ]),
+            true,
+        );
+        finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+        let schema: Value =
+            serde_json::from_str(include_str!("../../../../schemas/bundle.schema.json")).unwrap();
+        let schema = jsonschema::validator_for(&schema).unwrap();
+        for case in 0..4 {
+            let mut malformed = bundle.clone();
+            let node = malformed["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|n| n["type"] == "feature.landed")
+                .unwrap();
+            match case {
+                0 => {
+                    node.as_object_mut().unwrap().remove("publicationUrls");
+                }
+                1 => {
+                    node["publicationUrls"] = json!([]);
+                    node["landing"]["branchOnly"] = json!(false);
+                }
+                2 => node["publicationUrls"] = json!([""]),
+                3 => node["landing"]["branchOnly"] = json!(true),
+                _ => unreachable!(),
+            }
+            assert!(!schema.is_valid(&malformed), "case {case}");
+            assert!(
+                !validate_change_group(&serde_json::from_value(malformed).unwrap()).is_empty(),
+                "case {case}"
+            );
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn landing_record_branch_only_terminal_and_intermediate_validate_without_urls() {
+        for terminal in [false, true] {
+            let (plan, mut bundle, journal, root) = fixture(
+                json!([
+                    {"id":"api","type":"merge_branch","repoId":"api","status":"succeeded","output":{"targetBranch":"staging"}}
+                ]),
+                terminal,
+            );
+            finalize(&plan, &mut bundle, &journal, &journal.bundle_out).unwrap();
+            assert_valid(&bundle);
+            assert_eq!(summary(&bundle)["landing"]["branchOnly"], true);
+            assert!(summary(&bundle)["publicationUrls"].is_null());
+            assert_eq!(bundle["state"] == "archived", terminal);
+            let mut malformed = bundle.clone();
+            let node = malformed["nodes"]
+                .as_array_mut()
+                .unwrap()
+                .iter_mut()
+                .find(|n| n["type"] == "feature.landed")
+                .unwrap();
+            node["landing"]
+                .as_object_mut()
+                .unwrap()
+                .remove("branchOnly");
+            assert!(
+                validate_change_group(&serde_json::from_value(malformed).unwrap())
+                    .iter()
+                    .any(|e| e.contains("publicationUrls"))
+            );
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

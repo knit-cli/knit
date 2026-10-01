@@ -5,10 +5,39 @@ on:
     tags:
       - "v*"
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
 jobs:
+  publication-mode:
+    name: tap publication preflight
+    runs-on: ubuntu-latest
+    outputs:
+      mode: ${{ steps.mode.outputs.mode }}
+    env:
+      # Explicit policy: a publisher lands the verified formula through Knit.
+      TAP_PUBLISH_MODE: manual
+      TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+    steps:
+      - id: mode
+        run: |
+          set -euo pipefail
+          case "$TAP_PUBLISH_MODE" in
+            manual) ;;
+            automatic)
+              if [ -z "$TAP_TOKEN" ]; then
+                echo "::error::Automatic tap publication requires HOMEBREW_TAP_TOKEN before creating release assets."
+                exit 1
+              fi
+              ;;
+            *) echo "::error::invalid tap publication mode"; exit 1 ;;
+          esac
+          echo "mode=$TAP_PUBLISH_MODE" >> "$GITHUB_OUTPUT"
+
   # CI runs on branches and pull requests, not on tags, so without this a tag
   # could publish binaries that never passed a gate. Everything the release is
   # allowed to be wrong about has to be checked here, before any asset exists:
@@ -54,7 +83,7 @@ jobs:
   # upload-rust-binary-action uploads assets to an existing release; create it
   # first so tag pushes work unattended.
   create-release:
-    needs: [verify, verify-msrv]
+    needs: [verify, verify-msrv, publication-mode]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -80,28 +109,66 @@ jobs:
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     runs-on: ${{ matrix.os }}
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+      RELEASE_TARGET: ${{ matrix.target }}
     steps:
       - uses: actions/checkout@v4
+      - name: Verify existing raw release assets
+        id: raw
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: >-
+          python3 scripts/release_assets.py check --repo "$GITHUB_REPOSITORY"
+          --tag "$RELEASE_TAG" --target "$RELEASE_TARGET"
       - uses: dtolnay/rust-toolchain@stable
+        if: steps.raw.outputs.complete != 'true'
         with:
           targets: ${{ matrix.target }}
       - uses: taiki-e/setup-cross-toolchain-action@v1
+        if: steps.raw.outputs.complete != 'true'
         with:
           target: ${{ matrix.target }}
       # Both macOS builds (native arm64 and cross-compiled x86_64) share the
       # deployment target that the Homebrew bottle floor (big_sur) claims.
       - name: Pin macOS deployment target
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && steps.raw.outputs.complete != 'true'
         run: echo "MACOSX_DEPLOYMENT_TARGET=11.0" >> "$GITHUB_ENV"
+      # The action's normal upload uses --clobber. Build locally only; our
+      # publisher checks existing bytes and uploads missing files without it.
       - uses: taiki-e/upload-rust-binary-action@v1
+        if: steps.raw.outputs.complete != 'true'
         with:
           bin: knit
           target: ${{ matrix.target }}
           archive: knit-$tag-${{ matrix.target }}
           checksum: sha256
-          token: ${{ secrets.GITHUB_TOKEN }}
+          dry-run: true
+          dry-run-intended: true
           ref: refs/tags/${{ github.ref_name }}
           features: ""
+      # Retain the original build if publication stops between pair members.
+      # Attempt-specific names keep a later rebuild from replacing recovery bytes.
+      - name: Retain raw asset pair for recovery
+        if: steps.raw.outputs.complete != 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: raw-release-${{ matrix.target }}-${{ github.run_attempt }}
+          path: |
+            knit-${{ github.ref_name }}-${{ matrix.target }}.tar.gz
+            knit-${{ github.ref_name }}-${{ matrix.target }}.zip
+            knit-${{ github.ref_name }}-${{ matrix.target }}.sha256
+          if-no-files-found: error
+
+      - name: Publish immutable raw release assets
+        if: steps.raw.outputs.complete != 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
+        run: >-
+          python3 scripts/release_assets.py publish --repo "$GITHUB_REPOSITORY"
+          --tag "$RELEASE_TAG" --target "$RELEASE_TARGET"
       - name: Mark as pre-release
         if: contains(github.ref_name, '-')
         env:
@@ -112,13 +179,14 @@ jobs:
 
   # Repackage the just-uploaded raw binaries into Homebrew bottles, publish
   # them plus the complete generated formula to this release, verify the
-  # published bytes, and open the tap bump PR. The reusable workflow is also
-  # manually dispatchable to backfill an existing release tag.
+  # published bytes, and require the exact formula on the live tap. The reusable
+  # workflow is also manually dispatchable to backfill an existing release tag.
   homebrew-bottles:
-    needs: upload-assets
+    needs: [upload-assets, publication-mode]
     uses: ./.github/workflows/homebrew.yml
     with:
       release_tag: ${{ github.ref_name }}
+      tap_publish_mode: ${{ needs.publication-mode.outputs.mode }}
     permissions:
       contents: write
     secrets: inherit

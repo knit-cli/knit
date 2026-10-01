@@ -23,7 +23,7 @@ use anyhow::{bail, Context, Result};
 use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
-use validate::validate_change_group;
+pub(crate) use validate::validate_change_group;
 
 pub fn show_current_bundle() -> Result<()> {
     let active = load_active_bundle()?;

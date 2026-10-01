@@ -43,7 +43,51 @@
       "type": "array",
       "items": {
         "type": "object",
+        "allOf": [{
+          "if": { "required": ["type"], "properties": { "type": { "const": "feature.landed" } } },
+          "then": {
+            "if": {
+              "required": ["landing"],
+              "properties": { "landing": {
+                "required": ["mergeMode"],
+                "properties": { "mergeMode": { "const": "none" } }
+              } }
+            },
+            "then": { "properties": {
+              "repoIds": { "maxItems": 0 },
+              "publicationUrls": { "maxItems": 0 },
+              "landing": { "properties": { "branchOnly": { "const": false } } }
+            } },
+            "else": {
+              "required": ["repoIds"],
+              "properties": { "repoIds": { "minItems": 1 } },
+              "if": {
+                "required": ["landing"],
+                "properties": { "landing": {
+                  "required": ["branchOnly"],
+                  "properties": { "branchOnly": { "const": true } }
+                } }
+              },
+              "then": { "properties": { "publicationUrls": { "maxItems": 0 } } },
+              "else": {
+                "required": ["publicationUrls"],
+                "properties": { "publicationUrls": { "minItems": 1 } }
+              }
+            }
+          }
+        }],
         "properties": {
+          "publicationUrls": {
+            "type": "array",
+            "items": { "type": "string", "minLength": 1 }
+          },
+          "landing": {
+            "type": "object",
+            "properties": {
+              "mergeMode": { "enum": ["none"], "description": "A completed plan without any source merge steps." },
+              "branchOnly": { "type": "boolean", "description": "True only when every completed source merge was a branch merge, with no review publications." }
+            }
+          },
           "rewrite": {
             "type": "object",
             "required": ["kind", "supersededGroups"],

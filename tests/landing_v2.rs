@@ -1337,3 +1337,156 @@ fn paused_run_cannot_resume_after_a_newer_local_generation() {
     assert!(String::from_utf8_lossy(&refused.stderr).contains("superseded"));
     assert_eq!(read(&path), run);
 }
+
+#[test]
+fn landing_record_native_merge_disabled_plan_finalizes_valid_bundle() {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"steps":[{
+        "id":"inspect","type":"run","repoId":"service","effect":"read_only",
+        "command":[python_executable(),"-c","print('synthetic completion')"]
+    }]});
+    write(&f.project, &project);
+    let mut bundle = read(&f.bundle);
+    bundle["custom"] = json!({"bundle":"keep"});
+    bundle["repos"][0]["custom"] = json!({"repo":"keep"});
+    bundle["nodes"][0]["custom"] = json!({"node":"keep"});
+    write(&f.bundle, &bundle);
+    let output = f.cmd(&["land", "plan", "--out", "no-merge.json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let output = f.cmd(&[
+        "land",
+        "apply",
+        "--plan",
+        "no-merge.json",
+        "--from-artifact",
+        f.bundle.to_str().unwrap(),
+        "--project-file",
+        f.project.to_str().unwrap(),
+        "--repo-roots",
+        "roots.json",
+        "--run-out",
+        "no-merge.run.json",
+        "--out",
+        f.bundle.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let result = read(&f.bundle);
+    assert_eq!(result["custom"], bundle["custom"]);
+    assert_eq!(result["repos"][0]["custom"], bundle["repos"][0]["custom"]);
+    assert_eq!(result["nodes"][0]["custom"], bundle["nodes"][0]["custom"]);
+    let node = result["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["type"] == "feature.landed")
+        .unwrap();
+    assert_eq!(node["landing"]["mergeMode"], "none");
+    assert_eq!(node["repoIds"], json!([]));
+    assert!(node["publicationUrls"].is_null());
+    let output = f.cmd(&["bundle", "validate"]);
+    assert!(
+        output.status.success(),
+        "{} {}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let schema: Value =
+        serde_json::from_str(include_str!("../schemas/bundle.schema.json")).unwrap();
+    assert!(jsonschema::validator_for(&schema)
+        .unwrap()
+        .is_valid(&result));
+
+    // Model a historical completed run whose summary omitted its merge mode.
+    let mut historical = result.clone();
+    let node = historical["nodes"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|n| n["type"] == "feature.landed")
+        .unwrap();
+    node["custom"] = json!({"audit":"keep"});
+    node["landing"]["custom"] = json!({"destination":"keep"});
+    node["landing"].as_object_mut().unwrap().remove("mergeMode");
+    // Saved and current extension values deliberately conflict. Current opaque
+    // values must win as a whole, without resurrecting stale nested keys.
+    let original_extension = json!({"revision":"original","old":true});
+    let current_extension = json!({"revision":"current","new":true});
+    let summary_index = historical["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .position(|n| n["type"] == "feature.landed")
+        .unwrap();
+    historical["custom"] = original_extension.clone();
+    historical["repos"][0]["custom"] = original_extension.clone();
+    historical["nodes"][0]["custom"] = original_extension.clone();
+    historical["nodes"][summary_index]["custom"] = original_extension.clone();
+    historical["nodes"][summary_index]["landing"]["custom"] = original_extension;
+    historical["savedOnly"] = json!({"keep":true});
+    let run_path = f.root.join("no-merge.run.json");
+    let mut run = read(&run_path);
+    run["resultBundle"] = historical.clone();
+    write(&run_path, &run);
+    historical.as_object_mut().unwrap().remove("savedOnly");
+    historical["custom"] = current_extension.clone();
+    historical["repos"][0]["custom"] = current_extension.clone();
+    historical["nodes"][0]["custom"] = current_extension.clone();
+    historical["nodes"][summary_index]["custom"] = current_extension.clone();
+    historical["nodes"][summary_index]["landing"]["custom"] = current_extension.clone();
+    write(&f.bundle, &historical);
+    let output = f.cmd(&[
+        "land",
+        "apply",
+        "--resume",
+        "--plan",
+        "no-merge.json",
+        "--from-artifact",
+        f.bundle.to_str().unwrap(),
+        "--project-file",
+        f.project.to_str().unwrap(),
+        "--repo-roots",
+        "roots.json",
+        "--run-out",
+        "no-merge.run.json",
+        "--out",
+        f.bundle.to_str().unwrap(),
+    ]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let resumed = read(&f.bundle);
+    let node = resumed["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["type"] == "feature.landed")
+        .unwrap();
+    assert_eq!(node["landing"]["mergeMode"], "none");
+    assert_eq!(node["custom"], current_extension);
+    assert_eq!(node["landing"]["custom"], current_extension);
+    assert_eq!(resumed["custom"], current_extension);
+    assert_eq!(resumed["repos"][0]["custom"], current_extension);
+    assert_eq!(resumed["nodes"][0]["custom"], current_extension);
+    assert_eq!(resumed["savedOnly"], json!({"keep":true}));
+    assert_eq!(
+        resumed["nodes"].as_array().unwrap().len(),
+        result["nodes"].as_array().unwrap().len()
+    );
+    let resumed_run = read(&run_path);
+    assert_eq!(resumed_run["planHash"], run["planHash"]);
+    assert_eq!(resumed_run["plan"], run["plan"]);
+    assert!(jsonschema::validator_for(&schema)
+        .unwrap()
+        .is_valid(&resumed));
+}
