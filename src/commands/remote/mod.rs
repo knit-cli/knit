@@ -36,6 +36,7 @@ pub use pull::{
     pull_remote_state, pull_views_from_remote, remote_bundle_lifecycle, RemoteBundleOutcome,
     RemoteBundleRecord, RemotePullContext,
 };
+pub(crate) use push::preflight_automatic_sync;
 pub use push::sync_remote_helpers_command;
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote,

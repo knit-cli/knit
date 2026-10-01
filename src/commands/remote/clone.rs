@@ -2069,6 +2069,11 @@ fn local_project_from_export(
         .clone()
         .unwrap_or_else(|| KnitProject::new(export.project.slug.clone(), now_iso()));
     project.id = slugify(&project.id);
+    let publishing: BTreeMap<_, _> = project
+        .repos
+        .iter()
+        .map(|r| (r.id.clone(), r.publish.clone()))
+        .collect();
     project.repos.clear();
 
     for repository in repositories {
@@ -2081,9 +2086,9 @@ fn local_project_from_export(
             .get(&local_id)
             .cloned()
             .unwrap_or_else(|| target_root.join(&local_id));
-        project
-            .repos
-            .push(project_repo_entry_from_export(repository, &repo_path));
+        let mut entry = project_repo_entry_from_export(repository, &repo_path);
+        entry.publish = publishing.get(&entry.id).cloned().flatten();
+        project.repos.push(entry);
     }
 
     project.updated_at = now_iso();

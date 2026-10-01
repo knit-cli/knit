@@ -395,6 +395,9 @@ pub enum Commands {
     },
     /// Push tracked feature branches.
     Push {
+        /// Permit outgoing commits by authors other than git-config identity.
+        #[arg(long)]
+        allow_foreign_author: bool,
         /// Optional repo ids or paths to limit the push.
         repos: Vec<String>,
         /// Push every tracked repo. This is the default when no repos are passed.
@@ -1342,10 +1345,15 @@ pub enum SchemaCommand {
     },
 }
 
+// Parsed once per process; keeping the command fields together simplifies clap.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum PublishCommand {
     /// Push feature branches and create missing review objects (auto-detects each repo's host).
     Create {
+        /// Permit outgoing commits by authors other than git-config identity.
+        #[arg(long)]
+        allow_foreign_author: bool,
         /// Optional repo ids or paths to limit creation.
         repos: Vec<String>,
         /// Read a bundle JSON artifact from this path instead of the local Knit workspace.
@@ -1375,11 +1383,24 @@ pub enum PublishCommand {
         /// Existing Git remote whose fetch URL owns the review base (one selected repo).
         #[arg(long, conflicts_with = "from_artifact")]
         target_remote: Option<String>,
-        /// Create every selected repo's review object as a draft. Without it,
-        /// only repos whose project entry sets `publish.draft`
-        /// (`knit project set-draft <repo>`) open as drafts.
-        #[arg(long)]
+        /// Create every selected review as a draft, overriding project and bundle policy.
+        #[arg(long, conflicts_with = "ready")]
         draft: bool,
+        /// Open this repository ready for review, overriding configured draft policy. Repeatable.
+        #[arg(long, value_name = "REPO")]
+        ready: Vec<String>,
+        /// Open this repository as a draft, overriding configured policy. Repeatable.
+        #[arg(long, value_name = "REPO")]
+        draft_repo: Vec<String>,
+        /// Set a repository's review title, overriding bundle and project policy. Repeatable.
+        #[arg(long, value_name = "REPO=TEXT")]
+        title: Vec<String>,
+        /// Read a repository's review body relative to the bundle worktree root. Repeatable.
+        #[arg(long, value_name = "REPO=PATH")]
+        body_file: Vec<String>,
+        /// Preview targets, source branches, draft reasons, titles and body sources. No writes.
+        #[arg(long)]
+        dry_run: bool,
         /// Replace recorded merged/closed review objects with a fresh review round.
         #[arg(long)]
         renew: bool,

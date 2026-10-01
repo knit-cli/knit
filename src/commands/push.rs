@@ -81,11 +81,14 @@ fn ensure_no_pending_rewrite(root: &Path, bundle: &ChangeGroup) -> Result<()> {
     Ok(())
 }
 
+// Command entry point: these arguments correspond directly to CLI flags.
+#[allow(clippy::too_many_arguments)]
 pub fn push_repos(
     selectors: &[String],
     all: bool,
     set_upstream: bool,
     force: PushForce,
+    allow_foreign_author: bool,
     remote: &[String],
     no_remote: bool,
     no_history: bool,
@@ -114,6 +117,18 @@ pub fn push_repos(
             crate::contribution::push_remote(&cwd, repo)?;
         }
     }
+    // Validate every selected repository before starting any parallel push.
+    for &index in &indexes {
+        let repo = &active.bundle.repos[index];
+        let cwd = checkout_dir(&active, repo).context("missing feature checkout")?;
+        let remote = crate::contribution::push_remote(&cwd, repo)?;
+        crate::author::preflight_push(&cwd, repo, &remote, allow_foreign_author)?;
+    }
+    let checked: Vec<_> = indexes
+        .iter()
+        .map(|&i| active.bundle.repos[i].id.clone())
+        .collect();
+    crate::commands::remote::preflight_automatic_sync(&active, remote, no_remote, &checked)?;
     if discovered {
         save_active_bundle(&active)?;
     }
@@ -520,6 +535,7 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
             }
         }
     }
+    preflight_sync_branches(root, bundle, &[])?;
     let mut pushed = Vec::new();
     for repo in &bundle.repos {
         // No git remote recorded: the branch/artifact coupling cannot apply.
@@ -590,6 +606,33 @@ pub(crate) fn ensure_open_bundle_branches_on_origin(
     }
 
     Ok(pushed)
+}
+
+pub(crate) fn preflight_sync_branches(
+    root: &Path,
+    bundle: &ChangeGroup,
+    already_checked: &[String],
+) -> Result<()> {
+    // Automatic artifact sync can push repositories outside the caller's
+    // selected review set. Validate all locally pushable branches first.
+    for repo in &bundle.repos {
+        if already_checked.iter().any(|id| id == &repo.id) {
+            continue;
+        }
+        if crate::contribution::source(repo).is_none() {
+            continue;
+        }
+        let (Some(branch), Some(cwd)) =
+            (repo.feature_branch.as_deref(), branch_push_dir(root, repo))
+        else {
+            continue;
+        };
+        if ref_commit_sha(&cwd, &format!("refs/heads/{branch}"))?.is_some() {
+            let remote = crate::contribution::push_remote(&cwd, repo)?;
+            crate::author::preflight_push(&cwd, repo, &remote, false)?;
+        }
+    }
+    Ok(())
 }
 
 /// Where a bundle repo's feature branch can be pushed from: the recorded

@@ -772,6 +772,28 @@ knit project set-draft frontend
 knit project set-draft frontend false
 ```
 
+Project and bundle `publish` policies can also select titles, body files, upstream
+review templates, and dependency-based drafts. Per-repo policy lives under
+`publish.repos`; CLI overrides win over bundle and project settings. Body paths
+are relative to the bundle worktree root, and `PR-{{repo}}.md` expands the repo id.
+Use a preview to inspect each target, source branch, draft reason, title, and body
+source before publishing:
+
+```sh
+knit publish create --dry-run
+knit publish create --ready library --draft-repo consumer
+knit publish create --title 'library=Add the shared API' --body-file consumer=consumer-review.md
+```
+
+`--dry-run` does not push, create reviews, or sync artifacts. `knit publish sync`
+updates the managed Knit block and preserves the author's surrounding text.
+
+Knit uses Git-config authors for commits it creates, including rewrites, and
+warns when injected author environment variables are ignored. `knit push` and
+`knit publish create` check authors before publishing; use
+`--allow-foreign-author` only to deliberately permit other authors. If
+`commit.gpgsign` is enabled, signing remains required even with that override.
+
 Publish from a bundle artifact JSON (no local worktrees; branches must already exist on the host):
 
 ```sh

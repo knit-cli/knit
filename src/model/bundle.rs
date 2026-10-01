@@ -68,6 +68,8 @@ pub struct ChangeGroup {
     pub id: String,
     pub title: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<super::PublishPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub state: Option<BundleState>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub closed_at: Option<String>,
@@ -102,6 +104,7 @@ impl ChangeGroup {
             kind: CHANGE_GROUP_KIND.to_string(),
             id,
             title,
+            publish: None,
             state: Some(BundleState::Open),
             closed_at: None,
             archived_at: None,
@@ -299,6 +302,11 @@ impl ChangeGroup {
 pub fn merge_ledgers(local: &ChangeGroup, remote: &ChangeGroup, now: String) -> ChangeGroup {
     use std::collections::BTreeSet;
     let mut merged = local.clone();
+    // As with portable repository roles, adopt a newly supplied policy while
+    // preserving locally authored overrides on divergent ledger merges.
+    if merged.publish.is_none() {
+        merged.publish = remote.publish.clone();
+    }
 
     let known: BTreeSet<String> = local.nodes.iter().map(|node| node.id.clone()).collect();
     let mut nodes = local.nodes.clone();

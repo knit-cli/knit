@@ -1,6 +1,7 @@
 pub mod advice;
 pub mod auth;
 pub mod auth_git;
+pub mod author;
 pub mod checkout;
 pub mod cli;
 pub mod commands;
@@ -439,6 +440,7 @@ pub fn run(cli: Cli) -> Result<()> {
             merge,
         ),
         Commands::Push {
+            allow_foreign_author,
             repos,
             all,
             set_upstream,
@@ -452,6 +454,7 @@ pub fn run(cli: Cli) -> Result<()> {
             all,
             set_upstream,
             PushForce::from_flags(force_with_lease, force),
+            allow_foreign_author,
             &remote,
             no_remote,
             no_history,
@@ -504,6 +507,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::run_project_command(name.as_deref(), &repos, all, list, force, purge, &args),
         Commands::Publish { target } => match target {
             PublishCommand::Create {
+                allow_foreign_author,
                 source_remote,
                 target_remote,
                 repos,
@@ -514,6 +518,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 lane,
                 all,
                 draft,
+                ready,
+                draft_repo,
+                title,
+                body_file,
+                dry_run,
                 renew,
                 sync,
                 no_sync,
@@ -524,21 +533,32 @@ pub fn run(cli: Cli) -> Result<()> {
                 github,
             } => {
                 let provider = effective_publish_provider(provider, github);
+                let options = commands::publish::PublishOptions {
+                    allow_foreign_author,
+                    ready,
+                    draft_repo,
+                    title,
+                    body_file,
+                    dry_run,
+                };
                 match from_artifact {
-                    Some(path) => commands::create_publications_from_artifact(
-                        &path,
-                        out.as_deref(),
-                        &repos,
-                        all,
-                        draft,
-                        renew,
-                        target.as_deref(),
-                        lane.as_deref(),
-                        sync || !no_sync,
-                        !no_push,
-                        provider.as_deref(),
-                    ),
-                    None => commands::create_publications(
+                    Some(path) => {
+                        commands::publish::create_publications_from_artifact_with_options(
+                            &path,
+                            out.as_deref(),
+                            &repos,
+                            all,
+                            draft,
+                            renew,
+                            target.as_deref(),
+                            lane.as_deref(),
+                            sync || !no_sync,
+                            !no_push,
+                            provider.as_deref(),
+                            &options,
+                        )
+                    }
+                    None => commands::publish::create_publications_with_options(
                         source_remote.as_deref(),
                         target_remote.as_deref(),
                         &repos,
@@ -552,6 +572,7 @@ pub fn run(cli: Cli) -> Result<()> {
                         &remote,
                         no_remote,
                         provider.as_deref(),
+                        &options,
                     ),
                 }
             }

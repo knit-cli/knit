@@ -30,6 +30,8 @@ pub struct KnitProject {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub landing: Option<ProjectLandingPlan>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub publish: Option<PublishPolicy>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requirements: Option<ProjectRequirements>,
     /// Project-defined forge authentication requirements: which repositories
     /// need a forge credential, of which kind, from which host. Purely
@@ -53,6 +55,7 @@ impl KnitProject {
             runtime: None,
             history: None,
             landing: None,
+            publish: None,
             requirements: None,
             auth: None,
         }
@@ -965,4 +968,69 @@ mod auth_tests {
             .unwrap_err()
             .contains("more than one auth group"));
     }
+}
+
+/// Shared project defaults and optional bundle overrides. Unknown extensions
+/// survive typed project/bundle round trips for forward compatibility.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<PublishDraft>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<PublishTitle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<PublishBody>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub repos: BTreeMap<String, PublishRepoPolicy>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PublishDraft {
+    Mode(PublishDraftMode),
+    Repos(Vec<String>),
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublishDraftMode {
+    None,
+    All,
+    Dependents,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublishTitle {
+    CommitGroup,
+    BundleTitle,
+    File,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishBody {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fallback: Option<PublishBodyFallback>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum PublishBodyFallback {
+    UpstreamTemplate,
+    Knit,
+}
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PublishRepoPolicy {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub draft: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_file: Option<String>,
+    #[serde(flatten)]
+    pub extensions: BTreeMap<String, serde_json::Value>,
 }

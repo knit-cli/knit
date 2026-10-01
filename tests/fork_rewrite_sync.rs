@@ -163,6 +163,36 @@ impl Fixture {
 }
 
 #[test]
+fn native_explicit_lease_uses_fork_push_url_and_rejects_concurrent_changes() {
+    let f = Fixture::new();
+    let first = f.plain_push().trim().to_owned();
+    let upstream_before = git(&f.upstream, ["rev-parse", BRANCH]);
+    // A fetch observes the upstream branch, which intentionally differs from
+    // the fork. An explicit native lease still applies to the push endpoint.
+    git(&f.checkout, ["fetch", "origin"]);
+    f.rewrite();
+    let rewritten = git(&f.checkout, ["rev-parse", "HEAD"]).trim().to_owned();
+    let lease = format!("--force-with-lease=refs/heads/{BRANCH}:{first}");
+    let refspec = format!("HEAD:refs/heads/{BRANCH}");
+    git(
+        &f.checkout,
+        ["push", lease.as_str(), "origin", refspec.as_str()],
+    );
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]).trim(), rewritten);
+    assert_eq!(git(&f.upstream, ["rev-parse", BRANCH]), upstream_before);
+
+    let concurrent = f.foreign_fork_commit();
+    let stale_lease = format!("--force-with-lease=refs/heads/{BRANCH}:{rewritten}");
+    assert!(!git_success(
+        &f.checkout,
+        ["push", stale_lease.as_str(), "origin", refspec.as_str()]
+    ));
+    assert_eq!(git(&f.fork, ["rev-parse", BRANCH]), concurrent);
+    assert_eq!(git(&f.upstream, ["rev-parse", BRANCH]), upstream_before);
+    fs::remove_dir_all(f.root).unwrap();
+}
+
+#[test]
 fn fork_rewrite_push_and_subsequent_artifact_lease_use_last_successful_receipts() {
     let f = Fixture::new();
     f.run(&["push"]);
