@@ -226,6 +226,13 @@ fn scoped_project_push_preserves_remote_auth_definitions() {
     )
     .unwrap();
 
+    let export_path = fake_dir.join("export.json");
+    let mut export: serde_json::Value =
+        serde_json::from_slice(&fs::read(&export_path).unwrap()).unwrap();
+    export["data"]["knitProject"]["publish"] =
+        serde_json::json!({"draft":"dependents","repos":{"frontend":{"title":"Shared review"}}});
+    fs::write(&export_path, export.to_string()).unwrap();
+
     // A scoped workspace cloned only `backend`, and its (stale, local-only)
     // auth definitions differ from the remote's.
     let workspace = root.join("workspace");
@@ -244,6 +251,7 @@ fn scoped_project_push_preserves_remote_auth_definitions() {
                 "remote": "https://forge.example/org/backend.git",
                 "baseBranch": "main",
             }],
+            "publish": {"draft":"all"},
             "auth": {"groups": [{
                 "id": "stale-local", "name": "Stale", "provider": "github",
                 "host": "forge.example", "repos": ["frontend"],
@@ -284,6 +292,10 @@ fn scoped_project_push_preserves_remote_auth_definitions() {
         knit_project["auth"]["groups"][0]["id"],
         serde_json::json!("remote-def")
     );
+    assert_eq!(
+        knit_project["publish"],
+        export["data"]["knitProject"]["publish"]
+    );
     // And the merged shape still carries the whole remote membership.
     let ids: Vec<&str> = knit_project["repos"]
         .as_array()
@@ -293,6 +305,29 @@ fn scoped_project_push_preserves_remote_auth_definitions() {
         .collect();
     assert_eq!(ids, vec!["backend", "frontend"]);
 
+    export["data"]["knitProject"]
+        .as_object_mut()
+        .unwrap()
+        .remove("publish");
+    fs::write(&export_path, export.to_string()).unwrap();
+    knit(&workspace, ["project", "push"]);
+    let writes = fs::read_to_string(fake_dir.join("project-shape-writes.jsonl")).unwrap();
+    let cleared: serde_json::Value = serde_json::from_str(writes.lines().last().unwrap()).unwrap();
+    assert!(
+        cleared["metadata"]["knitProject"].get("publish").is_none(),
+        "scoped stale policy must not resurrect a remote clear"
+    );
+
+    export["data"]["omittedRepositoryCount"] = serde_json::json!(1);
+    fs::write(&export_path, export.to_string()).unwrap();
+    let partial = knit(&workspace, ["project", "push"]);
+    assert!(partial.contains("project shape not pushed"), "{partial}");
+    let writes = fs::read_to_string(fake_dir.join("project-shape-writes.jsonl")).unwrap();
+    let partial: serde_json::Value = serde_json::from_str(writes.lines().last().unwrap()).unwrap();
+    assert!(
+        partial["metadata"].get("knitProject").is_none(),
+        "partial membership must not replace the shared project shape"
+    );
     fs::remove_dir_all(root).unwrap();
 }
 

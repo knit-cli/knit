@@ -8,7 +8,7 @@ use crate::commands::land::lanes::{
 use crate::model::{ChangeGroup, ProjectLandingLane, RepoEntry};
 use crate::providers::{self};
 use crate::repo_selectors::resolve_repo_indexes;
-use crate::store::{load_config, project_path, ActiveBundle};
+use crate::store::ActiveBundle;
 use anyhow::{bail, Result};
 use std::collections::BTreeSet;
 
@@ -129,7 +129,7 @@ pub(super) fn resolve_publish_repo_indexes_for_bundle(
         .repos
         .iter()
         .enumerate()
-        .filter_map(|(index, repo)| repo_ids.contains(&repo.id).then_some(index))
+        .filter_map(|(index, repo)| (all || repo_ids.contains(&repo.id)).then_some(index))
         .collect::<Vec<_>>();
 
     if indexes.is_empty() {
@@ -189,32 +189,6 @@ impl PublishDestination {
             _ => None,
         }
     }
-}
-
-/// Repo ids whose project entry sets `publish.draft`. A bundle with no
-/// project, or whose project file is not in this workspace, has none, so it
-/// publishes exactly as it did before the setting existed.
-pub(super) fn project_draft_repo_ids(active: &ActiveBundle) -> Result<BTreeSet<String>> {
-    let config = load_config(&active.root)?;
-    let project_id = active
-        .bundle
-        .project_id
-        .as_deref()
-        .or(config.active_project.as_deref());
-    let has_project_file = project_id.is_some_and(|id| project_path(&active.root, id).is_file());
-    if !has_project_file {
-        return Ok(BTreeSet::new());
-    }
-    Ok(load_project_for_bundle(active)?
-        .map(|project| {
-            project
-                .repos
-                .iter()
-                .filter(|repo| repo.publishes_as_draft())
-                .map(|repo| repo.id.clone())
-                .collect()
-        })
-        .unwrap_or_default())
 }
 
 /// Turn the `--target`/`--lane` flags into a destination for a

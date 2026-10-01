@@ -11,6 +11,92 @@
     "repos"
   ],
   "properties": {
+    "publish": {
+      "type": [
+        "object",
+        "null"
+      ],
+      "properties": {
+        "draft": {
+          "oneOf": [
+            {
+              "enum": [
+                "none",
+                "all",
+                "dependents"
+              ]
+            },
+            {
+              "type": "array",
+              "items": {
+                "type": "string"
+              }
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "title": {
+          "enum": [
+            "commit-group",
+            "bundle-title",
+            "file",
+            null
+          ]
+        },
+        "body": {
+          "type": [
+            "object",
+            "null"
+          ],
+          "properties": {
+            "file": {
+              "type": [
+                "string",
+                "null"
+              ]
+            },
+            "fallback": {
+              "enum": [
+                "upstream-template",
+                "knit",
+                null
+              ]
+            }
+          },
+          "additionalProperties": true
+        },
+        "repos": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "draft": {
+                "type": [
+                  "boolean",
+                  "null"
+                ]
+              },
+              "title": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              },
+              "bodyFile": {
+                "type": [
+                  "string",
+                  "null"
+                ]
+              }
+            },
+            "additionalProperties": true
+          }
+        }
+      },
+      "additionalProperties": true
+    },
     "history": {
       "type": "object",
       "additionalProperties": false,
@@ -111,7 +197,7 @@
         "properties": {
           "publish": {
             "description": "How `knit publish create` opens this repo's review object. Set with `knit project set-draft <repo>`.",
-            "type": "object",
+            "type": ["object", "null"],
             "additionalProperties": false,
             "properties": {
               "draft": {

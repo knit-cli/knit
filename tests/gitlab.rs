@@ -154,6 +154,15 @@ fn gitlab_cli_workspace_publish_and_land_loop() {
             remote.to_str().unwrap(),
         ],
     );
+    // Publication preflight now reads the upstream base before landing setup.
+    git(
+        &feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", remote.display()),
+            "https://gitlab.com/acme/backend.git",
+        ],
+    );
     let bundle_path = workspace.join(".knit/bundles/forge-workspace.bundle.json");
     let mut bundle: Value =
         serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
@@ -163,6 +172,7 @@ fn gitlab_cli_workspace_publish_and_land_loop() {
     let fake_bin = root.join("fake bin");
     let fake_dir = root.join("fake forge");
     write_fake_glab(&fake_bin, &fake_dir);
+    provider_fixture::install(&fake_bin, None);
     let publish = knit_with_fake_forge(
         &workspace,
         [

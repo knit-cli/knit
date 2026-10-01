@@ -213,13 +213,13 @@ fn inspect_bundle_paths(root: &Path, issues: &mut Vec<String>) {
         let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
             continue;
         };
-        // Archived bundles are expected to have no checkouts: archiving removes
-        // generated worktrees, so a recorded-but-missing worktree is normal and
-        // must not be reported as an issue.
+        // Archived bundles retain historical paths: generated worktrees are removed,
+        // and source checkouts may later be moved or removed. Only live bundles
+        // require these paths; archived ledger consistency is still checked.
         let archived = bundle.state == Some(BundleState::Archived);
         for repo in &bundle.repos {
             let repo_path = PathBuf::from(&repo.path);
-            if !repo_path.exists() {
+            if !archived && !repo_path.exists() {
                 issues.push(format!(
                     "{}:{} repo path missing: {}",
                     bundle.id, repo.id, repo.path

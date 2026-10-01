@@ -122,7 +122,7 @@ knit run --list
 knit check run <project-command> [--repo <repo>]... [--all]
 knit check record <name> --pass|--fail [--detail <text>]
 knit check status
-knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--source-remote <git-remote>] [--target-remote <git-remote>] [--target <branch>|--lane <name>] [--draft] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
+knit publish create [--from-artifact <path>] [--out <path>] [--no-push] [--provider <id>|--github] [--source-remote <git-remote>] [--target-remote <git-remote>] [--target <branch>|--lane <name>] [--draft] [--ready <repo>]... [--draft-repo <repo>]... [--title <repo=title>]... [--body-file <repo=path>]... [--dry-run] [--allow-foreign-author] [--renew] [--sync|--no-sync] [--set-upstream] [--remote <name>]... [--no-remote] [repo-id-or-path...]
 knit publish sync [--from-artifact <path>] [--out <path>] [--provider <id>|--github] [repo-id-or-path...]
 knit publish status [--live] [--provider <id>|--github] [repo-id-or-path...]
 knit request ...                               # alias for `knit publish`
@@ -886,7 +886,42 @@ knit publish status
 ]
 ```
 
-`knit publish create` then opens `frontend` as a draft and every other repo ready for review, in the same run. A project without the setting publishes exactly as before. The setting applies when a review object is created; an existing review is adopted as it is. Artifact publish (`--from-artifact`) reads no project, so only `--draft` applies there.
+With no other publishing policy, `knit publish create` opens `frontend` as a draft and other repos ready for review, in the same run. A project without publishing settings keeps the previous title, body, and ready-for-review defaults. Creation settings do not silently retitle or change the draft state of an existing review.
+
+A project can also define a top-level publishing policy. The same optional `publish` object on a bundle overrides the project:
+
+```json
+"publish": {
+  "draft": "dependents",
+  "title": "commit-group",
+  "body": {
+    "file": "PR-{repo}.md",
+    "fallback": "upstream-template"
+  },
+  "repos": {
+    "library": { "draft": false, "title": "Add the shared API" },
+    "consumer": { "bodyFile": "consumer-review.md" }
+  }
+}
+```
+
+`draft` accepts `"none"`, `"all"`, `"dependents"`, or an array of repository IDs. Dependency-based drafts use declared library/consumer relationships in `landing.dependencies` and Cargo git dependencies or patches targeting another bundle repository's feature branch, including its fork URL. A consumer blocked by an unmerged dependency, or a configured release awaiting acknowledgement, opens as a draft with a `Blocked on` review link. Independent repositories and libraries remain ready unless another setting overrides them.
+
+`title` selects `"commit-group"` (the head commit group's message), `"bundle-title"`, or `"file"` (a leading `Title: ...` line in the body file). A per-repository title is literal text and takes precedence over the selected strategy. Body paths are relative to `.knit/worktrees/<bundle>/`; `{repo}` expands to the repository ID. The `Title:` line is removed from the description. A missing body file falls back to the target repository's pull-request template when requested, then to Knit's normal body. Knit appends its managed cross-link block and preserves author text when syncing.
+
+Precedence is CLI overrides, bundle policy, project per-repository policy, project-wide policy, then built-in defaults. The existing project repo's `publish.draft` remains a per-repository default, below an explicit `publish.repos.<id>.draft` value. Project push/pull carries the policy and its removal. Push from a scoped clone preserves the remote's whole-project policy; change shared publishing defaults from a whole-project clone.
+
+```sh
+knit publish create --dry-run
+knit publish create --ready library --draft-repo consumer
+knit publish create --title 'library=Add the shared API' --body-file consumer=consumer-review.md
+```
+
+`--ready`, `--draft-repo`, `--title`, and `--body-file` accept repeated per-repository overrides. `--draft` still drafts every selected repository. `--dry-run` shows the target repository/base, source branch, draft decision and reason, title, and body source without pushing branches, creating reviews, or syncing bundle artifacts. Review the preview before publishing with the same options and without `--dry-run`.
+
+Before a branch push, including branch uploads required by artifact sync, Knit checks outgoing feature commits against the checkout's `user.name` and `user.email`. Before creating reviews it also checks the feature commits already present on the remote branch. Commits outside the feature's base are considered; unrelated upstream history is excluded. A mismatch lists the offending commits and stops before any selected branch is pushed. Use `--allow-foreign-author` only when publishing those authors is deliberate. When `commit.gpgsign` is true, unsigned commits are refused even with that author override.
+
+Knit-created commits use the Git-config identity, including squash, rebase, cherry-pick, and conflict completion. Injected `GIT_AUTHOR_NAME` and `GIT_AUTHOR_EMAIL` produce a warning and do not replace that identity. A rebase rewrites only the selected feature history; unrelated base commits keep their authors.
 
 `knit publish create` pushes the selected feature branches, creates or adopts their review objects, records publication metadata, and updates the managed cross-repo links. Publishing runs at most `KNIT_FORGE_JOBS` (default 4) repositories at a time. Transient forge failures are retried; a repository's failure does not stop the others, and the command reports failures with a nonzero exit status.
 
@@ -959,6 +994,8 @@ Choose the PR destination with the same flags used for landing:
 `--target` and `--lane` are mutually exclusive. Invalid or missing lane mappings fail before any branch push or PR change. Publishing leaves the bundle's starting base unchanged. An existing open PR is retargeted when its destination differs; publishing again without a destination selects the bundle base again. If a landing plan already exists, regenerate and inspect it with `knit land plan --force` after retargeting. `--base` is no longer a publishing option.
 
 Bare `knit land` follows the recorded PR targets. An explicit `knit land --target` or `knit land --lane` chooses a different landing destination. For an intermediate lane, landing merges feature branches into the mapped branches and keeps the bundle and its reviews open; a terminal lane merges the reviews and closes the bundle. Inspect the generated plan before applying.
+
+Artifact publishing uses the bundle policy and body files relative to the artifact directory. It reports that project configuration is unavailable. Without worktrees, `draft: dependents` requires explicit per-repository draft/ready overrides or `--draft`.
 
 `--lane` requires a project-backed workspace and is unavailable with `--from-artifact`; artifact publishing accepts `--target`. Body sync is on by default (`--no-sync` skips it). If body sync fails after reviews were created, use `knit publish sync` to retry the links without choosing PR destinations again.
 

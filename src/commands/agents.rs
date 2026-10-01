@@ -110,7 +110,12 @@ knit publish create
 `knit publish create` pushes every tracked feature branch itself and then opens
 one review object (PR/MR) per repo, so committing and publishing is the whole
 path to review. Use `knit push --set-upstream` only when you want the branches
-on `origin` without review objects.
+on `origin` without review objects. Project and bundle `publish` policy supplies
+review titles, bodies, and draft choices. Inspect it with `knit publish create
+--dry-run`; use `--ready <repo>`, `--draft-repo <repo>`, `--title <repo>=<text>`, or
+`--body-file <repo>=<path>` for deliberate overrides. Body files live relative to
+this bundle worktree root. Publishing sync preserves author text outside the
+managed Knit block.
 
 {teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
@@ -450,7 +455,7 @@ fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> Stri
         String::new()
     } else {
         format!(
-            "\n`knit publish create` opens these repos' reviews as drafts (`publish.draft`; change with `knit project set-draft <repo> false`). The other repos open ready for review:\n\n{}\n",
+            "\n`knit publish create` opens these repos' reviews as drafts (`publish.draft`; change with `knit project set-draft <repo> false`). Other draft choices may come from project or bundle publishing policy and CLI overrides:\n\n{}\n",
             draft_repos.join("\n")
         )
     };

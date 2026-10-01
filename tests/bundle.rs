@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 use std::fs;
 
 #[test]
-fn doctor_ignores_missing_recorded_worktree_only_for_archived_bundles() {
+fn doctor_ignores_missing_recorded_paths_only_for_archived_bundles() {
     let root = unique_temp_dir();
     let backend = root.join("backend");
     let workspace = root.join("workspace");
@@ -22,7 +22,9 @@ fn doctor_ignores_missing_recorded_worktree_only_for_archived_bundles() {
     let bundle_path = workspace.join(".knit/bundles/archived-checkout.bundle.json");
     let mut bundle: Value =
         serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    let missing_source = root.join("missing-source");
     let missing_worktree = ".knit/worktrees/archived-checkout/missing";
+    bundle["repos"][0]["path"] = json!(missing_source);
     bundle["repos"][0]["worktreePath"] = json!(missing_worktree);
     fs::write(
         &bundle_path,
@@ -39,8 +41,66 @@ fn doctor_ignores_missing_recorded_worktree_only_for_archived_bundles() {
     )
     .unwrap();
     let open_doctor = knit_fails(&workspace, ["doctor"]);
+    assert!(open_doctor.contains("repo path missing"), "{open_doctor}");
+    assert!(
+        open_doctor.contains(missing_source.to_str().unwrap()),
+        "{open_doctor}"
+    );
     assert!(open_doctor.contains("worktree missing"), "{open_doctor}");
     assert!(open_doctor.contains(missing_worktree), "{open_doctor}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn doctor_reports_archived_ledger_inconsistency_with_missing_paths() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "archived ledger"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    fs::write(
+        workspace.join(".knit/worktrees/archived-ledger/backend/app.txt"),
+        "feature\n",
+    )
+    .unwrap();
+    knit(&workspace, ["commit", "--all", "-m", "Add fixture feature"]);
+    knit(&workspace, ["bundle", "archive", "archived-ledger"]);
+
+    let bundle_path = workspace.join(".knit/bundles/archived-ledger.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    assert_eq!(bundle["state"], json!("archived"));
+    assert_ne!(bundle["repos"][0]["headSha"], bundle["repos"][0]["baseSha"]);
+    bundle["repos"][0]["headSha"] = bundle["repos"][0]["baseSha"].clone();
+    bundle["repos"][0]["path"] = json!(root.join("missing-source"));
+    bundle["repos"][0]["worktreePath"] = json!(".knit/worktrees/archived-ledger/missing");
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+
+    let doctor = knit_fails(&workspace, ["doctor"]);
+    assert!(
+        doctor.contains("headSha projection differs from ledger"),
+        "{doctor}"
+    );
+    assert!(!doctor.contains("repo path missing"), "{doctor}");
+    assert!(!doctor.contains("worktree missing"), "{doctor}");
+
+    // Archived artifacts must also continue through structural validation.
+    bundle["repos"][0]["baseBranch"] = json!(42);
+    fs::write(
+        &bundle_path,
+        format!("{}\n", serde_json::to_string_pretty(&bundle).unwrap()),
+    )
+    .unwrap();
+    let doctor = knit_fails(&workspace, ["doctor"]);
+    assert!(doctor.contains("invalid type"), "{doctor}");
 
     fs::remove_dir_all(root).unwrap();
 }

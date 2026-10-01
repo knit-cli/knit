@@ -183,6 +183,16 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
             remote.to_str().unwrap(),
         ],
     );
+    // Preflight reads the review base through the fetch URL, not the push URL.
+    // Preserve the forge identity while routing that read to the real fixture.
+    git(
+        &feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", remote.display()),
+            "https://bitbucket.org/acme/backend.git",
+        ],
+    );
     let bundle_path = workspace.join(".knit/bundles/bitbucket-workspace.bundle.json");
     let mut bundle: Value =
         serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
@@ -190,11 +200,20 @@ fn workspace_publish_status_and_land_apply_archive_through_bitbucket() {
         Value::String("https://bitbucket.org/acme/backend.git".to_string());
     fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
 
+    // Reuse the native provider shim before publication as well as landing:
+    // provider identity stays synthetic; Git transport uses the local mapping.
+    let publish_bin = root.join("publish bin");
+    provider_fixture::install(&publish_bin, None);
+    let publish_path = std::env::join_paths(std::iter::once(publish_bin).chain(
+        std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()),
+    ))
+    .unwrap();
     let state = root.join("fake-bitbucket-workspace");
     let base = spawn_fake_bitbucket_api(&state);
     let env = [
         ("KNIT_BITBUCKET_API_BASE", base.as_str()),
         ("KNIT_BITBUCKET_ACCESS_TOKEN", "workspace-token"),
+        ("PATH", publish_path.to_str().unwrap()),
     ];
     let publish = knit_with_env(
         &workspace,
@@ -330,6 +349,14 @@ fn bitbucket_provider_filter_skips_github_and_uses_basic_auth() {
             backend_remote.to_str().unwrap(),
         ],
     );
+    git(
+        &backend_feature,
+        [
+            "config",
+            &format!("url.{}.insteadOf", backend_remote.display()),
+            "https://bitbucket.org/acme/backend.git",
+        ],
+    );
     let bundle_path = workspace.join(".knit/bundles/mixed-forge-filter.bundle.json");
     let mut bundle: Value =
         serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
@@ -344,6 +371,7 @@ fn bitbucket_provider_filter_skips_github_and_uses_basic_auth() {
     let fake_bin = root.join("fake-bin");
     let fake_gh = root.join("fake-gh");
     write_fake_gh(&fake_bin, &fake_gh);
+    provider_fixture::install(&fake_bin, None);
     let output = knit_with_fake_gh_env(
         &workspace,
         [

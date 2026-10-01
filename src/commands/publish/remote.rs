@@ -4,7 +4,7 @@
 //! hosted bundle sync can run between branch pushes and review-object
 //! creation. The `*_from_artifact` variants run without local checkouts.
 
-use super::pr_body::initial_pr_body;
+use super::policy::ResolvedPublish;
 use crate::checkout::checkout_dir;
 use crate::commands::push::{run_push_to, PushForce};
 use crate::git::{current_branch, git_output_optional, rev_parse};
@@ -117,7 +117,7 @@ pub(super) fn publish_repo_remote(
     active: &ActiveBundle,
     bundle: &ChangeGroup,
     job: &PublishJob,
-    draft: bool,
+    resolved: &ResolvedPublish,
     renew: bool,
     pushed_sha: &str,
 ) -> Result<PublishRemoteResult> {
@@ -191,7 +191,7 @@ pub(super) fn publish_repo_remote(
         repo,
         base_branch,
         &head,
-        draft,
+        resolved,
     )?;
     Ok(PublishRemoteResult {
         repo_index: job.repo_index,
@@ -204,7 +204,7 @@ pub(super) fn publish_repo_remote_from_artifact(
     cwd: &Path,
     bundle: &ChangeGroup,
     job: &PublishJob,
-    draft: bool,
+    resolved: &ResolvedPublish,
     renew: bool,
 ) -> Result<ArtifactPublishResult> {
     let repo = &job.repo;
@@ -274,7 +274,7 @@ pub(super) fn publish_repo_remote_from_artifact(
         repo,
         base_branch,
         &head,
-        draft,
+        resolved,
     )?;
     Ok(ArtifactPublishResult {
         repo_index: job.repo_index,
@@ -387,10 +387,19 @@ fn create_or_adopt(
     repo: &RepoEntry,
     base_branch: &str,
     branch: &str,
-    draft: bool,
+    resolved: &ResolvedPublish,
 ) -> Result<PublishStatus> {
-    let title = format!("{} ({})", bundle.title, repo.id);
-    let initial_body = initial_pr_body(bundle, &repo.id, forge.id());
+    for library in &resolved.blocked_on {
+        if publication_for_repo(bundle, library).is_none() {
+            bail!(
+                "{}: dependency {library} has no review link; retry after publishing the library",
+                repo.id
+            );
+        }
+    }
+    let title = resolved.title.clone();
+    let initial_body = resolved.body(bundle, repo, forge.id());
+    let draft = resolved.draft;
     let url = match forge.create(target, base_branch, branch, &title, &initial_body, draft) {
         Ok(url) => url,
         Err(error) => {

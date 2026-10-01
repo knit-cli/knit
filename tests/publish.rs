@@ -428,6 +428,8 @@ fn artifact_pr_create_reuses_existing_pr_found_with_github_api() {
 fn pr_create_targets_a_branch_and_a_default_rerun_retargets_back() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    // Real review bases must exist for publication author/signing preflight.
+    git(&root.join("backend.git"), ["branch", "release", "main"]);
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 
@@ -736,6 +738,12 @@ fn pr_create_lane_routes_per_repo_default_and_null_entries() {
         }),
     );
 
+    git(
+        &root.join("backend.git"),
+        ["branch", "staging-backend", "main"],
+    );
+    git(&root.join("frontend.git"), ["branch", "staging", "main"]);
+
     // Every repo gets an open review first, so the lane run has to leave the
     // absent repo's existing review and body untouched.
     knit_with_fake_gh(
@@ -933,6 +941,8 @@ fn publish_create_rejects_base_flag_and_conflicting_destination_flags() {
 fn renew_with_a_changed_target_keeps_the_renewal_contract() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    // Real review bases must exist for publication author/signing preflight.
+    git(&root.join("backend.git"), ["branch", "release", "main"]);
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
 

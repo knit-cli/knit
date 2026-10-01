@@ -166,6 +166,7 @@ fn start_active(
         {
             bail!("{}: finish the existing Git operation first", repo.id);
         }
+        crate::author::require_identity(&checkout)?;
         let old_head = rev_parse(&checkout, "HEAD")?;
         let old_base = rev_parse(
             &checkout,
@@ -185,7 +186,8 @@ fn start_active(
         )?
         .parse()?;
         let needs_squash = squash
-            && (count > 1
+            && (crate::author::needs_reauthor(&checkout, &old_base, &old_head)?
+                || count > 1
                 || (count == 1
                     && git_output(&checkout, ["show", "-s", "--format=%B", "HEAD"])?.trim_end()
                         != message.trim_end()));
@@ -454,7 +456,9 @@ fn execute_repo(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
             ["rebase", "--continue"],
             &[("GIT_EDITOR", "true")],
         )?;
-    } else if repo.old_base != repo.new_base {
+    } else if repo.old_base != repo.new_base
+        || crate::author::needs_reauthor(&repo.path, &repo.old_base, "HEAD")?
+    {
         let head = rev_parse(&repo.path, "HEAD")?;
         let before = repo
             .rebase_head
@@ -467,7 +471,17 @@ fn execute_repo(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
         } else {
             git_output(
                 &repo.path,
-                ["rebase", "--onto", &repo.new_base, &repo.old_base],
+                [
+                    "rebase",
+                    "--force-rebase",
+                    "--empty=drop",
+                    "--reschedule-failed-exec",
+                    "--exec",
+                    &crate::author::rebase_author_exec(&repo.new_base),
+                    "--onto",
+                    &repo.new_base,
+                    &repo.old_base,
+                ],
             )?;
         }
     }

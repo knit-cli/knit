@@ -124,6 +124,9 @@ fn checkpoint_round_trip_and_idempotent_acceptance() {
     let incoming = f.accept(&f.target, "vps");
     assert_eq!(incoming["bundleId"], "travel");
     let target_tree = f.target.join(".knit/worktrees/travel/backend");
+    // A second machine needs its own configured identity for new checkpoints.
+    git(&target_tree, ["config", "user.name", "Test"]);
+    git(&target_tree, ["config", "user.email", "test@example.test"]);
     assert_eq!(
         fs::read_to_string(target_tree.join("wip.txt")).unwrap(),
         "laptop work\n"

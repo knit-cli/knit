@@ -397,7 +397,7 @@ where
     git_output_inner(cwd, collect_args(args), true)
 }
 
-fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Result<String> {
+fn git_output_inner(cwd: &Path, mut args: Vec<OsString>, allow_recovery: bool) -> Result<String> {
     let mut command = Command::new("git");
     let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {
         Ok(credentials) => credentials,
@@ -408,6 +408,7 @@ fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Re
             return Err(error);
         }
     };
+    crate::author::configure(cwd, &mut args, &mut command)?;
     command.args(&args).current_dir(cwd);
     let output = if crate::commands::land::git_progress::active(&args) {
         crate::commands::land::git_progress::run(&mut command, &args, &credentials)
@@ -572,7 +573,7 @@ where
 
 fn git_output_env_inner(
     cwd: &Path,
-    args: Vec<OsString>,
+    mut args: Vec<OsString>,
     envs: &[(&str, &str)],
     allow_recovery: bool,
 ) -> Result<String> {
@@ -589,6 +590,7 @@ fn git_output_env_inner(
             return Err(error);
         }
     };
+    crate::author::configure(cwd, &mut args, &mut command)?;
     command.args(&args).current_dir(cwd);
     let output = command
         .output()

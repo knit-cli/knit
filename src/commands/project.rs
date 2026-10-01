@@ -654,6 +654,12 @@ pub fn pull_project_config(name: Option<&str>, repo_id: &str, agents: bool) -> R
     if incoming.landing.is_some() {
         project.landing = incoming.landing;
     }
+    project.publish = incoming.publish;
+    for repo in &mut project.repos {
+        if let Some(source) = incoming.repos.iter().find(|source| source.id == repo.id) {
+            repo.publish = source.publish.clone();
+        }
+    }
     for (command_name, command) in incoming.commands {
         project.commands.entry(command_name).or_insert(command);
     }

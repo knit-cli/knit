@@ -4,7 +4,12 @@
 //! reports recorded/live state. The `*_from_artifact` entry points run the
 //! same flows from a bundle artifact JSON with no local worktrees.
 
+mod policy;
+#[cfg(test)]
+mod policy_tests;
 mod pr_body;
+mod template;
+pub use policy::PublishOptions;
 mod remote;
 mod scope;
 mod status;
@@ -24,7 +29,7 @@ use remote::{
 };
 pub(crate) use scope::publish_scope_repo_ids;
 use scope::{
-    filter_indexes_by_provider, project_draft_repo_ids, resolve_publish_destination,
+    filter_indexes_by_provider, resolve_publish_destination,
     resolve_publish_destination_for_artifact, resolve_publish_repo_indexes,
     resolve_publish_repo_indexes_for_bundle, PublishDestination,
 };
@@ -48,7 +53,46 @@ pub fn create_publications(
     no_remote: bool,
     provider: Option<&str>,
 ) -> Result<()> {
-    let mut active = load_active_bundle_for_update()?;
+    create_publications_with_options(
+        source_remote,
+        target_remote,
+        selectors,
+        all,
+        draft,
+        renew,
+        target,
+        lane,
+        sync,
+        set_upstream,
+        remote,
+        no_remote,
+        provider,
+        &PublishOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_publications_with_options(
+    source_remote: Option<&str>,
+    target_remote: Option<&str>,
+    selectors: &[String],
+    all: bool,
+    draft: bool,
+    renew: bool,
+    target: Option<&str>,
+    lane: Option<&str>,
+    sync: bool,
+    set_upstream: bool,
+    remote: &[String],
+    no_remote: bool,
+    provider: Option<&str>,
+    options: &PublishOptions,
+) -> Result<()> {
+    let mut active = if options.dry_run {
+        crate::store::load_active_bundle()?
+    } else {
+        load_active_bundle_for_update()?
+    };
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
     }
@@ -80,7 +124,56 @@ pub fn create_publications(
     let mut bundle_changed = false;
 
     let jobs = resolve_publish_jobs(&active.bundle.repos, &indexes, &destination)?;
+    let project = policy::project(&active)?;
+    let checkouts = active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            crate::checkout::checkout_dir(&active, repo).map(|p| (repo.id.clone(), p))
+        })
+        .collect();
+    let body_root = active.root.join(".knit/worktrees").join(&active.bundle.id);
+    policy::refresh_dependencies(
+        &mut active.bundle,
+        project.as_ref(),
+        &body_root,
+        &checkouts,
+        &jobs,
+        draft,
+        options,
+    )?;
+    let resolved = policy::resolve(
+        &active.bundle,
+        project.as_ref(),
+        &body_root,
+        &checkouts,
+        &jobs,
+        draft,
+        options,
+    )?;
+    if options.dry_run {
+        return policy::preview(&active.bundle, &jobs, &resolved);
+    }
     preflight(&active.bundle, &jobs, Some(&active), renew)?;
+    for job in &jobs {
+        let cwd = crate::checkout::checkout_dir(&active, &job.repo)
+            .context("missing feature checkout")?;
+        let push_remote = crate::contribution::push_remote(&cwd, &job.repo)?;
+        crate::author::preflight_publish(
+            &cwd,
+            &job.repo,
+            &push_remote,
+            if target.is_some() || lane.is_some() {
+                Some(&job.base_branch)
+            } else {
+                None
+            },
+            options.allow_foreign_author,
+        )?;
+    }
+    let checked: Vec<_> = jobs.iter().map(|job| job.repo.id.clone()).collect();
+    crate::commands::remote::preflight_automatic_sync(&active, remote, no_remote, &checked)?;
     if discovered || source_remote.is_some() || target_remote.is_some() {
         save_active_bundle(&active)?;
     }
@@ -89,15 +182,13 @@ pub fn create_publications(
     // excluded keeps its existing review and body untouched.
     let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
 
-    // `--draft` makes every review a draft; without it, only repos whose
-    // project entry sets `publish.draft` open as drafts.
-    let draft_repos = project_draft_repo_ids(&active)?;
-    if !draft {
-        for job in jobs.iter().filter(|job| draft_repos.contains(&job.repo.id)) {
+    for job in &jobs {
+        let policy = &resolved[&job.repo.id];
+        if policy.draft {
             println!(
                 "{}: {}",
                 out::repo(&job.repo.id),
-                out::muted("opens as a draft (project publish.draft)")
+                out::muted(format!("opens as a draft ({})", policy.draft_reason))
             );
         }
     }
@@ -189,65 +280,82 @@ pub fn create_publications(
             failures.push(format!("{repo_id}: {error:#}"));
         }
     }
-    let total = create_jobs.len();
+    for wave in policy::waves(
+        create_jobs.iter().map(|(j, _)| j.repo.id.clone()),
+        &resolved,
+    )? {
+        let wave_jobs: Vec<_> = create_jobs
+            .iter()
+            .filter(|(job, _)| wave.contains(&job.repo.id))
+            .cloned()
+            .collect();
+        let total = wave_jobs.len();
+        let wave_snapshot = active.bundle.clone();
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
-        let active = &active;
-        let bundle = &bundle_snapshot;
-        let draft_repos = &draft_repos;
-        let sender = tx.clone();
-        crate::parallel::spawn_bounded(scope, &create_jobs, limit, move |(job, pushed)| {
-            let repo_id = job.repo.id.clone();
-            let notes = sender.clone();
-            let note_repo = repo_id.clone();
-            let _notes = crate::retry::stream_notes_to(move |line| {
-                let _ = notes.send(PublishEvent::Note(format!(
-                    "{}: {line}",
-                    out::repo(&note_repo)
-                )));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let outcomes: Vec<PublishRemoteResult> = std::thread::scope(|scope| {
+            let active = &active;
+            let bundle = &wave_snapshot;
+            let resolved = &resolved;
+            let sender = tx.clone();
+            crate::parallel::spawn_bounded(scope, &wave_jobs, limit, move |(job, pushed)| {
+                let repo_id = job.repo.id.clone();
+                let notes = sender.clone();
+                let note_repo = repo_id.clone();
+                let _notes = crate::retry::stream_notes_to(move |line| {
+                    let _ = notes.send(PublishEvent::Note(format!(
+                        "{}: {line}",
+                        out::repo(&note_repo)
+                    )));
+                });
+                let result = publish_repo_remote(
+                    active,
+                    bundle,
+                    job,
+                    &resolved[&job.repo.id],
+                    renew,
+                    &pushed.sha,
+                );
+                let _ = sender.send(PublishEvent::Done {
+                    repo_id,
+                    result: Box::new(result),
+                });
             });
-            let draft = draft || draft_repos.contains(&job.repo.id);
-            let result = publish_repo_remote(active, bundle, job, draft, renew, &pushed.sha);
-            let _ = sender.send(PublishEvent::Done {
-                repo_id,
-                result: Box::new(result),
-            });
-        });
-        drop(tx);
+            drop(tx);
 
-        let mut outcomes = Vec::new();
-        let mut done = 0;
-        for event in rx {
-            match event {
-                PublishEvent::Note(line) => println!("{line}"),
-                PublishEvent::PushDone { .. } => unreachable!("push event in review phase"),
-                PublishEvent::Done { repo_id, result } => {
-                    done += 1;
-                    let progress = out::progress(done, total);
-                    match *result {
-                        Ok(outcome) => {
-                            report_publish_remote_result(&outcome, &progress);
-                            outcomes.push(outcome);
-                        }
-                        Err(error) => {
-                            println!(
-                                "{}: {}{progress}",
-                                out::repo(&repo_id),
-                                out::danger("PR create failed")
-                            );
-                            failures.push(format!("{repo_id}: {error:#}"));
+            let mut outcomes = Vec::new();
+            let mut done = 0;
+            for event in rx {
+                match event {
+                    PublishEvent::Note(line) => println!("{line}"),
+                    PublishEvent::PushDone { .. } => unreachable!("push event in review phase"),
+                    PublishEvent::Done { repo_id, result } => {
+                        done += 1;
+                        let progress = out::progress(done, total);
+                        match *result {
+                            Ok(outcome) => {
+                                report_publish_remote_result(&outcome, &progress);
+                                outcomes.push(outcome);
+                            }
+                            Err(error) => {
+                                println!(
+                                    "{}: {}{progress}",
+                                    out::repo(&repo_id),
+                                    out::danger("PR create failed")
+                                );
+                                failures.push(format!("{repo_id}: {error:#}"));
+                            }
                         }
                     }
                 }
             }
-        }
-        outcomes
-    });
+            outcomes
+        });
 
-    for outcome in &outcomes {
-        if apply_publish_remote_result(&mut active, outcome)? {
-            bundle_changed = true;
+        for outcome in &outcomes {
+            if apply_publish_remote_result(&mut active, outcome)? {
+                bundle_changed = true;
+            }
         }
     }
 
@@ -318,23 +426,98 @@ pub fn create_publications_from_artifact(
     push: bool,
     provider: Option<&str>,
 ) -> Result<()> {
+    create_publications_from_artifact_with_options(
+        artifact_path,
+        out_path,
+        selectors,
+        all,
+        draft,
+        renew,
+        target,
+        lane,
+        sync,
+        push,
+        provider,
+        &PublishOptions::default(),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub fn create_publications_from_artifact_with_options(
+    artifact_path: &Path,
+    out_path: Option<&Path>,
+    selectors: &[String],
+    all: bool,
+    draft: bool,
+    renew: bool,
+    target: Option<&str>,
+    lane: Option<&str>,
+    sync: bool,
+    push: bool,
+    provider: Option<&str>,
+    options: &PublishOptions,
+) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let mut bundle: ChangeGroup = crate::store::read_json(artifact_path)
+    let artifact_path = cwd.join(artifact_path);
+    let mut bundle: ChangeGroup = crate::store::read_json(&artifact_path)
         .with_context(|| format!("failed to load bundle artifact {}", artifact_path.display()))?;
     if bundle.repos.is_empty() {
         bail!("Bundle artifact has no repos.");
     }
-    if push {
+    if push && !options.dry_run {
         bail!("Artifact publish does not support git push. Re-run with --no-push.");
     }
 
     let indexes = resolve_publish_repo_indexes_for_bundle(&bundle, selectors, all)?;
     let indexes = filter_indexes_by_provider(&bundle.repos, indexes, provider)?;
     let destination = resolve_publish_destination_for_artifact(target, lane)?;
-    let bundle_snapshot = bundle.clone();
     let mut failures = Vec::new();
 
     let jobs = resolve_publish_jobs(&bundle.repos, &indexes, &destination)?;
+    if bundle.project_id.is_some() {
+        eprintln!("Artifact publishing has no project configuration; using bundle overrides and built-in defaults.");
+    }
+    if !draft
+        && bundle.publish.as_ref().is_some_and(|p| {
+            matches!(
+                p.draft,
+                Some(crate::model::PublishDraft::Mode(
+                    crate::model::PublishDraftMode::Dependents
+                ))
+            )
+        })
+    {
+        let unresolved: Vec<_> = jobs
+            .iter()
+            .filter(|j| {
+                !options.ready.contains(&j.repo.id)
+                    && !options.draft_repo.contains(&j.repo.id)
+                    && bundle
+                        .publish
+                        .as_ref()
+                        .and_then(|p| p.repos.get(&j.repo.id))
+                        .and_then(|p| p.draft)
+                        .is_none()
+            })
+            .map(|j| j.repo.id.as_str())
+            .collect();
+        if !unresolved.is_empty() {
+            bail!("Artifact-only publishing cannot detect Cargo or project landing dependencies for {}; publish from worktrees or specify --ready/--draft-repo per repository (or --draft for all).", unresolved.join(", "));
+        }
+    }
+    let body_root = artifact_path.parent().unwrap_or(&cwd);
+    let resolved = policy::resolve(
+        &bundle,
+        None,
+        body_root,
+        &Default::default(),
+        &jobs,
+        draft,
+        options,
+    )?;
+    if options.dry_run {
+        return policy::preview(&bundle, &jobs, &resolved);
+    }
     preflight(&bundle, &jobs, None, renew)?;
     // Same rule as the worktree path: sync covers only what this run publishes.
     let indexes: Vec<usize> = jobs.iter().map(|job| job.repo_index).collect();
@@ -348,54 +531,69 @@ pub fn create_publications_from_artifact(
     // Same streaming shape and same bounded pool as the worktree path:
     // workers publish against the snapshot while the live artifact is updated
     // as each result arrives.
-    let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::scope(|scope| {
-        let cwd = cwd.as_ref();
-        let snapshot = &bundle_snapshot;
-        let sender = tx.clone();
-        crate::parallel::spawn_bounded(scope, &jobs, limit, move |job| {
-            let repo_id = job.repo.id.clone();
-            let notes = sender.clone();
-            let note_repo = repo_id.clone();
-            let _notes = crate::retry::stream_notes_to(move |line| {
-                let _ = notes.send(ArtifactPublishEvent::Note(format!(
-                    "{}: {line}",
-                    out::repo(&note_repo)
-                )));
+    for wave in policy::waves(jobs.iter().map(|j| j.repo.id.clone()), &resolved)? {
+        let wave_jobs: Vec<_> = jobs
+            .iter()
+            .filter(|j| wave.contains(&j.repo.id))
+            .cloned()
+            .collect();
+        let bundle_snapshot = bundle.clone();
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::scope(|scope| {
+            let cwd = cwd.as_ref();
+            let snapshot = &bundle_snapshot;
+            let resolved = &resolved;
+            let sender = tx.clone();
+            crate::parallel::spawn_bounded(scope, &wave_jobs, limit, move |job| {
+                let repo_id = job.repo.id.clone();
+                let notes = sender.clone();
+                let note_repo = repo_id.clone();
+                let _notes = crate::retry::stream_notes_to(move |line| {
+                    let _ = notes.send(ArtifactPublishEvent::Note(format!(
+                        "{}: {line}",
+                        out::repo(&note_repo)
+                    )));
+                });
+                let result = publish_repo_remote_from_artifact(
+                    cwd,
+                    snapshot,
+                    job,
+                    &resolved[&job.repo.id],
+                    renew,
+                );
+                // The receiver outlives every worker; a send cannot fail.
+                let _ = sender.send(ArtifactPublishEvent::Done {
+                    repo_id,
+                    result: Box::new(result),
+                });
             });
-            let result = publish_repo_remote_from_artifact(cwd, snapshot, job, draft, renew);
-            // The receiver outlives every worker; a send cannot fail.
-            let _ = sender.send(ArtifactPublishEvent::Done {
-                repo_id,
-                result: Box::new(result),
-            });
-        });
-        drop(tx);
+            drop(tx);
 
-        let mut done = 0;
-        for event in rx {
-            match event {
-                ArtifactPublishEvent::Note(line) => println!("{line}"),
-                ArtifactPublishEvent::Done { repo_id, result } => {
-                    done += 1;
-                    let progress = out::progress(done, total);
-                    match *result {
-                        Ok(outcome) => {
-                            apply_artifact_publish_result(&mut bundle, &outcome, &progress)
-                        }
-                        Err(error) => {
-                            println!(
-                                "{}: {}{progress}",
-                                out::repo(&repo_id),
-                                out::danger("PR create failed")
-                            );
-                            failures.push(format!("{repo_id}: {error:#}"));
+            let mut done = 0;
+            for event in rx {
+                match event {
+                    ArtifactPublishEvent::Note(line) => println!("{line}"),
+                    ArtifactPublishEvent::Done { repo_id, result } => {
+                        done += 1;
+                        let progress = out::progress(done, total);
+                        match *result {
+                            Ok(outcome) => {
+                                apply_artifact_publish_result(&mut bundle, &outcome, &progress)
+                            }
+                            Err(error) => {
+                                println!(
+                                    "{}: {}{progress}",
+                                    out::repo(&repo_id),
+                                    out::danger("PR create failed")
+                                );
+                                failures.push(format!("{repo_id}: {error:#}"));
+                            }
                         }
                     }
                 }
             }
-        }
-    });
+        });
+    }
 
     if failures.is_empty() && sync {
         failures.extend(sync_publications_for_indexes_from_artifact(
@@ -655,6 +853,7 @@ mod tests {
     /// shape every managed-block rendering test below starts from.
     fn published_bundle() -> ChangeGroup {
         ChangeGroup {
+            publish: None,
             schema_version: SCHEMA_VERSION.to_string(),
             kind: CHANGE_GROUP_KIND.to_string(),
             id: "venue-capacity".to_string(),
@@ -787,6 +986,7 @@ mod tests {
     #[test]
     fn publish_scope_excludes_tracked_repos_without_recorded_work() {
         let bundle = ChangeGroup {
+            publish: None,
             schema_version: SCHEMA_VERSION.to_string(),
             kind: CHANGE_GROUP_KIND.to_string(),
             id: "venue-capacity".to_string(),

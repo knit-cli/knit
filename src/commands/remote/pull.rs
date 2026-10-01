@@ -212,6 +212,7 @@ pub fn prepare_remote_pull(
                 // own new requirements: the next pull needs both the group
                 // and the failed repo's project entry to recover.
                 reconcile_project_auth(&root, &mut project, &export)?;
+                reconcile_project_publish(&root, &mut project, &export)?;
                 reconcile_project_repositories(&root, &mut project, &export)?;
                 // Refresh again after a successful reconcile: entries the
                 // reconcile added (or kept for failed adds) leave the pending
@@ -631,6 +632,16 @@ fn reconcile_project_repositories(
         }
     }
 
+    let membership_entry = |repository: &RemoteExportRepository, path: &Path| {
+        let mut entry = project_repo_entry_from_export(repository, path);
+        entry.publish = membership
+            .repos
+            .iter()
+            .find(|source| source.id == entry.id)
+            .and_then(|source| source.publish.clone());
+        entry
+    };
+
     // Apply phase: clone verified additions and retries, and record them.
     let mut added = Vec::new();
     let mut recovered = Vec::new();
@@ -646,14 +657,12 @@ fn reconcile_project_repositories(
                             project.repos.iter_mut().find(|repo| repo.id == local_id)
                         {
                             if authoritative {
-                                *entry = project_repo_entry_from_export(repository, repo_path);
+                                *entry = membership_entry(repository, repo_path);
                             }
                         }
                         recovered.push(local_id);
                     } else {
-                        project
-                            .repos
-                            .push(project_repo_entry_from_export(repository, repo_path));
+                        project.repos.push(membership_entry(repository, repo_path));
                         added.push(local_id);
                     }
                 }
@@ -680,10 +689,9 @@ fn reconcile_project_repositories(
         if project.repos.iter().any(|repo| repo.id == local_id) {
             continue;
         }
-        project.repos.push(project_repo_entry_from_export(
-            repository,
-            &root.join(&local_id),
-        ));
+        project
+            .repos
+            .push(membership_entry(repository, &root.join(&local_id)));
         unresolved_ids.push(local_id);
     }
 
@@ -858,6 +866,33 @@ fn reconcile_project_repositories(
         );
     }
 
+    Ok(())
+}
+
+/// Complete project exports are authoritative, including policy removal.
+/// Partial exports never replace a whole policy.
+fn reconcile_project_publish(
+    root: &Path,
+    project: &mut KnitProject,
+    export: &RemoteProjectExport,
+) -> Result<()> {
+    let Some(incoming) = export.knit_project.as_ref() else {
+        return Ok(());
+    };
+    if export.omitted_repository_count.unwrap_or(0) > 0 {
+        return Ok(());
+    }
+    let before = serde_json::to_value(&*project)?;
+    project.publish = incoming.publish.clone();
+    for repo in &mut project.repos {
+        if let Some(remote) = incoming.repos.iter().find(|r| r.id == repo.id) {
+            repo.publish = remote.publish.clone();
+        }
+    }
+    if serde_json::to_value(&*project)? != before {
+        project.updated_at = now_iso();
+        write_json(&project_path(root, &project.id), project)?;
+    }
     Ok(())
 }
 
@@ -1755,6 +1790,7 @@ fn fetch_bundles_with_options(
         bail!("No local project `{project_id}` found. Cannot localize bundles.");
     };
 
+    reconcile_project_publish(root, &mut local_project, &export)?;
     match repos {
         Some(true) => {
             reconcile_known_pending(root, &local_project, &export)?;
@@ -2295,4 +2331,48 @@ fn bundle_branch_mapping(bundle: &ChangeGroup) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod publishing_roundtrip_tests {
+    use super::*;
+    #[test]
+    fn complete_pull_imports_policy_extensions_but_partial_export_preserves_local() {
+        let root = std::env::temp_dir().join(format!(
+            "knit-policy-pull-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join(".knit/projects")).unwrap();
+        let mut project = KnitProject::new("example".into(), now_iso());
+        let policy = serde_json::json!({"draft":"dependents","future":{"keep":true}});
+        let mut incoming = project.clone();
+        incoming.publish = Some(serde_json::from_value(policy.clone()).unwrap());
+        let mut export:RemoteProjectExport=serde_json::from_value(serde_json::json!({"project":{"slug":"example"},"knitProject":incoming,"repositories":[],"bundles":[]})).unwrap();
+        reconcile_project_publish(&root, &mut project, &export).unwrap();
+        let saved: KnitProject = read_json(&project_path(&root, "example")).unwrap();
+        assert_eq!(serde_json::to_value(saved.publish).unwrap(), policy);
+        export.omitted_repository_count = Some(1);
+        export.knit_project.as_mut().unwrap().publish =
+            Some(serde_json::from_value(serde_json::json!({"draft":"all"})).unwrap());
+        reconcile_project_publish(&root, &mut project, &export).unwrap();
+        assert_eq!(serde_json::to_value(&project.publish).unwrap(), policy);
+        export.omitted_repository_count = Some(0);
+        for incoming in [serde_json::json!({}), serde_json::json!({"publish":null})] {
+            project.publish = Some(serde_json::from_value(policy.clone()).unwrap());
+            let mut document = serde_json::to_value(export.knit_project.as_ref().unwrap()).unwrap();
+            document.as_object_mut().unwrap().remove("publish");
+            if incoming.get("publish").is_some() {
+                document["publish"] = serde_json::Value::Null;
+            }
+            export.knit_project = Some(serde_json::from_value(document).unwrap());
+            reconcile_project_publish(&root, &mut project, &export).unwrap();
+            let saved: KnitProject = read_json(&project_path(&root, "example")).unwrap();
+            assert!(project.publish.is_none());
+            assert!(saved.publish.is_none());
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 }
