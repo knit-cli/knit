@@ -455,22 +455,14 @@ fn push_force_with_lease_checks_push_url_without_a_receipt() {
         let env = [("HOME", home.to_str().unwrap())];
 
         knit_with_env(&workspace, ["bundle", "push URL lease"], &env);
-        knit_with_env(
-            &workspace,
-            ["bundle", "add", local.to_str().unwrap()],
-            &env,
-        );
+        knit_with_env(&workspace, ["bundle", "add", local.to_str().unwrap()], &env);
         let feature = workspace.join(".knit/worktrees/push-url-lease/upstream");
         let branch = "knit/push-url-lease";
         let reference = "refs/heads/knit/push-url-lease";
         let upstream_sha = git(&upstream, ["rev-parse", "main"]);
 
         append_line(&feature.join("app.txt"), "feature push");
-        knit_with_env(
-            &workspace,
-            ["commit", "--all", "-m", "Feature push"],
-            &env,
-        );
+        knit_with_env(&workspace, ["commit", "--all", "-m", "Feature push"], &env);
         let original_sha = git(&feature, ["rev-parse", "HEAD"]);
         // Publish through Git so Knit has no push receipt for the fork.
         git(&feature, ["push", "origin", branch]);
@@ -482,7 +474,10 @@ fn push_force_with_lease_checks_push_url_without_a_receipt() {
         let tracking_sha = git(&feature, ["rev-parse", "origin/knit/push-url-lease"]);
         assert_eq!(tracking_sha, upstream_sha);
         assert_ne!(tracking_sha, original_sha);
-        git(&feature, ["commit", "--amend", "-m", "Feature push, reworded"]);
+        git(
+            &feature,
+            ["commit", "--amend", "-m", "Feature push, reworded"],
+        );
         let rewritten_sha = git(&feature, ["rev-parse", "HEAD"]);
         assert_ne!(rewritten_sha, original_sha);
 
@@ -509,11 +504,8 @@ fn push_force_with_lease_checks_push_url_without_a_receipt() {
             assert_ne!(concurrent_sha, original_sha);
             assert_eq!(git(&fork, ["rev-parse", reference]), concurrent_sha);
 
-            let refused = knit_fails_with_env(
-                &workspace,
-                ["push", "--force-with-lease", "upstream"],
-                &env,
-            );
+            let refused =
+                knit_fails_with_env(&workspace, ["push", "--force-with-lease", "upstream"], &env);
             assert!(
                 refused.contains("this bundle never recorded and this checkout never had"),
                 "{refused}"
@@ -521,11 +513,8 @@ fn push_force_with_lease_checks_push_url_without_a_receipt() {
             assert!(refused.contains(concurrent_sha.trim()), "{refused}");
             assert_eq!(git(&fork, ["rev-parse", reference]), concurrent_sha);
         } else {
-            let pushed = knit_with_env(
-                &workspace,
-                ["push", "--force-with-lease", "upstream"],
-                &env,
-            );
+            let pushed =
+                knit_with_env(&workspace, ["push", "--force-with-lease", "upstream"], &env);
             assert!(pushed.contains(&rewritten_sha[..7]), "{pushed}");
             assert_eq!(git(&fork, ["rev-parse", reference]), rewritten_sha);
         }
