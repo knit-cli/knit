@@ -244,7 +244,7 @@ fn consumer_only_preview_refreshes_merged_library_without_mutating_bundle() {
     let open = knit_with_fake_gh(&workspace, args, &bin, &forge);
     assert!(open.contains("draft=true"), "{open}");
     assert!(
-        open.contains("Blocked on https://github.com/acme/backend/pull/1"),
+        open.contains("Blocked on [backend #1](https://github.com/acme/backend/pull/1)"),
         "{open}"
     );
     fs::write(forge.join("merged-backend"), "").unwrap();

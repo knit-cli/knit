@@ -27,19 +27,8 @@ pub(super) struct ResolvedPublish {
 }
 impl ResolvedPublish {
     pub fn body(&self, bundle: &ChangeGroup, repo: &RepoEntry, provider: &str) -> String {
-        let mut body = self.body.clone();
-        // Blockers belong to authored content so a normal managed-block sync
-        // cannot erase them. Fresh library links are resolved at create time.
-        for library in &self.blocked_on {
-            let blocker = publication_for_repo(bundle, library)
-                .map(|p| p.url.as_str())
-                .unwrap_or(library);
-            if !body.is_empty() {
-                body.push_str("\n\n");
-            }
-            body.push_str(&format!("Blocked on {blocker}"));
-        }
-        let block = super::pr_body::initial_pr_body(bundle, &repo.id, provider);
+        let body = &self.body;
+        let block = super::pr_body::initial_pr_body(bundle, &repo.id, provider, &self.blocked_on);
         if body.is_empty() {
             block
         } else {

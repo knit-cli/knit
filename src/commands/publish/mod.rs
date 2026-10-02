@@ -914,7 +914,12 @@ mod tests {
 
     #[test]
     fn bitbucket_body_is_fenced_with_invisible_reference_definitions() {
-        let body = initial_pr_body(&published_bundle(), "backend", "bitbucket");
+        let body = initial_pr_body(
+            &published_bundle(),
+            "backend",
+            "bitbucket",
+            &Default::default(),
+        );
         assert!(
             body.starts_with(&format!("{KNIT_PR_BLOCK_BEGIN_REFS}\n\n## Knit Bundle")),
             "{body}"
@@ -1050,7 +1055,7 @@ mod tests {
             "{content}"
         );
         // A fresh PR body starts with the heading, then the link.
-        let body = initial_pr_body(&bundle, "backend", "github");
+        let body = initial_pr_body(&bundle, "backend", "github", &Default::default());
         assert!(
             body.starts_with(&format!(
                 "{KNIT_PR_BLOCK_BEGIN}\n## Knit Bundle\n\n[View bundle](https://app.example.test/bundles/rb-venue-capacity)"

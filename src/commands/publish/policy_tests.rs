@@ -77,7 +77,7 @@ fn no_config_keeps_original_title_body_and_ready_default() {
         assert_eq!(r.title, format!("Bundle title ({})", job.repo.id));
         assert_eq!(
             r.body(&f.bundle, &job.repo, "github"),
-            super::pr_body::initial_pr_body(&f.bundle, &job.repo.id, "github")
+            super::pr_body::initial_pr_body(&f.bundle, &job.repo.id, "github", &r.blocked_on)
         );
     }
 }
@@ -167,15 +167,64 @@ fn cargo_fork_patch_requires_matching_feature_branch_and_orders_library_first() 
     let waves = waves(f.jobs.iter().map(|j| j.repo.id.clone()), &r).unwrap();
     assert!(waves[0].contains("library"));
     assert!(waves[1].contains("consumer"));
+    f.project.publish.as_mut().unwrap().title = Some(PublishTitle::BundleTitle);
+    let authored = "Authored text for consumer  \n\n";
+    std::fs::write(f.root.join("PR-consumer.md"), authored).unwrap();
+    let r = resolve(
+        &f.bundle,
+        Some(&f.project),
+        &f.root,
+        &paths,
+        &f.jobs,
+        false,
+        &PublishOptions::default(),
+    )
+    .unwrap();
+    let preview = r["consumer"].body(&f.bundle, &f.bundle.repos[1], "github");
+    let (prefix, block) = preview
+        .split_once(super::pr_body::KNIT_PR_BLOCK_BEGIN)
+        .unwrap();
+    assert_eq!(prefix, format!("{authored}\n\n"));
+    assert!(block.contains("\nBlocked on library\n"));
     f.bundle.publications.push(serde_json::from_value(json!({"provider":"github","kind":"pull_request","repoId":"library","number":12,"url":"https://github.com/example/library/pull/12","state":"OPEN","headBranch":"knit/feature","baseBranch":"main","createdAt":"2026-01-01T00:00:00Z","updatedAt":"2026-01-01T00:00:00Z"})).unwrap());
-    let body = r["consumer"].body(&f.bundle, &f.bundle.repos[1], "github");
-    assert!(body.contains("Blocked on https://github.com/example/library/pull/12"));
-    let synced = super::pr_body::upsert_knit_pr_block(
-        &body,
-        &super::pr_body::render_knit_pr_block(&f.bundle, Some("consumer"), "github"),
+    for provider in ["github", "bitbucket"] {
+        let body = r["consumer"].body(&f.bundle, &f.bundle.repos[1], provider);
+        let block = super::pr_body::initial_pr_body(
+            &f.bundle,
+            "consumer",
+            provider,
+            &r["consumer"].blocked_on,
+        );
+        assert_eq!(body, format!("{authored}\n\n{block}"));
+        assert!(
+            block.contains("Blocked on [library #12](https://github.com/example/library/pull/12)")
+        );
+        let synced = super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", provider, &body);
+        assert_eq!(synced, body);
+    }
+    let synced = super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", "github", &preview);
+    assert_eq!(
+        synced,
+        r["consumer"].body(&f.bundle, &f.bundle.repos[1], "github")
     );
-    assert!(synced.contains("Authored text for consumer\n"));
-    assert!(synced.contains("Blocked on https://github.com/example/library/pull/12"));
+    f.bundle.publications[0].number = 13;
+    f.bundle.publications[0].url = "https://github.com/example/library/pull/13".into();
+    let synced = super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", "github", &synced);
+    assert_eq!(
+        synced,
+        r["consumer"].body(&f.bundle, &f.bundle.repos[1], "github")
+    );
+    assert!(synced.contains("Blocked on [library #13](https://github.com/example/library/pull/13)"));
+    assert!(!synced.contains("/pull/12"));
+    let mut without_library = f.bundle.clone();
+    without_library.repos.retain(|repo| repo.id != "library");
+    without_library.publications.clear();
+    let synced = super::pr_body::sync_knit_pr_body(&without_library, "consumer", "github", &synced);
+    let (prefix, block) = synced
+        .split_once(super::pr_body::KNIT_PR_BLOCK_BEGIN)
+        .unwrap();
+    assert_eq!(prefix, format!("{authored}\n\n"));
+    assert!(block.contains("\nBlocked on library\n"));
     std::fs::write(consumer.join("Cargo.toml"),"[dependencies]\nlibrary={git='https://github.com/contributor/library.git', branch='main'}\n").unwrap();
     assert!(
         !resolve(
@@ -378,7 +427,7 @@ fn consumer_only_cargo_selection_recognizes_upstream_target_and_retains_library(
     assert!(result["consumer"].draft);
     assert!(result["consumer"].blocked_on.contains("library"));
     let body = result["consumer"].body(&f.bundle, &f.jobs[0].repo, "github");
-    assert!(body.contains("Blocked on https://github.com/upstream/library/pull/12"));
+    assert!(body.contains("Blocked on [library #12](https://github.com/upstream/library/pull/12)"));
     std::fs::write(paths["consumer"].join("Cargo.toml"), "invalid TOML [").unwrap();
     let options = PublishOptions {
         ready: vec!["consumer".into()],
