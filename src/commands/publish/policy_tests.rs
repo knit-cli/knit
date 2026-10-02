@@ -196,7 +196,9 @@ fn cargo_fork_patch_requires_matching_feature_branch_and_orders_library_first() 
             &r["consumer"].blocked_on,
         );
         assert_eq!(body, format!("{authored}\n\n{block}"));
-        assert!(block.contains("Blocked on [library #12](https://github.com/example/library/pull/12)"));
+        assert!(
+            block.contains("Blocked on [library #12](https://github.com/example/library/pull/12)")
+        );
         let synced = super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", provider, &body);
         assert_eq!(synced, body);
     }
@@ -217,8 +219,7 @@ fn cargo_fork_patch_requires_matching_feature_branch_and_orders_library_first() 
     let mut without_library = f.bundle.clone();
     without_library.repos.retain(|repo| repo.id != "library");
     without_library.publications.clear();
-    let synced =
-        super::pr_body::sync_knit_pr_body(&without_library, "consumer", "github", &synced);
+    let synced = super::pr_body::sync_knit_pr_body(&without_library, "consumer", "github", &synced);
     let (prefix, block) = synced
         .split_once(super::pr_body::KNIT_PR_BLOCK_BEGIN)
         .unwrap();

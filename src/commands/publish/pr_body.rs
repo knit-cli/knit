@@ -196,7 +196,11 @@ pub(super) fn sync_knit_pr_body(
             .collect();
         if !blocked_on.is_empty() {
             let block = initial_pr_body(bundle, current_repo_id, provider, &blocked_on);
-            return format!("{}{block}{}", &existing_body[..begin], &existing_body[end..]);
+            return format!(
+                "{}{block}{}",
+                &existing_body[..begin],
+                &existing_body[end..]
+            );
         }
     }
     let block = render_knit_pr_block(bundle, Some(current_repo_id), provider);
