@@ -21,8 +21,9 @@ pub(super) fn initial_pr_body(
     bundle: &ChangeGroup,
     current_repo_id: &str,
     provider: &str,
+    blocked_on: &BTreeSet<String>,
 ) -> String {
-    render_knit_pr_block(bundle, Some(current_repo_id), provider)
+    render_knit_pr_block_with_blockers(bundle, Some(current_repo_id), provider, blocked_on)
 }
 
 pub(super) fn render_knit_pr_block(
@@ -30,7 +31,16 @@ pub(super) fn render_knit_pr_block(
     current_repo_id: Option<&str>,
     provider: &str,
 ) -> String {
-    let content = knit_block_content(bundle, current_repo_id);
+    render_knit_pr_block_with_blockers(bundle, current_repo_id, provider, &BTreeSet::new())
+}
+
+fn render_knit_pr_block_with_blockers(
+    bundle: &ChangeGroup,
+    current_repo_id: Option<&str>,
+    provider: &str,
+    blocked_on: &BTreeSet<String>,
+) -> String {
+    let content = knit_block_content(bundle, current_repo_id, blocked_on);
     if provider == "bitbucket" {
         // A reference definition cannot interrupt a paragraph, so blank lines
         // keep both markers parsing as definitions instead of trailing along
@@ -41,7 +51,11 @@ pub(super) fn render_knit_pr_block(
     }
 }
 
-fn knit_block_content(bundle: &ChangeGroup, current_repo_id: Option<&str>) -> String {
+fn knit_block_content(
+    bundle: &ChangeGroup,
+    current_repo_id: Option<&str>,
+    blocked_on: &BTreeSet<String>,
+) -> String {
     let mut lines = vec!["## Knit Bundle".to_string(), String::new()];
 
     // Place hosted links immediately below the heading. Only server-reported
@@ -77,6 +91,14 @@ fn knit_block_content(bundle: &ChangeGroup, current_repo_id: Option<&str>) -> St
             }
             None => lines.push(format!("- `{}`: pending", repo.id)),
         }
+    }
+
+    for library in blocked_on {
+        let blocker = publication_for_repo(bundle, library)
+            .map(|pr| format!("[{library} #{}]({})", pr.number, pr.url))
+            .unwrap_or_else(|| library.clone());
+        lines.push(String::new());
+        lines.push(format!("Blocked on {blocker}"));
     }
 
     lines.extend([
@@ -148,6 +170,37 @@ fn block_has_hosted_link_below_heading(block: &str) -> bool {
         && lines
             .next()
             .is_some_and(|line| line.starts_with(&format!("[{VIEW_BUNDLE_LABEL}](")))
+}
+
+/// Retain the policy's blocker repo IDs from the managed publication body,
+/// resolving links from the freshly synced bundle, including in artifact mode.
+/// Authored text is never inspected for blockers or changed during replacement.
+pub(super) fn sync_knit_pr_body(
+    bundle: &ChangeGroup,
+    current_repo_id: &str,
+    provider: &str,
+    existing_body: &str,
+) -> String {
+    if let Some((begin, end)) = managed_block_bounds(existing_body) {
+        let blocked_on: BTreeSet<String> = existing_body[begin..end]
+            .lines()
+            .filter_map(|line| line.strip_prefix("Blocked on "))
+            .map(|blocker| {
+                blocker
+                    .strip_prefix('[')
+                    .and_then(|link| link.split_once(" #"))
+                    .map(|(id, _)| id)
+                    .unwrap_or(blocker)
+                    .to_owned()
+            })
+            .collect();
+        if !blocked_on.is_empty() {
+            let block = initial_pr_body(bundle, current_repo_id, provider, &blocked_on);
+            return format!("{}{block}{}", &existing_body[..begin], &existing_body[end..]);
+        }
+    }
+    let block = render_knit_pr_block(bundle, Some(current_repo_id), provider);
+    upsert_knit_pr_block(existing_body, &block)
 }
 
 pub(super) fn upsert_knit_pr_block(existing_body: &str, block: &str) -> String {

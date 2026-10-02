@@ -2,7 +2,7 @@
 //! in the bundle, and upsert the managed Knit block into every PR body. The
 //! `*_from_artifact` variants run without local checkouts.
 
-use super::pr_body::{render_knit_pr_block, upsert_knit_pr_block};
+use super::pr_body::sync_knit_pr_body;
 use crate::checkout::checkout_dir;
 use crate::model::{ChangeGroup, RepoEntry};
 use crate::output as out;
@@ -133,8 +133,7 @@ fn sync_pr_body_remote(
         id.base = pr.base_branch.clone();
     }
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
-    let block = render_knit_pr_block(&active.bundle, Some(&repo.id), forge.id());
-    let next_body = upsert_knit_pr_block(&current_body, &block);
+    let next_body = sync_knit_pr_body(&active.bundle, &repo.id, forge.id(), &current_body);
     if next_body == current_body {
         return Ok(SyncBodyResult::AlreadySynced);
     }
@@ -160,8 +159,7 @@ fn sync_pr_body_remote_from_artifact(
         id.base = pr.base_branch.clone();
     }
     let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
-    let block = render_knit_pr_block(bundle, Some(&repo.id), forge.id());
-    let next_body = upsert_knit_pr_block(&current_body, &block);
+    let next_body = sync_knit_pr_body(bundle, &repo.id, forge.id(), &current_body);
     if next_body == current_body {
         return Ok(SyncBodyResult::AlreadySynced);
     }
