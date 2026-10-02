@@ -430,6 +430,101 @@ fn push_force_with_lease_updates_rewritten_feature_branch() {
 }
 
 #[test]
+fn push_force_with_lease_checks_push_url_without_a_receipt() {
+    for concurrent_update in [false, true] {
+        let root = unique_temp_dir();
+        let (upstream, local, _collaborator) = init_remote_repo(&root, "upstream");
+        let fork = root.join("fork.git");
+        git(
+            &root,
+            [
+                "clone",
+                "--bare",
+                upstream.to_str().unwrap(),
+                fork.to_str().unwrap(),
+            ],
+        );
+        git(
+            &local,
+            ["config", "remote.origin.pushurl", fork.to_str().unwrap()],
+        );
+        let workspace = root.join("workspace");
+        let home = root.join("home");
+        fs::create_dir_all(&workspace).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        let env = [("HOME", home.to_str().unwrap())];
+
+        knit_with_env(&workspace, ["bundle", "push URL lease"], &env);
+        knit_with_env(&workspace, ["bundle", "add", local.to_str().unwrap()], &env);
+        let feature = workspace.join(".knit/worktrees/push-url-lease/upstream");
+        let branch = "knit/push-url-lease";
+        let reference = "refs/heads/knit/push-url-lease";
+        let upstream_sha = git(&upstream, ["rev-parse", "main"]);
+
+        append_line(&feature.join("app.txt"), "feature push");
+        knit_with_env(&workspace, ["commit", "--all", "-m", "Feature push"], &env);
+        let original_sha = git(&feature, ["rev-parse", "HEAD"]);
+        // Publish through Git so Knit has no push receipt for the fork.
+        git(&feature, ["push", "origin", branch]);
+        assert_eq!(git(&fork, ["rev-parse", reference]), original_sha);
+
+        // The fetch-side tracking ref deliberately disagrees with the push URL.
+        git(&upstream, ["branch", branch, "main"]);
+        git(&feature, ["fetch", "origin"]);
+        let tracking_sha = git(&feature, ["rev-parse", "origin/knit/push-url-lease"]);
+        assert_eq!(tracking_sha, upstream_sha);
+        assert_ne!(tracking_sha, original_sha);
+        git(
+            &feature,
+            ["commit", "--amend", "-m", "Feature push, reworded"],
+        );
+        let rewritten_sha = git(&feature, ["rev-parse", "HEAD"]);
+        assert_ne!(rewritten_sha, original_sha);
+
+        if concurrent_update {
+            let collaborator = root.join("fork-collaborator");
+            git(
+                &root,
+                [
+                    "clone",
+                    "--config",
+                    "core.autocrlf=false",
+                    "--branch",
+                    branch,
+                    fork.to_str().unwrap(),
+                    collaborator.to_str().unwrap(),
+                ],
+            );
+            configure_git_user(&collaborator);
+            append_line(&collaborator.join("app.txt"), "concurrent fork update");
+            git(&collaborator, ["add", "app.txt"]);
+            git(&collaborator, ["commit", "-m", "Concurrent fork update"]);
+            git(&collaborator, ["push", "origin", branch]);
+            let concurrent_sha = git(&collaborator, ["rev-parse", "HEAD"]);
+            assert_ne!(concurrent_sha, original_sha);
+            assert_eq!(git(&fork, ["rev-parse", reference]), concurrent_sha);
+
+            let refused =
+                knit_fails_with_env(&workspace, ["push", "--force-with-lease", "upstream"], &env);
+            assert!(
+                refused.contains("this bundle never recorded and this checkout never had"),
+                "{refused}"
+            );
+            assert!(refused.contains(concurrent_sha.trim()), "{refused}");
+            assert_eq!(git(&fork, ["rev-parse", reference]), concurrent_sha);
+        } else {
+            let pushed =
+                knit_with_env(&workspace, ["push", "--force-with-lease", "upstream"], &env);
+            assert!(pushed.contains(&rewritten_sha[..7]), "{pushed}");
+            assert_eq!(git(&fork, ["rev-parse", reference]), rewritten_sha);
+        }
+        assert_eq!(git(&upstream, ["rev-parse", reference]), upstream_sha);
+
+        fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[test]
 fn push_skips_missing_implicit_sync_remote_after_git_branch_push() {
     let root = unique_temp_dir();
     let (remote, backend, _collaborator) = init_remote_repo(&root, "backend");
