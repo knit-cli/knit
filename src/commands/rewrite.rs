@@ -9,6 +9,7 @@ use crate::rewrite::{record_rewrite, RepoRewrite, RewriteKind};
 use crate::store::{load_active_bundle_for_update, save_active_bundle, write_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -40,6 +41,256 @@ struct RepoState {
     needs_squash: bool,
     #[serde(default)]
     rebase_head: Option<String>,
+    #[serde(default)]
+    repin: Option<Repin>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct Repin {
+    head: String,
+    files: Vec<LockEdit>,
+    tree: Option<String>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct LockEdit {
+    path: String,
+    before: String,
+    after: String,
+}
+
+// Only tracked lockfiles are rewrite inputs; never regenerate or serialize TOML.
+fn lockfiles(path: &Path) -> Result<Vec<String>> {
+    Ok(git_output(path, ["ls-files", "--stage", "-z"])?
+        .split('\0')
+        .filter_map(|entry| entry.split_once('\t'))
+        .filter(|(mode, name)| {
+            mode.starts_with("100")
+                && Path::new(name)
+                    .file_name()
+                    .is_some_and(|n| n == "Cargo.lock")
+        })
+        .map(|(_, name)| name.to_owned())
+        .collect())
+}
+
+fn lock_source(line: &str) -> Option<(&str, String, std::ops::Range<usize>)> {
+    let (key, value) = line.split_once('=')?;
+    if key.trim() != "source" {
+        return None;
+    }
+    let value = value.trim_start().strip_prefix('"')?;
+    let end = value.find('"')?;
+    let source = value[..end].strip_prefix("git+")?;
+    let (remote, _) = source.split_once('?')?;
+    let parsed = url::Url::parse(source).ok()?;
+    let pairs: Vec<_> = parsed.query_pairs().collect();
+    if pairs.len() != 1 || pairs[0].0 != "branch" {
+        return None;
+    }
+    let sha = parsed.fragment()?;
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let start = line.len() - value.len() + end - sha.len();
+    Some((remote, pairs[0].1.to_string(), start..start + sha.len()))
+}
+
+fn library_urls(state: &RewriteState) -> BTreeMap<String, Vec<String>> {
+    state
+        .original_bundle
+        .repos
+        .iter()
+        .map(|repo| {
+            let mut urls: Vec<String> = [
+                repo.remote.clone(),
+                repo.source_remote.clone(),
+                repo.target_remote.clone(),
+            ]
+            .into_iter()
+            .flatten()
+            .collect();
+            if let Some(saved) = state.repos.iter().find(|r| r.repo_id == repo.id) {
+                if let Ok(url) = git_output(&saved.path, ["remote", "get-url", "--push", "origin"])
+                {
+                    urls.push(url);
+                }
+            }
+            (repo.id.clone(), urls)
+        })
+        .collect()
+}
+
+fn matching_library<'a>(
+    state: &'a RewriteState,
+    urls: &BTreeMap<String, Vec<String>>,
+    consumer: &str,
+    remote: &str,
+    branch: &str,
+) -> Result<Option<&'a RepoState>> {
+    if branch != format!("knit/{}", state.bundle_id) {
+        return Ok(None);
+    }
+    let matches: Vec<_> = state
+        .repos
+        .iter()
+        .filter(|repo| {
+            repo.repo_id != consumer
+                && repo.branch == branch
+                && urls[&repo.repo_id]
+                    .iter()
+                    .any(|url| contribution::same_repository(remote, url).unwrap_or(false))
+        })
+        .collect();
+    if matches.len() > 1 {
+        bail!("Ambiguous Cargo lockfile library for {consumer}");
+    }
+    Ok(matches.into_iter().next())
+}
+
+fn order_libraries_first(state: &mut RewriteState) -> Result<()> {
+    let urls = library_urls(state);
+    let mut dependencies = BTreeMap::<String, Vec<String>>::new();
+    for repo in &state.repos {
+        let deps = dependencies.entry(repo.repo_id.clone()).or_default();
+        for file in lockfiles(&repo.path)? {
+            for line in fs::read_to_string(repo.path.join(file))?.lines() {
+                if let Some((remote, branch, _)) = lock_source(line) {
+                    if let Some(library) =
+                        matching_library(state, &urls, &repo.repo_id, remote, &branch)?
+                    {
+                        deps.push(library.repo_id.clone());
+                    }
+                }
+            }
+        }
+    }
+    let mut ordered = Vec::new();
+    while !state.repos.is_empty() {
+        let Some(i) = state.repos.iter().position(|repo| {
+            dependencies[&repo.repo_id]
+                .iter()
+                .all(|id| ordered.iter().any(|r: &RepoState| &r.repo_id == id))
+        }) else {
+            bail!("Cyclic Cargo lockfile dependencies prevent a library-first rewrite");
+        };
+        ordered.push(state.repos.remove(i));
+    }
+    state.repos = ordered;
+    Ok(())
+}
+
+fn plan_repin(state: &RewriteState, i: usize) -> Result<Repin> {
+    let repo = &state.repos[i];
+    let urls = library_urls(state);
+    let mut files = Vec::new();
+    for path in lockfiles(&repo.path)? {
+        let before = fs::read_to_string(repo.path.join(&path))?;
+        let mut after = String::new();
+        for line in before.split_inclusive('\n') {
+            let mut replacement = None;
+            if let Some((remote, branch, range)) = lock_source(line) {
+                if let Some(library) =
+                    matching_library(state, &urls, &repo.repo_id, remote, &branch)?
+                {
+                    let head = library
+                        .new_head
+                        .as_deref()
+                        .context("Cargo library rewrite is not complete")?;
+                    if head != library.old_head {
+                        replacement = Some((range, head));
+                    }
+                }
+            }
+            if let Some((range, head)) = replacement {
+                after.push_str(&line[..range.start]);
+                after.push_str(head);
+                after.push_str(&line[range.end..]);
+            } else {
+                after.push_str(line);
+            }
+        }
+        if before != after {
+            files.push(LockEdit {
+                path,
+                before,
+                after,
+            });
+        }
+    }
+    let head = rev_parse(&repo.path, "HEAD")?;
+    if !files.is_empty() && head == repo.new_base {
+        bail!(
+            "{}: cannot fold Cargo lockfile repinning into a missing feature commit",
+            repo.repo_id
+        );
+    }
+    Ok(Repin {
+        head,
+        files,
+        tree: None,
+    })
+}
+
+fn execute_repin(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
+    let repo = &state.repos[i];
+    let repin = repo
+        .repin
+        .as_ref()
+        .context("Missing Cargo repin checkpoint")?;
+    let head = rev_parse(&repo.path, "HEAD")?;
+    if head != repin.head {
+        // The amend may have succeeded before the durable checkpoint.
+        return verify_repin(repo, repin);
+    }
+    if repin.files.is_empty() {
+        clean(&repo.path)?;
+        return Ok(());
+    }
+    // Retry only the saved edits, never absorb unrelated staged or working changes.
+    let changed = format!(
+        "{}\0{}",
+        git_output(&repo.path, ["diff", "--name-only", "-z"])?,
+        git_output(&repo.path, ["diff", "--cached", "--name-only", "-z"])?
+    );
+    for changed in changed.split('\0').filter(|s| !s.is_empty()) {
+        if !repin.files.iter().any(|edit| edit.path == changed) {
+            bail!("Unrelated changes during Cargo repin recovery: {changed}");
+        }
+    }
+    for edit in &repin.files {
+        let current = fs::read_to_string(repo.path.join(&edit.path))?;
+        let indexed = git_output(&repo.path, ["show", &format!(":{}", edit.path)])?;
+        if (current != edit.before && current != edit.after)
+            || (indexed != edit.before.trim_end() && indexed != edit.after.trim_end())
+        {
+            bail!(
+                "{}: lockfile changed during Cargo repin recovery",
+                edit.path
+            );
+        }
+    }
+    for edit in &repin.files {
+        fs::write(repo.path.join(&edit.path), &edit.after)?;
+        git_output(&repo.path, ["add", "--", &edit.path])?;
+    }
+    let tree = git_output(&repo.path, ["write-tree"])?;
+    state.repos[i].repin.as_mut().unwrap().tree = Some(tree);
+    persist(path, state)?;
+    git_output(&state.repos[i].path, ["commit", "--amend", "--no-edit"])?;
+    let repo = &state.repos[i];
+    verify_repin(repo, repo.repin.as_ref().unwrap())
+}
+
+fn verify_repin(repo: &RepoState, repin: &Repin) -> Result<()> {
+    clean(&repo.path)?;
+    if repin.tree.as_deref() != Some(rev_parse(&repo.path, "HEAD^{tree}")?.as_str())
+        || git_output(&repo.path, ["show", "-s", "--format=%P", "HEAD"])?
+            != git_output(&repo.path, ["show", "-s", "--format=%P", &repin.head])?
+    {
+        bail!("Unexpected HEAD during Cargo repin recovery");
+    }
+    Ok(())
 }
 
 pub fn squash(message: Option<&str>) -> Result<()> {
@@ -202,6 +453,7 @@ fn start_active(
             phase: "pending".into(),
             needs_squash,
             rebase_head: None,
+            repin: None,
         });
     }
     if repos.is_empty() {
@@ -249,6 +501,7 @@ fn start_active(
         groups: Vec::new(),
         aborting: false,
     };
+    order_libraries_first(&mut state)?;
     fs::create_dir_all(path.parent().context("Missing state directory")?)?;
     persist(&path, &state)?;
     execute(&mut active, &mut state, &path)
@@ -449,13 +702,13 @@ fn execute_repo(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
         persist(path, state)?;
     }
     let repo = &state.repos[i];
-    if rebasing(&repo.path)? {
+    if repo.phase == "rebasing" && rebasing(&repo.path)? {
         git_output_with_env(
             &repo.path,
             ["rebase", "--continue"],
             &[("GIT_EDITOR", "true")],
         )?;
-    } else if repo.old_base != repo.new_base {
+    } else if repo.phase == "rebasing" && repo.old_base != repo.new_base {
         let head = rev_parse(&repo.path, "HEAD")?;
         let before = repo
             .rebase_head
@@ -473,8 +726,14 @@ fn execute_repo(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
         }
     }
     expected_branch(&repo.path, &repo.branch)?;
-    clean(&repo.path)?;
-    state.repos[i].new_head = Some(rev_parse(&repo.path, "HEAD")?);
+    if repo.phase == "rebasing" {
+        clean(&repo.path)?;
+        state.repos[i].repin = Some(plan_repin(state, i)?);
+        state.repos[i].phase = "repinning".into();
+        persist(path, state)?;
+    }
+    execute_repin(state, i, path)?;
+    state.repos[i].new_head = Some(rev_parse(&state.repos[i].path, "HEAD")?);
     state.repos[i].status = "done".into();
     persist(path, state)
 }
@@ -507,6 +766,36 @@ fn abort_rewrite(active: &ActiveBundle, state: &mut RewriteState, path: &Path) -
             git_output(&repo.path, ["rebase", "--abort"])?;
         }
         expected_branch(&repo.path, &repo.branch)?;
+        if repo.phase == "repinning" {
+            if let Some(repin) = &repo.repin {
+                if rev_parse(&repo.path, "HEAD")? == repin.head {
+                    for edit in &repin.files {
+                        let current = fs::read_to_string(repo.path.join(&edit.path))?;
+                        let indexed = git_output(&repo.path, ["show", &format!(":{}", edit.path)])?;
+                        if (current != edit.before && current != edit.after)
+                            || (indexed != edit.before.trim_end()
+                                && indexed != edit.after.trim_end())
+                        {
+                            bail!("{}: preserve changed lockfile before aborting", edit.path);
+                        }
+                    }
+                    for edit in &repin.files {
+                        git_output(
+                            &repo.path,
+                            [
+                                "restore",
+                                "--source",
+                                &repin.head,
+                                "--staged",
+                                "--worktree",
+                                "--",
+                                &edit.path,
+                            ],
+                        )?;
+                    }
+                }
+            }
+        }
         if repo.phase != "pending" {
             git_output(&repo.path, ["reset", "--keep", &repo.old_head]).with_context(|| {
                 format!(
@@ -638,6 +927,322 @@ mod tests {
     fn load_saved(fixture: &Fixture) -> ChangeGroup {
         serde_json::from_slice(&fs::read(fixture.root.join(".knit/example.bundle.json")).unwrap())
             .unwrap()
+    }
+
+    fn cargo_fixture(f: &Fixture) -> (RepoEntry, RepoEntry, String) {
+        let mut library = f.repo("library");
+        let consumer = f.repo("consumer");
+        let lib = Path::new(&library.path);
+        fs::create_dir_all(lib.join("src")).unwrap();
+        fs::write(
+            lib.join("Cargo.toml"),
+            "[workspace]\n[package]\nname = \"local-library\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        fs::write(lib.join("src/lib.rs"), "pub fn value() -> u32 { 7 }\n").unwrap();
+        commit(lib, "Add library");
+        let old = feature(&library, "note", "Library change");
+        let remote = url::Url::from_file_path(lib).unwrap().to_string();
+        library.remote = Some(remote.clone());
+        let root = Path::new(&consumer.path);
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join("Cargo.toml"), format!("[workspace]\n[package]\nname = \"local-consumer\"\nversion = \"0.1.0\"\nedition = \"2021\"\n[dependencies]\nlocal-library = {{ git = \"{remote}\", branch = \"knit/example\" }}\n")).unwrap();
+        fs::write(
+            root.join("src/main.rs"),
+            "fn main() { assert_eq!(local_library::value(), 7); }\n",
+        )
+        .unwrap();
+        cargo(f, &consumer, &["generate-lockfile"]);
+        commit(root, "Add consumer");
+        feature(&consumer, "note", "Consumer change");
+        (library, consumer, old)
+    }
+
+    fn cargo(f: &Fixture, repo: &RepoEntry, args: &[&str]) {
+        let cargo = Path::new(env!("CARGO"));
+        let mut command = std::process::Command::new(cargo);
+        command
+            .args(args)
+            .current_dir(&repo.path)
+            .env("CARGO_HOME", f.root.join("cargo-home"))
+            .env("CARGO_TARGET_DIR", f.root.join("cargo-target"))
+            .env("CARGO_NET_GIT_FETCH_WITH_CLI", "true");
+        let rustc = cargo.with_file_name("rustc");
+        if rustc.exists() {
+            command.env("RUSTC", rustc);
+        }
+        let output = command.output().unwrap();
+        assert!(
+            output.status.success(),
+            "cargo {args:?}: {}\n{}\n{}",
+            output.status,
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    fn assert_repinned(
+        f: &Fixture,
+        library: &RepoEntry,
+        consumer: &RepoEntry,
+        old: &str,
+        squash: bool,
+    ) {
+        let head = rev_parse(Path::new(&library.path), "HEAD").unwrap();
+        assert_ne!(head, old);
+        let lock = fs::read_to_string(Path::new(&consumer.path).join("Cargo.lock")).unwrap();
+        assert!(lock.contains(&format!("#{head}")));
+        assert!(!lock.contains(&format!("#{old}")));
+        let saved = load_saved(f);
+        for repo in [library, consumer] {
+            let path = Path::new(&repo.path);
+            let recorded = saved.repos.iter().find(|r| r.id == repo.id).unwrap();
+            let tip = rev_parse(path, "HEAD").unwrap();
+            assert_eq!(recorded.head_sha.as_deref(), Some(tip.as_str()));
+            if squash {
+                assert_eq!(
+                    git_output(
+                        path,
+                        [
+                            "rev-list",
+                            "--count",
+                            &format!("{}..HEAD", recorded.base_sha.as_ref().unwrap())
+                        ]
+                    )
+                    .unwrap(),
+                    "1"
+                );
+                assert_eq!(saved.commit_groups.len(), 1);
+                assert_eq!(
+                    saved.commit_groups[0]
+                        .commits
+                        .iter()
+                        .filter(|c| c.repo_id == repo.id && c.sha == tip)
+                        .count(),
+                    1
+                );
+            }
+        }
+        // Only file:// Git is used; populate the private cache, then prove locked offline use.
+        cargo(f, consumer, &["build", "--locked"]);
+        cargo(f, consumer, &["build", "--locked", "--offline"]);
+    }
+
+    #[test]
+    fn cargo_squash_repins_in_library_order_and_one_group() {
+        if isolated_test("cargo_squash_repins_in_library_order_and_one_group") {
+            return;
+        }
+        let f = Fixture::new();
+        let (library, consumer, old) = cargo_fixture(&f);
+        // Consumer deliberately precedes its library in bundle order.
+        start_active(
+            f.active(vec![consumer.clone(), library.clone()]),
+            true,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        assert_repinned(&f, &library, &consumer, &old, true);
+    }
+
+    #[test]
+    fn cargo_noop_rebase_preserves_older_pin_heads_and_ledger() {
+        if isolated_test("cargo_noop_rebase_preserves_older_pin_heads_and_ledger") {
+            return;
+        }
+        let f = Fixture::new();
+        let mut library = f.repo("library");
+        let mut consumer = f.repo("consumer");
+        let old_pin = feature(&library, "first", "First library change");
+        let library_head = feature(&library, "second", "Second library change");
+        assert_ne!(old_pin, library_head);
+        let remote = url::Url::from_file_path(&library.path).unwrap().to_string();
+        library.remote = Some(remote.clone());
+        let lock = format!(
+            "version = 4\n\n[[package]]\nname = \"local-library\"\nversion = \"0.1.0\"\nsource = \"git+{remote}?branch=knit/example#{old_pin}\"\n"
+        );
+        let lock_path = Path::new(&consumer.path).join("Cargo.lock");
+        fs::write(&lock_path, &lock).unwrap();
+        commit(Path::new(&consumer.path), "Pin earlier library commit");
+        let consumer_head = rev_parse(Path::new(&consumer.path), "HEAD").unwrap();
+        library.head_sha = Some(library_head.clone());
+        consumer.head_sha = Some(consumer_head.clone());
+        let mut active = f.active(vec![consumer.clone(), library.clone()]);
+        active.bundle.commit_groups.push(CommitGroup {
+            id: "previous".into(),
+            message: "Existing changes".into(),
+            created_at: crate::time::now_iso(),
+            commits: vec![
+                CommitRef {
+                    repo_id: library.id.clone(),
+                    sha: library_head.clone(),
+                },
+                CommitRef {
+                    repo_id: consumer.id.clone(),
+                    sha: consumer_head.clone(),
+                },
+            ],
+            author: None,
+        });
+        let ledger_path = active.bundle_path.clone();
+        let ledger = serde_json::to_vec(&active.bundle).unwrap();
+        fs::write(&ledger_path, &ledger).unwrap();
+
+        start_active(active, false, None, true, true).unwrap();
+
+        assert_eq!(fs::read(&lock_path).unwrap(), lock.as_bytes());
+        assert_eq!(
+            rev_parse(Path::new(&library.path), "HEAD").unwrap(),
+            library_head
+        );
+        assert_eq!(
+            rev_parse(Path::new(&consumer.path), "HEAD").unwrap(),
+            consumer_head
+        );
+        assert_eq!(fs::read(&ledger_path).unwrap(), ledger);
+        clean(Path::new(&consumer.path)).unwrap();
+        assert!(!f.root.join(".knit/rebase/example.json").exists());
+    }
+
+    #[test]
+    fn cargo_rebase_amends_tip_without_extra_commit() {
+        if isolated_test("cargo_rebase_amends_tip_without_extra_commit") {
+            return;
+        }
+        let f = Fixture::new();
+        let (library, consumer, old) = cargo_fixture(&f);
+        for repo in [&library, &consumer] {
+            let path = Path::new(&repo.path);
+            git_output(path, ["checkout", "main"]).unwrap();
+            fs::write(path.join("upstream"), "upstream").unwrap();
+            commit(path, "Upstream");
+            git_output(path, ["checkout", "knit/example"]).unwrap();
+        }
+        start_active(
+            f.active(vec![consumer.clone(), library.clone()]),
+            false,
+            None,
+            true,
+            true,
+        )
+        .unwrap();
+        assert_repinned(&f, &library, &consumer, &old, false);
+        for repo in [&library, &consumer] {
+            assert_eq!(
+                git_output(Path::new(&repo.path), ["rev-list", "--count", "main..HEAD"]).unwrap(),
+                "2"
+            );
+        }
+    }
+
+    #[test]
+    fn cargo_repin_preserves_nonmatching_lines_byte_for_byte() {
+        if isolated_test("cargo_repin_preserves_nonmatching_lines_byte_for_byte") {
+            return;
+        }
+        let f = Fixture::new();
+        let (library, consumer, old) = cargo_fixture(&f);
+        let remote = library.remote.as_ref().unwrap();
+        let other = format!("# comment #{old}\r\nsource = \"registry+https://example.invalid/index\"\r\nsource = \"git+{remote}?branch=main#{old}\"\r\nsource = \"git+{remote}?branch=knit/other#{old}\"\r\nsource = \"git+file:///other?branch=knit/example#{old}\"\r\nsource = \"git+{remote}?rev={old}#{old}\"\r\nchecksum = \"{old}\"\r\n");
+        let matched =
+            format!("  source = \"git+{remote}?branch=knit%2Fexample#{old}\" # retained\r\n");
+        fs::write(
+            Path::new(&consumer.path).join("Cargo.lock"),
+            format!("{other}{matched}"),
+        )
+        .unwrap();
+        commit(Path::new(&consumer.path), "Lock entries");
+        start_active(
+            f.active(vec![consumer.clone(), library.clone()]),
+            true,
+            None,
+            true,
+            false,
+        )
+        .unwrap();
+        let new = rev_parse(Path::new(&library.path), "HEAD").unwrap();
+        assert_eq!(
+            fs::read_to_string(Path::new(&consumer.path).join("Cargo.lock")).unwrap(),
+            format!("{other}{}", matched.replace(&old, &new))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cargo_repin_hook_failure_can_continue_or_abort() {
+        if isolated_test("cargo_repin_hook_failure_can_continue_or_abort") {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        for recovery in ["continue", "crash", "abort"] {
+            let f = Fixture::new();
+            let (library, consumer, old) = cargo_fixture(&f);
+            let consumer_head = rev_parse(Path::new(&consumer.path), "HEAD").unwrap();
+            let old_lock = fs::read(Path::new(&consumer.path).join("Cargo.lock")).unwrap();
+            let hook = Path::new(&consumer.path).join(".git/hooks/pre-commit");
+            // Squash succeeds; only the repinning amend fails.
+            fs::write(
+                &hook,
+                format!("#!/bin/sh\ngit show :Cargo.lock | grep -q '{old}'\n"),
+            )
+            .unwrap();
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+            assert!(start_active(
+                f.active(vec![consumer.clone(), library.clone()]),
+                true,
+                None,
+                true,
+                false
+            )
+            .is_err());
+            let mut state = f.state();
+            assert_eq!(state.repos[0].repo_id, library.id);
+            assert_eq!(state.repos[1].phase, "repinning");
+            assert_eq!(state.repos[1].status, "conflict");
+            assert!(!f.root.join(".knit/example.bundle.json").exists());
+            fs::remove_file(hook).unwrap();
+            let mut active = f.active(vec![consumer.clone(), library.clone()]);
+            active.bundle = state.original_bundle.clone();
+            let path = state_path(&active).unwrap();
+            if recovery == "abort" {
+                abort_rewrite(&active, &mut state, &path).unwrap();
+                assert_eq!(rev_parse(Path::new(&library.path), "HEAD").unwrap(), old);
+                assert_eq!(
+                    rev_parse(Path::new(&consumer.path), "HEAD").unwrap(),
+                    consumer_head
+                );
+                assert_eq!(
+                    fs::read(Path::new(&consumer.path).join("Cargo.lock")).unwrap(),
+                    old_lock
+                );
+                clean(Path::new(&consumer.path)).unwrap();
+                assert!(!active.bundle_path.exists());
+            } else {
+                // Simulate a crash after the amend, before its completion checkpoint.
+                if recovery == "continue" {
+                    // A staged-only unrelated edit must not be absorbed by the amend.
+                    let root = Path::new(&consumer.path);
+                    fs::write(root.join("note"), "unrelated").unwrap();
+                    git_output(root, ["add", "note"]).unwrap();
+                    fs::write(root.join("note"), "Consumer change").unwrap();
+                    let error = execute(&mut active, &mut state, &path).unwrap_err();
+                    assert!(format!("{error:#}").contains("Unrelated changes"));
+                    git_output(root, ["restore", "--staged", "note"]).unwrap();
+                }
+                if recovery == "crash" {
+                    git_output(
+                        Path::new(&consumer.path),
+                        ["commit", "--amend", "--no-edit"],
+                    )
+                    .unwrap();
+                }
+                execute(&mut active, &mut state, &path).unwrap();
+                assert_repinned(&f, &library, &consumer, &old, true);
+            }
+            assert!(!path.exists());
+        }
     }
 
     #[test]
