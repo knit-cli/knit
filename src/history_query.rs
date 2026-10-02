@@ -930,6 +930,22 @@ mod tests {
         assert!(f.query(&q).is_empty());
     }
     #[test]
+    fn plain_date_until_includes_the_whole_day() {
+        let f = Fixture::new();
+        f.write(&[a(), b()]);
+        let date = |value, since| {
+            crate::commands::history::query::parse_history_date(Path::new("."), value, since)
+                .unwrap()
+        };
+        let q = HistoryQuery {
+            since: Some(date("2026-01-01", true)),
+            until: Some(date("2026-01-01", false)),
+            ..HistoryQuery::default()
+        };
+        let ids: Vec<_> = f.query(&q).into_iter().map(|e| e.id).collect();
+        assert_eq!(ids, vec!["node-a"]);
+    }
+    #[test]
     fn grep_regex_fixed_case_and_group_all_match() {
         let f = Fixture::new();
         let mut companion = b();
