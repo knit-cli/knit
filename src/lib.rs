@@ -1043,14 +1043,14 @@ pub fn run(cli: Cli) -> Result<()> {
             remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
-        Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
+        Commands::Squash { message } => commands::rewrite::squash(&message),
         Commands::Rebase {
             squash,
             message,
             offline,
             continue_rebase,
             abort,
-        } => commands::rewrite::rebase(squash, message.as_deref(), offline, continue_rebase, abort),
+        } => commands::rewrite::rebase(squash, &message, offline, continue_rebase, abort),
         Commands::Log { args } => commands::show_log(&args, bundle_context.as_deref()),
         Commands::Revert {
             target,

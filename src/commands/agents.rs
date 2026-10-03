@@ -129,7 +129,7 @@ Knit uses Git history to find commits for the path, then expands matching Knit h
 
 ## Useful Commands
 
-- `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
+- `knit squash [-m <message>|<repo>=<message>]...` rewrites bundle work as one commit per repo and one group; repeat `-m <repo>=<message>` for per-repo messages, with one plain `-m` as the default; publish with `knit push --force-with-lease`.
 - `knit rebase [--squash] [--offline]` replays work onto upstream bases; use `--continue` after resolving conflicts or `--abort` to restore original heads.
 
 {runtime_section}{checks_section}For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.

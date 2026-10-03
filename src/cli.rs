@@ -613,15 +613,17 @@ pub enum Commands {
     },
     /// Squash bundle commits into one commit per repository and one ledger group.
     Squash {
-        #[arg(short, long)]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
     },
     /// Rebase bundle branches onto their refreshed configured bases.
     Rebase {
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         squash: bool,
-        #[arg(short, long, requires = "squash")]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, requires = "squash", value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         offline: bool,
         #[arg(long = "continue", conflicts_with = "abort")]

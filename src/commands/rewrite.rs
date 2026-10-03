@@ -40,6 +40,8 @@ struct RepoState {
     phase: String,
     needs_squash: bool,
     #[serde(default)]
+    message: Option<String>,
+    #[serde(default)]
     rebase_head: Option<String>,
     #[serde(default)]
     repin: Option<Repin>,
@@ -293,13 +295,43 @@ fn verify_repin(repo: &RepoState, repin: &Repin) -> Result<()> {
     Ok(())
 }
 
-pub fn squash(message: Option<&str>) -> Result<()> {
-    start(true, message, true, false)
+// Unlike publish assignments, an unknown prefix is part of a plain message.
+fn squash_messages(
+    bundle: &ChangeGroup,
+    values: &[String],
+) -> Result<(Option<String>, BTreeMap<String, String>)> {
+    let mut default = None;
+    let mut assignments = BTreeMap::new();
+    for value in values {
+        if let Some((id, text)) = value
+            .split_once('=')
+            .filter(|(id, _)| bundle.repos.iter().any(|repo| repo.id == *id))
+        {
+            if text.trim().is_empty() {
+                bail!("--message: squash message for {id} must not be empty");
+            }
+            if assignments.insert(id.to_owned(), text.to_owned()).is_some() {
+                bail!("--message: duplicate value for {id}");
+            }
+        } else {
+            if value.trim().is_empty() {
+                bail!("--message: squash message must not be empty");
+            }
+            if default.replace(value.clone()).is_some() {
+                bail!("--message: at most one plain default message is allowed");
+            }
+        }
+    }
+    Ok((default, assignments))
+}
+
+pub fn squash(messages: &[String]) -> Result<()> {
+    start(true, messages, true, false)
 }
 
 pub fn rebase(
     squash: bool,
-    message: Option<&str>,
+    messages: &[String],
     offline: bool,
     continue_rebase: bool,
     abort: bool,
@@ -321,7 +353,7 @@ pub fn rebase(
             execute(&mut active, &mut state, &path)
         }
     } else {
-        start(squash, message, offline, true)
+        start(squash, messages, offline, true)
     }
 }
 
@@ -368,11 +400,11 @@ fn rebasing(path: &Path) -> Result<bool> {
     Ok(git_path_exists(path, "rebase-merge")? || git_path_exists(path, "rebase-apply")?)
 }
 
-fn start(squash: bool, message: Option<&str>, offline: bool, do_rebase: bool) -> Result<()> {
+fn start(squash: bool, messages: &[String], offline: bool, do_rebase: bool) -> Result<()> {
     start_active(
         load_active_bundle_for_update()?,
         squash,
-        message,
+        messages,
         offline,
         do_rebase,
     )
@@ -381,7 +413,7 @@ fn start(squash: bool, message: Option<&str>, offline: bool, do_rebase: bool) ->
 fn start_active(
     mut active: ActiveBundle,
     squash: bool,
-    message: Option<&str>,
+    messages: &[String],
     offline: bool,
     do_rebase: bool,
 ) -> Result<()> {
@@ -389,19 +421,24 @@ fn start_active(
     if path.exists() {
         bail!("A rewrite is already pending. Use knit rebase --continue or knit rebase --abort");
     }
-    let message = message.map(str::to_owned).unwrap_or_else(|| {
+    let (default, assignments) = squash_messages(&active.bundle, messages)?;
+    let message = default
+        .clone()
+        .unwrap_or_else(|| active.bundle.title.clone());
+    let fallback = default.unwrap_or_else(|| {
         if active.bundle.commit_groups.len() == 1 {
             active.bundle.commit_groups[0].message.clone()
         } else {
             active.bundle.title.clone()
         }
     });
-    if squash && message.trim().is_empty() {
-        bail!("Squash message must not be empty");
-    }
     let mut repos = Vec::new();
     // Complete local preflight for every repo before even fetching a base.
     for repo in &active.bundle.repos {
+        let repo_message = assignments.get(&repo.id).unwrap_or(&fallback);
+        if squash && repo_message.trim().is_empty() {
+            bail!("{}: squash message must not be empty", repo.id);
+        }
         let checkout = checkout_dir(&active, repo)
             .with_context(|| format!("{}: checkout is not materialized", repo.id))?;
         let branch = repo
@@ -440,7 +477,7 @@ fn start_active(
                 || count > 1
                 || (count == 1
                     && git_output(&checkout, ["show", "-s", "--format=%B", "HEAD"])?.trim_end()
-                        != message.trim_end()));
+                        != repo_message.trim_end()));
         repos.push(RepoState {
             repo_id: repo.id.clone(),
             path: checkout,
@@ -452,6 +489,7 @@ fn start_active(
             status: "pending".into(),
             phase: "pending".into(),
             needs_squash,
+            message: squash.then(|| repo_message.clone()),
             rebase_head: None,
             repin: None,
         });
@@ -689,7 +727,12 @@ fn execute_repo(state: &mut RewriteState, i: usize, path: &Path) -> Result<()> {
             // A real commit deliberately preserves hooks, signing and local configuration.
             git_output(
                 &repo.path,
-                ["commit", "--allow-empty", "-m", &state.message],
+                [
+                    "commit",
+                    "--allow-empty",
+                    "-m",
+                    repo.message.as_deref().unwrap_or(&state.message),
+                ],
             )?;
         }
         state.repos[i].phase = "squashed".into();
@@ -1039,7 +1082,7 @@ mod tests {
         start_active(
             f.active(vec![consumer.clone(), library.clone()]),
             true,
-            None,
+            &[],
             true,
             false,
         )
@@ -1090,7 +1133,7 @@ mod tests {
         let ledger = serde_json::to_vec(&active.bundle).unwrap();
         fs::write(&ledger_path, &ledger).unwrap();
 
-        start_active(active, false, None, true, true).unwrap();
+        start_active(active, false, &[], true, true).unwrap();
 
         assert_eq!(fs::read(&lock_path).unwrap(), lock.as_bytes());
         assert_eq!(
@@ -1123,7 +1166,7 @@ mod tests {
         start_active(
             f.active(vec![consumer.clone(), library.clone()]),
             false,
-            None,
+            &[],
             true,
             true,
         )
@@ -1157,7 +1200,7 @@ mod tests {
         start_active(
             f.active(vec![consumer.clone(), library.clone()]),
             true,
-            None,
+            &[],
             true,
             false,
         )
@@ -1192,7 +1235,7 @@ mod tests {
             assert!(start_active(
                 f.active(vec![consumer.clone(), library.clone()]),
                 true,
-                None,
+                &[],
                 true,
                 false
             )
@@ -1246,6 +1289,226 @@ mod tests {
     }
 
     #[test]
+    fn squash_message_cli_is_repeatable() {
+        use clap::Parser;
+        for command in [vec!["knit", "squash"], vec!["knit", "rebase", "--squash"]] {
+            let cli = crate::cli::Cli::try_parse_from(command.into_iter().chain([
+                "-m",
+                "Default",
+                "--message",
+                "api=API change",
+            ]))
+            .unwrap();
+            let messages = match cli.command {
+                crate::cli::Commands::Squash { message }
+                | crate::cli::Commands::Rebase { message, .. } => message,
+                _ => unreachable!(),
+            };
+            assert_eq!(messages, ["Default", "api=API change"]);
+        }
+        assert!(crate::cli::Cli::try_parse_from(["knit", "rebase", "-m", "Default"]).is_err());
+    }
+
+    #[test]
+    fn squash_message_assignments_preserve_plain_equals_and_reject_invalid_values() {
+        let mut bundle = ChangeGroup::new("example".into(), "Title".into(), crate::time::now_iso());
+        bundle.repos = vec![serde_json::from_value(serde_json::json!({
+            "id": "api", "path": "api", "baseBranch": "main"
+        }))
+        .unwrap()];
+        for plain in [
+            "Default",
+            "unknown=value",
+            "x=y=z",
+            "api =value",
+            "API=value",
+            "=value",
+            "unknown=",
+        ] {
+            let (default, assignments) =
+                squash_messages(&bundle, &["api=Subject=a=b".into(), plain.into()]).unwrap();
+            assert_eq!(default.as_deref(), Some(plain));
+            assert_eq!(assignments["api"], "Subject=a=b");
+        }
+        for values in [
+            vec!["one", "two"],
+            vec!["api=one", "api=two"],
+            vec![""],
+            vec![" \n"],
+            vec!["api="],
+            vec!["api= \n"],
+        ] {
+            assert!(squash_messages(
+                &bundle,
+                &values.into_iter().map(str::to_owned).collect::<Vec<_>>()
+            )
+            .is_err());
+        }
+    }
+
+    #[test]
+    fn per_repo_squash_messages_defaults_and_ledger() {
+        if isolated_test("per_repo_squash_messages_defaults_and_ledger") {
+            return;
+        }
+        for do_rebase in [false, true] {
+            for (plain, sole_group, expected_default) in [
+                (Some("Default"), false, "Default"),
+                (None, false, "Example change"),
+                (None, true, "Previous group"),
+            ] {
+                let f = Fixture::new();
+                let a = f.repo("api");
+                let b = f.repo("web");
+                let c = f.repo("cli");
+                let original_a = feature(&a, "first", "API=change");
+                let original_b = feature(&b, "first", "Old web message");
+                feature(&c, "first", "First");
+                feature(&c, "second", "Second");
+                if do_rebase {
+                    for repo in [&a, &b, &c] {
+                        let path = Path::new(&repo.path);
+                        git_output(path, ["checkout", "main"]).unwrap();
+                        fs::write(path.join("upstream"), "Upstream").unwrap();
+                        commit(path, "Upstream");
+                        git_output(path, ["checkout", "knit/example"]).unwrap();
+                    }
+                }
+                let mut active = f.active(vec![a.clone(), b.clone(), c.clone()]);
+                if sole_group {
+                    active.bundle.commit_groups.push(CommitGroup {
+                        id: "previous".into(),
+                        message: "Previous group".into(),
+                        created_at: crate::time::now_iso(),
+                        author: None,
+                        commits: vec![CommitRef {
+                            repo_id: a.id.clone(),
+                            sha: original_a.clone(),
+                        }],
+                    });
+                }
+                let mut messages = vec!["api=API=change".into(), "web=Web change".into()];
+                if let Some(plain) = plain {
+                    messages.push(plain.into());
+                }
+                start_active(active, true, &messages, true, do_rebase).unwrap();
+                if !do_rebase {
+                    assert_eq!(rev_parse(Path::new(&a.path), "HEAD").unwrap(), original_a);
+                } else {
+                    for repo in [&a, &b, &c] {
+                        assert!(is_ancestor(Path::new(&repo.path), "main", "HEAD"));
+                    }
+                }
+                assert_ne!(rev_parse(Path::new(&b.path), "HEAD").unwrap(), original_b);
+                let saved = load_saved(&f);
+                assert_eq!(saved.commit_groups.len(), 1);
+                assert_eq!(
+                    saved.commit_groups[0].message,
+                    plain.unwrap_or("Example change")
+                );
+                let json = serde_json::to_value(&saved).unwrap();
+                for (repo, expected) in [
+                    (&a, "API=change"),
+                    (&b, "Web change"),
+                    (&c, expected_default),
+                ] {
+                    let head = rev_parse(Path::new(&repo.path), "HEAD").unwrap();
+                    assert_eq!(
+                        git_output(Path::new(&repo.path), ["show", "-s", "--format=%B", "HEAD"])
+                            .unwrap(),
+                        expected
+                    );
+                    assert_eq!(
+                        git_output(Path::new(&repo.path), ["rev-list", "--count", "main..HEAD"])
+                            .unwrap(),
+                        "1"
+                    );
+                    assert!(json["nodes"].as_array().unwrap().iter().any(|node| {
+                        node["repoChanges"].as_array().is_some_and(|changes| {
+                            changes.iter().any(|change| {
+                                change["repoId"] == repo.id
+                                    && change["commitDetails"][&head]["subject"] == expected
+                            })
+                        })
+                    }));
+                }
+            }
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn per_repo_and_legacy_messages_survive_recovery() {
+        if isolated_test("per_repo_and_legacy_messages_survive_recovery") {
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        for legacy in [false, true] {
+            let f = Fixture::new();
+            let a = f.repo("api");
+            let b = f.repo("web");
+            for repo in [&a, &b] {
+                feature(repo, "first", "First");
+                feature(repo, "second", "Second");
+            }
+            let hook = Path::new(&b.path).join(".git/hooks/pre-commit");
+            fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
+            fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+            let messages = if legacy {
+                vec!["Shared legacy".into()]
+            } else {
+                vec![
+                    "api=API recovered".into(),
+                    "web=Web recovered".into(),
+                    "Ledger".into(),
+                ]
+            };
+            assert!(start_active(
+                f.active(vec![a.clone(), b.clone()]),
+                true,
+                &messages,
+                true,
+                false
+            )
+            .is_err());
+            let mut json = serde_json::to_value(f.state()).unwrap();
+            if legacy {
+                for repo in json["repos"].as_array_mut().unwrap() {
+                    repo.as_object_mut().unwrap().remove("message");
+                }
+            }
+            let mut state: RewriteState = serde_json::from_value(json).unwrap();
+            assert_eq!(state.repos[0].status, "done");
+            assert_eq!(state.repos[1].phase, "squashing");
+            assert_eq!(
+                state.repos[1].message.as_deref(),
+                if legacy { None } else { Some("Web recovered") }
+            );
+            fs::remove_file(hook).unwrap();
+            let completed_head = rev_parse(Path::new(&a.path), "HEAD").unwrap();
+            let mut active = f.active(vec![a.clone(), b.clone()]);
+            let path = state_path(&active).unwrap();
+            execute(&mut active, &mut state, &path).unwrap();
+            assert_eq!(
+                rev_parse(Path::new(&a.path), "HEAD").unwrap(),
+                completed_head
+            );
+            for (repo, message) in [(&a, "API recovered"), (&b, "Web recovered")] {
+                assert_eq!(
+                    git_output(Path::new(&repo.path), ["show", "-s", "--format=%B", "HEAD"])
+                        .unwrap(),
+                    if legacy { "Shared legacy" } else { message }
+                );
+            }
+            assert_eq!(
+                load_saved(&f).commit_groups[0].message,
+                if legacy { "Shared legacy" } else { "Ledger" }
+            );
+            assert!(!path.exists());
+        }
+    }
+
+    #[test]
     fn squash_combines_repos_and_retains_unchanged_single_commit() {
         if isolated_test("squash_combines_repos_and_retains_unchanged_single_commit") {
             return;
@@ -1259,7 +1522,7 @@ mod tests {
         start_active(
             f.active(vec![a.clone(), b.clone()]),
             true,
-            Some("Combined"),
+            &["Combined".into()],
             true,
             false,
         )
@@ -1300,7 +1563,7 @@ mod tests {
                 }],
             })
             .collect();
-        start_active(active, true, Some("Combined"), true, false).unwrap();
+        start_active(active, true, &["Combined".into()], true, false).unwrap();
         let saved = load_saved(&f);
         assert_eq!(saved.commit_groups.len(), 1);
         assert_eq!(saved.commit_groups[0].commits.len(), 2);
@@ -1311,7 +1574,7 @@ mod tests {
         active.bundle = saved;
         let path = active.bundle_path.clone();
         fs::write(&path, &bytes).unwrap();
-        start_active(active, true, Some("Combined"), true, false).unwrap();
+        start_active(active, true, &["Combined".into()], true, false).unwrap();
         assert_eq!(fs::read(path).unwrap(), bytes);
         assert!(!f.root.join(".knit/rebase/example.json").exists());
     }
@@ -1327,18 +1590,13 @@ mod tests {
         feature(&a, "first", "First");
         let head = feature(&a, "second", "Second");
         fs::write(Path::new(&b.path).join("file"), "dirty").unwrap();
-        assert!(start_active(
-            f.active(vec![a.clone(), b.clone()]),
-            true,
-            None,
-            true,
-            false
-        )
-        .is_err());
+        assert!(
+            start_active(f.active(vec![a.clone(), b.clone()]), true, &[], true, false).is_err()
+        );
         assert_eq!(rev_parse(Path::new(&a.path), "HEAD").unwrap(), head);
         git_output(Path::new(&b.path), ["checkout", "--", "file"]).unwrap();
         git_output(Path::new(&b.path), ["checkout", "main"]).unwrap();
-        assert!(start_active(f.active(vec![a.clone(), b]), true, None, true, false).is_err());
+        assert!(start_active(f.active(vec![a.clone(), b]), true, &[], true, false).is_err());
         assert_eq!(rev_parse(Path::new(&a.path), "HEAD").unwrap(), head);
     }
 
@@ -1368,7 +1626,7 @@ mod tests {
             author: None,
         });
         let original = active.bundle.clone();
-        assert!(start_active(active, true, None, true, false).is_err());
+        assert!(start_active(active, true, &[], true, false).is_err());
         assert!(!f.root.join(".knit/example.bundle.json").exists());
         let mut state = f.state();
         assert_eq!(state.repos[0].status, "conflict");
@@ -1398,7 +1656,7 @@ mod tests {
         let hook = Path::new(&a.path).join(".git/hooks/pre-commit");
         fs::write(&hook, "#!/bin/sh\nexit 1\n").unwrap();
         fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(start_active(f.active(vec![a.clone()]), true, None, true, false).is_err());
+        assert!(start_active(f.active(vec![a.clone()]), true, &[], true, false).is_err());
         let mut state = f.state();
         let mut active = f.active(vec![a.clone()]);
         active.bundle = state.original_bundle.clone();
@@ -1430,14 +1688,9 @@ mod tests {
             commit(path, "Upstream");
             git_output(path, ["checkout", "knit/example"]).unwrap();
         }
-        assert!(start_active(
-            f.active(vec![a.clone(), b.clone()]),
-            false,
-            None,
-            true,
-            true
-        )
-        .is_err());
+        assert!(
+            start_active(f.active(vec![a.clone(), b.clone()]), false, &[], true, true).is_err()
+        );
         assert!(!f.root.join(".knit/example.bundle.json").exists());
         let mut state = f.state();
         assert_eq!(state.repos[1].status, "pending");
@@ -1472,9 +1725,7 @@ mod tests {
         fs::write(path.join("file"), "upstream").unwrap();
         commit(path, "Upstream");
         git_output(path, ["checkout", "knit/example"]).unwrap();
-        assert!(
-            start_active(f.active(vec![a.clone(), b.clone()]), true, None, true, true).is_err()
-        );
+        assert!(start_active(f.active(vec![a.clone(), b.clone()]), true, &[], true, true).is_err());
         let mut state = f.state();
         assert_eq!(state.repos[0].status, "done");
         let mut active = f.active(vec![a.clone(), b.clone()]);

@@ -104,8 +104,8 @@ knit bundle print
 knit bundle validate
 knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
-knit squash [-m <message>]
-knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
+knit squash [-m <message>|<repo>=<message>]...
+knit rebase [--squash] [-m <message>|<repo>=<message>]... [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status [--json]
 knit workspace status
@@ -1026,14 +1026,22 @@ Run rewrites from the bundle worktree, with clean tracked files and each repo on
 its recorded feature branch:
 
 ```sh
-knit squash -m "Add widget support"
+knit squash -m "Add widget support" -m "sdk=Expose widget support"
 knit rebase
 knit rebase --squash -m "Add widget support"
 ```
 
 `knit squash` combines the bundle's work into one commit per repository and one
-commit group. Without `-m`, it uses the only existing group's message or the
-bundle title. `knit rebase` fetches each repository's base and replays the bundle
+commit group. Repeat `-m '<repo>=<message>'` to choose each repository's message;
+one plain `-m '<message>'` supplies the default for the rest. An assignment is
+recognized only when the prefix before the first `=` exactly matches a tracked
+repo id; otherwise the whole value is a plain message. Duplicate assignments,
+multiple plain messages, and empty messages are errors. Repos without an override
+or plain default use the only existing group's message, or the bundle title.
+The ledger group uses the plain default if given, otherwise the bundle title.
+These message options also work with `knit rebase --squash`.
+
+`knit rebase` fetches each repository's base and replays the bundle
 commits on it, preserving group messages where possible. Contribution repos use
 the upstream destination base. `--offline` uses cached base refs, falling back to
 the local base branch. `--squash` combines the work before rebasing.
