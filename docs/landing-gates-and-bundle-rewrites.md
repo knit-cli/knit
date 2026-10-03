@@ -187,12 +187,13 @@ between the lookup and the push is refused by the remote.
 Decision: rewrites update the bundle's `commitGroups`, repository heads and
 bases in place, and append one audit node. Nothing is hand-edited.
 
-- `knit squash [-m <message>]`: one commit per repository on the recorded
-  base, one commit group.
-- `knit rebase [repos...] [--squash] [-m <message>] [--offline]`: fetch each
-  repository's base (the recorded review's base branch when there is one, the
-  configured base otherwise; the upstream target for forks) and rebase onto it;
-  `--continue` / `--abort` across repositories after a conflict.
+- `knit squash [-m <message>|<repo>=<message>]...`: one commit per repository on
+  the recorded base, one commit group. Repeat per-repo messages with one optional
+  plain default.
+- `knit rebase [repos...] [--squash] [-m <message>|<repo>=<message>]... [--offline]`:
+  fetch each repository's base (the recorded review's base branch when there is
+  one, the configured base otherwise; the upstream target for forks) and rebase
+  onto it; `--continue` / `--abort` across repositories after a conflict.
 - `knit sync` recognises a rebase done with plain Git: commits reachable from
   the upstream base are the new base, not bundle work, and `baseSha` moves.
 
