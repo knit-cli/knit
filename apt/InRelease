@@ -2,33 +2,33 @@
 Hash: SHA256
 
 Architectures: amd64 arm64
-Date: Sun, 04 Oct 2026 12:32:44 +0000
+Date: Sun, 04 Oct 2026 16:38:46 +0000
 Description: Knit Linux packages
 Label: Knit
 Origin: Knit
 MD5Sum:
- 888c5d7ab30cf0bae6a53bd520967961            19040 Packages
- a3ded739ec9cc01d503eb0d4f989fb0d             3928 Packages.gz
+ 6cfd24edbabd69c8e5af789945cf90eb            20160 Packages
+ eb4af63a6ae8cf75bd76cfb4047c3705             4162 Packages.gz
 SHA1:
- 6e6f72f6b4fbab34b273694a1002a504a16e235b            19040 Packages
- 017ea33d7557867d8c7170535ece54827ac06be1             3928 Packages.gz
+ f280ed4f11b9d6e91576d1fd83f3773ac707f714            20160 Packages
+ 5111964e55f9bb240015445ef3e6967e42acce4a             4162 Packages.gz
 SHA256:
- 0fa297f13cabeb6ee13dca1edbf195d483b10aa23e0d2d1b895fa15b4ddf8740            19040 Packages
- ef655bb13550199896dfe618f15917334637010ae0380ec08f73d3b9e1cf9f54             3928 Packages.gz
+ ba118b43f24ecc2bd3d911aed9d54607c749cba84a47193dbf35c98cdf2d0e18            20160 Packages
+ ca1d3de75bb2e119a87f21bdae015bebd5439a2d03e5dac58082db52e42c31d0             4162 Packages.gz
 SHA512:
- c5555a5d6716ccebfb66390614d7a07335db6d45683cf996214d9bb1c90dfad625694926dec1c87342522622ab804273fc34b988bbf0d1a13f567876bfffe993            19040 Packages
- 87a7e261d59512520ac2d32c77fa0b7e9deacffe95198880e1138914a39de2378eee46e45492c16238ac3e49fe59e2b489aed70e2718efc281e97220dfc24840             3928 Packages.gz
+ 54d4ede96fd61e8e172d4fb0133cc7b9f3b6bf4dbc3dd791def34a0196301449fc5e78c7170d1dc07c9f6858132d37b59161094b2a7629a2d214cbd14f3074a4            20160 Packages
+ af3bbd5b4f3fcf0e359fe0d68dca7891b8e5f0793edb6dd08ed373478173fb0c93086926e064658ca8786f6948bbefe88bb1c19bf05f6a5101a8d6c7a26f0dd2             4162 Packages.gz
 -----BEGIN PGP SIGNATURE-----
 
-iQGzBAEBCAAdFiEEhz5ZEKtVy6IU5ffyJYw7sWPsC5oFAmrCR2wACgkQJYw7sWPs
-C5ofZwv+KMmQo4aZpN6UIrFAy+li8fLwuoC3GMDdJOvEP3ALWYeaSuJpOtN1Sb+K
-6+hvDv7vPKRG+p/NWAtyxtXkmsjwHvR2iWAK2zmsxRCh0dMCYeASZpo8S0aMy1ir
-QlQ64tO9xFLX8Pf3fFm1fm1U2SgL/1Kw2CbZC1Y8wJZY48TzyL2XGeioZ4xjuWc3
-sSOQ3OgHm21OOr65lVFFsOO1YMClCoOXkP56CKKc8MGVGlq5FHuZGdtQhzafVa8g
-0wQJGdOA+V/hiZZV3lQ5+OcODz5xWqoNglpS0hj9s8hl5EI79aV5dzooRywIw7Ki
-d2GbHWrRBKr55cb3Yb/6ZnBLOueaWedWRwZ1QDGcF57S95uAt+U4WDSSEs7tCxI9
-Xq0nIrcZg7CnaPvMwG2Sho3y9hk+N9+Mvx2pk6Ah7MPZB2Vlasg10sA7KaOnySTm
-1hv48KCdl7h8uCAL7JVytHTEAmqJM4l5Mh9VTRR88fOQGhMWnJZwjzOecDZ7SguD
-Ee09VuE1
-=GIWz
+iQGzBAEBCAAdFiEEhz5ZEKtVy6IU5ffyJYw7sWPsC5oFAmrCgRYACgkQJYw7sWPs
+C5oRYwv/RWHWEhq4fsaneqUI6HAKGcrjWkr0yg7TwYeEZCOmjstqL7MsRRsznn/3
+k674GoRaEc95w4/lcw2GZhmKhbJmAt7hedYdhg4/fUrWvd652BcwV68VUM8PRccu
+uypRRftU92CxVqci8L8b6O37YosEi37C1ZrmnvNzCeG5QSkkqmgsBevGmryNh6wT
+IuOM6yNMnoZq+mq6zisbGShbuEXXWSqzSTvkUKSKwxym+3nHICiiCvnrcXI2DCD0
+YEcsZ2qo7BFeL7QpMKakAqRmAb0ZYmVkXYAPNgFn9DWPQJoSAK0XsUat6eK+DiGL
+hb7IbCgIhsfrvRFhGChLqaSjezBFg1SHU2demUq38n+ojiDUO/mGza2eHD4ZYVBx
+omhpkr7DXVmaQFN83k7xj1Stl9vFd6Mp5yto2tc2goOIPSw+3y+nw9abXvbAocyG
+62qhZuO3pokwMaS+Koh7LgPZ+4LxbXFOe9NcdrdGIg4jQ767FBRGnqod3A9WUjor
+rW3FdWu7
+=0bqd
 -----END PGP SIGNATURE-----
