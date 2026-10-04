@@ -1,6 +1,34 @@
 //! Native landing shims: Rust's Windows process lookup does not find git.cmd.
 use std::{fs, path::Path, process::Command};
 
+pub fn reexec_in_isolated_knit_home() -> bool {
+    const CHILD_TEST: &str = "KNIT_PROVIDER_FIXTURE_CHILD_TEST";
+    let thread = std::thread::current();
+    let test_name = thread.name().expect("test harness thread name");
+    if std::env::var(CHILD_TEST).as_deref() == Ok(test_name) {
+        return false;
+    }
+
+    let home = crate::common::unique_temp_dir();
+    let mut command = Command::new(std::env::current_exe().unwrap());
+    command
+        .args(["--exact", test_name, "--nocapture", "--test-threads=1"])
+        .env(CHILD_TEST, test_name)
+        .env("KNIT_HOME", &home);
+    crate::common::scrub_ambient_forge_env(&mut command);
+    let output = command.output();
+    fs::remove_dir_all(home).unwrap();
+    let output = output.expect("reexecute provider test with isolated credentials");
+    assert!(
+        output.status.success(),
+        "isolated test {test_name} failed ({}):\n{}\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    true
+}
+
 pub fn install(bin: &Path, forge_cli: Option<&str>) {
     fs::create_dir_all(bin).unwrap();
     // Resolve before the fixture directory is added to PATH; never recurse into the shim.

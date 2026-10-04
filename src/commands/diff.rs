@@ -23,9 +23,24 @@ pub fn show_diff(selectors: &[String], stat: bool, published: bool) -> Result<()
 
     let repos = resolve_repos(&active, selectors)?;
     if published {
+        let mut shown = 0usize;
         for repo in repos {
-            show_published_diff(&active, repo, stat)
-                .with_context(|| format!("{}: published diff failed", repo.id))?;
+            match show_published_diff(&active, repo, stat)
+                .with_context(|| format!("{}: published diff failed", repo.id))?
+            {
+                Some(()) => shown += 1,
+                None if selectors.is_empty() => println!(
+                    "{}",
+                    out::muted(format!("{}: not published (no recorded PR/MR)", repo.id))
+                ),
+                None => bail!("{}: published diff failed: no recorded PR/MR", repo.id),
+            }
+        }
+        if shown == 0 {
+            println!(
+                "No published reviews recorded in bundle {}",
+                out::node(&active.bundle.id)
+            );
         }
         return Ok(());
     }
@@ -79,15 +94,16 @@ pub fn show_diff(selectors: &[String], stat: bool, published: bool) -> Result<()
     Ok(())
 }
 
-fn show_published_diff(active: &ActiveBundle, repo: &RepoEntry, stat: bool) -> Result<()> {
-    let publication = crate::providers::publication_for_repo(&active.bundle, &repo.id)
-        .context("no recorded PR/MR publication")?;
+fn show_published_diff(active: &ActiveBundle, repo: &RepoEntry, stat: bool) -> Result<Option<()>> {
     let checkout = checkout_dir(active, repo).context("bundle checkout unavailable")?;
     if crate::git::git_root(&checkout).ok() != canonical(&checkout) {
         bail!("bundle checkout unavailable: not a Git checkout root");
     }
     let local_head = git_output(&checkout, ["rev-parse", "--verify", "HEAD^{commit}"])
         .context("bundle checkout has no resolvable local HEAD")?;
+    let Some(publication) = crate::providers::publication_for_repo(&active.bundle, &repo.id) else {
+        return Ok(None);
+    };
     let forge = crate::providers::by_id(&publication.provider)
         .with_context(|| format!("unknown publication provider `{}`", publication.provider))?;
     let target = published_target(&checkout, &publication.url, forge.id())?;
@@ -156,7 +172,7 @@ fn show_published_diff(active: &ActiveBundle, repo: &RepoEntry, stat: bool) -> R
             &output
         }
     );
-    Ok(())
+    Ok(Some(()))
 }
 
 fn published_target(

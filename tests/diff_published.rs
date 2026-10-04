@@ -337,6 +337,8 @@ fn selectors_skip_unpublished_repos_and_missing_checkouts_fail_explicitly() {
     let other = f.root.join("other");
     init_repo(&other, "other");
     knit(&f.workspace, ["bundle", "add", other.to_str().unwrap()]);
+    f.edit_bundle(|b| b["repos"].as_array_mut().unwrap().reverse());
+    let before = f.snapshot();
     let output = f.run(
         &f.workspace,
         &[
@@ -353,16 +355,90 @@ fn selectors_skip_unpublished_repos_and_missing_checkouts_fail_explicitly() {
         output.contains("== widget") && !output.contains("== other"),
         "{output}"
     );
-    let output = f.run(&f.workspace, &["diff", "--published"], true);
+    assert_eq!(before, f.snapshot());
+    let output = f.run(&f.workspace, &["diff", "--published"], false);
     assert!(
-        output.contains("other: published diff failed") && output.contains("no recorded PR/MR"),
+        output.contains("== widget") && output.contains("other: not published (no recorded PR/MR)"),
         "{output}"
     );
+    assert!(
+        !output.contains("No published reviews recorded"),
+        "{output}"
+    );
+    assert_eq!(before, f.snapshot());
+    assert!(output.find("other: not published").unwrap() < output.find("== widget").unwrap());
+    let output = f.run(&f.workspace, &["diff", "--published", "other"], true);
+    assert!(output.contains("no recorded PR/MR"), "{output}");
+    assert_eq!(before, f.snapshot());
     let output = f.run(&f.workspace, &["diff", "--published", "unknown"], true);
     assert!(output.contains("No tracked repo matched"), "{output}");
-    f.edit_bundle(|b| b["repos"][0]["worktreePath"] = json!("missing-checkout"));
+    assert_eq!(before, f.snapshot());
+    f.edit_bundle(|b| b["repos"][1]["worktreePath"] = json!("missing-checkout"));
+    let before = f.snapshot();
     let output = f.run(&f.workspace, &["diff", "--published", "widget"], true);
     assert!(output.contains("bundle checkout unavailable"), "{output}");
+    assert_eq!(before, f.snapshot());
+}
+
+#[test]
+fn explicit_unpublished_selector_fails_without_state_changes() {
+    let f = Fixture::new();
+    f.edit_bundle(|b| b["publications"] = json!([]));
+    let before = f.snapshot();
+    let output = f.run(&f.workspace, &["diff", "--published", "widget"], true);
+    assert!(output.contains("no recorded PR/MR"), "{output}");
+    assert!(!output.contains("not published ("), "{output}");
+    assert!(!f.root.join("calls").exists());
+    assert_eq!(before, f.snapshot());
+}
+
+#[test]
+fn all_unpublished_repos_report_no_reviews_without_state_changes() {
+    let f = Fixture::new();
+    let other = f.root.join("other");
+    init_repo(&other, "other");
+    knit(&f.workspace, ["bundle", "add", other.to_str().unwrap()]);
+    f.edit_bundle(|b| b["publications"] = json!([]));
+    let before = f.snapshot();
+    let output = f.run(&f.workspace, &["diff", "--published"], false);
+    for expected in [
+        "widget: not published (no recorded PR/MR)",
+        "other: not published (no recorded PR/MR)",
+        "No published reviews recorded in bundle published-diff",
+    ] {
+        assert!(output.contains(expected), "{output}");
+    }
+    assert!(!f.root.join("calls").exists());
+    assert_eq!(before, f.snapshot());
+}
+
+#[test]
+fn unpublished_repos_require_available_checkouts_and_resolvable_heads() {
+    let f = Fixture::new();
+    f.edit_bundle(|b| b["publications"] = json!([]));
+    git(&f.checkout, ["symbolic-ref", "HEAD", "refs/heads/unborn"]);
+    let before = f.snapshot();
+    for args in [
+        vec!["diff", "--published"],
+        vec!["diff", "--published", "widget"],
+    ] {
+        let output = f.run(&f.workspace, &args, true);
+        assert!(output.contains("no resolvable local HEAD"), "{output}");
+        assert!(!output.contains("no recorded PR/MR"), "{output}");
+        assert_eq!(before, f.snapshot());
+    }
+    f.edit_bundle(|b| b["repos"][0]["worktreePath"] = json!("missing-checkout"));
+    let before = f.snapshot();
+    for args in [
+        vec!["diff", "--published"],
+        vec!["diff", "--published", "widget"],
+    ] {
+        let output = f.run(&f.workspace, &args, true);
+        assert!(output.contains("bundle checkout unavailable"), "{output}");
+        assert!(!output.contains("no recorded PR/MR"), "{output}");
+        assert_eq!(before, f.snapshot());
+    }
+    assert!(!f.root.join("calls").exists());
 }
 
 #[test]
