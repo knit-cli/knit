@@ -85,6 +85,10 @@ fn handle(stream: &mut TcpStream, state: &std::path::Path) -> std::io::Result<()
 
 #[test]
 fn forgejo_native_parity_surfaces_are_hermetic() {
+    if provider_fixture::reexec_in_isolated_knit_home() {
+        return;
+    }
+
     let root = unique_temp_dir();
     let state = root.join("forgejo-state");
     let base = spawn_forgejo_api(&state);

@@ -13,6 +13,10 @@ use std::path::Path;
 
 #[test]
 fn bitbucket_native_adapter_covers_publish_status_retarget_and_land_surfaces() {
+    if provider_fixture::reexec_in_isolated_knit_home() {
+        return;
+    }
+
     let root = unique_temp_dir();
     let state = root.join("fake-bitbucket");
     let base = spawn_fake_bitbucket_api(&state);
