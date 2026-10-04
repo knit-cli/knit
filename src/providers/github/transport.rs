@@ -55,12 +55,24 @@ pub(super) fn use_native_github_api(target: &PrTarget) -> bool {
             .unwrap_or(false)
 }
 
-fn github_api_base() -> String {
-    std::env::var("KNIT_GITHUB_API_BASE")
+fn github_api_base(target: &PrTarget) -> Result<String> {
+    if let Some(base) = std::env::var("KNIT_GITHUB_API_BASE")
         .ok()
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| "https://api.github.com".to_string())
+    {
+        return Ok(base);
+    }
+    let host = target
+        .repo_remote
+        .as_deref()
+        .map(crate::auth::remote_target)
+        .transpose()?
+        .map(|(host, _)| host);
+    Ok(match host.as_deref() {
+        None | Some("github.com") => "https://api.github.com".to_string(),
+        Some(host) => format!("https://{host}/api/v3"),
+    })
 }
 
 /// Resolve hostnames preferring IPv4 addresses. This transport exists for
@@ -91,7 +103,7 @@ pub(super) fn native_github_api_output(
         .context("KNIT_GITHUB_API_TRANSPORT requires GH_TOKEN or GITHUB_TOKEN")?;
     let base = match &credential {
         Some(value) => crate::providers::bound_api_base(value)?,
-        None => github_api_base(),
+        None => github_api_base(target)?,
     };
     let url = format!("{}/{}", base, endpoint.trim_start_matches('/'));
     let operation = format!("{method} /{}", endpoint.trim_start_matches('/'));
@@ -193,5 +205,36 @@ mod tests {
         if addrs.iter().any(std::net::SocketAddr::is_ipv4) {
             assert!(addrs.iter().all(std::net::SocketAddr::is_ipv4));
         }
+    }
+}
+
+#[cfg(test)]
+mod published_host_tests {
+    use super::*;
+
+    #[test]
+    fn native_base_uses_explicit_remote_host() {
+        let mut target = PrTarget::explicit(".", "upstream/widget");
+        target.repo_remote = Some("https://review.example.test/upstream/widget.git".into());
+        let override_base = std::env::var("KNIT_GITHUB_API_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        assert_eq!(
+            github_api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test/api/v3".into())
+        );
+        target.repo_remote = None;
+        assert_eq!(
+            github_api_base(&target).unwrap(),
+            override_base.unwrap_or_else(|| "https://api.github.com".into())
+        );
+        target.repo_remote = Some("https://github.com/upstream/widget.git".into());
+        assert_eq!(
+            github_api_base(&target).unwrap(),
+            github_api_base(&PrTarget::explicit(".", "upstream/widget")).unwrap()
+        );
     }
 }

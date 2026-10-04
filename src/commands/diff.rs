@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 
-pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
+pub fn show_diff(selectors: &[String], stat: bool, published: bool) -> Result<()> {
     let active = load_active_bundle()?;
     if active.bundle.repos.is_empty() {
         bail!("The resolved bundle has no repos. Run `knit bundle add <repo-path>` first.");
@@ -22,6 +22,13 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
     );
 
     let repos = resolve_repos(&active, selectors)?;
+    if published {
+        for repo in repos {
+            show_published_diff(&active, repo, stat)
+                .with_context(|| format!("{}: published diff failed", repo.id))?;
+        }
+        return Ok(());
+    }
     let mut shown = 0usize;
 
     for repo in repos {
@@ -70,6 +77,117 @@ pub fn show_diff(selectors: &[String], stat: bool) -> Result<()> {
     }
 
     Ok(())
+}
+
+fn show_published_diff(active: &ActiveBundle, repo: &RepoEntry, stat: bool) -> Result<()> {
+    let publication = crate::providers::publication_for_repo(&active.bundle, &repo.id)
+        .context("no recorded PR/MR publication")?;
+    let checkout = checkout_dir(active, repo).context("bundle checkout unavailable")?;
+    if crate::git::git_root(&checkout).ok() != canonical(&checkout) {
+        bail!("bundle checkout unavailable: not a Git checkout root");
+    }
+    let local_head = git_output(&checkout, ["rev-parse", "--verify", "HEAD^{commit}"])
+        .context("bundle checkout has no resolvable local HEAD")?;
+    let forge = crate::providers::by_id(&publication.provider)
+        .with_context(|| format!("unknown publication provider `{}`", publication.provider))?;
+    let target = published_target(&checkout, &publication.url, forge.id())?;
+    let review = forge
+        .view(&target, &publication.url)
+        .with_context(|| format!("cannot resolve published review {}", publication.url))?;
+    let sha = review
+        .head_ref_oid
+        .as_deref()
+        .context("published review has no head SHA")?;
+    if !matches!(sha.len(), 40 | 64) || !sha.bytes().all(|c| c.is_ascii_hexdigit()) {
+        bail!("published review has no valid full head SHA");
+    }
+
+    let remote = if crate::contribution::configured(repo) {
+        match crate::contribution::push_remote(&checkout, repo) {
+            Ok(name) => crate::contribution::git_remote_url(&checkout, &name, true)?,
+            Err(_) => crate::contribution::source(repo)
+                .context("missing source remote")?
+                .to_owned(),
+        }
+    } else {
+        let name = crate::auth_git::default_remote(&checkout, true);
+        crate::contribution::git_remote_url(&checkout, &name, true)?
+    };
+    // A URL and an empty refmap prevent configured fetch refspecs from updating
+    // tracking/lease refs. The immutable host SHA is the only requested object.
+    crate::git::git_output_without_recovery(
+        &checkout,
+        [
+            "fetch",
+            "--no-tags",
+            "--no-write-fetch-head",
+            "--no-recurse-submodules",
+            "--no-auto-maintenance",
+            "--refmap=",
+            "--",
+            &remote,
+            sha,
+        ],
+    )
+    .with_context(|| format!("cannot fetch published head {sha} for {}", publication.url))?;
+    git_output(&checkout, ["cat-file", "-e", &format!("{sha}^{{commit}}")])
+        .context("published head is not an available commit")?;
+    let mut args = vec![
+        OsString::from("--no-optional-locks"),
+        OsString::from("diff"),
+    ];
+    args.extend(display_color_args());
+    args.extend(["--no-ext-diff", "--no-textconv"].map(OsString::from));
+    if stat {
+        args.push(OsString::from("--stat"));
+    }
+    args.extend([OsString::from(sha), OsString::from("--")]);
+    let output = git_output(&checkout, args)?;
+    println!("== {} against published ==", out::repo(&repo.id));
+    println!("review: {}", publication.url);
+    println!("published: {sha}");
+    println!("local HEAD: {local_head}");
+    println!("checkout: {}", out::path(checkout_display_path(repo)));
+    println!(
+        "{}",
+        if output.trim().is_empty() {
+            "no diff"
+        } else {
+            &output
+        }
+    );
+    Ok(())
+}
+
+fn published_target(
+    checkout: &Path,
+    review_url: &str,
+    provider: &str,
+) -> Result<crate::providers::PrTarget> {
+    let mut url = url::Url::parse(review_url).context("invalid recorded review URL")?;
+    let marker = match provider {
+        "github" => "/pull/",
+        "gitlab" => "/-/merge_requests/",
+        "forgejo" => "/pulls/",
+        "bitbucket" => "/pull-requests/",
+        _ => bail!("unsupported review provider `{provider}`"),
+    };
+    let (repo, number) = url
+        .path()
+        .rsplit_once(marker)
+        .context("invalid recorded review URL path")?;
+    if repo.trim_matches('/').is_empty() || number.parse::<u64>().is_err() {
+        bail!("invalid recorded review URL path");
+    }
+    let repo = repo.trim_start_matches('/').to_owned();
+    url.set_path(&format!("/{repo}"));
+    url.set_query(None);
+    url.set_fragment(None);
+    // Resolve auth from the recorded review destination, not the checkout's
+    // origin or the ledger's (possibly rewritten) contribution head.
+    let mut target = crate::providers::PrTarget::explicit(checkout, repo);
+    target.repo_remote = Some(url.to_string());
+    Ok(target)
 }
 
 fn print_no_diff_context(repo: &RepoEntry, checkout: &Path) -> Result<()> {

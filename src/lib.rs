@@ -405,7 +405,11 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
         } => commands::clean_generated(plans, worktrees, archived, merge_worktrees, all, force),
         Commands::Status { json } => commands::show_status(json),
-        Commands::Diff { stat, repos } => commands::show_diff(&repos, stat),
+        Commands::Diff {
+            stat,
+            published,
+            repos,
+        } => commands::show_diff(&repos, stat, published),
         Commands::Fetch {
             repos,
             mode,

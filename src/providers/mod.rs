@@ -611,13 +611,22 @@ where
         _ => bail!("unsupported forge CLI `{bin}`"),
     };
     let credential = target_credential(target, provider)?;
-    if let Some(credential) = &credential {
-        // gh api otherwise derives its host from cwd in some invocation
-        // contexts, even when this operation explicitly targets another repo.
-        if bin == "gh" && args.first().is_some_and(|arg| arg == "api") {
+    if matches!(bin, "gh" | "glab") && args.first().is_some_and(|arg| arg == "api") {
+        let host = credential
+            .as_ref()
+            .map(|value| value.host.clone())
+            .or(target
+                .repo_remote
+                .as_deref()
+                .map(crate::auth::remote_target)
+                .transpose()?
+                .map(|(host, _)| host));
+        if let Some(host) = host {
             args.push(OsString::from("--hostname"));
-            args.push(OsString::from(&credential.host));
+            args.push(OsString::from(host));
         }
+    }
+    if let Some(credential) = &credential {
         if (bin == "gh" && args.first().is_some_and(|arg| arg == "pr"))
             || (bin == "glab" && args.first().is_some_and(|arg| arg == "mr"))
         {
