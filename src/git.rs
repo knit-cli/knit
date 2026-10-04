@@ -397,6 +397,15 @@ where
     git_output_inner(cwd, collect_args(args), true)
 }
 
+/// Inspection fetches use existing credentials without repairing persisted auth state.
+pub(crate) fn git_output_without_recovery<I, S>(cwd: &Path, args: I) -> Result<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<OsStr>,
+{
+    git_output_inner(cwd, collect_args(args), false)
+}
+
 fn git_output_inner(cwd: &Path, args: Vec<OsString>, allow_recovery: bool) -> Result<String> {
     let mut command = Command::new("git");
     let credentials = match crate::auth_git::configure(cwd, &args, &mut command) {

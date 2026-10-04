@@ -208,6 +208,12 @@ impl Forge for Forgejo {
     }
 
     fn view(&self, target: &PrTarget, selector: &str) -> Result<PullRequest> {
+        if target.repo_full_name.is_some()
+            && super::target_credential(target, "forgejo")?.is_none()
+            && api_token().is_none()
+        {
+            return tea_explicit_view(target, selector);
+        }
         if use_api(target)? {
             let repo = resolve_repo(target)?;
             let output = api_output(
@@ -372,6 +378,54 @@ impl Forgejo {
     }
 }
 
+fn tea_explicit_view(target: &PrTarget, selector: &str) -> Result<PullRequest> {
+    let remote = target.repo_remote.as_deref().context(
+        "Explicit Forgejo CLI reads require a repository URL to select a saved tea login",
+    )?;
+    let (host, _) = crate::auth::remote_target(remote)?;
+    let output = cli_output(CLI, target, ["logins", "list", "--output", "json"], None)?;
+    let login = tea_login_for_host(&output, &host)?;
+    let endpoint = format!(
+        "repos/{}/pulls/{}",
+        resolve_repo(target)?,
+        selector_index(selector)
+    );
+    let output = cli_output(
+        CLI,
+        target,
+        ["api", "--method", "GET", "--login", &login, &endpoint],
+        None,
+    )?;
+    let pr: ForgejoApiPr =
+        serde_json::from_str(&output).context("failed to parse Forgejo pull JSON")?;
+    Ok(api_pull_request(pr, false))
+}
+
+fn tea_login_for_host(output: &str, host: &str) -> Result<String> {
+    #[derive(Deserialize)]
+    struct Login {
+        #[serde(alias = "Name")]
+        name: String,
+        #[serde(alias = "URL")]
+        url: String,
+    }
+    let logins: Vec<Login> =
+        serde_json::from_str(output).context("failed to parse tea login metadata")?;
+    let matches = logins
+        .iter()
+        .filter(|login| {
+            // Match the API server, not SSHHost or the default-login flag.
+            crate::auth::remote_target(&format!("{}/owner/repo", login.url.trim_end_matches('/')))
+                .is_ok_and(|(server, path)| server == host && path == "owner/repo")
+        })
+        .collect::<Vec<_>>();
+    match matches.as_slice() {
+        [login] if !login.name.trim().is_empty() => Ok(login.name.clone()),
+        [] => bail!("No saved tea login matches the explicit Forgejo host `{host}`"),
+        _ => bail!("Ambiguous saved tea logins for explicit Forgejo host `{host}`"),
+    }
+}
+
 /// `tea api` uses tea's saved login and repository context. List fields such as
 /// `head` and `base-commit` are not evidence of the commit produced by a merge.
 fn tea_merge_metadata(target: &PrTarget, selector: &str) -> Result<MergeRevision> {
@@ -437,7 +491,11 @@ fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<Pull
                 .is_some_and(|state| state.eq_ignore_ascii_case("APPROVED"))
         })
     });
-    Ok(PullRequest {
+    Ok(api_pull_request(pr, approved))
+}
+
+fn api_pull_request(pr: ForgejoApiPr, approved: bool) -> PullRequest {
+    PullRequest {
         source_repository: None,
         number: pr.number,
         url: pr.html_url,
@@ -467,7 +525,7 @@ fn enrich_api_pr(target: &PrTarget, repo: &str, pr: ForgejoApiPr) -> Result<Pull
             avatar_url: user.avatar_url,
             url: user.html_url,
         }),
-    })
+    }
 }
 
 fn edit_api_pr(target: &PrTarget, selector: &str, value: &serde_json::Value) -> Result<()> {
@@ -610,6 +668,10 @@ fn api_base(target: &PrTarget) -> Result<String> {
         .filter(|value| !value.is_empty())
     {
         return Ok(base);
+    }
+    if let Some(remote) = &target.repo_remote {
+        let (host, _) = crate::auth::remote_target(remote)?;
+        return Ok(format!("https://{host}/api/v1"));
     }
     if target.repo_full_name.is_none() {
         if let Some(remote) =
@@ -758,5 +820,31 @@ mod tests {
         let collection: ForgejoStatusCollection =
             serde_json::from_str(r#"{"statuses":null}"#).unwrap();
         assert!(collection.statuses.unwrap_or_default().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod published_host_tests {
+    use super::*;
+
+    #[test]
+    fn native_base_uses_explicit_remote_host() {
+        let mut target = PrTarget::explicit(".", "upstream/widget");
+        target.repo_remote = Some("https://review.example.test/upstream/widget.git".into());
+        let override_base = std::env::var("KNIT_FORGEJO_API_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test/api/v1".into())
+        );
+        target.repo_remote = None;
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base.unwrap_or_else(|| "https://codeberg.org/api/v1".into())
+        );
     }
 }

@@ -332,6 +332,9 @@ pub enum Commands {
     },
     /// Show cross-repo diffs against each repo base.
     Diff {
+        /// Compare tracked working state with the live head of each recorded PR/MR.
+        #[arg(long)]
+        published: bool,
         /// Show a compact diffstat instead of full patches.
         #[arg(long)]
         stat: bool,

@@ -663,7 +663,13 @@ fn api_output(
     endpoint: &str,
     body: Option<&str>,
 ) -> Result<String> {
-    if target.repo_full_name.is_some() {
+    if target.repo_full_name.is_some()
+        && (super::target_credential(target, "gitlab")?.is_some()
+            || ["KNIT_GITLAB_TOKEN", "GITLAB_TOKEN"]
+                .into_iter()
+                .find_map(non_empty_env)
+                .is_some())
+    {
         return native_api_output(target, method, endpoint, body);
     }
     let mut args = vec![
@@ -677,6 +683,24 @@ fn api_output(
         args.push(OsString::from("-"));
     }
     cli_output(CLI, target, args, body)
+}
+
+fn api_base(target: &PrTarget) -> Result<String> {
+    if let Some(base) = std::env::var("KNIT_GITLAB_API_BASE")
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+    {
+        return Ok(base);
+    }
+    let host = target
+        .repo_remote
+        .as_deref()
+        .map(crate::auth::remote_target)
+        .transpose()?
+        .map(|(host, _)| host)
+        .unwrap_or_else(|| "gitlab.com".to_string());
+    Ok(format!("https://{host}/api/v4"))
 }
 
 fn native_api_output(
@@ -697,11 +721,7 @@ fn native_api_output(
         .context("GitLab API access requires KNIT_GITLAB_TOKEN or GITLAB_TOKEN")?;
     let base = match &credential {
         Some(value) => super::bound_api_base(value)?,
-        None => std::env::var("KNIT_GITLAB_API_BASE")
-            .ok()
-            .map(|value| value.trim().trim_end_matches('/').to_string())
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| "https://gitlab.com/api/v4".to_string()),
+        None => api_base(target)?,
     };
     let endpoint = endpoint.trim_start_matches('/');
     let operation = format!("{method} /{endpoint}");
@@ -954,5 +974,31 @@ mod tests {
             "12"
         );
         assert_eq!(selector_iid("7"), "7");
+    }
+}
+
+#[cfg(test)]
+mod published_host_tests {
+    use super::*;
+
+    #[test]
+    fn native_base_uses_explicit_remote_host() {
+        let mut target = PrTarget::explicit(".", "upstream/widget");
+        target.repo_remote = Some("https://review.example.test/upstream/widget.git".into());
+        let override_base = std::env::var("KNIT_GITLAB_API_BASE")
+            .ok()
+            .map(|value| value.trim().trim_end_matches('/').to_string())
+            .filter(|value| !value.is_empty());
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test/api/v4".into())
+        );
+        target.repo_remote = None;
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base.unwrap_or_else(|| "https://gitlab.com/api/v4".into())
+        );
     }
 }

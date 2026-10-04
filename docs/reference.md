@@ -109,7 +109,7 @@ knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status [--json]
 knit workspace status
-knit diff [--stat] [repo-id-or-path...]
+knit diff [--published] [--stat] [repo-id-or-path...]
 knit fetch [--mode all|git|knit] [--remote <name>] [repo-id-or-path...]
 knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [--remote <name>] [--no-remote] [--merge] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [--no-history] [repo-id-or-path...]
@@ -812,6 +812,20 @@ knit diff --stat
 knit diff backend
 knit diff --stat ../backend
 ```
+
+Use `--published` to compare each selected repository's current published PR/MR head with its local bundle checkout:
+
+```sh
+knit diff --published
+knit diff --published --stat
+knit diff --published backend
+knit diff --published --stat ../backend
+knit --bundle feature-a diff --published backend
+```
+
+The direction is **published → local**: deletions (`-`) belong to the published version; additions (`+`) belong to the local version. This compares the two endpoint trees, not their merge base, so it also works after squashing, rebasing, or cleaning up local Knit history. The local side includes committed, staged, and unstaged tracked-file changes, with the same untracked-file behavior as ordinary `knit diff`.
+
+For each selected repository, Knit resolves the recorded review's live head through its forge, fetches that exact commit, and prints the repository, review URL, full published SHA, and local HEAD. Fork contributions can have an upstream fetch URL and a contributor fork push URL. A missing publication, unavailable published head, or missing checkout is an error; Knit never substitutes the bundle base. This is inspection only: it does not push, publish, edit reviews, switch branches, change the index or working tree, or rewrite bundle/history metadata. Without `--published`, the existing bundle-base comparison is unchanged.
 
 `knit fetch` updates remote refs and local object availability without merging, rebasing, moving checkouts, or changing bundle state. It is the safer way to give Knit and Gloss fresher git history:
 
