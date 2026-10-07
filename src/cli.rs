@@ -1381,10 +1381,11 @@ pub enum SchemaCommand {
 pub enum PublishCommand {
     /// Push feature branches and create missing review objects (auto-detects each repo's host).
     ///
-    /// Without a body from `--body-file` or publish policy, a `PR-<repo>.md`
-    /// file in the bundle worktree root becomes that repo's review body. A
-    /// leading `Title: <text>` line in it becomes the title unless `--title`
-    /// or policy sets one. Set policy with `knit project set-publish`.
+    /// Without a body from `--body-file` or publish policy, `PR-<repo>.md` in
+    /// the bundle worktree root becomes that repo's review body, else `PR.md`
+    /// becomes every repo's body. A leading `Title: <text>` line in it becomes
+    /// the title unless `--title` or policy sets one. Set policy with
+    /// `knit project set-publish`.
     Create {
         /// Permit outgoing commits by authors other than git-config identity.
         #[arg(long)]
@@ -1431,7 +1432,7 @@ pub enum PublishCommand {
         #[arg(long, value_name = "REPO=TEXT")]
         title: Vec<String>,
         /// Read a repository's review body relative to the bundle worktree root,
-        /// instead of `PR-<repo>.md` or policy. Repeatable.
+        /// instead of `PR-<repo>.md`, `PR.md` or policy. Repeatable.
         #[arg(long, value_name = "REPO=PATH")]
         body_file: Vec<String>,
         /// Preview targets, source branches, draft reasons, titles and body sources. No writes.

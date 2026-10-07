@@ -777,7 +777,8 @@ review templates, and dependency-based drafts. Per-repo policy lives under
 `publish.repos`; CLI overrides win over bundle and project settings. Body paths
 are relative to the bundle worktree root, and `PR-{{repo}}.md` expands the repo id.
 Without a flag or policy body, `PR-<repo>.md` in the bundle worktree root is used
-as that repo's body, and a leading `Title: <text>` line as its title. Set title
+as that repo's body, else `PR.md` as every repo's body, and a leading
+`Title: <text>` line as the title. Set title
 and body policy with `knit project set-publish [<repo>] --title <mode-or-text>
 --body-file <path>` (`--clear` removes it).
 Use a preview to inspect each target, source branch, draft reason, title, and body

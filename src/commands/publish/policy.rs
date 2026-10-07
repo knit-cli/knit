@@ -424,7 +424,14 @@ pub(super) fn resolve(
             .or_else(|| bundle_policy.body.as_ref().and_then(|p| p.file.as_ref()))
             .or_else(|| pr.and_then(|p| p.body_file.as_ref()))
             .or_else(|| project_policy.body.as_ref().and_then(|p| p.file.as_ref()));
-        let default_file = file.is_none().then(|| format!("PR-{id}.md"));
+        let default_file = file
+            .is_none()
+            .then(|| {
+                [format!("PR-{id}.md"), "PR.md".to_string()]
+                    .into_iter()
+                    .find(|name| root.join(name).is_file())
+            })
+            .flatten();
         let file = file.or(default_file.as_ref());
         let fallback = bundle_policy
             .body

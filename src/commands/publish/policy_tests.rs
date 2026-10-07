@@ -579,3 +579,23 @@ fn publish_schema_and_typed_model_agree_on_null_duplicates_and_invalid_values() 
         }
     }
 }
+
+#[test]
+fn bundle_wide_body_file_applies_to_every_repo_unless_the_repo_has_its_own() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.root.join("PR.md"),
+        "Title: Bundle-wide title\nShared body\n",
+    )
+    .unwrap();
+    std::fs::write(f.root.join("PR-consumer.md"), "Consumer body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["library"].title, "Bundle-wide title");
+    assert_eq!(r["library"].body, "Shared body\n");
+    assert_eq!(
+        r["library"].body_source,
+        format!("file:{}", f.root.join("PR.md").display())
+    );
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Consumer body\n");
+}

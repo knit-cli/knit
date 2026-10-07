@@ -115,7 +115,8 @@ review titles, bodies, and draft choices. Inspect it with `knit publish create
 --dry-run`; use `--ready <repo>`, `--draft-repo <repo>`, `--title <repo>=<text>`, or
 `--body-file <repo>=<path>` for deliberate overrides. Body files live relative to
 this bundle worktree root. Without a selected body, `PR-<repo>.md` here becomes
-that repo's review body, and a leading `Title: <text>` line becomes its title.
+that repo's review body, else `PR.md` becomes every repo's body; a leading
+`Title: <text>` line becomes the title.
 Publishing sync preserves author text outside the managed Knit block.
 
 {teamwork_section}

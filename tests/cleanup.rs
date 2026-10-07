@@ -710,6 +710,8 @@ fn prune_removes_bundle_worktree_container_dir_and_agents_md() {
     let feature = bundle_root.join("backend");
     assert!(feature.exists());
     assert!(bundle_root.join("AGENTS.md").exists());
+    fs::write(bundle_root.join("PR.md"), "Shared body\n").unwrap();
+    fs::write(bundle_root.join("PR-backend.md"), "Backend body\n").unwrap();
 
     let pruned = knit(
         &workspace,
