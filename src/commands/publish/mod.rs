@@ -153,7 +153,14 @@ pub fn create_publications_with_options(
         options,
     )?;
     if options.dry_run {
-        return policy::preview(&active.bundle, &jobs, &resolved);
+        policy::preview(&active.bundle, &jobs, &resolved)?;
+        let remotes = crate::commands::remote::planned_sync_remote_names(remote, no_remote);
+        if remotes.is_empty() {
+            println!("remote sync: none (push-sync is off or no sync remote is set; pass --remote <name> to sync)");
+        } else {
+            println!("remote sync: {}", remotes.join(", "));
+        }
+        return Ok(());
     }
     preflight(&active.bundle, &jobs, Some(&active), renew)?;
     for job in &jobs {

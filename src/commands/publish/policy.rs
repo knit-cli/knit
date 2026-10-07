@@ -31,8 +31,11 @@ impl ResolvedPublish {
         let block = super::pr_body::initial_pr_body(bundle, &repo.id, provider, &self.blocked_on);
         if body.is_empty() {
             block
-        } else {
+        } else if super::pr_body::hosted_bundle_links(bundle).is_empty() {
             format!("{body}\n\n{block}")
+        } else {
+            // With a hosted link the post-create sync leads with the block; place it there from the start.
+            format!("{block}\n\n{body}")
         }
     }
 }

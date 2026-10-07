@@ -599,3 +599,22 @@ fn bundle_wide_body_file_applies_to_every_repo_unless_the_repo_has_its_own() {
     assert_eq!(r["consumer"].title, "Bundle title (consumer)");
     assert_eq!(r["consumer"].body, "Consumer body\n");
 }
+
+#[test]
+fn hosted_bundle_body_leads_with_the_block_that_sync_keeps() {
+    let mut f = Fixture::new();
+    f.bundle.sync_targets.push(
+        serde_json::from_value(json!({"remote":"hosted","bundleId":"b1","apiUrl":"https://api.example.com","webUrl":"https://example.com/app/bundles/b1"})).unwrap(),
+    );
+    let authored = "Authored description.";
+    let mut resolved = f.resolve(&PublishOptions::default()).unwrap();
+    let r = resolved.get_mut("consumer").unwrap();
+    r.body = authored.to_string();
+    let body = r.body(&f.bundle, &f.bundle.repos[1], "github");
+    let block = super::pr_body::initial_pr_body(&f.bundle, "consumer", "github", &r.blocked_on);
+    assert_eq!(body, format!("{block}\n\n{authored}"));
+    assert_eq!(
+        super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", "github", &body),
+        body
+    );
+}
