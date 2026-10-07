@@ -474,6 +474,65 @@ fn only_leading_title_line_is_metadata() {
 }
 
 #[test]
+fn default_body_file_supplies_body_and_title_without_policy() {
+    let mut f = Fixture::new();
+    let path = f.root.join("PR-consumer.md");
+    std::fs::write(&path, "Title: File title\nAuthored body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "File title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+    assert_eq!(
+        r["consumer"].body_source,
+        format!("file:{}", path.display())
+    );
+    assert_eq!(r["library"].title, "Bundle title (library)");
+    assert_eq!(r["library"].body_source, "knit");
+
+    std::fs::write(&path, "Authored body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    std::fs::write(&path, "Title: File title\nAuthored body\n").unwrap();
+    std::fs::write(f.root.join("flag.md"), "Flag body\n").unwrap();
+    let r = f
+        .resolve(&PublishOptions {
+            title: vec!["consumer=Flag title".into()],
+            body_file: vec!["consumer=flag.md".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(r["consumer"].title, "Flag title");
+    assert_eq!(r["consumer"].body, "Flag body\n");
+    let r = f
+        .resolve(&PublishOptions {
+            title: vec!["consumer=Flag title".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(r["consumer"].title, "Flag title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    f.project.publish = Some(serde_json::from_value(json!({"title":"bundle-title"})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    std::fs::write(f.root.join("policy-consumer.md"), "Policy body\n").unwrap();
+    f.project.publish =
+        Some(serde_json::from_value(json!({"body":{"file":"policy-{repo}.md"}})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Policy body\n");
+    // A policy file that is missing does not fall back to the default file.
+    f.bundle.publish =
+        Some(serde_json::from_value(json!({"body":{"file":"missing-{repo}.md"}})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].body_source, "knit");
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+}
+
+#[test]
 fn publish_schema_and_typed_model_agree_on_null_duplicates_and_invalid_values() {
     let f = Fixture::new();
     let cases = [

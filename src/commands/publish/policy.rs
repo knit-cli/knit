@@ -424,6 +424,8 @@ pub(super) fn resolve(
             .or_else(|| bundle_policy.body.as_ref().and_then(|p| p.file.as_ref()))
             .or_else(|| pr.and_then(|p| p.body_file.as_ref()))
             .or_else(|| project_policy.body.as_ref().and_then(|p| p.file.as_ref()));
+        let default_file = file.is_none().then(|| format!("PR-{id}.md"));
+        let file = file.or(default_file.as_ref());
         let fallback = bundle_policy
             .body
             .as_ref()
@@ -460,7 +462,9 @@ pub(super) fn resolve(
             title.clone()
         } else {
             match title_mode {
-                None => format!("{} ({id})", bundle.title),
+                None => file_title
+                    .filter(|_| default_file.is_some())
+                    .unwrap_or_else(|| format!("{} ({id})", bundle.title)),
                 Some(PublishTitle::BundleTitle) => bundle.title.clone(),
                 Some(PublishTitle::CommitGroup) => bundle
                     .commit_groups

@@ -776,6 +776,10 @@ Project and bundle `publish` policies can also select titles, body files, upstre
 review templates, and dependency-based drafts. Per-repo policy lives under
 `publish.repos`; CLI overrides win over bundle and project settings. Body paths
 are relative to the bundle worktree root, and `PR-{{repo}}.md` expands the repo id.
+Without a flag or policy body, `PR-<repo>.md` in the bundle worktree root is used
+as that repo's body, and a leading `Title: <text>` line as its title. Set title
+and body policy with `knit project set-publish [<repo>] --title <mode-or-text>
+--body-file <path>` (`--clear` removes it).
 Use a preview to inspect each target, source branch, draft reason, title, and body
 source before publishing:
 
@@ -884,6 +888,7 @@ knit cherrypick --from feature-a --repo backend abc123
 - `knit bundle --cd [<repo>]` starts a shell in the resolved existing bundle's worktree (or one repo checkout) without creating or switching anything.
 - `knit project set-base <repo> <branch>` changes only that project repo's configured base; existing bundles remain pinned and are reported.
 - `knit project set-draft <repo> [true|false]` sets `publish.draft` on a project repo so `knit publish create` opens its review as a draft (`false` removes it); `--draft` still drafts every repo.
+- `knit project set-publish [<repo>] [--title <mode-or-text>] [--body-file <path>] [--body-fallback upstream-template|knit] [--clear]` sets project-wide (`--title commit-group|bundle-title|file`) or per-repo (literal `--title`) review title and body policy for `knit publish create`; `--clear` removes it for that scope.
 - `knit bundle add <repo-or-project-repo>` adds repos to the current bundle and materializes their worktrees (`--no-worktree` to skip); it refuses repos already tracked in the bundle.
 - `knit bundle remove <repo>...` removes repos from the current bundle and tears down their worktrees (`--keep-worktree` to only untrack, `--delete-branch` to also drop the feature branch, `--force` to discard dirty/unpushed work).
 - `knit bundle apply-view <name>` reshapes the current bundle to match a saved view.
