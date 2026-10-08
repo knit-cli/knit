@@ -153,7 +153,14 @@ pub fn create_publications_with_options(
         options,
     )?;
     if options.dry_run {
-        return policy::preview(&active.bundle, &jobs, &resolved);
+        policy::preview(&active.bundle, &jobs, &resolved)?;
+        let remotes = crate::commands::remote::planned_sync_remote_names(remote, no_remote);
+        if remotes.is_empty() {
+            println!("remote sync: none (push-sync is off or no sync remote is set; pass --remote <name> to sync)");
+        } else {
+            println!("remote sync: {}", remotes.join(", "));
+        }
+        return Ok(());
     }
     preflight(&active.bundle, &jobs, Some(&active), renew)?;
     for job in &jobs {
@@ -351,7 +358,8 @@ pub fn create_publications_with_options(
         });
 
         for outcome in &outcomes {
-            if apply_publish_remote_result(&mut active, outcome)? {
+            let repo_id = active.bundle.repos[outcome.repo_index].id.clone();
+            if apply_publish_remote_result(&mut active, outcome, resolved.get(&repo_id))? {
                 bundle_changed = true;
             }
         }
@@ -382,7 +390,11 @@ pub fn create_publications_with_options(
     }
 
     if failures.is_empty() && sync {
-        failures.extend(sync_publications_for_indexes(&mut active, &indexes)?);
+        failures.extend(sync_publications_for_indexes(
+            &mut active,
+            &indexes,
+            &Default::default(),
+        )?);
     } else if !sync {
         println!(
             "{}",
@@ -626,12 +638,52 @@ pub fn sync_publications(selectors: &[String], all: bool, provider: Option<&str>
     let indexes = resolve_publish_repo_indexes(&active, selectors, all)?;
     let indexes = filter_indexes_by_provider(&active.bundle.repos, indexes, provider)?;
     crate::contribution::validate_bundle(&active.bundle)?;
-    let failures = sync_publications_for_indexes(&mut active, &indexes)?;
+    let texts = publication_texts(&active, &indexes)?;
+    let failures = sync_publications_for_indexes(&mut active, &indexes, &texts)?;
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
     }
 
     Ok(())
+}
+
+fn publication_texts(
+    active: &crate::store::ActiveBundle,
+    indexes: &[usize],
+) -> Result<std::collections::BTreeMap<String, policy::ResolvedText>> {
+    let project = policy::project(active)?;
+    let root = active.root.join(".knit/worktrees").join(&active.bundle.id);
+    let checkouts = active
+        .bundle
+        .repos
+        .iter()
+        .filter_map(|repo| {
+            crate::checkout::checkout_dir(active, repo).map(|p| (repo.id.clone(), p))
+        })
+        .collect();
+    let mut texts = std::collections::BTreeMap::new();
+    for &index in indexes {
+        let repo = &active.bundle.repos[index];
+        match policy::text(
+            &active.bundle,
+            project.as_ref(),
+            &root,
+            &checkouts,
+            repo,
+            &Default::default(),
+            &Default::default(),
+        ) {
+            Ok(text) => {
+                texts.insert(repo.id.clone(), text);
+            }
+            Err(error) => eprintln!(
+                "{}: {}",
+                out::repo(&repo.id),
+                out::warn(format!("title and body not applied: {error:#}"))
+            ),
+        }
+    }
+    Ok(texts)
 }
 
 pub fn sync_publications_from_artifact(
@@ -820,6 +872,7 @@ mod tests {
             state: "OPEN".to_string(),
             title: None,
             author: None,
+            applied: None,
             updated_at: "2026-05-05T00:00:00.000Z".to_string(),
         }
     }

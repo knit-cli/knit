@@ -114,8 +114,10 @@ on `origin` without review objects. Project and bundle `publish` policy supplies
 review titles, bodies, and draft choices. Inspect it with `knit publish create
 --dry-run`; use `--ready <repo>`, `--draft-repo <repo>`, `--title <repo>=<text>`, or
 `--body-file <repo>=<path>` for deliberate overrides. Body files live relative to
-this bundle worktree root. Publishing sync preserves author text outside the
-managed Knit block.
+this bundle worktree root. Without a selected body, `PR-<repo>.md` here becomes
+that repo's review body, else `PR.md` becomes every repo's body; a leading
+`Title: <text>` line becomes the title.
+Publishing sync preserves author text outside the managed Knit block.
 
 {teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:

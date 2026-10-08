@@ -432,7 +432,19 @@ pub struct PublicationEntry {
     /// from the bundle's author when a bundle takes in someone else's PR.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub author: Option<ForgeAuthor>,
+    /// What Knit last wrote, so sync rewrites only after the source changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub applied: Option<AppliedText>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AppliedText {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body_sha256: Option<String>,
 }
 
 /// A host account that opened a review object.

@@ -1025,6 +1025,33 @@ pub enum ProjectCommand {
         #[arg(long)]
         project: Option<String>,
     },
+    /// Choose where `knit publish create` takes review titles and bodies.
+    ///
+    /// Without a repo this sets the project `publish.title` mode and
+    /// `publish.body`; with a repo it sets `publish.repos.<repo>.title` and
+    /// `bodyFile`. Body paths are relative to the bundle worktree root and
+    /// `{repo}` expands to the repo id. `--clear` removes the title and body
+    /// settings for that scope; draft settings are kept.
+    SetPublish {
+        /// Stable repo id inside the project. Omit for project-wide policy.
+        repo_id: Option<String>,
+        /// Project-wide: `commit-group`, `bundle-title`, or `file` (the body
+        /// file's leading `Title:` line). With a repo: the literal title.
+        #[arg(long)]
+        title: Option<String>,
+        /// Body file, e.g. `PR-{repo}.md`.
+        #[arg(long, value_name = "PATH")]
+        body_file: Option<String>,
+        /// Project-wide body when no body file exists: `upstream-template` or `knit`.
+        #[arg(long, value_parser = ["upstream-template", "knit"])]
+        body_fallback: Option<String>,
+        /// Remove the title and body settings for this scope.
+        #[arg(long, conflicts_with_all = ["title", "body_file", "body_fallback"])]
+        clear: bool,
+        /// Project name. Defaults to the active project.
+        #[arg(long)]
+        project: Option<String>,
+    },
     /// List projects in this workspace.
     List,
     /// Print a project JSON artifact.
@@ -1353,6 +1380,12 @@ pub enum SchemaCommand {
 #[derive(Subcommand)]
 pub enum PublishCommand {
     /// Push feature branches and create missing review objects (auto-detects each repo's host).
+    ///
+    /// Without a body from `--body-file` or publish policy, `PR-<repo>.md` in
+    /// the bundle worktree root becomes that repo's review body, else `PR.md`
+    /// becomes every repo's body. A leading `Title: <text>` line in it becomes
+    /// the title unless `--title` or policy sets one. Set policy with
+    /// `knit project set-publish`.
     Create {
         /// Permit outgoing commits by authors other than git-config identity.
         #[arg(long)]
@@ -1398,7 +1431,8 @@ pub enum PublishCommand {
         /// Set a repository's review title, overriding bundle and project policy. Repeatable.
         #[arg(long, value_name = "REPO=TEXT")]
         title: Vec<String>,
-        /// Read a repository's review body relative to the bundle worktree root. Repeatable.
+        /// Read a repository's review body relative to the bundle worktree root,
+        /// instead of `PR-<repo>.md`, `PR.md` or policy. Repeatable.
         #[arg(long, value_name = "REPO=PATH")]
         body_file: Vec<String>,
         /// Preview targets, source branches, draft reasons, titles and body sources. No writes.

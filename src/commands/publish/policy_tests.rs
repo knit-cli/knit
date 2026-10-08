@@ -474,6 +474,65 @@ fn only_leading_title_line_is_metadata() {
 }
 
 #[test]
+fn default_body_file_supplies_body_and_title_without_policy() {
+    let mut f = Fixture::new();
+    let path = f.root.join("PR-consumer.md");
+    std::fs::write(&path, "Title: File title\nAuthored body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "File title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+    assert_eq!(
+        r["consumer"].body_source,
+        format!("file:{}", path.display())
+    );
+    assert_eq!(r["library"].title, "Bundle title (library)");
+    assert_eq!(r["library"].body_source, "knit");
+
+    std::fs::write(&path, "Authored body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    std::fs::write(&path, "Title: File title\nAuthored body\n").unwrap();
+    std::fs::write(f.root.join("flag.md"), "Flag body\n").unwrap();
+    let r = f
+        .resolve(&PublishOptions {
+            title: vec!["consumer=Flag title".into()],
+            body_file: vec!["consumer=flag.md".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(r["consumer"].title, "Flag title");
+    assert_eq!(r["consumer"].body, "Flag body\n");
+    let r = f
+        .resolve(&PublishOptions {
+            title: vec!["consumer=Flag title".into()],
+            ..Default::default()
+        })
+        .unwrap();
+    assert_eq!(r["consumer"].title, "Flag title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    f.project.publish = Some(serde_json::from_value(json!({"title":"bundle-title"})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title");
+    assert_eq!(r["consumer"].body, "Authored body\n");
+
+    std::fs::write(f.root.join("policy-consumer.md"), "Policy body\n").unwrap();
+    f.project.publish =
+        Some(serde_json::from_value(json!({"body":{"file":"policy-{repo}.md"}})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Policy body\n");
+    // A policy file that is missing does not fall back to the default file.
+    f.bundle.publish =
+        Some(serde_json::from_value(json!({"body":{"file":"missing-{repo}.md"}})).unwrap());
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["consumer"].body_source, "knit");
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+}
+
+#[test]
 fn publish_schema_and_typed_model_agree_on_null_duplicates_and_invalid_values() {
     let f = Fixture::new();
     let cases = [
@@ -519,4 +578,43 @@ fn publish_schema_and_typed_model_agree_on_null_duplicates_and_invalid_values() 
             );
         }
     }
+}
+
+#[test]
+fn bundle_wide_body_file_applies_to_every_repo_unless_the_repo_has_its_own() {
+    let f = Fixture::new();
+    std::fs::write(
+        f.root.join("PR.md"),
+        "Title: Bundle-wide title\nShared body\n",
+    )
+    .unwrap();
+    std::fs::write(f.root.join("PR-consumer.md"), "Consumer body\n").unwrap();
+    let r = f.resolve(&PublishOptions::default()).unwrap();
+    assert_eq!(r["library"].title, "Bundle-wide title");
+    assert_eq!(r["library"].body, "Shared body\n");
+    assert_eq!(
+        r["library"].body_source,
+        format!("file:{}", f.root.join("PR.md").display())
+    );
+    assert_eq!(r["consumer"].title, "Bundle title (consumer)");
+    assert_eq!(r["consumer"].body, "Consumer body\n");
+}
+
+#[test]
+fn hosted_bundle_body_leads_with_the_block_that_sync_keeps() {
+    let mut f = Fixture::new();
+    f.bundle.sync_targets.push(
+        serde_json::from_value(json!({"remote":"hosted","bundleId":"b1","apiUrl":"https://api.example.com","webUrl":"https://example.com/app/bundles/b1"})).unwrap(),
+    );
+    let authored = "Authored description.";
+    let mut resolved = f.resolve(&PublishOptions::default()).unwrap();
+    let r = resolved.get_mut("consumer").unwrap();
+    r.body = authored.to_string();
+    let body = r.body(&f.bundle, &f.bundle.repos[1], "github");
+    let block = super::pr_body::initial_pr_body(&f.bundle, "consumer", "github", &r.blocked_on);
+    assert_eq!(body, format!("{block}\n\n{authored}"));
+    assert_eq!(
+        super::pr_body::sync_knit_pr_body(&f.bundle, "consumer", "github", &body),
+        body
+    );
 }

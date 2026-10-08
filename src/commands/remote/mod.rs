@@ -39,8 +39,9 @@ pub use pull::{
 pub use push::sync_remote_helpers_command;
 pub use push::{
     add_remote, list_remotes, maybe_sync_bundle_to_remote,
-    maybe_sync_bundle_to_remote_with_history, push_all_bundles_to_remote, push_bundle_to_remote,
-    push_project_to_remote, push_views_to_remote, remove_remote, set_remote_token, show_remote,
+    maybe_sync_bundle_to_remote_with_history, planned_sync_remote_names,
+    push_all_bundles_to_remote, push_bundle_to_remote, push_project_to_remote,
+    push_views_to_remote, remove_remote, set_remote_token, show_remote,
     sync_active_bundle_to_remote_if_enabled, sync_bundle_to_remote_if_enabled,
 };
 pub(crate) use push::{push_active_bundle_to_remote, push_handoff_bundle_to_remote};

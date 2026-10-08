@@ -215,6 +215,26 @@ impl Forge for GitHub {
         Ok(())
     }
 
+    fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()> {
+        if let Some(repo_full_name) = &target.repo_full_name {
+            return api::edit_title(target, repo_full_name, selector, title);
+        }
+
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("pr"),
+                OsString::from("edit"),
+                OsString::from(selector),
+                OsString::from("--title"),
+                OsString::from(title),
+            ],
+        );
+        cli_output(CLI, target, args, None)?;
+        Ok(())
+    }
+
     fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
         if let Some(repo_full_name) = &target.repo_full_name {
             return api::edit_base(target, repo_full_name, selector, base);

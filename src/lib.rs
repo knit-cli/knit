@@ -98,6 +98,21 @@ pub fn run(cli: Cli) -> Result<()> {
                 &repo_id,
                 draft.unwrap_or(true),
             ),
+            ProjectCommand::SetPublish {
+                repo_id,
+                title,
+                body_file,
+                body_fallback,
+                clear,
+                project,
+            } => commands::set_project_publish(
+                project.as_deref(),
+                repo_id.as_deref(),
+                title.as_deref(),
+                body_file.as_deref(),
+                body_fallback.as_deref(),
+                clear,
+            ),
             ProjectCommand::List => commands::list_projects(),
             ProjectCommand::Show { name } => commands::show_project(name.as_deref()),
             ProjectCommand::Remove { name, repos, force } => {

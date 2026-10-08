@@ -277,3 +277,64 @@ fn consumer_only_preview_refreshes_merged_library_without_mutating_bundle() {
         .contains("Blocked on"));
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_applies_changed_body_files_and_keeps_host_edits() {
+    let root = unique_temp_dir();
+    let (_remote, source, _) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "retitled review"]);
+    knit(&workspace, ["bundle", "add", source.to_str().unwrap()]);
+    let checkout = workspace.join(".knit/worktrees/retitled-review/backend");
+    append_line(&checkout.join("app.txt"), "retitle feature");
+    knit(&workspace, ["commit", "--all", "-m", "Retitled review"]);
+    let bin = root.join("bin");
+    let forge = root.join("forge");
+    write_fake_gh(&bin, &forge);
+    let publish = ["publish", "create", "--github", "--no-sync", "--no-remote"];
+    knit_with_fake_gh(&workspace, publish, &bin, &forge);
+    let args = fs::read_to_string(forge.join("create-backend.args")).unwrap();
+    assert!(args.contains("retitled review (backend)"), "{args}");
+    let sync = ["publish", "sync", "--github"];
+    knit_with_fake_gh(&workspace, sync, &bin, &forge);
+    assert!(!forge.join("edit-backend.title").exists());
+
+    let file = checkout.parent().unwrap().join("PR-backend.md");
+    fs::write(
+        &file,
+        "Title: Precise review title\n\nWhat changed and why.\n",
+    )
+    .unwrap();
+    knit_with_fake_gh(&workspace, sync, &bin, &forge);
+    let title = fs::read_to_string(forge.join("edit-backend.title")).unwrap();
+    assert_eq!(title.trim(), "Precise review title");
+    let body = fs::read_to_string(forge.join("edit-backend.md")).unwrap();
+    assert!(body.starts_with("\nWhat changed and why.\n\n"), "{body}");
+    assert!(!body.contains("Existing body"), "{body}");
+    assert!(body.contains("<!-- BEGIN KNIT BUNDLE -->"), "{body}");
+    let path = workspace.join(".knit/bundles/retitled-review.bundle.json");
+    let bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(bundle["publications"][0]["title"], "Precise review title");
+    assert_eq!(
+        bundle["publications"][0]["applied"]["title"],
+        "Precise review title"
+    );
+
+    // The host still reports its own title and text; with the file unchanged
+    // a sync leaves them alone.
+    fs::remove_file(forge.join("edit-backend.title")).unwrap();
+    knit_with_fake_gh(&workspace, sync, &bin, &forge);
+    assert!(!forge.join("edit-backend.title").exists());
+    let body = fs::read_to_string(forge.join("edit-backend.md")).unwrap();
+    assert!(body.starts_with("Existing body"), "{body}");
+
+    fs::write(
+        &file,
+        "Title: Sharper review title\n\nWhat changed and why.\n",
+    )
+    .unwrap();
+    knit_with_fake_gh(&workspace, sync, &bin, &forge);
+    let title = fs::read_to_string(forge.join("edit-backend.title")).unwrap();
+    assert_eq!(title.trim(), "Sharper review title");
+}

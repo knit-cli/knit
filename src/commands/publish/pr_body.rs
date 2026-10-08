@@ -207,6 +207,16 @@ pub(super) fn sync_knit_pr_body(
     upsert_knit_pr_block(existing_body, &block)
 }
 
+/// Keep the managed block of `existing_body` and replace the text around it.
+pub(super) fn replace_prose(existing_body: &str, prose: &str) -> String {
+    let prose = prose.trim_end();
+    match managed_block_bounds(existing_body) {
+        Some((begin, end)) if prose.is_empty() => existing_body[begin..end].to_string(),
+        Some((begin, end)) => format!("{prose}\n\n{}", &existing_body[begin..end]),
+        None => prose.to_string(),
+    }
+}
+
 pub(super) fn upsert_knit_pr_block(existing_body: &str, block: &str) -> String {
     let has_hosted_link = block_has_hosted_link_below_heading(block);
     let Some((begin, end)) = managed_block_bounds(existing_body) else {
