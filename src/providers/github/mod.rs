@@ -4,6 +4,7 @@
 //! (CLI-free) API path.
 
 mod api;
+mod gates;
 mod transport;
 
 use super::{
@@ -193,6 +194,10 @@ impl Forge for GitHub {
         } else {
             None
         })
+    }
+
+    fn gates(&self, target: &PrTarget, pr: &PullRequest) -> Result<Vec<crate::model::Gate>> {
+        gates::gates(target, pr)
     }
 
     fn can_merge(&self, target: &PrTarget) -> Result<Option<bool>> {

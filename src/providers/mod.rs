@@ -1,9 +1,10 @@
 pub mod bitbucket;
 pub mod forgejo;
+pub(crate) mod gates;
 pub mod github;
 pub mod gitlab;
 
-use crate::model::{ChangeGroup, ForgeAuthor, PublicationEntry, RepoEntry};
+use crate::model::{ChangeGroup, ForgeAuthor, Gate, PublicationEntry, RepoEntry, ReviewGates};
 use crate::output as out;
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -231,6 +232,13 @@ pub trait Forge {
         required_only: bool,
     ) -> Result<Vec<CheckRun>>;
 
+    /// What still stands between an open review and its merge.
+    fn gates(&self, target: &PrTarget, pr: &PullRequest) -> Result<Vec<Gate>> {
+        let runs = self.check_runs(target, &pr.url, true).ok();
+        let can_merge = self.can_merge(target).ok().flatten();
+        Ok(gates::from_review(pr, runs.as_deref(), can_merge))
+    }
+
     /// Poll `check_runs` until checks pass, fail, or time out. Shared by all adapters.
     fn wait_for_checks(
         &self,
@@ -411,6 +419,7 @@ pub fn upsert_publication(
         title: pr.title.clone(),
         author: pr.author.clone().and_then(clean_author),
         applied: None,
+        gates: None,
         updated_at: now_iso(),
     };
 
@@ -427,6 +436,7 @@ pub fn upsert_publication(
         }
         if existing.number == entry.number {
             entry.applied = existing.applied.clone();
+            entry.gates = existing.gates.clone();
         }
         let unchanged = existing.provider == entry.provider
             && existing.kind == entry.kind
@@ -444,6 +454,28 @@ pub fn upsert_publication(
     } else {
         bundle.publications.push(entry);
     }
+    bundle.updated_at = now_iso();
+    true
+}
+
+/// Record a review's gates. An empty list clears them; unchanged gates keep
+/// their timestamp. Returns whether the bundle changed.
+pub fn record_gates(bundle: &mut ChangeGroup, repo_id: &str, items: Vec<Gate>) -> bool {
+    let Some(publication) = bundle
+        .publications
+        .iter_mut()
+        .find(|publication| publication.repo_id == repo_id && is_review_kind(&publication.kind))
+    else {
+        return false;
+    };
+    let next = (!items.is_empty()).then(|| ReviewGates {
+        updated_at: now_iso(),
+        items,
+    });
+    if publication.gates.as_ref().map(|g| &g.items) == next.as_ref().map(|g| &g.items) {
+        return false;
+    }
+    publication.gates = next;
     bundle.updated_at = now_iso();
     true
 }

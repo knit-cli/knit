@@ -360,6 +360,7 @@ mod tests {
                 title: None,
                 author: None,
                 applied: None,
+                gates: None,
                 updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             })
             .collect();

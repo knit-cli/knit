@@ -180,6 +180,83 @@ fn split_pushurl_create_update_retarget_and_portable_sync() {
 }
 
 #[test]
+fn sync_records_what_the_maintainers_still_have_to_do() {
+    let f = Fixture::new();
+    f.create();
+    fs::write(
+        f.api.join("gates.json"),
+        json!({
+            "reviewDecision": "REVIEW_REQUIRED",
+            "rules": [
+                {"type": "pull_request", "parameters": {"required_approving_review_count": 1}},
+                {"type": "required_status_checks", "parameters": {"required_status_checks": [{"context": "build"}]}},
+                {"type": "required_signatures"}
+            ],
+            "awaiting": ["CI"],
+            "commits": [{"commit": {"verification": {"verified": false}}}],
+            "push": false
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let gated = f.root.join("gated.json");
+    let output = f.run(&[
+        "publish",
+        "sync",
+        "--from-artifact",
+        f.artifact().to_str().unwrap(),
+        "--out",
+        gated.to_str().unwrap(),
+    ]);
+    assert!(output.contains("action needed: signed commits"), "{output}");
+    let read =
+        |path: &PathBuf| -> Value { serde_json::from_slice(&fs::read(path).unwrap()).unwrap() };
+    let first = read(&gated);
+    let gates = &first["publications"][0]["gates"];
+    let seen: Vec<(&str, &str, &str)> = gates["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|gate| {
+            (
+                gate["kind"].as_str().unwrap(),
+                gate["state"].as_str().unwrap(),
+                gate["actor"].as_str().unwrap(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        seen,
+        [
+            ("review", "pending", "maintainers"),
+            ("ci_approval", "pending", "maintainers"),
+            ("checks", "pending", "maintainers"),
+            ("signatures", "blocked", "you"),
+            ("merge_permission", "pending", "maintainers"),
+        ]
+    );
+    assert_eq!(
+        gates["items"][2]["summary"],
+        "required checks not reported yet: build"
+    );
+
+    let again = f.root.join("again.json");
+    f.run(&[
+        "publish",
+        "sync",
+        "--from-artifact",
+        gated.to_str().unwrap(),
+        "--out",
+        again.to_str().unwrap(),
+    ]);
+    assert_eq!(
+        read(&again)["publications"][0]["gates"],
+        first["publications"][0]["gates"],
+        "unchanged gates keep their timestamp"
+    );
+}
+
+#[test]
 fn wrong_same_number_url_and_wrong_review_identity_never_mutate() {
     let f = Fixture::new();
     f.create();

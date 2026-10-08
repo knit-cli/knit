@@ -44,6 +44,7 @@ pub fn show_publication_status(
                     let readiness =
                         crate::commands::land::assess_landing_readiness(&active, repo, &pr.url);
                     crate::commands::land::print_readiness_row(&readiness);
+                    crate::commands::land::print_open_gates(&readiness);
                 }
                 None => println!(
                     "{}  {}",

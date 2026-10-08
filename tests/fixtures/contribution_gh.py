@@ -4,7 +4,7 @@ import json, os, pathlib, subprocess, sys, urllib.parse
 root = pathlib.Path(os.environ['GH_FAKE_DIR'])
 args = sys.argv[1:]
 assert args[0] == 'api', args
-endpoint = next(a for a in args if a.startswith('repos/'))
+endpoint = next(a for a in args if a.startswith('repos/') or a == 'graphql')
 method = args[args.index('--method') + 1] if '--method' in args else 'GET'
 with (root / 'calls').open('a', newline='\n') as f:
     f.write(method + ' ' + endpoint + '\n')
@@ -31,10 +31,27 @@ def pr():
             d[fields[-1]] = value
     return p
 path, _, query = endpoint.partition('?')
+gates = json.loads((root / 'gates.json').read_text()) if (root / 'gates.json').exists() else None
 if path == f'repos/{source}' and source != target:
     value = {'id': 2, 'full_name': source, 'fork': True, 'parent': {'id': 1}}
 elif path == f'repos/{target}':
     value = {'id': 1, 'full_name': target, 'fork': False}
+    if gates and 'push' in gates:
+        value['permissions'] = {'push': gates['push']}
+elif gates is not None and path == 'graphql':
+    value = {'data': {'repository': {'pullRequest': {'reviewDecision': gates.get('reviewDecision')}}}}
+elif gates is not None and path.startswith(f'repos/{target}/rules/branches/'):
+    value = gates.get('rules', [])
+elif gates is not None and path.startswith(f'repos/{target}/branches/'):
+    value = {'protection': gates.get('protection', {})}
+elif gates is not None and path == f'repos/{target}/actions/runs':
+    value = {'workflow_runs': [{'name': name} for name in gates.get('awaiting', [])]}
+elif gates is not None and path.endswith('/check-runs'):
+    value = {'check_runs': gates.get('checkRuns', [])}
+elif gates is not None and path.endswith('/status'):
+    value = {'state': 'pending', 'statuses': []}
+elif gates is not None and path == f'repos/{target}/pulls/7/commits':
+    value = gates.get('commits', [])
 elif '/git/ref/heads/' in path:
     repo, branch = path.split('/git/ref/heads/')
     value = {'object': {'sha': sha('fork' if repo == f'repos/{source}' else 'upstream', urllib.parse.unquote(branch))}}

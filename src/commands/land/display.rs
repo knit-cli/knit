@@ -74,6 +74,11 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
         if !step.needs.is_empty() {
             println!("  needs {}", step.needs.join(", "));
         }
+        if step.step_type == LandStepKind::MergePr {
+            if let Some(repo_id) = &step.repo_id {
+                print_recorded_gates(active, repo_id);
+            }
+        }
     }
     println!();
     match (plan.lane.as_deref(), plan.target_branch.as_deref()) {
@@ -84,6 +89,26 @@ pub(super) fn print_plan(active: &ActiveBundle, plan: &LandPlan, path: &Path) {
             target
         ),
         (None, None) => println!("{} knit land apply", out::heading("Apply:")),
+    }
+}
+
+/// The gates `knit publish sync` last recorded, so the plan shows what the
+/// merge waits for without asking the host.
+fn print_recorded_gates(active: &ActiveBundle, repo_id: &str) {
+    let Some(gates) = publication_for_repo(&active.bundle, repo_id).and_then(|p| p.gates.as_ref())
+    else {
+        return;
+    };
+    let Some(headline) = providers::gates::headline(&gates.items) else {
+        return;
+    };
+    println!(
+        "  {} {}",
+        out::warn(&headline),
+        out::muted(format!("(as of {})", gates.updated_at))
+    );
+    for gate in providers::gates::open(&gates.items) {
+        println!("    {}", gate.summary);
     }
 }
 

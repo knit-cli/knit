@@ -28,7 +28,7 @@ mod validate;
 
 pub use artifact::apply_land_from_artifact;
 pub use check::check_landing;
-pub(crate) use check::{assess_landing_readiness, print_readiness_row};
+pub(crate) use check::{assess_landing_readiness, print_open_gates, print_readiness_row};
 pub(crate) use lanes::{normalize_lane_name, normalize_target_branch};
 pub(crate) use process::DEFAULT_COMMAND_TIMEOUT_SECONDS;
 pub use rollback::rollback_land_run;

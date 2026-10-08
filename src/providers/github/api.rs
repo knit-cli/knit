@@ -694,7 +694,7 @@ impl From<GitHubApiStatus> for CheckRun {
     }
 }
 
-fn encode_query_component(input: &str) -> String {
+pub(super) fn encode_query_component(input: &str) -> String {
     let mut encoded = String::new();
     for byte in input.bytes() {
         match byte {
@@ -714,7 +714,7 @@ fn encode_path_component(input: &str) -> String {
     encode_path(input, false)
 }
 
-fn encode_path_allow_slash(input: &str) -> String {
+pub(super) fn encode_path_allow_slash(input: &str) -> String {
     encode_path(input, true)
 }
 

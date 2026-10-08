@@ -1170,6 +1170,21 @@ knit land source --plan <path> --repo <repo-id> --branch <branch> --out <new-pla
 
 `knit land check` is a read-only preflight: it fetches each recorded PR once and prints a readiness table (state, mergeable, checks, review decision, and a verdict) so you can see whether `knit land apply` will succeed and why not. A `conflict` verdict points you at `knit land update`; an already-merged PR shows `already landed`. `knit publish status --live` shows the same live columns alongside the recorded review objects. Both are non-mutating.
 
+Both list each review's open landing gates under its row: what still stands between the review and its merge, and who has to act (`you`, `maintainers`, or `host`). A review is `ready` only when no gate is open. On GitHub the gates come from the review, the base branch's rulesets and public branch protection, the head commit's checks, workflow runs waiting for a maintainer to approve them, and commit signatures, all readable without admin rights on the repository:
+
+| Gate | Opens when |
+|---|---|
+| `draft` | the review is marked ready |
+| `conflict`, `behind` | the branch merges cleanly and is as current as the base requires (`knit land update`) |
+| `review` | the required approvals are given; changes requested makes it yours |
+| `ci_approval` | a maintainer approves the workflow runs of an outside contribution |
+| `checks` | the required checks passed; a required check that never reported is pending, not passed |
+| `signatures` | every commit is signed, when the base requires it |
+| `merge_permission` | a maintainer merges the review, when this account cannot |
+| `host` | GitHub stops reporting the merge as blocked by a rule Knit cannot read |
+
+Other hosts report the gates their review objects expose (GitLab's detailed merge status, review decisions, checks, merge permission). `knit publish sync` records the gates in each publication under `gates` (`updatedAt`, `items[]` with `kind`, `state`, `actor`, `summary`, `url`), so the landing plan and hosted dashboards show them without asking the host; `updatedAt` changes only when the gates do.
+
 `knit land plan` writes an editable JSON plan to `.knit/land-plans/<bundle-id>.land.json`. `--lane staging` resolves project-declared per-repo branches; `--target staging` stores one common raw target. Either way the plan records `terminal`: whether landing it finishes the bundle. The options are mutually exclusive. Without either, each review keeps its recorded base. Without a project landing template, the default plan is linear in bundle repo order, uses `merge`, waits for required checks, and does not delete feature branches. With a project landing template, Knit uses the configured merge priority, merge defaults, and selected deployment list. In Knit, a PR with no required checks has passed the required-check gate. You can edit the generated bundle plan to change merge order, use `squash` or `rebase`, insert `wait_checks` steps, insert local `run` steps, or tune typed `deploy` steps before applying.
 
 Bare `knit land` is safe: it creates or shows the default plan and stops. It never merges PRs, deploys, waits, or runs plan commands. Execute the plan explicitly with `knit land apply` after inspection.
