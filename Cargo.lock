@@ -697,7 +697,7 @@ dependencies = [
 
 [[package]]
 name = "knit-cli"
-version = "0.1.0-alpha.40"
+version = "0.1.0-alpha.41"
 dependencies = [
  "anyhow",
  "chrono",
@@ -720,7 +720,7 @@ dependencies = [
 
 [[package]]
 name = "knit-runtime"
-version = "0.1.0-alpha.40"
+version = "0.1.0-alpha.41"
 dependencies = [
  "anyhow",
  "chrono",
