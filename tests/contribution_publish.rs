@@ -208,7 +208,12 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
         "--out",
         gated.to_str().unwrap(),
     ]);
-    assert!(output.contains("action needed: signed commits"), "{output}");
+    assert!(
+        output.contains(
+            "waiting on maintainers (review, CI approval, checks, signed commits, merge)"
+        ),
+        "{output}"
+    );
     let read =
         |path: &PathBuf| -> Value { serde_json::from_slice(&fs::read(path).unwrap()).unwrap() };
     let first = read(&gated);
@@ -231,7 +236,7 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
             ("review", "pending", "maintainers"),
             ("ci_approval", "pending", "maintainers"),
             ("checks", "pending", "maintainers"),
-            ("signatures", "blocked", "you"),
+            ("signatures", "pending", "maintainers"),
             ("merge_permission", "pending", "maintainers"),
         ]
     );

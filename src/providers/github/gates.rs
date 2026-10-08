@@ -293,6 +293,7 @@ pub(super) fn gates(target: &PrTarget, pr: &PullRequest) -> Result<Vec<Gate>> {
         )),
     }
 
+    let maintainers_merge = matches!(can_merge(target, &repo), Ok(Some(false)));
     if rules.signatures {
         match unsigned_commits(target, &repo, pr.number) {
             Ok(0) => gates.push(gate(
@@ -301,12 +302,23 @@ pub(super) fn gates(target: &PrTarget, pr: &PullRequest) -> Result<Vec<Gate>> {
                 GateActor::You,
                 "commits signed".to_string(),
             )),
+            // GitHub signs the commit a squash merge creates, so unsigned
+            // commits only rule out the other merge methods.
+            Ok(count) if maintainers_merge => gates.push(gate(
+                "signatures",
+                GateState::Pending,
+                GateActor::Maintainers,
+                format!(
+                    "{} unsigned; the base requires signed commits, so maintainers must squash-merge it",
+                    plural(count, "commit", "commits")
+                ),
+            )),
             Ok(count) => gates.push(gate(
                 "signatures",
                 GateState::Blocked,
                 GateActor::You,
                 format!(
-                    "{} unsigned; the base requires signed commits",
+                    "{} unsigned; the base requires signed commits: sign them or land with squash",
                     plural(count, "commit", "commits")
                 ),
             )),
@@ -319,7 +331,7 @@ pub(super) fn gates(target: &PrTarget, pr: &PullRequest) -> Result<Vec<Gate>> {
         }
     }
 
-    if matches!(can_merge(target, &repo), Ok(Some(false))) {
+    if maintainers_merge {
         gates.push(common::merge_permission());
     }
 
