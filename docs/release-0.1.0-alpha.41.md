@@ -10,3 +10,6 @@ approve them, commit signatures, and whether this account can merge; other
 hosts report what their review objects expose. `knit publish sync` records the
 gates in each publication, so `knit land` shows them under each merge step and
 hosted dashboards show them without asking the host.
+
+`knit publish sync` also records each review's CI runs (name, state and link)
+under `checks`, so hosted dashboards show the host's CI for every review.

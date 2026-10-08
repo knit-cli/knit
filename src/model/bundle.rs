@@ -438,7 +438,27 @@ pub struct PublicationEntry {
     /// What still stands between the review and its merge, as last seen on the host.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gates: Option<ReviewGates>,
+    /// The review's CI runs on its head commit, as last seen on the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checks: Option<ReviewChecks>,
     pub updated_at: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewChecks {
+    pub updated_at: String,
+    pub items: Vec<CheckRecord>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckRecord {
+    pub name: String,
+    /// `success`, `failure`, `pending`, `skipped`, or `cancelled`.
+    pub state: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

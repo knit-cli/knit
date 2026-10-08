@@ -281,6 +281,7 @@ mod tests {
             name: name.to_string(),
             state: None,
             bucket: Some(bucket.to_string()),
+            url: None,
         }
     }
 

@@ -23,6 +23,7 @@ enum SyncFetchResult {
         summary: PullRequest,
         /// `None` keeps the recorded gates when the host could not be read.
         gates: Option<Vec<Gate>>,
+        checks: Option<Vec<providers::CheckRun>>,
     },
 }
 
@@ -76,10 +77,12 @@ fn fetch_pr_summary_for_sync(
     };
 
     let gates = review_gates(forge.as_ref(), &target, &summary);
+    let checks = review_checks(forge.as_ref(), &target, &summary);
     Ok(SyncFetchResult::Summary {
         repo_index,
         summary,
         gates,
+        checks,
     })
 }
 
@@ -120,10 +123,12 @@ fn fetch_pr_summary_for_sync_from_artifact(
     };
 
     let gates = review_gates(forge.as_ref(), &target, &summary);
+    let checks = review_checks(forge.as_ref(), &target, &summary);
     Ok(SyncFetchResult::Summary {
         repo_index,
         summary,
         gates,
+        checks,
     })
 }
 
@@ -136,6 +141,17 @@ fn review_gates(
         return Some(Vec::new());
     }
     forge.gates(target, summary).ok()
+}
+
+fn review_checks(
+    forge: &dyn providers::Forge,
+    target: &providers::PrTarget,
+    summary: &PullRequest,
+) -> Option<Vec<providers::CheckRun>> {
+    if summary.state.as_deref() != Some("OPEN") {
+        return Some(Vec::new());
+    }
+    forge.check_runs(target, &summary.url, false).ok()
 }
 
 fn print_gates(repo_id: &str, gates: &[Gate]) {
@@ -283,6 +299,7 @@ pub(super) fn sync_publications_for_indexes(
                 repo_index,
                 summary,
                 gates,
+                checks,
             }) => {
                 let repo = active.bundle.repos[repo_index].clone();
                 let forge = providers::for_repo(&repo)?;
@@ -290,6 +307,9 @@ pub(super) fn sync_publications_for_indexes(
                 if let Some(gates) = gates {
                     print_gates(&repo.id, &gates);
                     providers::record_gates(&mut active.bundle, &repo.id, gates);
+                }
+                if let Some(checks) = checks {
+                    providers::record_checks(&mut active.bundle, &repo.id, &checks);
                 }
                 synced_repo_indexes.push(repo_index);
             }
@@ -426,6 +446,7 @@ pub(super) fn sync_publications_for_indexes_from_artifact(
                 repo_index,
                 summary,
                 gates,
+                checks,
             }) => {
                 let repo = bundle.repos[repo_index].clone();
                 let forge = providers::for_repo(&repo)?;
@@ -433,6 +454,9 @@ pub(super) fn sync_publications_for_indexes_from_artifact(
                 if let Some(gates) = gates {
                     print_gates(&repo.id, &gates);
                     providers::record_gates(bundle, &repo.id, gates);
+                }
+                if let Some(checks) = checks {
+                    providers::record_checks(bundle, &repo.id, &checks);
                 }
                 synced_repo_indexes.push(repo_index);
             }

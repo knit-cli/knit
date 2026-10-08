@@ -102,6 +102,8 @@ struct BitbucketStatus {
     #[serde(default)]
     name: Option<String>,
     state: String,
+    #[serde(default)]
+    url: Option<String>,
 }
 
 impl Forge for Bitbucket {
@@ -374,6 +376,7 @@ impl From<BitbucketStatus> for CheckRun {
                 .unwrap_or_else(|| "status".to_string()),
             state: Some(state.to_string()),
             bucket: Some(bucket.to_string()),
+            url: status.url.filter(|url| !url.is_empty()),
         }
     }
 }

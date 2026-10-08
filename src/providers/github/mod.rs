@@ -362,7 +362,7 @@ impl Forge for GitHub {
             OsString::from("checks"),
             OsString::from(selector),
             OsString::from("--json"),
-            OsString::from("name,state,bucket"),
+            OsString::from("name,state,bucket,link"),
         ];
         if required_only {
             args.push(OsString::from("--required"));

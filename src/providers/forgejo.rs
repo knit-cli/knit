@@ -100,6 +100,8 @@ struct ForgejoStatus {
     #[serde(default)]
     context: Option<String>,
     state: String,
+    #[serde(default)]
+    target_url: Option<String>,
 }
 
 impl Forge for Forgejo {
@@ -569,6 +571,7 @@ impl From<ForgejoStatus> for CheckRun {
             name: status.context.unwrap_or_else(|| "status".to_string()),
             state: Some(state.to_string()),
             bucket: Some(bucket.to_string()),
+            url: status.target_url.filter(|url| !url.is_empty()),
         }
     }
 }

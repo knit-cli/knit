@@ -4,7 +4,10 @@ pub(crate) mod gates;
 pub mod github;
 pub mod gitlab;
 
-use crate::model::{ChangeGroup, ForgeAuthor, Gate, PublicationEntry, RepoEntry, ReviewGates};
+use crate::model::{
+    ChangeGroup, CheckRecord, ForgeAuthor, Gate, PublicationEntry, RepoEntry, ReviewChecks,
+    ReviewGates,
+};
 use crate::output as out;
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -90,6 +93,8 @@ pub struct CheckRun {
     pub state: Option<String>,
     #[serde(default)]
     pub bucket: Option<String>,
+    #[serde(default, alias = "link")]
+    pub url: Option<String>,
 }
 
 pub struct CheckWaitSummary {
@@ -420,6 +425,7 @@ pub fn upsert_publication(
         author: pr.author.clone().and_then(clean_author),
         applied: None,
         gates: None,
+        checks: None,
         updated_at: now_iso(),
     };
 
@@ -437,6 +443,7 @@ pub fn upsert_publication(
         if existing.number == entry.number {
             entry.applied = existing.applied.clone();
             entry.gates = existing.gates.clone();
+            entry.checks = existing.checks.clone();
         }
         let unchanged = existing.provider == entry.provider
             && existing.kind == entry.kind
@@ -478,6 +485,48 @@ pub fn record_gates(bundle: &mut ChangeGroup, repo_id: &str, items: Vec<Gate>) -
     publication.gates = next;
     bundle.updated_at = now_iso();
     true
+}
+
+/// Record a review's check runs. An empty list clears them; unchanged runs
+/// keep their timestamp. Returns whether the bundle changed.
+pub fn record_checks(bundle: &mut ChangeGroup, repo_id: &str, runs: &[CheckRun]) -> bool {
+    let Some(publication) = bundle
+        .publications
+        .iter_mut()
+        .find(|publication| publication.repo_id == repo_id && is_review_kind(&publication.kind))
+    else {
+        return false;
+    };
+    let items: Vec<CheckRecord> = runs
+        .iter()
+        .map(|run| CheckRecord {
+            name: run.name.clone(),
+            state: check_record_state(run).to_string(),
+            url: run.url.clone(),
+        })
+        .collect();
+    let next = (!items.is_empty()).then(|| ReviewChecks {
+        updated_at: now_iso(),
+        items,
+    });
+    if publication.checks.as_ref().map(|c| &c.items) == next.as_ref().map(|c| &c.items) {
+        return false;
+    }
+    publication.checks = next;
+    bundle.updated_at = now_iso();
+    true
+}
+
+fn check_record_state(run: &CheckRun) -> &'static str {
+    match (run.bucket.as_deref(), run.state.as_deref()) {
+        (Some("skipping"), _) | (_, Some("SKIPPED")) => "skipped",
+        (Some("cancel"), _) | (_, Some("CANCELLED")) => "cancelled",
+        _ => match gates::check_outcome(run) {
+            gates::CheckOutcome::Passed => "success",
+            gates::CheckOutcome::Failed => "failure",
+            gates::CheckOutcome::Pending => "pending",
+        },
+    }
 }
 
 pub fn pr_number_from_url(url: &str) -> Option<u64> {

@@ -193,6 +193,7 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
                 {"type": "required_signatures"}
             ],
             "awaiting": ["CI"],
+            "prChecks": [{"name": "lint", "state": "FAILURE", "bucket": "fail", "link": "https://example.test/runs/1"}],
             "commits": [{"commit": {"verification": {"verified": false}}}],
             "push": false
         })
@@ -244,6 +245,10 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
         gates["items"][2]["summary"],
         "required checks not reported yet: build"
     );
+    assert_eq!(
+        first["publications"][0]["checks"]["items"],
+        json!([{"name": "lint", "state": "failure", "url": "https://example.test/runs/1"}])
+    );
 
     let again = f.root.join("again.json");
     f.run(&[
@@ -258,6 +263,10 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
         read(&again)["publications"][0]["gates"],
         first["publications"][0]["gates"],
         "unchanged gates keep their timestamp"
+    );
+    assert_eq!(
+        read(&again)["publications"][0]["checks"],
+        first["publications"][0]["checks"]
     );
 }
 

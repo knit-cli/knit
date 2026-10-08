@@ -3,6 +3,10 @@
 import json, os, pathlib, subprocess, sys, urllib.parse
 root = pathlib.Path(os.environ['GH_FAKE_DIR'])
 args = sys.argv[1:]
+if args[:2] == ['pr', 'checks']:
+    gates_file = root / 'gates.json'
+    print(json.dumps(json.loads(gates_file.read_text()).get('prChecks', [])) if gates_file.exists() else '[]')
+    sys.exit(0)
 assert args[0] == 'api', args
 endpoint = next(a for a in args if a.startswith('repos/') or a == 'graphql')
 method = args[args.index('--method') + 1] if '--method' in args else 'GET'
