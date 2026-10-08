@@ -176,6 +176,7 @@ pub trait Forge {
     fn merged_revision(&self, target: &PrTarget, publication_url: &str) -> Result<Option<String>>;
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()>;
+    fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()>;
     /// Change the destination branch of an existing open review object.
     fn edit_base(&self, _target: &PrTarget, _selector: &str, _base: &str) -> Result<()> {
         bail!(
@@ -404,6 +405,7 @@ pub fn upsert_publication(
         state: pr.state.clone().unwrap_or_else(|| "UNKNOWN".to_string()),
         title: pr.title.clone(),
         author: pr.author.clone().and_then(clean_author),
+        applied: None,
         updated_at: now_iso(),
     };
 
@@ -417,6 +419,9 @@ pub fn upsert_publication(
         // trimmed response) keeps the one already recorded.
         if entry.author.is_none() && existing.number == entry.number {
             entry.author = existing.author.clone();
+        }
+        if existing.number == entry.number {
+            entry.applied = existing.applied.clone();
         }
         let unchanged = existing.provider == entry.provider
             && existing.kind == entry.kind

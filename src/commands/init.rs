@@ -791,7 +791,9 @@ knit publish create --title 'library=Add the shared API' --body-file consumer=co
 ```
 
 `--dry-run` does not push, create reviews, or sync artifacts. `knit publish sync`
-updates the managed Knit block and preserves the author's surrounding text.
+updates the managed Knit block, and re-applies a title or body file whenever it
+changed since Knit last applied it: edit `PR-<repo>.md` and run `knit publish sync`.
+Title and text edited on the host stay until their source changes.
 
 Knit uses Git-config authors for commits it creates (`commit` and `squash`) and
 warns once per process when injected author environment variables are ignored.

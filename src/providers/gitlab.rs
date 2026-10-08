@@ -301,6 +301,25 @@ impl Forge for GitLab {
         Ok(())
     }
 
+    fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()> {
+        if target.repo_full_name.is_some() {
+            return edit_merge_request(target, selector, &json!({ "title": title }), "title");
+        }
+        let args = repo_scoped_args(
+            target,
+            "--repo",
+            vec![
+                OsString::from("mr"),
+                OsString::from("update"),
+                OsString::from(selector_iid(selector)),
+                OsString::from("--title"),
+                OsString::from(title),
+            ],
+        );
+        cli_output(CLI, target, args, None)?;
+        Ok(())
+    }
+
     fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
         if target.repo_full_name.is_some() {
             return edit_merge_request(

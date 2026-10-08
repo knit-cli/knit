@@ -21,11 +21,22 @@ pub(super) struct ResolvedPublish {
     pub draft: bool,
     pub draft_reason: String,
     pub title: String,
+    pub title_chosen: bool,
     pub body: String,
     pub body_source: String,
+    pub body_from_file: bool,
     pub blocked_on: BTreeSet<String>,
 }
 impl ResolvedPublish {
+    pub fn applied(&self) -> AppliedText {
+        applied(
+            self.title_chosen,
+            &self.title,
+            self.body_from_file,
+            &self.body,
+        )
+    }
+
     pub fn body(&self, bundle: &ChangeGroup, repo: &RepoEntry, provider: &str) -> String {
         let body = &self.body;
         let block = super::pr_body::initial_pr_body(bundle, &repo.id, provider, &self.blocked_on);
@@ -375,9 +386,6 @@ pub(super) fn resolve(
     let titles = assignments(&options.title, &selected, "--title")?;
     let files = assignments(&options.body_file, &selected, "--body-file")?;
     let edges = dependency_edges(bundle, project, checkouts, jobs, draft_all, options)?;
-    let empty = PublishPolicy::default();
-    let project_policy = project.and_then(|p| p.publish.as_ref()).unwrap_or(&empty);
-    let bundle_policy = bundle.publish.as_ref().unwrap_or(&empty);
     let released = if edges.is_empty() {
         BTreeSet::new()
     } else {
@@ -410,85 +418,7 @@ pub(super) fn resolve(
         }
         let dependent = !blockers.is_empty();
         let (draft, reason) = effective_draft(bundle, project, id, draft_all, options, dependent);
-        let br = bundle_policy.repos.get(id);
-        let pr = project_policy.repos.get(id);
-        let literal = titles.get(id).or_else(|| br.and_then(|p| p.title.as_ref()));
-        let title_mode = bundle_policy.title.or(project_policy.title);
-        let literal = literal.or_else(|| {
-            if bundle_policy.title.is_none() {
-                pr.and_then(|p| p.title.as_ref())
-            } else {
-                None
-            }
-        });
-        let file = files
-            .get(id)
-            .or_else(|| br.and_then(|p| p.body_file.as_ref()))
-            .or_else(|| bundle_policy.body.as_ref().and_then(|p| p.file.as_ref()))
-            .or_else(|| pr.and_then(|p| p.body_file.as_ref()))
-            .or_else(|| project_policy.body.as_ref().and_then(|p| p.file.as_ref()));
-        let default_file = file
-            .is_none()
-            .then(|| {
-                [format!("PR-{id}.md"), "PR.md".to_string()]
-                    .into_iter()
-                    .find(|name| root.join(name).is_file())
-            })
-            .flatten();
-        let file = file.or(default_file.as_ref());
-        let fallback = bundle_policy
-            .body
-            .as_ref()
-            .and_then(|p| p.fallback)
-            .or_else(|| project_policy.body.as_ref().and_then(|p| p.fallback));
-        let mut body = String::new();
-        let mut body_source = "knit".to_string();
-        let mut file_title = None;
-        if let Some(file) = file {
-            let path = root.join(file.replace("{repo}", id));
-            match std::fs::read_to_string(&path) {
-                Ok(text) => {
-                    let (title, prose) = strip_title(&text);
-                    file_title = title;
-                    body = prose;
-                    body_source = format!("file:{}", path.display());
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound && !files.contains_key(id) => {}
-                Err(e) => {
-                    return Err(e).with_context(|| format!("read publish body {}", path.display()))
-                }
-            }
-        }
-        if body_source == "knit" && fallback == Some(PublishBodyFallback::UpstreamTemplate) {
-            if let Some((source, text)) = super::template::upstream_template(
-                &job.repo,
-                checkouts.get(id).map(PathBuf::as_path),
-            )? {
-                body = text;
-                body_source = source;
-            }
-        }
-        let title = if let Some(title) = literal {
-            title.clone()
-        } else {
-            match title_mode {
-                None => file_title
-                    .filter(|_| default_file.is_some())
-                    .unwrap_or_else(|| format!("{} ({id})", bundle.title)),
-                Some(PublishTitle::BundleTitle) => bundle.title.clone(),
-                Some(PublishTitle::CommitGroup) => bundle
-                    .commit_groups
-                    .last()
-                    .map(|g| g.message.lines().next().unwrap_or_default().to_owned())
-                    .unwrap_or_else(|| bundle.title.clone()),
-                Some(PublishTitle::File) => file_title.with_context(|| {
-                    format!("{id}: title=file requires a body file with a Title: line")
-                })?,
-            }
-        };
-        if title.trim().is_empty() {
-            bail!("{id}: publish title is empty");
-        }
+        let text = text(bundle, project, root, checkouts, &job.repo, &titles, &files)?;
         results.insert(
             id.clone(),
             ResolvedPublish {
@@ -501,9 +431,11 @@ pub(super) fn resolve(
                 } else {
                     reason.into()
                 },
-                title,
-                body,
-                body_source,
+                title: text.title,
+                title_chosen: text.title_chosen,
+                body: text.body,
+                body_source: text.body_source,
+                body_from_file: text.body_from_file,
                 blocked_on: blockers,
             },
         );
@@ -511,6 +443,130 @@ pub(super) fn resolve(
     waves(selected.into_iter(), &results)?;
     Ok(results)
 }
+pub(super) struct ResolvedText {
+    pub title: String,
+    pub title_chosen: bool,
+    pub body: String,
+    pub body_source: String,
+    pub body_from_file: bool,
+}
+
+pub(super) fn text(
+    bundle: &ChangeGroup,
+    project: Option<&KnitProject>,
+    root: &Path,
+    checkouts: &BTreeMap<String, PathBuf>,
+    repo: &RepoEntry,
+    titles: &BTreeMap<String, String>,
+    files: &BTreeMap<String, String>,
+) -> Result<ResolvedText> {
+    let id = &repo.id;
+    let empty = PublishPolicy::default();
+    let project_policy = project.and_then(|p| p.publish.as_ref()).unwrap_or(&empty);
+    let bundle_policy = bundle.publish.as_ref().unwrap_or(&empty);
+    let br = bundle_policy.repos.get(id);
+    let pr = project_policy.repos.get(id);
+    let literal = titles.get(id).or_else(|| br.and_then(|p| p.title.as_ref()));
+    let title_mode = bundle_policy.title.or(project_policy.title);
+    let literal = literal.or_else(|| {
+        if bundle_policy.title.is_none() {
+            pr.and_then(|p| p.title.as_ref())
+        } else {
+            None
+        }
+    });
+    let file = files
+        .get(id)
+        .or_else(|| br.and_then(|p| p.body_file.as_ref()))
+        .or_else(|| bundle_policy.body.as_ref().and_then(|p| p.file.as_ref()))
+        .or_else(|| pr.and_then(|p| p.body_file.as_ref()))
+        .or_else(|| project_policy.body.as_ref().and_then(|p| p.file.as_ref()));
+    let default_file = file
+        .is_none()
+        .then(|| {
+            [format!("PR-{id}.md"), "PR.md".to_string()]
+                .into_iter()
+                .find(|name| root.join(name).is_file())
+        })
+        .flatten();
+    let file = file.or(default_file.as_ref());
+    let fallback = bundle_policy
+        .body
+        .as_ref()
+        .and_then(|p| p.fallback)
+        .or_else(|| project_policy.body.as_ref().and_then(|p| p.fallback));
+    let mut body = String::new();
+    let mut body_source = "knit".to_string();
+    let mut file_title = None;
+    if let Some(file) = file {
+        let path = root.join(file.replace("{repo}", id));
+        match std::fs::read_to_string(&path) {
+            Ok(text) => {
+                let (title, prose) = strip_title(&text);
+                file_title = title;
+                body = prose;
+                body_source = format!("file:{}", path.display());
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && !files.contains_key(id) => {}
+            Err(e) => {
+                return Err(e).with_context(|| format!("read publish body {}", path.display()))
+            }
+        }
+    }
+    let body_from_file = body_source != "knit";
+    if !body_from_file && fallback == Some(PublishBodyFallback::UpstreamTemplate) {
+        if let Some((source, text)) =
+            super::template::upstream_template(repo, checkouts.get(id).map(PathBuf::as_path))?
+        {
+            body = text;
+            body_source = source;
+        }
+    }
+    let (title, title_chosen) = if let Some(title) = literal {
+        (title.clone(), true)
+    } else {
+        match title_mode {
+            None => match file_title.filter(|_| default_file.is_some()) {
+                Some(title) => (title, true),
+                None => (format!("{} ({id})", bundle.title), false),
+            },
+            Some(PublishTitle::BundleTitle) => (bundle.title.clone(), false),
+            Some(PublishTitle::CommitGroup) => (
+                bundle
+                    .commit_groups
+                    .last()
+                    .map(|g| g.message.lines().next().unwrap_or_default().to_owned())
+                    .unwrap_or_else(|| bundle.title.clone()),
+                false,
+            ),
+            Some(PublishTitle::File) => (
+                file_title.with_context(|| {
+                    format!("{id}: title=file requires a body file with a Title: line")
+                })?,
+                true,
+            ),
+        }
+    };
+    if title.trim().is_empty() {
+        bail!("{id}: publish title is empty");
+    }
+    Ok(ResolvedText {
+        title,
+        title_chosen,
+        body,
+        body_source,
+        body_from_file,
+    })
+}
+
+pub(super) fn applied(title_chosen: bool, title: &str, from_file: bool, body: &str) -> AppliedText {
+    use sha2::{Digest, Sha256};
+    AppliedText {
+        title: title_chosen.then(|| title.to_owned()),
+        body_sha256: from_file.then(|| format!("{:x}", Sha256::digest(body.trim().as_bytes()))),
+    }
+}
+
 fn strip_title(text: &str) -> (Option<String>, String) {
     let (first, rest) = text.split_once('\n').unwrap_or((text, ""));
     match first.strip_prefix("Title:") {

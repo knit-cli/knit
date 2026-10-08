@@ -273,6 +273,10 @@ impl Forge for Forgejo {
         Ok(())
     }
 
+    fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()> {
+        edit_api_pr(target, selector, &json!({ "title": title }))
+    }
+
     fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
         edit_api_pr(target, selector, &json!({ "base": base }))
     }
