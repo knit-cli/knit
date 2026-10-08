@@ -27,6 +27,8 @@ struct Fixture {
     project: PathBuf,
     api: String,
     wrong_head: Arc<Mutex<bool>>,
+    read_only: Arc<Mutex<bool>>,
+    maintainer_merged: Arc<Mutex<bool>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -102,6 +104,10 @@ impl Fixture {
         let api = format!("http://{}", listener.local_addr().unwrap());
         let wrong_head = Arc::new(Mutex::new(false));
         let wrong = wrong_head.clone();
+        let read_only = Arc::new(Mutex::new(false));
+        let no_push = read_only.clone();
+        let maintainer_merged = Arc::new(Mutex::new(false));
+        let maintainer = maintainer_merged.clone();
         let fork = source.clone();
         let api_log = root.join("api.log");
         std::thread::spawn(move || {
@@ -141,7 +147,13 @@ impl Fixture {
                     .open(&api_log)
                     .unwrap();
                 writeln!(log, "{line} {body}").unwrap();
-                let response = if line.starts_with("PATCH ") {
+                let response = if line.starts_with("GET /repos/upstream/service ") {
+                    if *no_push.lock().unwrap() {
+                        json!({"full_name":"upstream/service","permissions":{"push":false}})
+                    } else {
+                        json!([])
+                    }
+                } else if line.starts_with("PATCH ") {
                     let payload: Value = serde_json::from_str(body).unwrap();
                     base = payload["base"].as_str().unwrap().into();
                     json!({})
@@ -150,6 +162,7 @@ impl Fixture {
                     json!({"merged":true})
                 } else if line.contains("/pulls/7 ") {
                     let head = git(&fork, ["rev-parse", "feature"]).trim().to_owned();
+                    let merged = merged || *maintainer.lock().unwrap();
                     json!({"number":7,"html_url":"https://github.com/upstream/service/pull/7","state":if merged {"closed"}else{"open"},"merged":merged,"merge_commit_sha":head,"draft":false,"mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":head,"repo":{"full_name":if *wrong.lock().unwrap(){"collision/service"}else{"contributor/service"}}},"base":{"ref":base,"repo":{"full_name":"upstream/service"}}})
                 } else if line.contains("check-runs") {
                     json!({"check_runs":[]})
@@ -171,6 +184,8 @@ impl Fixture {
             project,
             api,
             wrong_head,
+            read_only,
+            maintainer_merged,
         }
     }
     fn cmd(&self, args: &[&str]) -> std::process::Output {
@@ -710,4 +725,77 @@ fn local_update_gate_accepts_new_fork_head_without_relaxing_source_identity() {
     let log = fs::read_to_string(f.root.join("api.log")).unwrap();
     let merge = log.lines().find(|line| line.starts_with("PUT ")).unwrap();
     assert!(merge.contains(&format!("\"sha\":\"{accepted}\"")));
+}
+
+#[test]
+fn landing_waits_for_maintainers_to_merge_a_review_this_account_cannot_merge() {
+    let f = Fixture::new();
+    *f.read_only.lock().unwrap() = true;
+    let mut project = read(&f.project);
+    project["landing"] = json!({});
+    let project_id = project["id"].as_str().unwrap().to_owned();
+    write(
+        &f.root
+            .join(format!(".knit/projects/{project_id}.project.json")),
+        &project,
+    );
+    let mut bundle = read(&f.bundle);
+    bundle["projectId"] = json!(project_id);
+    write(&f.bundle, &bundle);
+    f.ok(&["land", "plan", "--out", "plan.json"]);
+    let plan = read(&f.root.join("plan.json"));
+    let step = &plan["steps"][0];
+    assert_eq!(step["mergedBy"], "upstream", "{plan}");
+    assert_eq!(step["effect"], "read_only");
+    assert_eq!(step["recovery"]["mode"], "none");
+    assert_eq!(plan["requiredExecutorVersion"], "0.6");
+
+    let apply = [
+        "land",
+        "apply",
+        "--plan",
+        "plan.json",
+        "--no-remote",
+        "--keep-worktrees",
+    ];
+    let output = f.cmd(&apply);
+    let paused = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(output.status.success(), "{paused}");
+    assert!(paused.contains("\"paused\""), "{paused}");
+    assert!(
+        paused.contains("maintainers merge https://github.com/upstream/service/pull/7"),
+        "{paused}"
+    );
+    let log = fs::read_to_string(f.root.join("api.log")).unwrap();
+    assert!(!log.lines().any(|l| l.starts_with("PUT ")), "{log}");
+    let run_dir = f.root.join(".knit/land-runs");
+    let run_path = fs::read_dir(&run_dir)
+        .unwrap()
+        .map(|p| p.unwrap().path())
+        .find(|p| p.extension().is_some_and(|s| s == "json"))
+        .unwrap();
+    assert_eq!(read(&run_path)["status"], "paused");
+
+    let head = git(&f.source, ["rev-parse", "feature"]).trim().to_owned();
+    git(
+        &f.source,
+        [
+            "push",
+            "--force",
+            f.target.to_str().unwrap(),
+            "feature:main",
+        ],
+    );
+    *f.maintainer_merged.lock().unwrap() = true;
+    f.ok(&["land", "resume", "--no-remote", "--keep-worktrees"]);
+    let run = read(&run_path);
+    assert_eq!(run["status"], "succeeded", "{run}");
+    assert_eq!(run["steps"][0]["output"]["revision"], head);
+    assert_eq!(read(&f.bundle)["state"], "archived");
+    let log = fs::read_to_string(f.root.join("api.log")).unwrap();
+    assert!(!log.lines().any(|l| l.starts_with("PUT ")), "{log}");
 }

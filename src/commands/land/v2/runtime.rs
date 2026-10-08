@@ -464,7 +464,11 @@ fn preflight(
                 .context("missing publication")?;
             let pr = forge.view(&target, &pub_.url)?;
             gated_review_identity(plan, repo, pub_, &pr, existing)?;
-            if !super::super::state_is_merged(&pr) {
+            if super::gates::upstream_merge(step) {
+                if !super::super::state_is_merged(&pr) && pr.state.as_deref() != Some("OPEN") {
+                    bail!("{id}: PR #{} was closed without being merged", pr.number);
+                }
+            } else if !super::super::state_is_merged(&pr) {
                 super::super::ensure_open_and_ready(id, &pr)?;
             }
             // A gated repository's head legitimately moves when its update
@@ -1410,6 +1414,60 @@ fn gate(
     }
 }
 
+fn upstream_merge_outcome(
+    step: &Value,
+    plan: &Value,
+    bundle: &Value,
+    roots: &Roots,
+    journal: &Journal,
+) -> Result<Value> {
+    let id = step["id"].as_str().unwrap();
+    let repo_id = step["repoId"].as_str().context("merge repo required")?;
+    let typed: crate::model::ChangeGroup =
+        serde_json::from_value(journal.bundle.lock().unwrap().clone())?;
+    let repo = typed
+        .repos
+        .iter()
+        .find(|r| r.id == repo_id)
+        .with_context(|| format!("{repo_id}: not tracked by this bundle"))?;
+    let publication = crate::providers::publication_for_repo(&typed, repo_id)
+        .with_context(|| format!("{repo_id}: {id} waits for a review, but none is recorded"))?;
+    let forge = crate::providers::for_repo(repo)?;
+    let target = provider_target(roots, forge.as_ref(), repo, &publication.base_branch)?;
+    let pr = forge.view(&target, &publication.url)?;
+    let desired = step["targetBranch"]
+        .as_str()
+        .or(plan["targetBranches"][repo_id].as_str())
+        .or(plan["targetBranch"].as_str())
+        .unwrap_or(&publication.base_branch);
+    if super::super::state_is_merged(&pr) {
+        if pr
+            .base_ref_name
+            .as_deref()
+            .unwrap_or(&publication.base_branch)
+            != desired
+        {
+            bail!("{repo_id}: the review merged into another destination");
+        }
+        let mut output = json!({"attribution":"already_satisfied","mergedBy":"upstream","publicationUrl":publication.url,"source":pr.head_ref_oid,"targetBranch":desired});
+        pin_merge_result(step, bundle, roots, &mut output)?;
+        return Ok(output);
+    }
+    if pr.state.as_deref() != Some("OPEN") {
+        bail!(
+            "{repo_id}: {} was closed without being merged",
+            publication.url
+        );
+    }
+    Err(super::gates::LandingPaused {
+        step: id.to_owned(),
+        instructions: step["instructions"].as_str().unwrap_or_default().to_owned(),
+        waiting_for: format!("{repo_id}'s maintainers to merge {}", publication.url),
+        next: "Run `knit land resume` after they merge it; `knit land check` shows where each review stands.".to_owned(),
+    }
+    .into())
+}
+
 fn gate_outcome(
     step: &Value,
     plan: &Value,
@@ -1417,6 +1475,9 @@ fn gate_outcome(
     roots: &Roots,
     journal: &Journal,
 ) -> Result<Value> {
+    if super::gates::upstream_merge(step) {
+        return upstream_merge_outcome(step, plan, bundle, roots, journal);
+    }
     let id = step["id"].as_str().unwrap();
     let instructions = step["instructions"].as_str().unwrap_or_default().to_owned();
     let acknowledgement = journal.snapshot()["acknowledgements"][id].clone();

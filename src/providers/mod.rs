@@ -177,6 +177,11 @@ pub trait Forge {
 
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()>;
     fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()>;
+    /// Whether this account may merge reviews into the target repository;
+    /// `None` when the host does not say.
+    fn can_merge(&self, _target: &PrTarget) -> Result<Option<bool>> {
+        Ok(None)
+    }
     /// Change the destination branch of an existing open review object.
     fn edit_base(&self, _target: &PrTarget, _selector: &str, _base: &str) -> Result<()> {
         bail!(

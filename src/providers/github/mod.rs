@@ -195,6 +195,13 @@ impl Forge for GitHub {
         })
     }
 
+    fn can_merge(&self, target: &PrTarget) -> Result<Option<bool>> {
+        match &target.repo_full_name {
+            Some(repo_full_name) => api::can_merge(target, repo_full_name),
+            None => Ok(None),
+        }
+    }
+
     fn edit_body(&self, target: &PrTarget, selector: &str, body: &str) -> Result<()> {
         if let Some(repo_full_name) = &target.repo_full_name {
             return api::edit_body(target, repo_full_name, selector, body);

@@ -43,7 +43,14 @@ impl std::error::Error for LandingPaused {}
 
 /// Whether a step is a gate the run pauses at (instead of prompting).
 pub(crate) fn is_gate(step: &Value) -> bool {
-    step["type"] == "await_update" || (step["type"] == "manual" && step["acknowledge"] == "resume")
+    step["type"] == "await_update"
+        || (step["type"] == "manual" && step["acknowledge"] == "resume")
+        || upstream_merge(step)
+}
+
+/// A review the target repository's maintainers merge: the run waits for it.
+pub(crate) fn upstream_merge(step: &Value) -> bool {
+    step["type"] == "merge_pr" && step["mergedBy"] == "upstream"
 }
 
 /// Repositories whose reviewed head a gate may legitimately move during the run.

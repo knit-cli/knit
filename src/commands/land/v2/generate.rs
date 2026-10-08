@@ -149,6 +149,7 @@ pub(super) fn build(
         lane,
     )?;
     let mut plan = serde_json::to_value(base)?;
+    mark_upstream_merges(active, &mut plan)?;
     plan["schemaVersion"] = json!("0.2");
     plan["merge"] = json!({"enabled":merge_policy.enabled.unwrap_or(true)});
     if !merge_policy.repositories.is_empty() {
@@ -433,6 +434,72 @@ pub(super) fn build(
         bail!("{}", result["errors"]);
     }
     Ok(plan)
+}
+
+/// A review into a repository this account cannot merge waits for the
+/// repository's maintainers instead of being merged.
+fn mark_upstream_merges(active: &ActiveBundle, plan: &mut Value) -> Result<()> {
+    for step in plan["steps"].as_array_mut().into_iter().flatten() {
+        if step["type"] != "merge_pr" {
+            continue;
+        }
+        let Some(repo) = step["repoId"]
+            .as_str()
+            .and_then(|id| active.bundle.repos.iter().find(|r| r.id == id))
+        else {
+            continue;
+        };
+        if !crate::contribution::cross_repository(repo)? {
+            continue;
+        }
+        let Some(publication) = crate::providers::publication_for_repo(&active.bundle, &repo.id)
+        else {
+            continue;
+        };
+        let forge = crate::providers::for_repo(repo)?;
+        let cwd =
+            crate::checkout::checkout_dir(active, repo).unwrap_or_else(|| active.root.clone());
+        let target = crate::contribution::target(
+            &cwd,
+            repo,
+            forge.as_ref(),
+            &publication.base_branch,
+            true,
+        )?;
+        match forge.can_merge(&target) {
+            Ok(Some(false)) => {}
+            Ok(_) => continue,
+            Err(error) => {
+                eprintln!(
+                    "{}: could not read merge permission, planning a merge: {error:#}",
+                    repo.id
+                );
+                continue;
+            }
+        }
+        let object = step.as_object_mut().unwrap();
+        for key in [
+            "method",
+            "deleteBranch",
+            "waitForChecks",
+            "requiredChecksOnly",
+            "timeoutSeconds",
+            "intervalSeconds",
+        ] {
+            object.remove(key);
+        }
+        object.insert("mergedBy".into(), json!("upstream"));
+        object.insert("effect".into(), json!("read_only"));
+        object.insert("recovery".into(), json!({"mode": "none"}));
+        object.insert(
+            "instructions".into(),
+            json!(format!(
+                "{}'s maintainers merge {}",
+                repo.id, publication.url
+            )),
+        );
+    }
+    Ok(())
 }
 
 /// Scope overrides inherit each repository's fields independently.

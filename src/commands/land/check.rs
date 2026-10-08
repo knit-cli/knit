@@ -26,6 +26,8 @@ pub(crate) struct LandReadiness {
     pub verdict: String,
     /// True when the PR is not landable yet (so callers can color/aggregate).
     pub blocked: bool,
+    /// The target repository's maintainers merge this review, not this account.
+    pub upstream: bool,
 }
 
 pub fn check_landing() -> Result<()> {
@@ -90,11 +92,14 @@ pub fn check_landing() -> Result<()> {
     let mut ready = 0usize;
     let mut blocked = 0usize;
     let mut landed = 0usize;
+    let mut upstream = 0usize;
     for (index, url) in &publications {
         let readiness = assess_landing_readiness(&active, &active.bundle.repos[*index], url);
         print_readiness_row(&readiness);
         if readiness.state == "MERGED" {
             landed += 1;
+        } else if readiness.upstream {
+            upstream += 1;
         } else if readiness.blocked {
             blocked += 1;
         } else {
@@ -105,8 +110,9 @@ pub fn check_landing() -> Result<()> {
     println!();
     if checks_blocked > 0 {
         println!(
-            "{} {ready} ready, {blocked} blocked, {landed} already landed; {checks_blocked} required check(s) not green",
-            out::heading("Readiness:")
+            "{} {ready} ready, {}{blocked} blocked, {landed} already landed; {checks_blocked} required check(s) not green",
+            out::heading("Readiness:"),
+            awaiting(upstream)
         );
         println!(
             "{} refresh required checks with `knit check run <name>` before `knit land apply`.",
@@ -115,10 +121,16 @@ pub fn check_landing() -> Result<()> {
         return Ok(());
     }
     println!(
-        "{} {ready} ready, {blocked} blocked, {landed} already landed",
-        out::heading("Readiness:")
+        "{} {ready} ready, {}{blocked} blocked, {landed} already landed",
+        out::heading("Readiness:"),
+        awaiting(upstream)
     );
-    if blocked == 0 {
+    if blocked == 0 && upstream > 0 {
+        println!(
+            "{} `knit land` then `knit land apply` records merged reviews and waits for the maintainers; `knit land resume` picks up later merges.",
+            out::heading("Next:")
+        );
+    } else if blocked == 0 {
         println!(
             "{} when ready, run `knit land` then `knit land apply`.",
             out::heading("Next:")
@@ -152,6 +164,13 @@ pub(crate) fn print_readiness_row(r: &LandReadiness) {
 
 /// Fetch a publication's live PR state and classify its landing readiness. Forge
 /// errors are captured into the verdict rather than aborting the whole table.
+fn awaiting(upstream: usize) -> String {
+    match upstream {
+        0 => String::new(),
+        n => format!("{n} awaiting maintainers, "),
+    }
+}
+
 pub(crate) fn assess_landing_readiness(
     active: &ActiveBundle,
     repo: &crate::model::RepoEntry,
@@ -166,6 +185,7 @@ pub(crate) fn assess_landing_readiness(
         review: "-".to_string(),
         verdict: String::new(),
         blocked: true,
+        upstream: false,
     };
 
     let forge = match providers::for_repo(repo) {
@@ -258,6 +278,13 @@ pub(crate) fn assess_landing_readiness(
     } else {
         ("ready".to_string(), false)
     };
+    let upstream = crate::contribution::cross_repository(repo).unwrap_or(false)
+        && matches!(forge.can_merge(&target), Ok(Some(false)));
+    let (verdict, blocked) = match (upstream, blocked) {
+        (true, true) => (format!("awaiting maintainers ({verdict})"), false),
+        (true, false) => ("awaiting maintainers".to_string(), false),
+        (false, _) => (verdict, blocked),
+    };
 
     LandReadiness {
         repo_id: repo.id.clone(),
@@ -268,6 +295,7 @@ pub(crate) fn assess_landing_readiness(
         review: review.to_string(),
         verdict,
         blocked,
+        upstream,
     }
 }
 
