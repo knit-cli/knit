@@ -2,13 +2,15 @@
 //! in the bundle, and upsert the managed Knit block into every PR body. The
 //! `*_from_artifact` variants run without local checkouts.
 
-use super::pr_body::sync_knit_pr_body;
+use super::policy::ResolvedText;
+use super::pr_body::{replace_prose, sync_knit_pr_body};
 use crate::checkout::checkout_dir;
-use crate::model::{ChangeGroup, RepoEntry};
+use crate::model::{AppliedText, ChangeGroup, RepoEntry};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, PullRequest};
 use crate::store::{save_active_bundle, ActiveBundle};
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::path::Path;
 
 // One per repository in a bounded fetch, so the variant spread is not worth
@@ -25,6 +27,12 @@ enum SyncFetchResult {
 enum SyncBodyResult {
     Synced(String),
     AlreadySynced,
+}
+
+struct SyncedText {
+    result: SyncBodyResult,
+    title: Option<String>,
+    applied: Option<AppliedText>,
 }
 
 fn fetch_pr_summary_for_sync(
@@ -115,9 +123,9 @@ fn fetch_pr_summary_for_sync_from_artifact(
 
 fn sync_pr_body_remote(
     active: &ActiveBundle,
-    _repo_index: usize,
     repo: &RepoEntry,
-) -> Result<SyncBodyResult> {
+    text: Option<&ResolvedText>,
+) -> Result<SyncedText> {
     let Some(cwd) = checkout_dir(active, repo) else {
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
@@ -132,13 +140,50 @@ fn sync_pr_body_remote(
     if let Some(id) = &mut target.contribution {
         id.base = pr.base_branch.clone();
     }
-    let current_body = forge.view(&target, &pr.url)?.body.unwrap_or_default();
-    let next_body = sync_knit_pr_body(&active.bundle, &repo.id, forge.id(), &current_body);
-    if next_body == current_body {
-        return Ok(SyncBodyResult::AlreadySynced);
+    let current = forge.view(&target, &pr.url)?;
+    let current_body = current.body.clone().unwrap_or_default();
+    let open = current
+        .state
+        .as_deref()
+        .is_none_or(|s| matches!(s.to_ascii_lowercase().as_str(), "open" | "opened"));
+    let previous = pr.applied.clone().unwrap_or_default();
+    let mut applied = previous.clone();
+    let mut title = None;
+    let mut source = current_body.clone();
+    if let Some(text) = text.filter(|_| open) {
+        let wanted = super::policy::applied(
+            text.title_chosen,
+            &text.title,
+            text.body_from_file,
+            &text.body,
+        );
+        if wanted.title.is_some() && wanted.title != previous.title {
+            if current.title.as_deref() != wanted.title.as_deref() {
+                title = wanted.title.clone();
+            }
+            applied.title = wanted.title;
+        }
+        if wanted.body_sha256.is_some() && wanted.body_sha256 != previous.body_sha256 {
+            source = replace_prose(&current_body, &text.body);
+            applied.body_sha256 = wanted.body_sha256;
+        }
     }
-    forge.edit_body(&target, &pr.url, &next_body)?;
-    Ok(SyncBodyResult::Synced(pr.url.clone()))
+    let next_body = sync_knit_pr_body(&active.bundle, &repo.id, forge.id(), &source);
+    if let Some(title) = &title {
+        forge.edit_title(&target, &pr.url, title)?;
+    }
+    if next_body != current_body {
+        forge.edit_body(&target, &pr.url, &next_body)?;
+    }
+    Ok(SyncedText {
+        result: if title.is_none() && next_body == current_body {
+            SyncBodyResult::AlreadySynced
+        } else {
+            SyncBodyResult::Synced(pr.url.clone())
+        },
+        title,
+        applied: (applied != previous).then_some(applied),
+    })
 }
 
 fn sync_pr_body_remote_from_artifact(
@@ -170,6 +215,7 @@ fn sync_pr_body_remote_from_artifact(
 pub(super) fn sync_publications_for_indexes(
     active: &mut ActiveBundle,
     indexes: &[usize],
+    texts: &BTreeMap<String, ResolvedText>,
 ) -> Result<Vec<String>> {
     let jobs: Vec<(usize, RepoEntry)> = indexes
         .iter()
@@ -231,13 +277,14 @@ pub(super) fn sync_publications_for_indexes(
     }
 
     let active_read = &*active;
-    let body_results: Vec<(String, Result<SyncBodyResult>)> = std::thread::scope(|scope| {
+    let body_results: Vec<(String, Result<SyncedText>)> = std::thread::scope(|scope| {
         let handles: Vec<_> = synced_repo_indexes
             .iter()
             .map(|&repo_index| {
                 let repo = active_read.bundle.repos[repo_index].clone();
                 let repo_id = repo.id.clone();
-                scope.spawn(move || (repo_id, sync_pr_body_remote(active_read, repo_index, &repo)))
+                let text = texts.get(&repo_id);
+                scope.spawn(move || (repo_id, sync_pr_body_remote(active_read, &repo, text)))
             })
             .collect();
 
@@ -247,28 +294,52 @@ pub(super) fn sync_publications_for_indexes(
             .collect()
     });
 
+    let mut recorded = false;
     for (repo_id, result) in body_results {
         match result {
-            Ok(SyncBodyResult::Synced(url)) => {
-                println!(
-                    "{}: {} {}",
-                    out::repo(&repo_id),
-                    out::movement("synced"),
-                    url
-                );
-            }
-            Ok(SyncBodyResult::AlreadySynced) => {
-                println!(
-                    "{}: {}",
-                    out::repo(&repo_id),
-                    out::muted("PR body already synced")
-                );
+            Ok(synced) => {
+                match &synced.result {
+                    SyncBodyResult::Synced(url) => println!(
+                        "{}: {} {}",
+                        out::repo(&repo_id),
+                        out::movement("synced"),
+                        url
+                    ),
+                    SyncBodyResult::AlreadySynced => println!(
+                        "{}: {}",
+                        out::repo(&repo_id),
+                        out::muted("PR body already synced")
+                    ),
+                }
+                if let Some(title) = &synced.title {
+                    println!("{}: {} {title}", out::repo(&repo_id), out::muted("title"));
+                }
+                if synced.title.is_some() || synced.applied.is_some() {
+                    if let Some(publication) = active
+                        .bundle
+                        .publications
+                        .iter_mut()
+                        .rev()
+                        .find(|p| p.repo_id == repo_id)
+                    {
+                        if let Some(title) = synced.title {
+                            publication.title = Some(title);
+                        }
+                        if let Some(applied) = synced.applied {
+                            publication.applied = Some(applied);
+                        }
+                        recorded = true;
+                    }
+                }
             }
             Err(error) => {
                 println!("{}: {}", out::repo(&repo_id), out::danger("PR sync failed"));
                 failures.push(format!("{repo_id}: {error:#}"));
             }
         }
+    }
+    if recorded {
+        save_active_bundle(active)?;
     }
 
     Ok(failures)

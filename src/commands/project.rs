@@ -248,6 +248,116 @@ pub fn set_project_repo_draft(
     Ok(())
 }
 
+/// Set the project or per-repo title/body policy `knit publish create` reads.
+/// Draft settings in the same policy are left alone.
+pub fn set_project_publish(
+    project_name: Option<&str>,
+    repo_id: Option<&str>,
+    title: Option<&str>,
+    body_file: Option<&str>,
+    body_fallback: Option<&str>,
+    clear: bool,
+) -> Result<()> {
+    if !clear && title.is_none() && body_file.is_none() && body_fallback.is_none() {
+        bail!("Pass --title, --body-file, --body-fallback, or --clear.");
+    }
+    if title.or(body_file).is_some_and(|v| v.trim().is_empty()) {
+        bail!("--title and --body-file need a non-empty value; use --clear to remove them.");
+    }
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let config = load_config(&root)?;
+    let project_id = project_name
+        .map(slugify)
+        .or(config.active_project)
+        .context("No project selected. Pass --project <name> or run `knit init <name>`.")?;
+    let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
+    let path = project_path(&root, &project_id);
+    let mut project: KnitProject = read_json(&path)?;
+    let mut policy = project.publish.take().unwrap_or_default();
+    let mut settings = Vec::new();
+    let scope = if let Some(repo_id) = repo_id {
+        let repo_id = slugify(repo_id);
+        if !project.repos.iter().any(|repo| repo.id == repo_id) {
+            bail!("Project `{project_id}` has no repo `{repo_id}`.");
+        }
+        if body_fallback.is_some() {
+            bail!("--body-fallback is project-wide; omit the repo.");
+        }
+        let entry = policy.repos.entry(repo_id.clone()).or_default();
+        if clear {
+            entry.title = None;
+            entry.body_file = None;
+        }
+        entry.title = title.map(str::to_owned).or(entry.title.take());
+        entry.body_file = body_file.map(str::to_owned).or(entry.body_file.take());
+        settings.extend(entry.title.as_ref().map(|t| format!("title \"{t}\"")));
+        settings.extend(entry.body_file.as_ref().map(|f| format!("body file {f}")));
+        if entry.draft.is_none()
+            && entry.title.is_none()
+            && entry.body_file.is_none()
+            && entry.extensions.is_empty()
+        {
+            policy.repos.remove(&repo_id);
+        }
+        repo_id
+    } else {
+        if clear {
+            policy.title = None;
+            policy.body = None;
+        }
+        if let Some(title) = title {
+            policy.title = Some(
+                serde_json::from_value(title.into()).with_context(|| {
+                    format!("--title without a repo must be commit-group, bundle-title, or file, not `{title}`")
+                })?,
+            );
+        }
+        if body_file.is_some() || body_fallback.is_some() {
+            let body = policy.body.get_or_insert_with(Default::default);
+            body.file = body_file.map(str::to_owned).or(body.file.take());
+            if let Some(fallback) = body_fallback {
+                body.fallback = Some(serde_json::from_value(fallback.into())?);
+            }
+        }
+        let name = |value: serde_json::Value| value.as_str().unwrap_or_default().to_owned();
+        settings.extend(
+            policy
+                .title
+                .map(|t| format!("title {}", name(serde_json::json!(t)))),
+        );
+        if let Some(body) = &policy.body {
+            settings.extend(body.file.as_ref().map(|f| format!("body file {f}")));
+            settings.extend(
+                body.fallback
+                    .map(|f| format!("body fallback {}", name(serde_json::json!(f)))),
+            );
+        }
+        "project".to_string()
+    };
+    let unset = policy.draft.is_none()
+        && policy.title.is_none()
+        && policy.body.is_none()
+        && policy.repos.is_empty()
+        && policy.extensions.is_empty();
+    project.publish = (!unset).then_some(policy);
+    project.updated_at = now_iso();
+    write_json(&path, &project)?;
+
+    let summary = if settings.is_empty() {
+        "uses default titles and bodies".to_string()
+    } else {
+        settings.join(", ")
+    };
+    println!(
+        "{} {} {}",
+        out::heading("Project publish:"),
+        out::repo(&scope),
+        out::movement(&summary)
+    );
+    Ok(())
+}
+
 pub fn refresh_project_agents(name: Option<&str>) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;

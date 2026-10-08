@@ -223,6 +223,15 @@ impl Forge for Bitbucket {
         )
     }
 
+    fn edit_title(&self, target: &PrTarget, selector: &str, title: &str) -> Result<()> {
+        self.edit(
+            target,
+            selector,
+            &serde_json::to_string(&json!({ "title": title }))
+                .context("failed to encode Bitbucket pull request title payload")?,
+        )
+    }
+
     fn edit_base(&self, target: &PrTarget, selector: &str, base: &str) -> Result<()> {
         self.edit(
             target,

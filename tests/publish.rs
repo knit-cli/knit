@@ -664,6 +664,128 @@ fn pr_create_drafts_only_repos_whose_project_sets_publish_draft() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// `set-publish` writes and clears project-wide and per-repo title/body policy
+/// without touching drafts; with no policy, `PR-<repo>.md` in the bundle root
+/// supplies the review body and title, as `--dry-run` shows.
+#[test]
+fn set_publish_writes_and_clears_policy_and_dry_run_shows_default_body_file() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collaborator) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collaborator) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "bodies"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    let project_path = workspace.join(".knit/projects/bodies.project.json");
+    let publish = || -> Value {
+        let project: Value =
+            serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+        project["publish"].clone()
+    };
+
+    let set = knit(
+        &workspace,
+        [
+            "project",
+            "set-publish",
+            "--title",
+            "file",
+            "--body-file",
+            "PR-{repo}.md",
+            "--body-fallback",
+            "upstream-template",
+        ],
+    );
+    assert!(set.contains("title file"), "{set}");
+    assert_eq!(
+        publish(),
+        json!({"title": "file", "body": {"file": "PR-{repo}.md", "fallback": "upstream-template"}})
+    );
+    knit(
+        &workspace,
+        [
+            "project",
+            "set-publish",
+            "frontend",
+            "--title",
+            "Frontend title",
+            "--body-file",
+            "frontend-review.md",
+        ],
+    );
+    assert_eq!(
+        publish()["repos"],
+        json!({"frontend": {"title": "Frontend title", "bodyFile": "frontend-review.md"}})
+    );
+
+    let bad = knit_fails(
+        &workspace,
+        ["project", "set-publish", "--title", "Not a mode"],
+    );
+    assert!(bad.contains("commit-group, bundle-title, or file"), "{bad}");
+    let bad = knit_fails(
+        &workspace,
+        [
+            "project",
+            "set-publish",
+            "frontend",
+            "--body-fallback",
+            "knit",
+        ],
+    );
+    assert!(bad.contains("project-wide"), "{bad}");
+    knit_fails(&workspace, ["project", "set-publish"]);
+
+    let cleared = knit(
+        &workspace,
+        ["project", "set-publish", "frontend", "--clear"],
+    );
+    assert!(
+        cleared.contains("uses default titles and bodies"),
+        "{cleared}"
+    );
+    assert!(publish().get("repos").is_none(), "{}", publish());
+    knit(&workspace, ["project", "set-publish", "--clear"]);
+    assert!(publish().is_null(), "{}", publish());
+
+    knit(&workspace, ["bundle", "body files"]);
+    let bundle_root = workspace.join(".knit/worktrees/body-files");
+    append_line(&bundle_root.join("frontend/app.txt"), "body file change");
+    knit(&workspace, ["commit", "--all", "-m", "Body file change"]);
+    fs::write(
+        bundle_root.join("PR-frontend.md"),
+        "Title: Authored frontend title\nAuthored body\n",
+    )
+    .unwrap();
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    let preview = knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--dry-run"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        preview.contains("title: Authored frontend title")
+            && preview.contains("body source: file:")
+            && preview.contains("PR-frontend.md")
+            && preview.contains("Authored body"),
+        "{preview}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 /// A project workspace with backend/frontend/docs repos in a bundle with
 /// recorded work in all three, ready for lane publishing.
 fn lane_bundle_ready(

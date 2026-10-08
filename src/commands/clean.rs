@@ -404,6 +404,15 @@ fn remove_bundle_worktree_container(root: &Path, bundle_id: &str) {
         return;
     }
     let _ = fs::remove_file(dir.join("AGENTS.md"));
+    if let Ok(entries) = fs::read_dir(&dir) {
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name == "PR.md" || (name.starts_with("PR-") && name.ends_with(".md")) {
+                let _ = fs::remove_file(entry.path());
+            }
+        }
+    }
     remove_empty_dirs(dir);
 }
 

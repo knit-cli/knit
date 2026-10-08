@@ -489,6 +489,7 @@ pub(super) fn report_publish_remote_result(outcome: &PublishRemoteResult, progre
 pub(super) fn apply_publish_remote_result(
     active: &mut ActiveBundle,
     outcome: &PublishRemoteResult,
+    resolved: Option<&ResolvedPublish>,
 ) -> Result<bool> {
     let repo = active.bundle.repos[outcome.repo_index].clone();
     match &outcome.status {
@@ -498,6 +499,16 @@ pub(super) fn apply_publish_remote_result(
         | PublishStatus::Retargeted { summary, .. } => {
             let forge = providers::for_repo(&repo)?;
             providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), summary);
+            if let (PublishStatus::Created(summary), Some(resolved)) = (&outcome.status, resolved) {
+                if let Some(publication) = active
+                    .bundle
+                    .publications
+                    .iter_mut()
+                    .find(|p| p.repo_id == repo.id && p.number == summary.number)
+                {
+                    publication.applied = Some(resolved.applied());
+                }
+            }
             Ok(true)
         }
     }

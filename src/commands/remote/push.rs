@@ -881,6 +881,20 @@ pub fn maybe_sync_bundle_to_remote(
     maybe_sync_bundle_to_remote_with_history(active, remote_overrides, no_remote, force, true)
 }
 
+/// The sync remotes `maybe_sync_bundle_to_remote` pushes to; empty when it would skip.
+pub fn planned_sync_remote_names(remote_overrides: &[String], no_remote: bool) -> Vec<String> {
+    if no_remote {
+        return Vec::new();
+    }
+    let Ok((_, config)) = effective_workspace_config() else {
+        return Vec::new();
+    };
+    if !config.push_sync && remote_overrides.is_empty() {
+        return Vec::new();
+    }
+    resolve_sync_remote_names(&config, remote_overrides)
+}
+
 pub fn maybe_sync_bundle_to_remote_with_history(
     active: &mut ActiveBundle,
     remote_overrides: &[String],

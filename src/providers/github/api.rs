@@ -370,6 +370,24 @@ pub(super) fn edit_body(
     selector: &str,
     body: &str,
 ) -> Result<()> {
+    edit(target, repo_full_name, selector, json!({ "body": body }))
+}
+
+pub(super) fn edit_title(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    title: &str,
+) -> Result<()> {
+    edit(target, repo_full_name, selector, json!({ "title": title }))
+}
+
+fn edit(
+    target: &PrTarget,
+    repo_full_name: &str,
+    selector: &str,
+    fields: serde_json::Value,
+) -> Result<()> {
     if target.contribution.is_some() {
         if !target.verify_head {
             bail!("PR mutation requires exact head verification");
@@ -378,7 +396,7 @@ pub(super) fn edit_body(
     }
     let number = selector_pr_number(selector)
         .with_context(|| format!("could not determine GitHub PR number from `{selector}`"))?;
-    let payload = serde_json::to_string(&json!({ "body": body }))
+    let payload = serde_json::to_string(&fields)
         .context("failed to encode GitHub pull request edit payload")?;
     let endpoint = pull_request_api_item_endpoint(repo_full_name, number);
     github_api_output(target, "PATCH", &endpoint, Some(&payload))?;

@@ -359,6 +359,7 @@ mod tests {
                 state: (*state).to_string(),
                 title: None,
                 author: None,
+                applied: None,
                 updated_at: "2026-05-05T00:00:00.000Z".to_string(),
             })
             .collect();

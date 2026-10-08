@@ -994,6 +994,10 @@ case "$sub" in
           edited_base="$2"
           shift 2
           ;;
+        --title)
+          printf '%s\n' "$2" > "$GH_FAKE_DIR/edit-$pr_repo.title"
+          shift 2
+          ;;
         --body-file)
           body_file="$2"
           shift 2
