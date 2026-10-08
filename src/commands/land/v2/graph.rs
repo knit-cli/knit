@@ -122,6 +122,7 @@ pub(super) fn effect(step: &Value) -> &str {
     step["effect"]
         .as_str()
         .unwrap_or_else(|| match step["type"].as_str() {
+            Some("merge_pr") if super::gates::upstream_merge(step) => "read_only",
             Some("merge_pr" | "merge_branch") => "source",
             Some("wait_checks" | "await_update") => "read_only",
             Some("manual") if step["acknowledge"] == "resume" => "read_only",

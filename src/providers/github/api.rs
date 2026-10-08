@@ -357,6 +357,13 @@ pub(super) fn merged_revision(
     })
 }
 
+pub(super) fn can_merge(target: &PrTarget, repo_full_name: &str) -> Result<Option<bool>> {
+    let output = github_api_output(target, "GET", &format!("repos/{repo_full_name}"), None)?;
+    let repository: serde_json::Value =
+        serde_json::from_str(&output).context("failed to decode GitHub repository")?;
+    Ok(repository["permissions"]["push"].as_bool())
+}
+
 pub(super) fn edit_body(
     target: &PrTarget,
     repo_full_name: &str,

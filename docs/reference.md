@@ -448,6 +448,16 @@ completed steps. A concurrent failure outranks a pause and follows normal recove
 policy. A pause alone never triggers recovery or bundle finalization. If another
 landing supersedes this run, resume refuses; generate and review a fresh plan.
 
+A review opened from a fork into a repository this account cannot push to (GitHub
+reports `permissions.push: false`) is landed by that repository's maintainers.
+Generation marks its `merge_pr` step `mergedBy: "upstream"` with `effect: "read_only"`
+and `recovery: {"mode": "none"}`: the run never merges or reverts it. A merged review
+is recorded as landed with its merged revision, an open one pauses the run, and one
+closed without merging fails it. `knit land check` lists these reviews as awaiting
+maintainers; run `knit land resume` after they merge. When the last one merges the
+landing finalizes like any terminal landing. Delete `mergedBy` from a step to merge
+it yourself.
+
 `--acknowledge <step>` is repeatable and `--note` records up to 4096 bytes with the
 acknowledgements. An unchanged `await_update` head pauses unless explicitly
 acknowledged as already containing the bump. A changed head must append to the
