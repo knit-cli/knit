@@ -6,8 +6,9 @@
 //! per-repo assessment is shared with `knit publish status --live`.
 
 use crate::checkout::checkout_dir;
+use crate::model::{Gate, GateActor, GateState};
 use crate::output as out;
-use crate::providers::{self, publication_for_repo, CheckRun};
+use crate::providers::{self, gates, publication_for_repo};
 use crate::store::{load_active_bundle, ActiveBundle};
 use anyhow::{bail, Result};
 use std::path::PathBuf;
@@ -19,15 +20,16 @@ pub(crate) struct LandReadiness {
     pub state: String,
     /// `clean`, `conflict`, `unknown`, or `-` for terminal states.
     pub mergeable: String,
-    /// `passed`, `failed`, `pending`, `none`, or `-`.
+    /// `passed`, `failed`, `pending`, `unknown`, `none`, or `-`.
     pub checks: String,
-    /// `approved`, `changes`, `none`, or `-`.
+    /// `approved`, `required`, `changes`, `unknown`, `none`, or `-`.
     pub review: String,
     pub verdict: String,
     /// True when the PR is not landable yet (so callers can color/aggregate).
     pub blocked: bool,
     /// The target repository's maintainers merge this review, not this account.
     pub upstream: bool,
+    pub gates: Vec<Gate>,
 }
 
 pub fn check_landing() -> Result<()> {
@@ -96,6 +98,7 @@ pub fn check_landing() -> Result<()> {
     for (index, url) in &publications {
         let readiness = assess_landing_readiness(&active, &active.bundle.repos[*index], url);
         print_readiness_row(&readiness);
+        print_open_gates(&readiness);
         if readiness.state == "MERGED" {
             landed += 1;
         } else if readiness.upstream {
@@ -139,6 +142,32 @@ pub fn check_landing() -> Result<()> {
     Ok(())
 }
 
+pub(crate) fn print_open_gates(r: &LandReadiness) {
+    for gate in gates::open(&r.gates) {
+        let state = format!("{:<8}", gate_state(gate.state));
+        let state = match gate.state {
+            GateState::Blocked => out::danger(&state),
+            GateState::Pending => out::warn(&state),
+            _ => out::muted(&state),
+        };
+        let actor = match gate.actor {
+            GateActor::You => "you",
+            GateActor::Maintainers => "maintainers",
+            GateActor::Host => "host",
+        };
+        println!("{:16}  {state}  {actor:<11}  {}", "", gate.summary);
+    }
+}
+
+fn gate_state(state: GateState) -> &'static str {
+    match state {
+        GateState::Met => "met",
+        GateState::Pending => "pending",
+        GateState::Blocked => "blocked",
+        GateState::Unknown => "unknown",
+    }
+}
+
 /// Render one readiness row, coloring the verdict by landability.
 pub(crate) fn print_readiness_row(r: &LandReadiness) {
     let verdict = if r.state == "MERGED" {
@@ -162,8 +191,6 @@ pub(crate) fn print_readiness_row(r: &LandReadiness) {
     );
 }
 
-/// Fetch a publication's live PR state and classify its landing readiness. Forge
-/// errors are captured into the verdict rather than aborting the whole table.
 fn awaiting(upstream: usize) -> String {
     match upstream {
         0 => String::new(),
@@ -171,6 +198,8 @@ fn awaiting(upstream: usize) -> String {
     }
 }
 
+/// Fetch a publication's live PR state and classify its landing readiness. Forge
+/// errors are captured into the verdict rather than aborting the whole table.
 pub(crate) fn assess_landing_readiness(
     active: &ActiveBundle,
     repo: &crate::model::RepoEntry,
@@ -186,6 +215,7 @@ pub(crate) fn assess_landing_readiness(
         verdict: String::new(),
         blocked: true,
         upstream: false,
+        gates: Vec::new(),
     };
 
     let forge = match providers::for_repo(repo) {
@@ -242,14 +272,16 @@ pub(crate) fn assess_landing_readiness(
         _ => {}
     }
 
-    if pr.is_draft.unwrap_or(false) {
-        return LandReadiness {
-            state,
-            verdict: "draft".to_string(),
-            ..base
-        };
-    }
-
+    let gates = match forge.gates(&target, &pr) {
+        Ok(gates) => gates,
+        Err(error) => {
+            return LandReadiness {
+                state,
+                verdict: format!("gates unavailable: {error}"),
+                ..base
+            }
+        }
+    };
     let mergeable = if pr.is_conflicting() {
         "conflict"
     } else if pr.mergeable.as_deref() == Some("MERGEABLE") {
@@ -257,33 +289,29 @@ pub(crate) fn assess_landing_readiness(
     } else {
         "unknown"
     };
-    let review = match pr.review_decision.as_deref() {
-        Some("APPROVED") => "approved",
-        Some("CHANGES_REQUESTED") => "changes",
-        _ => "none",
+    let column = |kind: &str, labels: [&'static str; 4]| {
+        gates
+            .iter()
+            .find(|gate| gate.kind == kind)
+            .map(|gate| match gate.state {
+                GateState::Met => labels[0],
+                GateState::Pending => labels[1],
+                GateState::Blocked => labels[2],
+                GateState::Unknown => labels[3],
+            })
+            .unwrap_or("none")
     };
-    let (checks, checks_outcome) = match forge.check_runs(&target, publication_url, true) {
-        Ok(runs) => checks_label(&runs),
-        Err(_) => ("unknown".to_string(), ChecksOutcome::Unknown),
-    };
+    let checks = column("checks", ["passed", "pending", "failed", "unknown"]);
+    let review = column("review", ["approved", "required", "changes", "unknown"]);
 
-    let (verdict, blocked) = if pr.is_conflicting() {
-        ("conflict — run knit land update".to_string(), true)
-    } else if matches!(checks_outcome, ChecksOutcome::Failed) {
-        ("checks failing".to_string(), true)
-    } else if matches!(checks_outcome, ChecksOutcome::Pending) {
-        ("checks pending".to_string(), true)
-    } else if review == "changes" {
-        ("changes requested".to_string(), true)
-    } else {
-        ("ready".to_string(), false)
-    };
     let upstream = crate::contribution::cross_repository(repo).unwrap_or(false)
-        && matches!(forge.can_merge(&target), Ok(Some(false)));
-    let (verdict, blocked) = match (upstream, blocked) {
-        (true, true) => (format!("awaiting maintainers ({verdict})"), false),
-        (true, false) => ("awaiting maintainers".to_string(), false),
-        (false, _) => (verdict, blocked),
+        && gates.iter().any(|gate| gate.kind == "merge_permission");
+    let yours = gates::open(&gates).any(|gate| gate.actor == GateActor::You);
+    let (verdict, blocked) = match gates::headline(&gates) {
+        None => ("ready".to_string(), false),
+        Some(headline) if upstream && yours => (format!("awaiting maintainers; {headline}"), false),
+        Some(_) if upstream => ("awaiting maintainers".to_string(), false),
+        Some(headline) => (headline, true),
     };
 
     LandReadiness {
@@ -291,40 +319,11 @@ pub(crate) fn assess_landing_readiness(
         number: pr.number,
         state,
         mergeable: mergeable.to_string(),
-        checks,
+        checks: checks.to_string(),
         review: review.to_string(),
         verdict,
         blocked,
         upstream,
-    }
-}
-
-enum ChecksOutcome {
-    None,
-    Passed,
-    Pending,
-    Failed,
-    Unknown,
-}
-
-fn checks_label(runs: &[CheckRun]) -> (String, ChecksOutcome) {
-    if runs.is_empty() {
-        return ("none".to_string(), ChecksOutcome::None);
-    }
-    let failed = runs.iter().any(|run| {
-        matches!(run.bucket.as_deref(), Some("fail" | "cancel"))
-            || matches!(run.state.as_deref(), Some("FAILURE" | "CANCELLED"))
-    });
-    if failed {
-        return ("failed".to_string(), ChecksOutcome::Failed);
-    }
-    let pending = runs.iter().any(|run| {
-        !matches!(run.bucket.as_deref(), Some("pass" | "skipping"))
-            && !matches!(run.state.as_deref(), Some("SUCCESS" | "SKIPPED"))
-    });
-    if pending {
-        ("pending".to_string(), ChecksOutcome::Pending)
-    } else {
-        ("passed".to_string(), ChecksOutcome::Passed)
+        gates,
     }
 }

@@ -4,6 +4,7 @@
 //! (CLI-free) API path.
 
 mod api;
+mod gates;
 mod transport;
 
 use super::{
@@ -195,6 +196,10 @@ impl Forge for GitHub {
         })
     }
 
+    fn gates(&self, target: &PrTarget, pr: &PullRequest) -> Result<Vec<crate::model::Gate>> {
+        gates::gates(target, pr)
+    }
+
     fn can_merge(&self, target: &PrTarget) -> Result<Option<bool>> {
         match &target.repo_full_name {
             Some(repo_full_name) => api::can_merge(target, repo_full_name),
@@ -357,7 +362,7 @@ impl Forge for GitHub {
             OsString::from("checks"),
             OsString::from(selector),
             OsString::from("--json"),
-            OsString::from("name,state,bucket"),
+            OsString::from("name,state,bucket,link"),
         ];
         if required_only {
             args.push(OsString::from("--required"));

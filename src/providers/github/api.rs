@@ -175,6 +175,8 @@ struct GitHubApiCheckRun {
     status: Option<String>,
     #[serde(default)]
     conclusion: Option<String>,
+    #[serde(default)]
+    html_url: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -188,6 +190,8 @@ struct GitHubApiStatus {
     #[serde(default)]
     context: Option<String>,
     state: String,
+    #[serde(default)]
+    target_url: Option<String>,
 }
 
 impl GitHubApiPullRequest {
@@ -675,6 +679,7 @@ impl From<GitHubApiCheckRun> for CheckRun {
             name: run.name,
             state,
             bucket,
+            url: run.html_url,
         }
     }
 }
@@ -690,11 +695,12 @@ impl From<GitHubApiStatus> for CheckRun {
             name: status.context.unwrap_or_else(|| "status".to_string()),
             state,
             bucket,
+            url: status.target_url.filter(|url| !url.is_empty()),
         }
     }
 }
 
-fn encode_query_component(input: &str) -> String {
+pub(super) fn encode_query_component(input: &str) -> String {
     let mut encoded = String::new();
     for byte in input.bytes() {
         match byte {
@@ -714,7 +720,7 @@ fn encode_path_component(input: &str) -> String {
     encode_path(input, false)
 }
 
-fn encode_path_allow_slash(input: &str) -> String {
+pub(super) fn encode_path_allow_slash(input: &str) -> String {
     encode_path(input, true)
 }
 

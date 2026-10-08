@@ -80,6 +80,8 @@ struct GitLabJob {
     #[serde(default)]
     name: Option<String>,
     status: String,
+    #[serde(default)]
+    web_url: Option<String>,
 }
 
 impl Forge for GitLab {
@@ -658,6 +660,7 @@ impl From<GitLabJob> for CheckRun {
             name: job.name.unwrap_or_else(|| "job".to_string()),
             state: Some(state.to_string()),
             bucket: Some(bucket.to_string()),
+            url: job.web_url,
         }
     }
 }
@@ -859,6 +862,7 @@ fn pipeline_check(pipeline: Option<GlabPipeline>) -> Vec<CheckRun> {
         name: format!("pipeline ({status})"),
         state: Some(state.to_string()),
         bucket: Some(bucket.to_string()),
+        url: None,
     }]
 }
 

@@ -5,7 +5,7 @@
 use super::policy::ResolvedText;
 use super::pr_body::{replace_prose, sync_knit_pr_body};
 use crate::checkout::checkout_dir;
-use crate::model::{AppliedText, ChangeGroup, RepoEntry};
+use crate::model::{AppliedText, ChangeGroup, Gate, RepoEntry};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo, PullRequest};
 use crate::store::{save_active_bundle, ActiveBundle};
@@ -21,6 +21,9 @@ enum SyncFetchResult {
     Summary {
         repo_index: usize,
         summary: PullRequest,
+        /// `None` keeps the recorded gates when the host could not be read.
+        gates: Option<Vec<Gate>>,
+        checks: Option<Vec<providers::CheckRun>>,
     },
 }
 
@@ -73,9 +76,13 @@ fn fetch_pr_summary_for_sync(
         return Ok(SyncFetchResult::NoReviewObject);
     };
 
+    let gates = review_gates(forge.as_ref(), &target, &summary);
+    let checks = review_checks(forge.as_ref(), &target, &summary);
     Ok(SyncFetchResult::Summary {
         repo_index,
         summary,
+        gates,
+        checks,
     })
 }
 
@@ -115,10 +122,42 @@ fn fetch_pr_summary_for_sync_from_artifact(
         return Ok(SyncFetchResult::NoReviewObject);
     };
 
+    let gates = review_gates(forge.as_ref(), &target, &summary);
+    let checks = review_checks(forge.as_ref(), &target, &summary);
     Ok(SyncFetchResult::Summary {
         repo_index,
         summary,
+        gates,
+        checks,
     })
+}
+
+fn review_gates(
+    forge: &dyn providers::Forge,
+    target: &providers::PrTarget,
+    summary: &PullRequest,
+) -> Option<Vec<Gate>> {
+    if summary.state.as_deref() != Some("OPEN") {
+        return Some(Vec::new());
+    }
+    forge.gates(target, summary).ok()
+}
+
+fn review_checks(
+    forge: &dyn providers::Forge,
+    target: &providers::PrTarget,
+    summary: &PullRequest,
+) -> Option<Vec<providers::CheckRun>> {
+    if summary.state.as_deref() != Some("OPEN") {
+        return Some(Vec::new());
+    }
+    forge.check_runs(target, &summary.url, false).ok()
+}
+
+fn print_gates(repo_id: &str, gates: &[Gate]) {
+    if let Some(headline) = providers::gates::headline(gates) {
+        println!("{}: {}", out::repo(repo_id), out::warn(&headline));
+    }
 }
 
 fn sync_pr_body_remote(
@@ -259,10 +298,19 @@ pub(super) fn sync_publications_for_indexes(
             Ok(SyncFetchResult::Summary {
                 repo_index,
                 summary,
+                gates,
+                checks,
             }) => {
                 let repo = active.bundle.repos[repo_index].clone();
                 let forge = providers::for_repo(&repo)?;
                 providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
+                if let Some(gates) = gates {
+                    print_gates(&repo.id, &gates);
+                    providers::record_gates(&mut active.bundle, &repo.id, gates);
+                }
+                if let Some(checks) = checks {
+                    providers::record_checks(&mut active.bundle, &repo.id, &checks);
+                }
                 synced_repo_indexes.push(repo_index);
             }
             Err(error) => {
@@ -397,10 +445,19 @@ pub(super) fn sync_publications_for_indexes_from_artifact(
             Ok(SyncFetchResult::Summary {
                 repo_index,
                 summary,
+                gates,
+                checks,
             }) => {
                 let repo = bundle.repos[repo_index].clone();
                 let forge = providers::for_repo(&repo)?;
                 providers::upsert_publication(bundle, &repo, forge.as_ref(), &summary);
+                if let Some(gates) = gates {
+                    print_gates(&repo.id, &gates);
+                    providers::record_gates(bundle, &repo.id, gates);
+                }
+                if let Some(checks) = checks {
+                    providers::record_checks(bundle, &repo.id, &checks);
+                }
                 synced_repo_indexes.push(repo_index);
             }
             Err(error) => {
