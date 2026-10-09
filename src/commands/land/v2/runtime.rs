@@ -447,6 +447,11 @@ fn preflight(
                     identity.sha = pin;
                 }
             }
+            // Maintainers may rebase or squash the branch before they merge it.
+            // Knit merges nothing here, so only the review's identity must match.
+            if super::gates::upstream_merge(step) {
+                target.verify_head = false;
+            }
             if existing.is_some_and(|run| {
                 run["steps"].as_array().into_iter().flatten().any(|s| {
                     s["type"] == "await_update" && s["repoId"] == id && s["status"] == "succeeded"
@@ -474,16 +479,17 @@ fn preflight(
             // A gated repository's head legitimately moves when its update
             // lands; the gate verifies it and the merge is pinned to it.
             if let Some(pin) = plan["bundleHeads"][id].as_str().filter(|_| {
-                !super::gates::gated_repos(plan).contains(id)
-                    || existing.is_some_and(|run| {
-                        run["steps"].as_array().is_some_and(|steps| {
-                            steps.iter().any(|s| {
-                                s["type"] == "await_update"
-                                    && s["repoId"] == id
-                                    && s["status"] == "succeeded"
+                !super::gates::upstream_merge(step)
+                    && (!super::gates::gated_repos(plan).contains(id)
+                        || existing.is_some_and(|run| {
+                            run["steps"].as_array().is_some_and(|steps| {
+                                steps.iter().any(|s| {
+                                    s["type"] == "await_update"
+                                        && s["repoId"] == id
+                                        && s["status"] == "succeeded"
+                                })
                             })
-                        })
-                    })
+                        }))
             }) {
                 if pr.head_ref_oid.as_deref().is_some_and(|head| head != pin) {
                     bail!("{id}: live review head differs from reviewed plan");
@@ -1433,8 +1439,18 @@ fn upstream_merge_outcome(
     let publication = crate::providers::publication_for_repo(&typed, repo_id)
         .with_context(|| format!("{repo_id}: {id} waits for a review, but none is recorded"))?;
     let forge = crate::providers::for_repo(repo)?;
-    let target = provider_target(roots, forge.as_ref(), repo, &publication.base_branch)?;
+    let mut target = provider_target(roots, forge.as_ref(), repo, &publication.base_branch)?;
+    target.verify_head = false;
     let pr = forge.view(&target, &publication.url)?;
+    let reviewed = plan["bundleHeads"][repo_id]
+        .as_str()
+        .map(str::to_owned)
+        .or_else(|| target.contribution.as_ref().map(|c| c.sha.clone()))
+        .or_else(|| repo.head_sha.clone());
+    let rewritten = matches!(
+        (reviewed.as_deref(), pr.head_ref_oid.as_deref()),
+        (Some(reviewed), Some(live)) if reviewed != live
+    );
     let desired = step["targetBranch"]
         .as_str()
         .or(plan["targetBranches"][repo_id].as_str())
@@ -1449,8 +1465,32 @@ fn upstream_merge_outcome(
         {
             bail!("{repo_id}: the review merged into another destination");
         }
-        let mut output = json!({"attribution":"already_satisfied","mergedBy":"upstream","publicationUrl":publication.url,"source":pr.head_ref_oid,"targetBranch":desired});
+        let mut output = json!({"attribution":"already_satisfied","mergedBy":"upstream","publicationUrl":publication.url,"source":pr.head_ref_oid,"targetBranch":desired,"reviewedHead":reviewed,"mergedHead":pr.head_ref_oid});
         pin_merge_result(step, bundle, roots, &mut output)?;
+        if rewritten {
+            let matches = rewritten_patch_matches(repo_id, bundle, roots, &output, &pr);
+            output["patchMatches"] = json!(matches);
+            let short = |sha: &Value| {
+                sha.as_str()
+                    .unwrap_or_default()
+                    .chars()
+                    .take(7)
+                    .collect::<String>()
+            };
+            let (from, to) = (short(&output["reviewedHead"]), short(&output["mergedHead"]));
+            match matches {
+                Some(true) => eprintln!(
+                    "{repo_id}: the maintainers rewrote the review before merging it ({from} became {to}); the change is the same."
+                ),
+                Some(false) => eprintln!(
+                    "{repo_id}: the maintainers merged a different change than the one reviewed ({from} became {to}); recorded as landed, check {}.",
+                    publication.url
+                ),
+                None => eprintln!(
+                    "{repo_id}: the maintainers rewrote the review before merging it ({from} became {to}); Knit could not compare the two changes."
+                ),
+            }
+        }
         return Ok(output);
     }
     if pr.state.as_deref() != Some("OPEN") {
@@ -1459,13 +1499,99 @@ fn upstream_merge_outcome(
             publication.url
         );
     }
+    let updated = if rewritten {
+        " (a maintainer updated its branch)"
+    } else {
+        ""
+    };
+    let next = "Run `knit land resume` after they merge it; `knit land check` shows where each review stands.";
     Err(super::gates::LandingPaused {
         step: id.to_owned(),
         instructions: step["instructions"].as_str().unwrap_or_default().to_owned(),
-        waiting_for: format!("{repo_id}'s maintainers to merge {}", publication.url),
-        next: "Run `knit land resume` after they merge it; `knit land check` shows where each review stands.".to_owned(),
+        waiting_for: format!(
+            "{repo_id}'s maintainers to merge {}{updated}",
+            publication.url
+        ),
+        next: if rewritten {
+            format!("A maintainer updated its branch; Knit records whatever they merge. {next}")
+        } else {
+            next.to_owned()
+        },
     }
     .into())
+}
+
+/// Whether a review the maintainers rewrote still carries the reviewed change,
+/// or `None` when the commits cannot be compared.
+fn rewritten_patch_matches(
+    repo_id: &str,
+    bundle: &Value,
+    roots: &Roots,
+    output: &Value,
+    pr: &crate::providers::PullRequest,
+) -> Option<bool> {
+    let root = roots.get(repo_id)?;
+    let reviewed = output["reviewedHead"].as_str()?;
+    let merged = output["mergedHead"].as_str()?;
+    let revision = output["revision"].as_str()?;
+    let source = super::mergeability::bundle_remote(bundle, repo_id, None, true);
+    let destination = super::mergeability::destination(bundle, repo_id);
+    let available = |sha: &str| {
+        let object = format!("{sha}^{{commit}}");
+        git(root, &["cat-file", "-e", &object]).is_ok()
+            || [
+                (source, sha.to_owned()),
+                (destination, sha.to_owned()),
+                (destination, format!("pull/{}/head", pr.number)),
+            ]
+            .iter()
+            .any(|(remote, spec)| {
+                git(root, &["fetch", "--no-tags", remote, spec]).is_ok()
+                    && git(root, &["cat-file", "-e", &object]).is_ok()
+            })
+    };
+    if !available(reviewed) || !available(merged) {
+        return None;
+    }
+    // The destination just before the merge tells each branch apart from the
+    // upstream history it was based on, whatever merge method was used.
+    let upstream = git(root, &["rev-parse", &format!("{revision}^1")])
+        .ok()
+        .or_else(|| repo_base(bundle, repo_id))?;
+    let reviewed = patch_id(root, &upstream, reviewed)?;
+    let merged = patch_id(root, &upstream, merged)?;
+    Some(reviewed == merged)
+}
+
+fn repo_base(bundle: &Value, repo_id: &str) -> Option<String> {
+    bundle["repos"]
+        .as_array()?
+        .iter()
+        .find(|r| r["id"] == repo_id)?["baseSha"]
+        .as_str()
+        .map(str::to_owned)
+}
+
+fn patch_id(root: &Path, upstream: &str, head: &str) -> Option<String> {
+    use std::process::{Command, Stdio};
+    let base = git(root, &["merge-base", upstream, head]).ok()?;
+    let mut diff = Command::new("git")
+        .args(["diff", "--binary", &base, head])
+        .current_dir(root)
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let output = Command::new("git")
+        .args(["patch-id", "--stable"])
+        .current_dir(root)
+        .stdin(diff.stdout.take()?)
+        .output()
+        .ok()?;
+    if !diff.wait().ok()?.success() || !output.status.success() {
+        return None;
+    }
+    let id = String::from_utf8_lossy(&output.stdout);
+    Some(id.split_whitespace().next().unwrap_or_default().to_owned())
 }
 
 fn gate_outcome(
