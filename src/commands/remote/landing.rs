@@ -304,6 +304,39 @@ fn retain_record(root: &Path, record: &PlanRecord) -> Result<()> {
     private_save(&path, &serde_json::to_value(retained)?)
 }
 
+fn validate_historical_run(run: &Value, bundle: &str, project_id: &str) -> Result<()> {
+    let plan = &run["plan"];
+    if run["kind"] != "KnitLandRun"
+        || plan["kind"] != "KnitLandPlan"
+        || plan["schemaVersion"] != "0.2"
+        || plan["bundleId"] != bundle
+        || run["planHash"] != document_hash(plan)
+        || plan["sourceProjectId"] != project_id
+        || run["sourceBundle"]["id"] != bundle
+        || run["sourceBundle"]["projectId"] != project_id
+    {
+        bail!("a landing run has an invalid embedded plan hash or source scope");
+    }
+    if let Some(project) = run.get("sourceProject") {
+        let source = crate::commands::land::v2::validation(plan, Some(&run["sourceBundle"]), None);
+        if source["valid"] != true {
+            bail!("Invalid historical landing source: {}", source["errors"]);
+        }
+        if project["id"] != project_id {
+            bail!("Invalid historical landing project snapshot: it belongs to another project");
+        }
+        let snapshot =
+            crate::commands::land::v2::validation(plan, Some(&run["sourceBundle"]), Some(project));
+        if snapshot["valid"] != true {
+            bail!(
+                "Invalid historical landing project snapshot: {}",
+                snapshot["errors"]
+            );
+        }
+    }
+    Ok(())
+}
+
 fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
     outgoing_scoped(root, index, None)
 }
@@ -356,6 +389,7 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
     let mut histories: BTreeMap<String, BTreeMap<String, ExecutedPlan>> = BTreeMap::new();
     let mut run_hashes = BTreeMap::new();
     let mut deferred_authored = std::collections::BTreeSet::new();
+    let mut withheld: BTreeMap<String, std::collections::BTreeSet<String>> = BTreeMap::new();
     for path in json_files(&root.join(".knit/land-runs"), ".run.json")? {
         let run: Value = read_json(&path)?;
         if run["schemaVersion"] != "0.2" {
@@ -401,35 +435,17 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
             }
             continue;
         }
+        // One old receipt that today's validation refuses must not hold back
+        // every other bundle. Its whole bundle stays local: uploading the
+        // bundle's other revisions without it would rewrite their ancestry.
+        if let Err(reason) = validate_historical_run(&run, bundle, &index.project) {
+            withheld
+                .entry(format!("{reason:#}"))
+                .or_default()
+                .insert(bundle.to_owned());
+            continue;
+        }
         let plan = &run["plan"];
-        if run["kind"] != "KnitLandRun"
-            || plan["kind"] != "KnitLandPlan"
-            || plan["schemaVersion"] != "0.2"
-            || plan["bundleId"] != bundle
-            || run["planHash"] != document_hash(plan)
-            || plan["sourceProjectId"] != index.project
-            || run["sourceBundle"]["id"] != bundle
-            || run["sourceBundle"]["projectId"] != index.project
-        {
-            bail!("Landing run {id} has an invalid embedded plan hash or source scope");
-        }
-        if let Some(project) = run.get("sourceProject") {
-            let source =
-                crate::commands::land::v2::validation(plan, Some(&run["sourceBundle"]), None);
-            if source["valid"] != true {
-                bail!("Invalid historical landing source: {}", source["errors"]);
-            }
-            if project["id"] != index.project
-                || crate::commands::land::v2::validation(
-                    plan,
-                    Some(&run["sourceBundle"]),
-                    Some(project),
-                )["valid"]
-                    != true
-            {
-                bail!("Invalid historical landing project snapshot for run {id}");
-            }
-        }
         let key = plan_key(plan)?;
         let plan_hash = document_hash(plan);
         let known = index.plan_versions.get(&plan_hash);
@@ -472,6 +488,31 @@ fn outgoing_scoped(root: &Path, index: &SyncIndex, bundle_slug: Option<&str>) ->
             });
         }
     }
+    // Named once per reason: these are usually old receipts that a later
+    // validation rule refuses, and every routine sync would repeat them.
+    for (reason, bundles) in &withheld {
+        let shown: Vec<&str> = bundles.iter().take(3).map(String::as_str).collect();
+        let more = match bundles.len().saturating_sub(shown.len()) {
+            0 => String::new(),
+            rest => format!(" and {rest} more"),
+        };
+        crate::human!(
+            "{} {}{more}: {reason}. Their landing plans and runs stay local.",
+            crate::output::warn("Landing history not synced:"),
+            shown.join(", ")
+        );
+    }
+    let withheld: std::collections::BTreeSet<String> = withheld.into_values().flatten().collect();
+    let withheld_plan = |plan: &Value| {
+        plan["bundleId"]
+            .as_str()
+            .is_some_and(|bundle| withheld.contains(bundle))
+    };
+    result
+        .runs
+        .retain(|record| !withheld.contains(record.bundle_slug.as_str()));
+    histories.retain(|_, revisions| !revisions.values().any(|(plan, ..)| withheld_plan(plan)));
+    authored.retain(|_, plan| !withheld_plan(plan));
     authored.retain(|_, plan| !deferred_authored.contains(&document_hash(plan)));
     let keys: std::collections::BTreeSet<_> =
         authored.keys().chain(histories.keys()).cloned().collect();
@@ -684,6 +725,16 @@ fn install_plan(root: &Path, index: &mut SyncIndex, record: &PlanRecord) -> Resu
     Ok(())
 }
 
+fn receipt_core(run: &Value) -> Value {
+    let mut core = run.clone();
+    if let Some(fields) = core.as_object_mut() {
+        for key in ["finalization", "finalized", "resultBundle", "updatedAt"] {
+            fields.remove(key);
+        }
+    }
+    core
+}
+
 fn install_run(root: &Path, index: &mut SyncIndex, record: &RunRecord) -> Result<()> {
     identifier(&record.bundle_slug)?;
     let id = identifier(text(&record.run, "id")?)?;
@@ -712,6 +763,13 @@ fn install_run(root: &Path, index: &mut SyncIndex, record: &RunRecord) -> Result
     if path.exists() {
         let local: Value = read_json(&path)?;
         let local_hash = document_hash(&local);
+        // Svartal keeps the receipt the executor handed it. Finalization
+        // (archive, ledger, sync status) is then written only to the local
+        // copy, so that copy is the same receipt, already synced.
+        if local_hash != hash && receipt_core(&local) == receipt_core(&record.run) {
+            index.runs.insert(id.into(), local_hash);
+            return Ok(());
+        }
         if local_hash != hash && index.runs.get(id) != Some(&local_hash) {
             let candidate = root
                 .join(".knit/land-runs/conflicts")
@@ -1374,6 +1432,25 @@ mod tests {
         let mut newer = r;
         newer.run["detail"] = json!("remote");
         assert!(install_run(&root, &mut index, &newer).is_err());
+        let actual: Value = read_json(&root.join(".knit/land-runs/run-demo.run.json")).unwrap();
+        assert_eq!(actual, local);
+        fs::remove_dir_all(root).unwrap();
+    }
+    #[test]
+    fn local_finalization_alone_counts_as_the_synced_receipt() {
+        let root = temp();
+        let mut index = SyncIndex::default();
+        let remote = RunRecord {
+            bundle_slug: "demo".into(),
+            run: json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":"run-demo","bundleId":"demo","status":"succeeded","updatedAt":"2026-10-09T10:00:00Z"}),
+        };
+        let mut local = remote.run.clone();
+        local["finalization"] = json!({"archive":"succeeded","synchronization":"failed"});
+        local["finalized"] = json!(true);
+        local["updatedAt"] = json!("2026-10-09T10:05:00Z");
+        save(&root.join(".knit/land-runs/run-demo.run.json"), &local).unwrap();
+        install_run(&root, &mut index, &remote).unwrap();
+        assert_eq!(index.runs["run-demo"], document_hash(&local));
         let actual: Value = read_json(&root.join(".knit/land-runs/run-demo.run.json")).unwrap();
         assert_eq!(actual, local);
         fs::remove_dir_all(root).unwrap();
