@@ -29,6 +29,8 @@ struct Fixture {
     wrong_head: Arc<Mutex<bool>>,
     read_only: Arc<Mutex<bool>>,
     maintainer_merged: Arc<Mutex<bool>>,
+    /// How many of the next review reads report mergeability as not computed.
+    computing: Arc<Mutex<u32>>,
 }
 impl Fixture {
     fn new() -> Self {
@@ -108,6 +110,8 @@ impl Fixture {
         let no_push = read_only.clone();
         let maintainer_merged = Arc::new(Mutex::new(false));
         let maintainer = maintainer_merged.clone();
+        let computing = Arc::new(Mutex::new(0));
+        let unsettled = computing.clone();
         let fork = source.clone();
         let api_log = root.join("api.log");
         std::thread::spawn(move || {
@@ -163,7 +167,14 @@ impl Fixture {
                 } else if line.contains("/pulls/7 ") {
                     let head = git(&fork, ["rev-parse", "feature"]).trim().to_owned();
                     let merged = merged || *maintainer.lock().unwrap();
-                    json!({"number":7,"html_url":"https://github.com/upstream/service/pull/7","state":if merged {"closed"}else{"open"},"merged":merged,"merge_commit_sha":head,"draft":false,"mergeable":true,"mergeable_state":"clean","head":{"ref":"feature","sha":head,"repo":{"full_name":if *wrong.lock().unwrap(){"collision/service"}else{"contributor/service"}}},"base":{"ref":base,"repo":{"full_name":"upstream/service"}}})
+                    let mut unsettled = unsettled.lock().unwrap();
+                    let (mergeable, mergeable_state) = if *unsettled > 0 {
+                        *unsettled -= 1;
+                        (Value::Null, "unknown")
+                    } else {
+                        (json!(true), "clean")
+                    };
+                    json!({"number":7,"html_url":"https://github.com/upstream/service/pull/7","state":if merged {"closed"}else{"open"},"merged":merged,"merge_commit_sha":head,"draft":false,"mergeable":mergeable,"mergeable_state":mergeable_state,"head":{"ref":"feature","sha":head,"repo":{"full_name":if *wrong.lock().unwrap(){"collision/service"}else{"contributor/service"}}},"base":{"ref":base,"repo":{"full_name":"upstream/service"}}})
                 } else if line.contains("check-runs") {
                     json!({"check_runs":[]})
                 } else if line.contains("/status") {
@@ -186,6 +197,7 @@ impl Fixture {
             wrong_head,
             read_only,
             maintainer_merged,
+            computing,
         }
     }
     fn cmd(&self, args: &[&str]) -> std::process::Output {
@@ -211,6 +223,68 @@ impl Fixture {
             String::from_utf8_lossy(&o.stderr)
         );
         String::from_utf8_lossy(&o.stdout).into_owned()
+    }
+    /// The target repository refuses this account a merge, so landing waits
+    /// for its maintainers.
+    fn maintainers_merge(&self) {
+        *self.read_only.lock().unwrap() = true;
+        let mut project = read(&self.project);
+        project["landing"] = json!({});
+        let project_id = project["id"].as_str().unwrap().to_owned();
+        write(
+            &self
+                .root
+                .join(format!(".knit/projects/{project_id}.project.json")),
+            &project,
+        );
+        let mut bundle = read(&self.bundle);
+        bundle["projectId"] = json!(project_id);
+        write(&self.bundle, &bundle);
+    }
+    /// A maintainer replays the contribution onto the newest upstream main and
+    /// force-pushes it to the contributor's branch, as maintainer edits allow.
+    fn maintainer_rebases(&self, extra: Option<&str>) -> String {
+        let work = self.root.join("maintainer");
+        git(
+            &self.root,
+            [
+                "clone",
+                self.target.to_str().unwrap(),
+                work.to_str().unwrap(),
+            ],
+        );
+        git(&work, ["config", "user.email", "maintainer@example.test"]);
+        git(&work, ["config", "user.name", "Maintainer"]);
+        git(&work, ["fetch", self.source.to_str().unwrap(), "feature"]);
+        git(&work, ["cherry-pick", "FETCH_HEAD"]);
+        if let Some(text) = extra {
+            fs::write(work.join("feature.txt"), text).unwrap();
+            git(&work, ["commit", "--amend", "--no-edit", "-a"]);
+        }
+        git(
+            &work,
+            [
+                "push",
+                "--force",
+                self.source.to_str().unwrap(),
+                "HEAD:feature",
+            ],
+        );
+        git(&work, ["rev-parse", "HEAD"]).trim().to_owned()
+    }
+    fn maintainer_merges(&self) {
+        git(
+            &self.source,
+            ["push", self.target.to_str().unwrap(), "feature:main"],
+        );
+        *self.maintainer_merged.lock().unwrap() = true;
+    }
+    fn run_path(&self) -> PathBuf {
+        fs::read_dir(self.root.join(".knit/land-runs"))
+            .unwrap()
+            .map(|p| p.unwrap().path())
+            .find(|p| p.extension().is_some_and(|s| s == "json"))
+            .unwrap()
     }
     fn plan(&self, target: Option<&str>) {
         let mut args = vec![
@@ -730,18 +804,7 @@ fn local_update_gate_accepts_new_fork_head_without_relaxing_source_identity() {
 #[test]
 fn landing_waits_for_maintainers_to_merge_a_review_this_account_cannot_merge() {
     let f = Fixture::new();
-    *f.read_only.lock().unwrap() = true;
-    let mut project = read(&f.project);
-    project["landing"] = json!({});
-    let project_id = project["id"].as_str().unwrap().to_owned();
-    write(
-        &f.root
-            .join(format!(".knit/projects/{project_id}.project.json")),
-        &project,
-    );
-    let mut bundle = read(&f.bundle);
-    bundle["projectId"] = json!(project_id);
-    write(&f.bundle, &bundle);
+    f.maintainers_merge();
     f.ok(&["land", "plan", "--out", "plan.json"]);
     let plan = read(&f.root.join("plan.json"));
     let step = &plan["steps"][0];
@@ -772,12 +835,7 @@ fn landing_waits_for_maintainers_to_merge_a_review_this_account_cannot_merge() {
     );
     let log = fs::read_to_string(f.root.join("api.log")).unwrap();
     assert!(!log.lines().any(|l| l.starts_with("PUT ")), "{log}");
-    let run_dir = f.root.join(".knit/land-runs");
-    let run_path = fs::read_dir(&run_dir)
-        .unwrap()
-        .map(|p| p.unwrap().path())
-        .find(|p| p.extension().is_some_and(|s| s == "json"))
-        .unwrap();
+    let run_path = f.run_path();
     assert_eq!(read(&run_path)["status"], "paused");
 
     let head = git(&f.source, ["rev-parse", "feature"]).trim().to_owned();
@@ -798,4 +856,147 @@ fn landing_waits_for_maintainers_to_merge_a_review_this_account_cannot_merge() {
     assert_eq!(read(&f.bundle)["state"], "archived");
     let log = fs::read_to_string(f.root.join("api.log")).unwrap();
     assert!(!log.lines().any(|l| l.starts_with("PUT ")), "{log}");
+}
+
+const APPLY: [&str; 6] = [
+    "land",
+    "apply",
+    "--plan",
+    "plan.json",
+    "--no-remote",
+    "--keep-worktrees",
+];
+
+fn combined(output: &std::process::Output) -> String {
+    format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    )
+}
+
+#[test]
+fn landing_records_a_review_a_maintainer_rebased_before_merging_it() {
+    let f = Fixture::new();
+    f.maintainers_merge();
+    let reviewed = git(&f.source, ["rev-parse", "feature"]).trim().to_owned();
+    let merged = f.maintainer_rebases(None);
+    assert_ne!(merged, reviewed);
+    f.maintainer_merges();
+
+    let check = f.ok(&["land", "check"]);
+    assert!(check.contains("already landed"), "{check}");
+    assert!(!check.contains("unavailable"), "{check}");
+
+    f.ok(&["land", "plan", "--out", "plan.json"]);
+    let output = f.cmd(&APPLY);
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("the change is the same"), "{text}");
+    let run = read(&f.run_path());
+    assert_eq!(run["status"], "succeeded", "{run}");
+    let receipt = &run["steps"][0]["output"];
+    assert_eq!(receipt["reviewedHead"], reviewed, "{receipt}");
+    assert_eq!(receipt["mergedHead"], merged, "{receipt}");
+    assert_eq!(receipt["revision"], merged, "{receipt}");
+    assert_eq!(receipt["patchMatches"], true, "{receipt}");
+    assert_eq!(read(&f.bundle)["state"], "archived");
+    let log = fs::read_to_string(f.root.join("api.log")).unwrap();
+    assert!(!log.lines().any(|l| l.starts_with("PUT ")), "{log}");
+}
+
+#[test]
+fn a_paused_landing_keeps_waiting_when_a_maintainer_rewrites_the_open_review() {
+    let f = Fixture::new();
+    f.maintainers_merge();
+    f.ok(&["land", "plan", "--out", "plan.json"]);
+    let reviewed = git(&f.source, ["rev-parse", "feature"]).trim().to_owned();
+    let paused = f.cmd(&APPLY);
+    assert!(paused.status.success(), "{}", combined(&paused));
+    assert_eq!(read(&f.run_path())["status"], "paused");
+
+    let merged = f.maintainer_rebases(None);
+    let check = f.ok(&["land", "check"]);
+    assert!(
+        check.contains("awaiting maintainers (branch updated by a maintainer)"),
+        "{check}"
+    );
+    let resume = ["land", "resume", "--no-remote", "--keep-worktrees"];
+    let waiting = f.cmd(&resume);
+    let text = combined(&waiting);
+    assert!(waiting.status.success(), "{text}");
+    assert!(text.contains("A maintainer updated its branch"), "{text}");
+    assert_eq!(read(&f.run_path())["status"], "paused");
+
+    f.maintainer_merges();
+    f.ok(&resume);
+    let run = read(&f.run_path());
+    assert_eq!(run["status"], "succeeded", "{run}");
+    let receipt = &run["steps"][0]["output"];
+    assert_eq!(receipt["reviewedHead"], reviewed, "{receipt}");
+    assert_eq!(receipt["mergedHead"], merged, "{receipt}");
+    assert_eq!(receipt["patchMatches"], true, "{receipt}");
+    assert_eq!(read(&f.bundle)["state"], "archived");
+}
+
+#[test]
+fn land_check_waits_for_mergeability_on_a_review_a_maintainer_rewrote() {
+    let f = Fixture::new();
+    f.maintainers_merge();
+    f.maintainer_rebases(None);
+    // The pinned read is refused, and the host has not settled mergeability
+    // by the read without the pin. The re-read must leave the pin off too.
+    *f.computing.lock().unwrap() = 2;
+    let output = f.cmd(&["land", "check"]);
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("mergeability still being computed"), "{text}");
+    assert!(
+        text.contains("awaiting maintainers (branch updated by a maintainer)"),
+        "{text}"
+    );
+    assert!(text.contains("clean"), "{text}");
+    assert!(!text.contains("unavailable"), "{text}");
+}
+
+#[test]
+fn a_review_merged_with_a_different_change_lands_with_a_note() {
+    let f = Fixture::new();
+    f.maintainers_merge();
+    let merged = f.maintainer_rebases(Some("maintainer version\n"));
+    f.maintainer_merges();
+    f.ok(&["land", "plan", "--out", "plan.json"]);
+    let output = f.cmd(&APPLY);
+    let text = combined(&output);
+    assert!(output.status.success(), "{text}");
+    assert!(text.contains("merged a different change"), "{text}");
+    let run = read(&f.run_path());
+    assert_eq!(run["status"], "succeeded", "{run}");
+    assert_eq!(run["steps"][0]["output"]["mergedHead"], merged);
+    assert_eq!(run["steps"][0]["output"]["patchMatches"], false);
+}
+
+#[test]
+fn a_rewritten_review_is_still_refused_where_this_account_can_merge() {
+    let f = Fixture::new();
+    f.maintainer_rebases(None);
+    let result = f.cmd(&["land", "check"]);
+    assert!(
+        combined(&result).contains("contradicts"),
+        "{}",
+        combined(&result)
+    );
+}
+
+#[test]
+fn a_rewritten_review_from_another_source_repository_is_refused() {
+    let f = Fixture::new();
+    f.maintainers_merge();
+    f.maintainer_rebases(None);
+    f.maintainer_merges();
+    *f.wrong_head.lock().unwrap() = true;
+    let result = f.cmd(&["land", "check"]);
+    let text = combined(&result);
+    assert!(text.contains("contradicts"), "{text}");
+    assert!(text.contains("PR unavailable"), "{text}");
 }
