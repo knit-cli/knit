@@ -599,6 +599,8 @@ pub fn run(cli: Cli) -> Result<()> {
                 repos,
                 from_artifact,
                 out,
+                plan,
+                project_file,
                 all,
                 provider,
                 github,
@@ -608,6 +610,8 @@ pub fn run(cli: Cli) -> Result<()> {
                     Some(path) => commands::sync_publications_from_artifact(
                         &path,
                         out.as_deref(),
+                        plan.as_deref(),
+                        project_file.as_deref(),
                         &repos,
                         all,
                         provider.as_deref(),
@@ -651,6 +655,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::land::v2::show(&plan, target.as_deref(), lane.as_deref())
                 }
                 Some(LandCommand::Destinations { json }) => commands::land::v2::destinations(json),
+                Some(LandCommand::Remove { steps, plan }) => commands::land::v2::remove(
+                    plan.as_deref(),
+                    &steps,
+                    target.as_deref(),
+                    lane.as_deref(),
+                ),
                 Some(LandCommand::Validate {
                     plan,
                     from_artifact,

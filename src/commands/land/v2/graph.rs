@@ -659,8 +659,9 @@ pub(crate) fn validation(plan: &Value, bundle: Option<&Value>, project: Option<&
                 .filter_map(|s| s["repoId"].as_str())
                 .collect();
             if plan["terminal"] != false {
+                let already_merged = super::generate::merged_review_repos(&typed);
                 for id in &changed {
-                    if !merge_policy.enabled_for(id) {
+                    if !merge_policy.enabled_for(id) || already_merged.contains(id) {
                         continue;
                     }
                     if !merged.contains(id.as_str()) {

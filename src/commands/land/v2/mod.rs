@@ -5,6 +5,7 @@ mod destinations;
 mod gates;
 mod generate;
 pub use destinations::destinations;
+pub(crate) use generate::{default_plan, destination_path, merged_review_repos};
 mod graph;
 mod mergeability;
 pub(crate) use mergeability::KnownNoEffect;
@@ -13,15 +14,17 @@ pub use preflight::preflight;
 mod ledger;
 mod runtime;
 pub(crate) use ledger::repair_landed_nodes;
+mod remove;
 mod sequence;
+pub use remove::remove;
 mod source;
 pub use source::source;
 #[cfg(test)]
 mod tests;
 use crate::store::read_json;
 use anyhow::{bail, Result};
+pub(super) use generate::display_plan;
 pub use generate::generate;
-pub(super) use generate::{destination_path, display_plan};
 #[cfg(test)]
 pub(crate) use graph::bundle_fingerprint;
 pub(crate) use graph::{bundle_fingerprint_is_stale, canonical_hash, validation};

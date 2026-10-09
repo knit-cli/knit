@@ -361,7 +361,7 @@ fn assess_bundle(
 }
 
 /// Whether the bundle's most recent landing left it open on purpose.
-fn landed_intermediate(bundle: &ChangeGroup) -> bool {
+pub(crate) fn landed_intermediate(bundle: &ChangeGroup) -> bool {
     bundle
         .nodes
         .iter()

@@ -20,6 +20,23 @@ pub(super) fn local_project(active: &ActiveBundle) -> Result<Value> {
     }
 }
 
+/// The default destination's plan, built but not saved. `project` stands in
+/// for the workspace project when the caller has no workspace.
+pub(crate) fn default_plan(active: &ActiveBundle, project: Option<&Value>) -> Result<Value> {
+    let project = match project {
+        Some(project) => project.clone(),
+        None => local_project(active)?,
+    };
+    build(
+        active,
+        &serde_json::to_value(&active.bundle)?,
+        &project,
+        None,
+        None,
+        None,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate(
     artifact: Option<&Path>,
@@ -33,7 +50,10 @@ pub fn generate(
 ) -> Result<()> {
     let active = match artifact {
         Some(p) => ActiveBundle::unlocked(std::env::current_dir()?, p.into(), read_json(p)?),
-        None => crate::store::load_active_bundle()?,
+        None => {
+            record_host_merges(&crate::store::load_active_bundle()?)?;
+            crate::store::load_active_bundle()?
+        }
     };
     let bundle = match artifact {
         Some(p) => read_json(p)?,
@@ -45,6 +65,19 @@ pub fn generate(
         None => local_project(&active)?,
     };
     let plan = build(&active, &bundle, &project, provider, target, lane)?;
+    if artifact.is_none()
+        && target.is_none()
+        && lane.is_none()
+        && crate::commands::bundle::merged::assess(&active.bundle, Some(&plan))
+            == crate::commands::bundle::merged::Merged::Done
+    {
+        let mut locked = crate::store::load_active_bundle_for_update()?;
+        crate::commands::bundle::close_if_merged(&mut locked, Some(&plan))?;
+        return Ok(());
+    }
+    if plan["steps"].as_array().is_some_and(Vec::is_empty) {
+        bail!("every review is merged; the plan has nothing left to land");
+    }
     let path = out
         .map(PathBuf::from)
         .unwrap_or_else(|| destination_path(&active, target, lane));
@@ -150,6 +183,7 @@ pub(super) fn build(
     )?;
     let mut plan = serde_json::to_value(base)?;
     mark_upstream_merges(active, &mut plan)?;
+    drop_merged_reviews(&active.bundle, &mut plan);
     plan["schemaVersion"] = json!("0.2");
     plan["merge"] = json!({"enabled":merge_policy.enabled.unwrap_or(true)});
     if !merge_policy.repositories.is_empty() {
@@ -429,11 +463,101 @@ pub(super) fn build(
     }
     super::branch_checkout::configure(&mut plan)?;
     super::gates::require_executor(&mut plan);
+    if plan["steps"].as_array().is_some_and(Vec::is_empty) && plan.get("alreadyMerged").is_some() {
+        return Ok(plan);
+    }
     let result = validation(&plan, Some(bundle), Some(project));
     if result["valid"] != true {
         bail!("{}", result["errors"]);
     }
     Ok(plan)
+}
+
+/// Reviews merged on the host since the last sync are recorded before
+/// planning, so the plan leaves them out. Hosts that cannot be read keep the
+/// recorded state.
+fn record_host_merges(active: &ActiveBundle) -> Result<()> {
+    let mut merged = Vec::new();
+    for publication in &active.bundle.publications {
+        if !crate::providers::is_review_kind(&publication.kind)
+            || publication.state.eq_ignore_ascii_case("MERGED")
+            || publication.state.eq_ignore_ascii_case("CLOSED")
+        {
+            continue;
+        }
+        let Some(repo) = active
+            .bundle
+            .repos
+            .iter()
+            .find(|r| r.id == publication.repo_id)
+        else {
+            continue;
+        };
+        let Ok(forge) = crate::providers::for_repo(repo) else {
+            continue;
+        };
+        let cwd =
+            crate::checkout::checkout_dir(active, repo).unwrap_or_else(|| active.root.clone());
+        let Ok(target) =
+            crate::contribution::target(&cwd, repo, forge.as_ref(), &publication.base_branch, true)
+        else {
+            continue;
+        };
+        if let Ok(pr) = forge.view(&target, &publication.url) {
+            if pr.state.as_deref() == Some("MERGED") {
+                merged.push((repo.clone(), pr));
+            }
+        }
+    }
+    if merged.is_empty() {
+        return Ok(());
+    }
+    let mut locked = crate::store::load_active_bundle_for_update()?;
+    for (repo, pr) in &merged {
+        let forge = crate::providers::for_repo(repo)?;
+        crate::providers::upsert_publication(&mut locked.bundle, repo, forge.as_ref(), pr);
+        println!(
+            "{} {} {}",
+            crate::output::repo(&repo.id),
+            crate::output::ok("merged on the host:"),
+            pr.url
+        );
+    }
+    crate::store::save_active_bundle(&locked)
+}
+
+/// A review the host already merged has nothing left to merge, so its step is
+/// left out and nothing waits on it.
+fn drop_merged_reviews(bundle: &crate::model::ChangeGroup, plan: &mut Value) {
+    let merged = merged_review_repos(bundle);
+    let steps = plan["steps"].as_array_mut().unwrap();
+    let removed: Vec<String> = steps
+        .iter()
+        .filter(|s| s["type"] == "merge_pr")
+        .filter(|s| s["repoId"].as_str().is_some_and(|id| merged.contains(id)))
+        .filter_map(|s| s["id"].as_str().map(str::to_owned))
+        .collect();
+    steps.retain(|s| !removed.iter().any(|id| s["id"] == *id));
+    for step in steps.iter_mut() {
+        for key in ["needs", "requires"] {
+            if let Some(list) = step.get_mut(key).and_then(Value::as_array_mut) {
+                list.retain(|need| !removed.iter().any(|id| need == id));
+            }
+        }
+    }
+    if !merged.is_empty() {
+        plan["alreadyMerged"] = json!(merged);
+    }
+}
+
+pub(crate) fn merged_review_repos(bundle: &crate::model::ChangeGroup) -> BTreeSet<String> {
+    bundle
+        .publications
+        .iter()
+        .filter(|p| crate::providers::is_review_kind(&p.kind))
+        .filter(|p| p.state.eq_ignore_ascii_case("MERGED"))
+        .map(|p| p.repo_id.clone())
+        .collect()
 }
 
 /// A review into a repository this account cannot merge waits for the
@@ -581,6 +705,10 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
     effective["steps"] = json!(steps);
     let display: super::super::LandPlan = serde_json::from_value(effective)?;
     super::super::display::print_plan(active, &display, path);
+    if let Some(merged) = plan["alreadyMerged"].as_array().filter(|m| !m.is_empty()) {
+        let repos: Vec<&str> = merged.iter().filter_map(Value::as_str).collect();
+        println!("Already merged: {}", repos.join(", "));
+    }
     println!("Hash: {}", canonical_hash(plan));
     if plan["merge"]["enabled"] == false {
         if plan["merge"]["repositories"]

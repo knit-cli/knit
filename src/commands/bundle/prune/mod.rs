@@ -18,6 +18,7 @@ mod orphans;
 use super::{archive_dead_bundle, bundle_json_paths, current_root, delete_bundle};
 use crate::output as out;
 use anyhow::{bail, Result};
+pub(super) use assess::landed_intermediate;
 use assess::{assess_bundles, PruneAssessment, PruneCache};
 use orphans::{orphan_worktree_candidates, remote_orphan_candidates, remove_orphan_worktree};
 

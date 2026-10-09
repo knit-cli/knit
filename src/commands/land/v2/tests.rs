@@ -322,6 +322,45 @@ fn generator_includes_build_verify_and_custom_steps() {
     );
 }
 #[test]
+fn a_review_the_host_already_merged_gets_no_merge_step() {
+    let mut f = Fixture::new();
+    f.bundle["repos"] = json!([
+        {"id":"api","path":"api","baseBranch":"main","remote":"https://github.com/acme/api.git","featureBranch":"knit/synthetic","worktreePath":null,"headSha":"1111111111111111111111111111111111111111","baseSha":"0000000000000000000000000000000000000000"},
+        {"id":"web","path":"web","baseBranch":"main","remote":"https://github.com/acme/web.git","featureBranch":"knit/synthetic","worktreePath":null,"headSha":"2222222222222222222222222222222222222222","baseSha":"0000000000000000000000000000000000000000"}
+    ]);
+    f.bundle["publications"] = json!([
+        {"repoId":"api","provider":"github","kind":"pull_request","number":1,"url":"https://github.com/acme/api/pull/1","baseBranch":"main","headBranch":"knit/synthetic","state":"MERGED","updatedAt":"2026-01-01T00:00:00Z"},
+        {"repoId":"web","provider":"github","kind":"pull_request","number":2,"url":"https://github.com/acme/web/pull/2","baseBranch":"main","headBranch":"knit/synthetic","state":"OPEN","updatedAt":"2026-01-01T00:00:00Z"}
+    ]);
+    let mut project = serde_json::to_value(crate::model::KnitProject::new(
+        "synthetic-project".into(),
+        crate::time::now_iso(),
+    ))
+    .unwrap();
+    project["repos"] = json!([
+        {"id":"api","path":"api","remote":"https://github.com/acme/api.git","baseBranch":"main"},
+        {"id":"web","path":"web","remote":"https://github.com/acme/web.git","baseBranch":"main"}
+    ]);
+    project["landing"] = json!({"deployments":[{"id":"release","repoId":"api","whenChanged":["*"],"command":["true"]}]});
+    let active = crate::store::ActiveBundle::unlocked(
+        f.dir.clone(),
+        f.dir.join("bundle.json"),
+        serde_json::from_value(f.bundle.clone()).unwrap(),
+    );
+    let plan = generate::build(&active, &f.bundle, &project, None, None, None).unwrap();
+    let steps = plan["steps"].as_array().unwrap();
+    let ids: Vec<_> = steps.iter().map(|s| s["id"].as_str().unwrap()).collect();
+    assert!(!ids.contains(&"merge-api"), "{ids:?}");
+    assert!(ids.contains(&"merge-web"), "{ids:?}");
+    let release = steps.iter().find(|s| s["id"] == "release").unwrap();
+    assert_eq!(release["needs"], json!(["merge-web"]));
+    assert_eq!(plan["alreadyMerged"], json!(["api"]));
+    f.plan = plan;
+    f.files();
+    let result = super::graph::validation(&f.plan, Some(&f.bundle), Some(&project));
+    assert_eq!(result["valid"], true, "{result}");
+}
+#[test]
 fn reverse_recovery_restores_original_not_intermediate_state() {
     let mut f = Fixture::new();
     fs::write(f.dir.join("state"), "original").unwrap();
@@ -981,13 +1020,11 @@ fn repository_merge_mixes_staging_branches_and_reviews_but_delegates_production_
     assert_eq!(production["steps"][0]["type"], "merge_pr");
     assert_eq!(production["terminal"], true);
     assert_eq!(production["changedRepos"], json!(["app", "tools"]));
-    // An already merged review is retained for the executor's idempotent check.
     let mut f = f;
     f.bundle["publications"][0]["state"] = json!("MERGED");
-    assert_eq!(
-        repository_merge_plan(&f, &project, "production").unwrap()["steps"][0]["type"],
-        "merge_pr"
-    );
+    let merged = repository_merge_plan(&f, &project, "production").unwrap();
+    assert_eq!(merged["steps"], json!([]));
+    assert_eq!(merged["alreadyMerged"], json!(["tools"]));
 }
 
 #[test]
