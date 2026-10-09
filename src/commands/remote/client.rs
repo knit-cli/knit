@@ -19,6 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
 use std::ffi::OsString;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 #[derive(Debug, Deserialize)]
@@ -653,6 +654,8 @@ pub(super) fn request(
     request_with_optional_token(remote, Some(token), method, path, payload)
 }
 
+const MAX_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
+
 fn request_with_optional_token(
     remote: &KnitRemote,
     token: Option<&str>,
@@ -689,9 +692,19 @@ fn request_with_optional_token(
         }
     };
     let status = response.status();
-    let body = response
-        .into_string()
+    // `into_string` stops at 10 MB, which a project's landing history passes.
+    let mut body = String::new();
+    response
+        .into_reader()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_string(&mut body)
         .context("failed to read remote response body")?;
+    if body.len() as u64 > MAX_RESPONSE_BYTES {
+        bail!(
+            "Remote response from {url} is larger than {} MB",
+            MAX_RESPONSE_BYTES / (1024 * 1024)
+        );
+    }
     Ok(HttpResponse { status, body })
 }
 

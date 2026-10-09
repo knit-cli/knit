@@ -600,40 +600,46 @@ fn first_sync_includes_executed_revisions_snapshots_and_idempotent_history() {
 }
 
 #[test]
-fn tampered_embedded_plan_is_refused_before_import() {
+fn tampered_embedded_plan_keeps_its_bundle_history_local() {
     let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let server = Server::new();
-    let root = unique_temp_dir();
-    offline_history(&root, &server);
-    let path = root.join(".knit/land-runs/z-first.run.json");
-    let mut run: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
-    let original = run.clone();
-    run["plan"]["maxParallel"] = json!(999);
-    write(&path, &run);
-    assert!(
-        knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"])
-            .contains("invalid embedded plan hash")
-    );
-    run = original.clone();
-    run["plan"]["sourceProjectId"] = json!("different-project");
-    run["planHash"] = json!(hash(&run["plan"]));
-    write(&path, &run);
-    assert!(
-        knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"])
-            .contains("source scope")
-    );
-    run = original;
-    run["sourceBundle"]["repos"][0]["headSha"] = json!("not-reviewed");
-    write(&path, &run);
-    assert!(
-        knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"])
-            .contains("Invalid historical landing source")
-    );
-    assert!(server.state.lock().unwrap()["plans"]
-        .as_array()
-        .unwrap()
-        .is_empty());
-    fs::remove_dir_all(root).unwrap();
+    let path_of = |root: &Path| root.join(".knit/land-runs/z-first.run.json");
+    type Tampering = (&'static str, fn(&mut Value));
+    let tamperings: [Tampering; 3] = [
+        ("invalid embedded plan hash", |run| {
+            run["plan"]["maxParallel"] = json!(999);
+        }),
+        ("source scope", |run| {
+            run["plan"]["sourceProjectId"] = json!("different-project");
+            run["planHash"] = json!(hash(&run["plan"]));
+        }),
+        ("Invalid historical landing source", |run| {
+            run["sourceBundle"]["repos"][0]["headSha"] = json!("not-reviewed");
+        }),
+    ];
+    for (reason, tamper) in tamperings {
+        let server = Server::new();
+        let root = unique_temp_dir();
+        offline_history(&root, &server);
+        let mut run: Value = serde_json::from_slice(&fs::read(path_of(&root)).unwrap()).unwrap();
+        tamper(&mut run);
+        write(&path_of(&root), &run);
+        let output = knit(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+        assert!(
+            output.contains("Landing history not synced: demo"),
+            "{output}"
+        );
+        assert!(output.contains(reason), "{reason}: {output}");
+        let state = server.state.lock().unwrap().clone();
+        assert!(
+            state["runs"].as_array().unwrap().is_empty(),
+            "{reason}: {state}"
+        );
+        assert!(
+            state["plans"].as_array().unwrap().is_empty(),
+            "{reason}: {state}"
+        );
+        fs::remove_dir_all(root).unwrap();
+    }
 }
 
 #[test]
@@ -765,7 +771,7 @@ fn offline_recipe_revisions_keep_exact_projects_and_resume_preserves_provenance(
 }
 
 #[test]
-fn unavailable_or_invalid_historical_project_refuses_before_any_network_request() {
+fn missing_historical_project_refuses_before_any_request_and_an_invalid_one_stays_local() {
     let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let server = Server::new();
     let root = unique_temp_dir();
@@ -785,10 +791,26 @@ fn unavailable_or_invalid_historical_project_refuses_before_any_network_request(
             run.as_object_mut().unwrap().remove("sourceProject");
         }
         write(&path, &run);
-        let before = server.requests.load(Ordering::Relaxed);
-        let error = knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
-        assert!(error.contains("project snapshot"), "{error}");
-        assert_eq!(server.requests.load(Ordering::Relaxed), before);
+        let missing = run.get("sourceProject").is_none();
+        if missing {
+            let before = server.requests.load(Ordering::Relaxed);
+            let error = knit_fails(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+            assert!(error.contains("project snapshot"), "{error}");
+            assert_eq!(server.requests.load(Ordering::Relaxed), before);
+        } else {
+            // A snapshot today's validation refuses keeps that bundle's
+            // landing history local and names it, instead of failing the sync.
+            let output = knit(&root, ["sync", "push", "--plans", "--remote", "hosted"]);
+            assert!(
+                output.contains("Landing history not synced: demo"),
+                "{output}"
+            );
+            assert!(output.contains("project snapshot"), "{output}");
+            assert!(server.state.lock().unwrap()["runs"]
+                .as_array()
+                .unwrap()
+                .is_empty());
+        }
     }
     // A legacy run can use a retained exact project snapshot despite a newer current recipe.
     let mut legacy = original.clone();
