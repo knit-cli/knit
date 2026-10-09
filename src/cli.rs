@@ -1476,6 +1476,9 @@ pub enum PublishCommand {
         /// The bundle's saved landing plan. With every review merged, the bundle closes only when this plan has no step left besides merges.
         #[arg(long, requires = "from_artifact")]
         plan: Option<PathBuf>,
+        /// The bundle's project. Without a saved plan, the project's landing recipes decide whether steps besides merges are still due.
+        #[arg(long, requires = "from_artifact")]
+        project_file: Option<PathBuf>,
         /// Sync every tracked repo instead of only repos with recorded work or publications.
         #[arg(long)]
         all: bool,

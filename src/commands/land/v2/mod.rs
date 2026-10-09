@@ -5,7 +5,7 @@ mod destinations;
 mod gates;
 mod generate;
 pub use destinations::destinations;
-pub(crate) use generate::{destination_path, merged_review_repos};
+pub(crate) use generate::{default_plan, destination_path, merged_review_repos};
 mod graph;
 mod mergeability;
 pub(crate) use mergeability::KnownNoEffect;

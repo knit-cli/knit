@@ -20,6 +20,23 @@ pub(super) fn local_project(active: &ActiveBundle) -> Result<Value> {
     }
 }
 
+/// The default destination's plan, built but not saved. `project` stands in
+/// for the workspace project when the caller has no workspace.
+pub(crate) fn default_plan(active: &ActiveBundle, project: Option<&Value>) -> Result<Value> {
+    let project = match project {
+        Some(project) => project.clone(),
+        None => local_project(active)?,
+    };
+    build(
+        active,
+        &serde_json::to_value(&active.bundle)?,
+        &project,
+        None,
+        None,
+        None,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub fn generate(
     artifact: Option<&Path>,

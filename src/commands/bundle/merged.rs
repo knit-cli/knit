@@ -1,5 +1,6 @@
 //! A bundle whose reviews all merged on the host closes itself once its
-//! saved landing plan has nothing left to run.
+//! landing plan has nothing left to run: the saved plan, or without one, the
+//! plan the project's landing recipes would generate.
 
 use super::lifecycle::{clear_active_if_matches, mark_archived};
 use super::prune::landed_intermediate;
@@ -9,6 +10,7 @@ use crate::output as out;
 use crate::store::{read_json, save_active_bundle, ActiveBundle};
 use anyhow::Result;
 use serde_json::Value;
+use std::path::Path;
 
 const REASON: &str = "every review merged on the host";
 
@@ -48,19 +50,32 @@ pub(crate) fn assess(bundle: &ChangeGroup, plan: Option<&Value>) -> Merged {
 
 /// `plan` overrides the saved default plan, for callers that just edited it.
 pub(crate) fn close_if_merged(active: &mut ActiveBundle, plan: Option<&Value>) -> Result<bool> {
-    let saved;
+    if assess(&active.bundle, None) == Merged::No {
+        return Ok(false);
+    }
+    let found;
     let plan = match plan {
-        Some(plan) => Some(plan),
+        Some(plan) => plan,
         None => {
             let path = crate::commands::land::v2::destination_path(active, None, None);
-            saved = path
-                .exists()
-                .then(|| read_json::<Value>(&path))
-                .transpose()?;
-            saved.as_ref()
+            found = if path.exists() {
+                read_json::<Value>(&path)?
+            } else {
+                match crate::commands::land::v2::default_plan(active, None) {
+                    Ok(plan) => plan,
+                    Err(error) => {
+                        println!(
+                            "{} every review is merged, but its landing plan could not be worked out: {error:#}",
+                            out::heading("Still open:")
+                        );
+                        return Ok(false);
+                    }
+                }
+            };
+            &found
         }
     };
-    match assess(&active.bundle, plan) {
+    match assess(&active.bundle, Some(plan)) {
         Merged::No => Ok(false),
         Merged::StepsLeft(left) => {
             println!(
@@ -103,7 +118,43 @@ pub(crate) fn close_if_merged(active: &mut ActiveBundle, plan: Option<&Value>) -
     }
 }
 
-pub(crate) fn close_artifact_if_merged(bundle: &mut ChangeGroup, plan: Option<&Value>) -> bool {
+/// Without a saved `plan`, `project` (when given) supplies the landing
+/// recipes that decide whether steps besides merges are still due.
+pub(crate) fn close_artifact_if_merged(
+    root: &Path,
+    artifact_path: &Path,
+    bundle: &mut ChangeGroup,
+    plan: Option<&Value>,
+    project: Option<&Value>,
+) -> bool {
+    if assess(bundle, None) == Merged::No {
+        return false;
+    }
+    let built;
+    let plan = match (plan, project) {
+        (Some(plan), _) => Some(plan),
+        (None, Some(project)) => {
+            let active = ActiveBundle::unlocked(
+                root.to_path_buf(),
+                artifact_path.to_path_buf(),
+                bundle.clone(),
+            );
+            match crate::commands::land::v2::default_plan(&active, Some(project)) {
+                Ok(plan) => {
+                    built = plan;
+                    Some(&built)
+                }
+                Err(error) => {
+                    println!(
+                        "{} every review is merged, but its landing plan could not be worked out: {error:#}",
+                        out::heading("Still open:")
+                    );
+                    return false;
+                }
+            }
+        }
+        (None, None) => None,
+    };
     match assess(bundle, plan) {
         Merged::Done => {
             mark_archived(bundle, Some(REASON.to_owned()));
@@ -192,12 +243,25 @@ mod tests {
     #[test]
     fn an_artifact_records_the_close_in_its_ledger() {
         let mut merged = bundle(&[("api", "merged")]);
-        assert!(close_artifact_if_merged(&mut merged, None));
+        let (root, path) = (Path::new("/tmp"), Path::new("/tmp/demo.bundle.json"));
+        assert!(close_artifact_if_merged(
+            root,
+            path,
+            &mut merged,
+            None,
+            None
+        ));
         assert_eq!(bundle_state(&merged), BundleStatus::Archived);
         assert_eq!(
             merged.nodes.last().map(|n| n.node_type.as_str()),
             Some("feature.archived")
         );
-        assert!(!close_artifact_if_merged(&mut merged, None));
+        assert!(!close_artifact_if_merged(
+            root,
+            path,
+            &mut merged,
+            None,
+            None
+        ));
     }
 }
