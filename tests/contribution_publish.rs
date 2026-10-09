@@ -271,6 +271,73 @@ fn sync_records_what_the_maintainers_still_have_to_do() {
 }
 
 #[test]
+fn a_bundle_whose_reviews_all_merged_closes_once_its_plan_has_nothing_left() {
+    let f = Fixture::new();
+    f.create();
+    fs::write(
+        f.api.join("override.json"),
+        json!({"state": "closed", "merged": true, "merged_at": "2026-10-09T00:00:00Z"}).to_string(),
+    )
+    .unwrap();
+    let plan = f.root.join("plan.json");
+    fs::write(
+        &plan,
+        json!({"steps": [
+            {"id": "merge-widget", "type": "merge_pr"},
+            {"id": "deploy-widget", "type": "deploy"}
+        ]})
+        .to_string(),
+    )
+    .unwrap();
+    let read =
+        |path: &PathBuf| -> Value { serde_json::from_slice(&fs::read(path).unwrap()).unwrap() };
+    let kept = f.root.join("kept.json");
+    let output = f.run(&[
+        "publish",
+        "sync",
+        "--from-artifact",
+        f.artifact().to_str().unwrap(),
+        "--out",
+        kept.to_str().unwrap(),
+        "--plan",
+        plan.to_str().unwrap(),
+    ]);
+    assert!(output.contains("still has deploy-widget"), "{output}");
+    assert_eq!(read(&kept)["publications"][0]["state"], "MERGED");
+    assert_ne!(read(&kept)["state"], "archived");
+
+    let closed = f.root.join("closed.json");
+    f.run(&[
+        "publish",
+        "sync",
+        "--from-artifact",
+        f.artifact().to_str().unwrap(),
+        "--out",
+        closed.to_str().unwrap(),
+    ]);
+    assert_eq!(read(&closed)["state"], "archived");
+
+    let output = f.run(&["publish", "sync"]);
+    assert!(output.contains("Closed"), "{output}");
+    assert_eq!(f.bundle()["state"], "archived");
+}
+
+#[test]
+fn land_closes_a_bundle_the_host_already_merged() {
+    let f = Fixture::new();
+    f.create();
+    fs::write(
+        f.api.join("override.json"),
+        json!({"state": "closed", "merged": true, "merged_at": "2026-10-09T00:00:00Z"}).to_string(),
+    )
+    .unwrap();
+    let output = f.run(&["land"]);
+    assert!(output.contains("merged on the host"), "{output}");
+    assert!(output.contains("Closed"), "{output}");
+    assert_eq!(f.bundle()["state"], "archived");
+}
+
+#[test]
 fn wrong_same_number_url_and_wrong_review_identity_never_mutate() {
     let f = Fixture::new();
     f.create();

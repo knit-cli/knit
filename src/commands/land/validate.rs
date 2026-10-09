@@ -50,8 +50,9 @@ pub(super) fn validate_plan_for_bundle(active: &ActiveBundle, plan: &LandPlan) -
             .filter(|s| s.step_type == LandStepKind::MergePr)
             .filter_map(|s| s.repo_id.as_ref())
             .collect();
+        let already_merged = super::v2::merged_review_repos(&active.bundle);
         for id in crate::commands::publish::publish_scope_repo_ids(&active.bundle) {
-            if !covered.contains(&id) {
+            if !covered.contains(&id) && !already_merged.contains(&id) {
                 bail!("Terminal land plan omits changed repository `{id}`; it would strand work when archiving.");
             }
         }

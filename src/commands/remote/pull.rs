@@ -2020,6 +2020,13 @@ fn fetch_bundles_with_options(
                     // The replaced local artifact may know the hosted URL
                     // from before this copy left the remote.
                     bundle.inherit_missing_sync_target_web_urls(&local);
+                    if crate::commands::bundle::bundle_state(&local)
+                        == crate::commands::bundle::BundleStatus::Open
+                        && crate::commands::bundle::bundle_state(&bundle)
+                            == crate::commands::bundle::BundleStatus::Archived
+                    {
+                        bundle = remove_finished_worktrees(root, &bundle_path, bundle);
+                    }
                     crate::store::write_json(&bundle_path, &bundle).with_context(|| {
                         format!("failed to write bundle `{}`", remote_bundle.slug)
                     })?;
@@ -2331,6 +2338,23 @@ fn bundle_branch_mapping(bundle: &ChangeGroup) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+/// A bundle closed on the remote leaves its clean checkouts behind here the
+/// same way a local archive would; checkouts with changes are kept.
+fn remove_finished_worktrees(root: &Path, path: &Path, bundle: ChangeGroup) -> ChangeGroup {
+    let mut active =
+        crate::store::ActiveBundle::unlocked(root.to_path_buf(), path.to_path_buf(), bundle);
+    if let Err(error) = crate::commands::clean::clean_worktrees_for_bundle(&mut active, false) {
+        println!(
+            "  {} {error:#}",
+            out::warn(format!(
+                "{} closed remotely; checkouts kept:",
+                active.bundle.id
+            ))
+        );
+    }
+    active.bundle
 }
 
 #[cfg(test)]

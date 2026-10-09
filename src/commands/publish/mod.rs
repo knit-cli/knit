@@ -643,7 +643,7 @@ pub fn sync_publications(selectors: &[String], all: bool, provider: Option<&str>
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
     }
-
+    crate::commands::bundle::close_if_merged(&mut active, None)?;
     Ok(())
 }
 
@@ -689,6 +689,7 @@ fn publication_texts(
 pub fn sync_publications_from_artifact(
     artifact_path: &Path,
     out_path: Option<&Path>,
+    plan_path: Option<&Path>,
     selectors: &[String],
     all: bool,
     provider: Option<&str>,
@@ -706,6 +707,8 @@ pub fn sync_publications_from_artifact(
     if !failures.is_empty() {
         bail!("PR sync completed with failures:\n{}", failures.join("\n"));
     }
+    let plan: Option<serde_json::Value> = plan_path.map(crate::store::read_json).transpose()?;
+    crate::commands::bundle::close_artifact_if_merged(&mut bundle, plan.as_ref());
     write_bundle_artifact_output(&bundle, out_path)?;
     Ok(())
 }

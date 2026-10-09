@@ -80,20 +80,24 @@ pub(crate) fn archive_active_bundle(
     } else {
         crate::commands::clean::clean_worktrees_for_bundle(active, force)?
     };
-    let now = now_iso();
-    let node_id = crate::ids::node_id("archive");
-    active.bundle.state = Some(BundleState::Archived);
-    active.bundle.archived_at = Some(now.clone());
-    active
-        .bundle
-        .nodes
-        .push(BundleNode::feature_archived(node_id.clone(), now, reason));
-    active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
-    active.bundle.updated_at = now_iso();
+    let node_id = mark_archived(&mut active.bundle, reason);
     Ok(ArchiveSummary {
         node_id,
         removed_worktrees,
     })
+}
+
+pub(crate) fn mark_archived(bundle: &mut ChangeGroup, reason: Option<String>) -> String {
+    let now = now_iso();
+    let node_id = crate::ids::node_id("archive");
+    bundle.state = Some(BundleState::Archived);
+    bundle.archived_at = Some(now.clone());
+    bundle
+        .nodes
+        .push(BundleNode::feature_archived(node_id.clone(), now, reason));
+    bundle.head_node_id = bundle.nodes.last().map(|node| node.id.clone());
+    bundle.updated_at = now_iso();
+    node_id
 }
 
 pub(crate) fn clear_workspace_active_if_matches(root: &Path, bundle_id: &str) -> Result<()> {

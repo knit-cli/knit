@@ -417,6 +417,14 @@
       "default": true,
       "description": "Whether landing this plan finishes the bundle."
     },
+    "alreadyMerged": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      },
+      "uniqueItems": true,
+      "description": "Repositories whose review the host had already merged when the plan was generated; they have no merge step."
+    },
     "changedRepos": {
       "type": "array",
       "items": {

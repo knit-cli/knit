@@ -1473,6 +1473,9 @@ pub enum PublishCommand {
         /// Write the updated bundle JSON artifact to this path.
         #[arg(long)]
         out: Option<PathBuf>,
+        /// The bundle's saved landing plan. With every review merged, the bundle closes only when this plan has no step left besides merges.
+        #[arg(long, requires = "from_artifact")]
+        plan: Option<PathBuf>,
         /// Sync every tracked repo instead of only repos with recorded work or publications.
         #[arg(long)]
         all: bool,
@@ -1573,6 +1576,15 @@ pub enum LandCommand {
         /// Replace an existing plan file.
         #[arg(long)]
         force: bool,
+    },
+    /// Take steps out of the saved plan, such as a deployment you do not want to run.
+    Remove {
+        /// Step ids to remove, as `knit land` lists them.
+        #[arg(required = true)]
+        steps: Vec<String>,
+        /// Plan file to edit; defaults to the bundle's plan for this destination.
+        #[arg(long)]
+        plan: Option<PathBuf>,
     },
     /// Validate an exact saved plan without executing it.
     Validate {
