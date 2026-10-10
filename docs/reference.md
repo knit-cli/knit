@@ -1029,6 +1029,8 @@ When a bundle continues after its recorded reviews were merged or closed, pass `
 
 Hosted services that run Knit from bundle artifacts can set `KNIT_GITHUB_API_TRANSPORT=ipv4` (the historical `curl`/`curl-ipv4` values still work, as do `native`/`api`) to make GitHub artifact-mode publish and landing use Knit's built-in GitHub REST client instead of `gh pr ...` commands. The client resolves hostnames IPv4-first and requires `GH_TOKEN` or `GITHUB_TOKEN` in the environment; no external `curl` is needed. It is intended for non-interactive runtimes where provider CLI prompts, host credential stores, or default IPv6 routing can hang simple GitHub I/O. Local workspace commands keep using the normal provider CLIs unless this environment variable is set. `KNIT_GITHUB_API_BASE` overrides the API base URL (defaults to `https://api.github.com`), mainly for tests.
 
+When a bundle's repositories belong to several GitHub accounts, such a service can set `KNIT_GITHUB_TOKENS` to a JSON object that maps an account (`acme`) or a repository (`acme/widget`) to the token for it, for example `{"acme": "ghs_…", "other/widget": "ghs_…"}`. Knit reads each repository with the most specific match and falls back to `GH_TOKEN`/`GITHUB_TOKEN` for repositories the map does not name.
+
 Bitbucket is always native REST. Authentication is resolved in this order:
 `KNIT_BITBUCKET_ACCESS_TOKEN` as a bearer token, or
 `KNIT_BITBUCKET_EMAIL` together with `KNIT_BITBUCKET_API_TOKEN` as HTTP Basic
