@@ -3330,7 +3330,19 @@ pub(crate) fn local_apply(
     if options.is_some_and(|o| o.tag.is_some()) && plan["terminal"] == false {
         bail!("tag requires a terminal destination");
     }
-    let run_path = run_path.map(PathBuf::from).unwrap_or_else(|| {
+    let held = match run_path {
+        None if !recovering => {
+            crate::commands::remote::landing::held_run_for_plan(&active.root, &plan)?
+        }
+        _ => None,
+    };
+    if let Some(path) = &held {
+        eprintln!(
+            "Continuing the earlier landing run {}: it still holds this plan's landing lock.",
+            crate::output::path(path.display())
+        );
+    }
+    let run_path = run_path.map(PathBuf::from).or(held).unwrap_or_else(|| {
         active.root.join(".knit/land-runs").join(format!(
             "land-{}-{}.run.json",
             active.bundle.id,

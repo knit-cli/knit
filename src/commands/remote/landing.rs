@@ -1142,6 +1142,52 @@ pub(crate) fn claim_for_run(
     }))
 }
 
+/// The local run journal that a still-held landing lock belongs to, for a plan
+/// about to start a fresh run. A failed run keeps the lock so its effects can
+/// be finished or recovered; a second run started under that lock is one the
+/// execution authority refuses to record, which strands the lock for every
+/// later landing. The run the lock belongs to continues instead.
+pub(crate) fn held_run_for_plan(root: &Path, plan: &Value) -> Result<Option<PathBuf>> {
+    let file = root
+        .join(".knit/landing-ownership")
+        .join(format!("{}.json", document_hash(plan)));
+    if !file.exists() {
+        return Ok(None);
+    }
+    let held: Value = read_json(&file)?;
+    let bound = held["boundRun"]
+        .as_str()
+        .or_else(|| held["runIdentity"].as_str());
+    let plan_hash = crate::commands::land::v2::canonical_hash(plan);
+    let mut candidates = Vec::new();
+    for path in json_files(&root.join(".knit/land-runs"), ".run.json")? {
+        let Ok(run) = read_json::<Value>(&path) else {
+            continue;
+        };
+        let belongs = match bound {
+            Some(id) => run["id"] == id,
+            None => run["planHash"] == plan_hash.as_str(),
+        };
+        if belongs {
+            let finished = run["steps"]
+                .as_array()
+                .is_some_and(|steps| steps.iter().all(|step| step["status"] == "succeeded"));
+            let created = run["createdAt"].as_str().unwrap_or_default().to_string();
+            candidates.push((finished, created, path));
+        }
+    }
+    // Without a recorded binding, the earliest unfinished run is the one the
+    // lock was taken for; later fresh runs of the same plan never bound it.
+    candidates.sort();
+    match candidates.into_iter().next() {
+        Some((_, _, path)) => Ok(Some(path)),
+        None => bail!(
+            "An earlier landing of this plan still holds the landing lock, but its run journal is not in {}. Continue it where it ran with `knit land resume --run <run.json>`.",
+            root.join(".knit/land-runs").display()
+        ),
+    }
+}
+
 /// Persist receipts even on failure. Release only after the executor confirms
 /// quiescence; retain ownership for interrupted/unknown effects and recovery.
 pub(crate) fn finish_for_plan(
@@ -1175,6 +1221,14 @@ pub(crate) fn finish_for_plan(
             &index,
         )?;
     }
+    if !release {
+        // Remember which run the retained lock now belongs to, so a later
+        // `knit land apply` of this plan continues it instead of starting a
+        // run the authority would refuse to record.
+        let mut held: Value = read_json(&lease.file)?;
+        held["boundRun"] = json!(text(run, "id")?);
+        private_save(&lease.file, &held)?;
+    }
     if release {
         let response = request(
             &lease.remote,
@@ -1199,6 +1253,67 @@ pub(crate) fn finish_for_plan(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn held_fixture(runs: &[(&str, &str, &str)], held: Option<Value>) -> (PathBuf, Value) {
+        let root = temp();
+        let plan = json!({"id": "land-plan", "bundleId": "demo", "steps": []});
+        fs::create_dir_all(root.join(".knit/land-runs")).unwrap();
+        for (id, status, created) in runs {
+            let run = json!({
+                "id": id,
+                "planHash": crate::commands::land::v2::canonical_hash(&plan),
+                "createdAt": created,
+                "steps": [{"id": "deploy", "status": status}]
+            });
+            fs::write(
+                root.join(format!(".knit/land-runs/land-demo-{id}.run.json")),
+                run.to_string(),
+            )
+            .unwrap();
+        }
+        if let Some(held) = held {
+            fs::create_dir_all(root.join(".knit/landing-ownership")).unwrap();
+            fs::write(
+                root.join(format!(
+                    ".knit/landing-ownership/{}.json",
+                    document_hash(&plan)
+                )),
+                held.to_string(),
+            )
+            .unwrap();
+        }
+        (root, plan)
+    }
+
+    #[test]
+    fn a_fresh_landing_continues_the_run_that_holds_the_lock() {
+        let (root, plan) = held_fixture(&[("a", "failed", "2026-10-09T07:48:00Z")], None);
+        assert_eq!(held_run_for_plan(&root, &plan).unwrap(), None);
+
+        let (root, plan) = held_fixture(
+            &[
+                ("a", "failed", "2026-10-09T07:48:00Z"),
+                ("b", "succeeded", "2026-10-09T08:10:00Z"),
+            ],
+            Some(json!({"id": "lock", "token": "t", "action": "apply"})),
+        );
+        let held = held_run_for_plan(&root, &plan).unwrap().unwrap();
+        assert!(held.ends_with("land-demo-a.run.json"));
+
+        let (root, plan) = held_fixture(
+            &[
+                ("a", "failed", "2026-10-09T07:48:00Z"),
+                ("b", "failed", "2026-10-09T08:10:00Z"),
+            ],
+            Some(json!({"id": "lock", "token": "t", "action": "apply", "boundRun": "b"})),
+        );
+        let held = held_run_for_plan(&root, &plan).unwrap().unwrap();
+        assert!(held.ends_with("land-demo-b.run.json"));
+
+        let (root, plan) = held_fixture(&[], Some(json!({"id": "lock", "token": "t"})));
+        let error = held_run_for_plan(&root, &plan).unwrap_err().to_string();
+        assert!(error.contains("knit land resume --run"), "{error}");
+    }
+
     fn temp() -> PathBuf {
         static SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let p = std::env::temp_dir().join(format!(
