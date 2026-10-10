@@ -1452,6 +1452,40 @@ pub(crate) fn provider_for_remote(cwd: &Path, remote: &str) -> Result<Option<Str
         .map(|name| registry.credentials[&name].provider.clone()))
 }
 
+/// A token for one GitHub repository from `KNIT_GITHUB_TOKENS`: a JSON object
+/// mapping an account (`acme`) or a repository (`acme/widget`) to its token.
+/// A service running Knit for a bundle whose repositories belong to several
+/// GitHub accounts passes each account's own token this way; a match wins over
+/// `GH_TOKEN`, which still covers every repository the map does not name.
+pub(crate) fn github_account_credential(repository: &str) -> Option<ResolvedCredential> {
+    let raw = std::env::var("KNIT_GITHUB_TOKENS").ok()?;
+    github_account_token(&raw, repository).map(|token| ResolvedCredential {
+        name: "KNIT_GITHUB_TOKENS".to_string(),
+        provider: "github".to_string(),
+        host: "github.com".to_string(),
+        username: "x-access-token".to_string(),
+        token_type: None,
+        token,
+    })
+}
+
+fn github_account_token(raw: &str, repository: &str) -> Option<String> {
+    let tokens: BTreeMap<String, String> = serde_json::from_str(raw).ok()?;
+    let repository = repository
+        .trim_matches('/')
+        .trim_end_matches(".git")
+        .to_ascii_lowercase();
+    let account = repository.split('/').next()?.to_string();
+    let lookup = |wanted: &str| {
+        tokens
+            .iter()
+            .find(|(key, _)| key.trim().eq_ignore_ascii_case(wanted))
+            .map(|(_, token)| token.trim().to_string())
+            .filter(|token| !token.is_empty())
+    };
+    lookup(&repository).or_else(|| lookup(&account))
+}
+
 pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCredential>> {
     let origin;
     let remote = match remote {
@@ -1685,6 +1719,23 @@ fn validated_binding<'a>(
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn github_account_tokens_match_a_repository_before_its_account() {
+        let raw = r#"{"acme": "account-token", "Acme/Widget": "repo-token", "empty": " "}"#;
+
+        assert_eq!(
+            super::github_account_token(raw, "acme/widget").as_deref(),
+            Some("repo-token")
+        );
+        assert_eq!(
+            super::github_account_token(raw, "ACME/other.git").as_deref(),
+            Some("account-token")
+        );
+        assert_eq!(super::github_account_token(raw, "empty/repo"), None);
+        assert_eq!(super::github_account_token(raw, "else/repo"), None);
+        assert_eq!(super::github_account_token("not json", "acme/widget"), None);
+    }
+
     use super::*;
 
     fn project() -> KnitProject {

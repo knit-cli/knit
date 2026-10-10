@@ -568,6 +568,22 @@ pub(crate) fn target_credential(
     target: &PrTarget,
     provider: &str,
 ) -> Result<Option<crate::auth::ResolvedCredential>> {
+    if provider == "github" {
+        let repository = match (&target.repo_full_name, &target.repo_remote) {
+            (Some(name), _) => Some(name.clone()),
+            (None, Some(remote)) => match crate::auth::remote_target(remote)? {
+                (host, path) if host == "github.com" => Some(path),
+                _ => None,
+            },
+            (None, None) => None,
+        };
+        if let Some(credential) = repository
+            .as_deref()
+            .and_then(crate::auth::github_account_credential)
+        {
+            return Ok(Some(credential));
+        }
+    }
     let credential = if let Some(remote) = &target.repo_remote {
         let (_, path) = crate::auth::remote_target(remote)?;
         if target
