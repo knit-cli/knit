@@ -5,7 +5,7 @@ use crate::commands::land::lanes::{
     lane_destination, load_project_for_bundle, normalize_lane_name, normalize_target_branch,
     resolve_lane, workspace_is_scoped, LaneDestination,
 };
-use crate::model::{ChangeGroup, ProjectLandingLane, RepoEntry};
+use crate::model::{ChangeGroup, Movement, ProjectLandingLane, RepoEntry};
 use crate::providers::{self};
 use crate::repo_selectors::resolve_repo_indexes;
 use crate::store::ActiveBundle;
@@ -56,6 +56,20 @@ pub(super) fn resolve_publish_repo_indexes(
 
     let repo_ids = publish_scope_repo_ids(&active.bundle);
     if repo_ids.is_empty() {
+        let unrecorded = crate::tracking::detect_unrecorded_changes(active)?
+            .into_iter()
+            .filter(|change| change.movement == Movement::Advanced)
+            .map(|change| change.repo_id)
+            .collect::<Vec<_>>();
+        if !unrecorded.is_empty() {
+            bail!(
+                "No repos in bundle `{}` have recorded commits, but {} {} commits made outside Knit. Run `knit --bundle {} sync` to record them, then publish again.",
+                active.bundle.id,
+                unrecorded.join(", "),
+                if unrecorded.len() == 1 { "has" } else { "have" },
+                active.bundle.id
+            );
+        }
         bail!(
             "No repos in bundle `{}` have recorded commits, repo changes, or publications. Pass repo selectors or --all to publish tracked repos anyway.",
             active.bundle.id

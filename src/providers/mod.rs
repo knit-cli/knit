@@ -218,6 +218,11 @@ pub trait Forge {
             self.id()
         )
     }
+    /// Whether `revert_pull_request` is implemented by the host itself.
+    /// Without it, Knit reverts the merged commits in a disposable clone.
+    fn native_revert(&self) -> bool {
+        false
+    }
     fn revert_pull_request(
         &self,
         _target: &PrTarget,

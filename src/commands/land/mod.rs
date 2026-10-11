@@ -123,6 +123,18 @@ pub fn land_default_version(
             false,
         );
     }
+    if version == "0.2" && plan_superseded_by_revert(&active, &candidate)? {
+        return v2::generate(
+            None,
+            None,
+            None,
+            None,
+            target_branch,
+            lane_name,
+            true,
+            false,
+        );
+    }
     let raw: serde_json::Value = if candidate.exists() {
         read_json(&candidate)?
     } else {
@@ -249,6 +261,18 @@ pub fn apply_land_plan(
     }
     let active = crate::store::load_active_bundle()?;
     let destination = v2::destination_path(&active, target_branch, lane_name);
+    if plan_path.is_none() && !json_output && plan_superseded_by_revert(&active, &destination)? {
+        v2::generate(
+            None,
+            None,
+            None,
+            None,
+            target_branch,
+            lane_name,
+            true,
+            false,
+        )?;
+    }
     let candidate = if plan_path.is_none() && destination.exists() {
         destination
     } else {
@@ -902,6 +926,18 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         display::print_planned_step(&active, step);
     }
     Ok(())
+}
+
+/// The saved plan landed the reviews that revert PRs now undo. It is
+/// replaced rather than reported stale: the reverts are the only thing left
+/// to land for this destination.
+fn plan_superseded_by_revert(active: &ActiveBundle, path: &Path) -> Result<bool> {
+    if !path.exists() || !plan::lands_revert(&active.bundle) {
+        return Ok(false);
+    }
+    let raw: serde_json::Value = read_json(path)?;
+    Ok(raw["schemaVersion"] == "0.2"
+        && v2::bundle_fingerprint_is_stale(&raw, &serde_json::to_value(&active.bundle)?))
 }
 
 fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Result<usize> {

@@ -3,6 +3,7 @@
 //! commits, or provider PR reverts for landed nodes.
 
 mod apply;
+mod fallback;
 mod plan;
 mod review;
 pub(crate) use review::create_review;
@@ -109,6 +110,7 @@ fn plan_revert(target: &str) -> Result<()> {
     }
     write_json(&path, &plan)?;
     print_plan(&plan, &path);
+    print_apply_hint(&plan);
     Ok(())
 }
 
@@ -116,6 +118,22 @@ fn apply_revert(target: &str) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let target_node = resolve_log_node(&active.bundle.nodes, target)?.clone();
     let path = plan_path(&active, &target_node.id);
+
+    // Provider reverts of a landing touch no checkout and every PR is
+    // re-verified as merged before anything is created, so a missing plan
+    // is written here instead of costing a separate planning run.
+    if !path.exists() && target_node.node_type == "feature.landed" {
+        let plan = build_plan(&active, target)?;
+        preflight_plan(&active, &plan)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        write_json(&path, &plan)?;
+        print_plan(&plan, &path);
+        println!();
+        return apply_provider_revert(&mut active, &plan, path);
+    }
 
     if !path.exists() {
         bail!(
@@ -157,6 +175,17 @@ fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, PathBuf)
         .find(|(_, repo)| repo.id == repo_id)
         .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
     let Some(worktree) = checkout_dir(active, repo) else {
+        if active
+            .bundle
+            .nodes
+            .iter()
+            .any(|node| node.node_type == "feature.landed")
+        {
+            bail!(
+                "{repo_id}: no checkout is recorded in the bundle. Landed work is undone on the forge without checkouts: run `knit --bundle {} revert landed --apply`.",
+                active.bundle.id
+            );
+        }
         bail!("{repo_id}: no checkout is recorded in the bundle.");
     };
     ensure_expected_branch(repo, &worktree)?;
@@ -239,10 +268,18 @@ fn print_plan(plan: &RevertPlan, path: &Path) {
             }
         }
     }
+}
 
+fn print_apply_hint(plan: &RevertPlan) {
     println!();
+    // A landed bundle is archived, so only an explicit selector reaches it.
+    let bundle_flag = if plan.target_node_type == "feature.landed" {
+        format!("--bundle {} ", plan.bundle_id)
+    } else {
+        String::new()
+    };
     println!(
-        "{} knit revert {} --apply",
+        "{} knit {bundle_flag}revert {} --apply",
         out::heading("Apply:"),
         plan.target_ref
     );

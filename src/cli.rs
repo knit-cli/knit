@@ -1591,8 +1591,9 @@ pub enum LandCommand {
     },
     /// Validate an exact saved plan without executing it.
     Validate {
+        /// Plan file to validate; defaults to the bundle's plan for this destination.
         #[arg(long)]
-        plan: PathBuf,
+        plan: Option<PathBuf>,
         #[arg(long)]
         from_artifact: Option<PathBuf>,
         #[arg(long)]

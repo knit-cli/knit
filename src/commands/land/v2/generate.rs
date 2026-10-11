@@ -416,13 +416,17 @@ pub(super) fn build(
     } else {
         project["landing"]["execution"].clone()
     };
-    if let Some(order) = super::sequence::parse_execution(
+    if let Some(mut order) = super::sequence::parse_execution(
         &execution,
         &lane
             .map(|l| format!("landing.lanes.{l}"))
             .or_else(|| target.map(|t| format!("landing.targets.{t}")))
             .unwrap_or_else(|| "landing".to_owned()),
     )? {
+        // Revert merges are chained in reverse; the sequence must agree.
+        if super::super::plan::lands_revert(&active.bundle) {
+            order.reverse();
+        }
         let workflow = super::sequence::compile_workflow(&steps, &order)?;
         plan["execution"] = json!({"mode": super::sequence::MODE, "repoOrder": order});
         plan["workflow"] = workflow;

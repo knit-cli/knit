@@ -137,6 +137,7 @@ knit land resume [--run <path>] [--remote <remote>]... [--no-remote]
 knit land rollback [--run <path>] [--apply]
 knit land status [--run <path>]
 knit land source --plan <path> --repo <repo-id> --branch <branch> [--sha <sha>] [--repo-root <path>] --out <new-plan>
+knit land validate [--plan <path>] [--from-artifact <path>] [--project-file <path>] [--json]
 knit land preflight --plan <path> [--from-artifact <path>] [--project-file <path>] [--repo-roots <path>] [--json]
 knit merge <source-bundle-or-ref> --into <target-branch-or-bundle> [--fetch] [--push] [--set-upstream] [--manual]
 knit merge status [--run <id-or-path>]
@@ -171,8 +172,8 @@ knit log [--group <event|commit|bundle>] [--repo-match <any|all>] [--full-contex
 knit log [--since <date>] [--until <date>] [--grep <pattern>]... [--kind <kind>]...
 knit log [--all-match] [-i] [-F|-E]
 knit log [--oneline|--json] [--reverse] [--skip <count>] [--max-count <count>]
-knit revert <sha|node|HEAD|HEAD~N> [--plan]
-knit revert <sha|node|HEAD|HEAD~N> --apply
+knit revert <sha|node|HEAD|HEAD~N|landed> [--plan]
+knit revert <sha|node|HEAD|HEAD~N|landed> --apply
 knit git [--repo <repo>] [--all] <git-args...> [repo-selector...]
 knit show <sha|node|HEAD|HEAD~N>
 knit show <entry> --all [--project <project>] [--json]
@@ -372,6 +373,7 @@ Generate, inspect and execute the same document locally or on a runner:
 knit land plan --out reviewed.land.json
 knit land show --plan reviewed.land.json
 knit land validate --plan reviewed.land.json --json
+knit land validate --json            # the bundle's own plan for this destination
 knit land apply --plan reviewed.land.json --expected-plan-hash <reviewed-sha256>
 
 knit land plan --from-artifact bundle.json --project-file project.json --out reviewed.land.json --json
@@ -1241,7 +1243,9 @@ The output includes the touched-path commits, related commits in the same Knit s
 
 `knit show <target>` uses the same bundle log selectors as `knit revert`: `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, commit group ids, and recorded git commit SHAs. Commit and revert group nodes show `git show --stat --oneline` for each repo commit. Observed git nodes show the branch movement and the relevant added or dropped commits when those commits are still available locally.
 
-`knit revert <target>` resolves bundle log selectors like `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, and git commit SHAs shown in `knit log`. A commit SHA resolves to the latest bundle node that mentions that commit, so if a commit was later observed as dropped by a reset, reverting by that SHA restores it from the latest rewind node. By default it writes a checked revert plan under `.knit/revert-plans/` and prints the per-repo operations. `knit revert <target> --apply` requires that plan to exist. For local git entries, it verifies each affected worktree is still clean and at the planned head, then creates one revert commit per affected repo and appends a `revert.group` node. For a landed PR group, it verifies the recorded PRs are merged, runs the provider-native PR revert for each repo (`gh pr revert` for GitHub), records the newly opened revert PRs as the current publications, and appends a `pr.revert` node so the group can be landed through Knit.
+`knit revert <target>` resolves bundle log selectors like `HEAD`, `HEAD~1`, full node ids, unique node id prefixes, and git commit SHAs shown in `knit log`. A commit SHA resolves to the latest bundle node that mentions that commit, so if a commit was later observed as dropped by a reset, reverting by that SHA restores it from the latest rewind node. By default it writes a checked revert plan under `.knit/revert-plans/` and prints the per-repo operations. `knit revert <target> --apply` requires that plan to exist. For local git entries, it verifies each affected worktree is still clean and at the planned head, then creates one revert commit per affected repo and appends a `revert.group` node. For a landed PR group, it verifies the recorded PRs are merged, runs the provider-native PR revert for each repo (`gh pr revert` for GitHub; GitLab's revert API), records the newly opened revert PRs as the current publications, and appends a `pr.revert` node so the group can be landed through Knit. Forges without a native revert (Forgejo, Codeberg, Gitea, Bitbucket) get the same result from git: Knit reads the review's merge commit from the forge, clones the repository's remote into a disposable `.knit/revert-clones/` directory with the usual forge credentials, reverts the merge on a new `knit/revert-<number>-<timestamp>` branch from the base (`-m 1` for a merge commit; the squashed commit, or every rebased commit newest first, otherwise), pushes it and opens the review. A revert that conflicts with the current base pushes nothing and names the repository and review to revert by hand.
+
+`landed` selects the bundle's most recent `feature.landed` node. A terminal landing archives the bundle and removes its worktrees, and neither is needed to undo it: `knit --bundle <bundle> revert landed` previews the provider reverts, and `knit --bundle <bundle> revert landed --apply` writes the plan when none exists yet, opens one revert PR per repo, records them as the bundle's current publications with a `pr.revert` node, and reopens the archived bundle without rematerializing worktrees. Land the reverts with `knit --bundle <bundle> land` and `knit --bundle <bundle> land apply`: while the open reviews are exactly the compensation recorded by the latest `pr.revert` node, the plan merges them in the reverse of the project's `merge.repoOrder` (unlisted repositories, which normally follow the listed ones, come first), reverses a `repository_sequence` execution order to match, and replaces the saved plan of the original landing for that destination. A successful terminal landing of the reverts archives the bundle again. Reverting a local commit group needs the bundle's checkouts; for a landed bundle without them, Knit names the `revert landed --apply` command instead.
 
 Revert behavior is based on the target node:
 

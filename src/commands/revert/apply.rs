@@ -6,7 +6,9 @@ use super::*;
 use crate::checkout::checkout_dir;
 use crate::git::{commit_author, commit_details, git_output, rev_parse};
 use crate::ids::{revert_group_id, short_sha};
-use crate::model::{BundleNode, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange};
+use crate::model::{
+    BundleNode, BundleState, CommitAuthor, CommitGroup, CommitRef, Movement, RepoChange,
+};
 use crate::output as out;
 use crate::providers::{self, pr_number_from_url, PrTarget, PullRequest};
 use crate::store::{load_effective_config, save_active_bundle, ActiveBundle};
@@ -153,6 +155,40 @@ pub(super) fn apply_provider_revert(
         &items,
     )?;
     let _ = fs::remove_file(path);
+    if plan.target_node_type == "feature.landed" {
+        reopen_for_revert_landing(active)?;
+    }
+    Ok(())
+}
+
+/// The revert PRs are now the bundle's open reviews, so the bundle lives
+/// again until they land. Landing them merges on the forge and needs no
+/// checkout, so worktrees are not rematerialized.
+fn reopen_for_revert_landing(active: &mut ActiveBundle) -> Result<()> {
+    if active.bundle.state == Some(BundleState::Archived) {
+        active.bundle.state = Some(BundleState::Open);
+        active.bundle.archived_at = None;
+        active.bundle.updated_at = now_iso();
+        save_active_bundle(active)?;
+        println!(
+            "{} {} ({})",
+            out::heading("Reopened bundle:"),
+            out::node(&active.bundle.id),
+            BundleState::Open
+        );
+        if let Err(error) =
+            crate::commands::remote::sync_active_bundle_to_remote_if_enabled(active, &[], false)
+        {
+            println!("{} {error:#}", out::warn("remote sync skipped:"));
+        }
+    }
+    crate::advice::print(
+        &active.root,
+        format!(
+            "run `knit --bundle {id} land`, then `knit --bundle {id} land apply` to merge the revert PRs in reverse merge order.",
+            id = active.bundle.id
+        ),
+    );
     Ok(())
 }
 
@@ -220,6 +256,11 @@ pub(crate) fn create_provider_revert_prs(
                         forge.as_ref(),
                         &summary,
                     );
+                    // Landing pins each review merge to the repo's recorded
+                    // head, so the revert review's own head becomes that pin.
+                    if let Some(head) = &summary.head_ref_oid {
+                        active.bundle.repos[repo_index].head_sha = Some(head.clone());
+                    }
                 }
                 repo_ids.insert(repo_id.clone());
                 publication_urls.insert(summary.url.clone());

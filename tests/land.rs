@@ -1581,6 +1581,33 @@ fn land_resume_refuses_a_run_whose_plan_was_regenerated() {
 }
 
 #[test]
+fn land_rollback_of_succeeded_run_names_the_landed_revert_command() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land", "plan"], &fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+
+    let rollback = knit_fails_with_fake_gh(
+        &workspace,
+        ["--bundle", "venue-capacity", "land", "rollback"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(rollback.contains("succeeded"), "{rollback}");
+    assert!(
+        rollback.contains("knit --bundle venue-capacity revert landed --apply"),
+        "{rollback}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn land_rollback_creates_revert_prs_for_merged_steps_of_failed_run() {
     let root = unique_temp_dir();
     let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);

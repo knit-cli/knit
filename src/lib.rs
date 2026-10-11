@@ -667,10 +667,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     project_file,
                     json,
                 }) => commands::land::v2::validate(
-                    &plan,
+                    plan.as_deref(),
                     from_artifact.as_deref(),
                     project_file.as_deref(),
                     json,
+                    target.as_deref(),
+                    lane.as_deref(),
                 ),
                 Some(LandCommand::Source {
                     plan,

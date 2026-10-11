@@ -11,7 +11,7 @@ use super::{
     LAND_PLAN_KIND,
 };
 use crate::model::{
-    DeployMode, KnitProject, MergeMethod, ProjectLandingLane, ProjectLandingMergePlan,
+    ChangeGroup, DeployMode, KnitProject, MergeMethod, ProjectLandingLane, ProjectLandingMergePlan,
     ProjectLandingPlan, RepoEntry, SCHEMA_VERSION,
 };
 use crate::providers::publication_for_repo;
@@ -65,10 +65,13 @@ pub(super) fn build_plan_with_project(
     // branch merges use it whole, because reaching an environment does not
     // require a review at all.
     let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
-    let scope = ordered_merge_repos(active, merge)
+    let mut scope = ordered_merge_repos(active, merge)
         .into_iter()
         .filter(|repo| changed_repo_ids.contains(&repo.id))
         .collect::<Vec<_>>();
+    if lands_revert(&active.bundle) {
+        scope.reverse();
+    }
     let scoped = workspace_is_scoped(active);
     let lane = resolve_lane(project.as_ref(), landing, lane_name, scoped)?;
     let (destinations, lane_absent) =
@@ -591,6 +594,38 @@ fn inferred_plan_provider(active: &ActiveBundle) -> String {
     } else {
         DEFAULT_LAND_PROVIDER.to_string()
     }
+}
+
+/// Whether the bundle's open reviews are exactly the compensation recorded by
+/// its latest `pr.revert`. Those land in reverse merge order, so consumers
+/// drop their use of a change before the change itself is removed.
+pub(crate) fn lands_revert(bundle: &ChangeGroup) -> bool {
+    let Some(latest) = bundle.nodes.iter().rev().find(|node| {
+        matches!(
+            node.node_type.as_str(),
+            "commit.group"
+                | "revert.group"
+                | "git.observed"
+                | "land.update"
+                | "feature.landed"
+                | "pr.revert"
+        )
+    }) else {
+        return false;
+    };
+    if latest.node_type != "pr.revert" {
+        return false;
+    }
+    let mut open = bundle
+        .publications
+        .iter()
+        .filter(|publication| {
+            !publication.state.eq_ignore_ascii_case("merged")
+                && !publication.state.eq_ignore_ascii_case("closed")
+        })
+        .peekable();
+    open.peek().is_some()
+        && open.all(|publication| latest.publication_urls.contains(&publication.url))
 }
 
 fn ordered_merge_repos<'a>(
