@@ -14,66 +14,36 @@ fn init_can_generate_agents_tutorial() {
     assert!(output.contains("AGENTS.md"));
 
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
-    assert!(agents.contains("This is a Knit workspace"));
-    assert!(agents.contains("knit status"));
-    assert!(agents.contains("knit init"));
-    assert!(agents.contains("knit bundle \""));
-    assert!(agents.contains("fetches each selected repo's configured `origin/<baseBranch>`"));
-    assert!(agents.contains("knit workspace status"));
-    assert!(agents.contains("knit agents"));
-    assert!(agents.contains("knit pull --base"));
-    assert!(agents.contains("knit pull --current"));
-    assert!(agents.contains("knit project set-base"));
-    assert!(agents.contains("knit bundle add"));
-    assert!(agents.contains("knit bundle remove <repo>"));
-    assert!(agents.contains("knit bundle prune"));
-    assert!(agents.contains("archives dead bundles as finished history"));
-    assert!(agents.contains("knit bundle prune --apply --all"));
-    assert!(agents.contains("--remote-branches"));
-    assert!(agents.contains("matching remote bundle records"));
-    assert!(agents.contains("archived (never deleted) with the everyday `bundle:push` scope"));
-    assert!(agents.contains("--apply --delete --remote-bundles"));
-    assert!(agents.contains("knit project remove <project> --force"));
-    assert!(agents.contains("knit bundle pull <slug>"));
-    assert!(agents.contains("knit check run <name>"));
-    assert!(agents.contains("knit history list"));
-    assert!(agents.contains("--architecture|--kg"));
-    assert!(agents.contains("archived or landed bundles"));
-    assert!(agents.contains("knit --bundle feature-a commit"));
-    assert!(agents.contains("knit --bundle feature-a commit --all"));
-    assert!(agents.contains("knit --bundle feature-a push --set-upstream"));
-    assert!(agents.contains("If the harness provides subagents or agent teams"));
-    assert!(agents.contains("minimum capable subagent/model"));
-    assert!(agents.contains("Project JSON can define a default `landing` template"));
-    assert!(agents.contains(".knit/land-plans/<bundle>.land.json"));
     for guidance in [
-        "canonical schema `0.2` `KnitLandPlan`",
-        "Edit visually or as raw JSON",
-        "knit land validate --plan",
-        "knit land apply --plan reviewed.land.json --from-artifact",
-        "knit sync pull --plans --remote hosted",
-        "knit sync push --plans --remote hosted",
-        "--views|--plans|--architecture|--kg|--all",
-        "landing.steps[]",
-        "associated project landing recipes",
-        "complete immutable plan hash",
-        "knit land recover --run execution.run.json --apply",
-        "unavailable authority blocks execution",
-        "does not expire automatically",
-        "superseded run cannot restore",
-        "knit land --schema-version 0.1 plan",
-        "it does not restore deployed services",
+        "This is a Knit workspace",
+        ".knit/worktrees/<bundle>/<repo>/",
+        "knit bundle list",
+        "knit bundle \"Feature title\"",
+        "knit --bundle <b> diff",
+        "knit --bundle <b> commit --all",
+        "knit --bundle <b> publish create",
+        "knit --bundle <b> rebase --continue",
+        "knit --bundle <b> land",
+        "knit log --all",
+        "root commands without `--bundle` are refused",
+        "do not merge Knit-owned reviews with `gh pr merge`",
+        "knit agents",
+        "knit <command> --help",
+        "If the harness provides subagents or agent teams",
+        "the main agent does not write the code",
+        "send anything wrong, inconsistent or missing back",
     ] {
         assert!(
             agents.contains(guidance),
             "missing guide content: {guidance}"
         );
     }
-    assert!(!agents.contains(
-        "A landing template or plan can set `onFailure: \"rollback\"` to do this automatically."
-    ));
-    assert!(agents.contains("urdir review --bundle"));
-    assert!(agents.contains("gloss view --review"));
+    // The guide is read on every agent turn; keep it short.
+    assert!(
+        agents.len() < 5_000,
+        "workspace guide grew to {} bytes",
+        agents.len()
+    );
 
     fs::remove_file(workspace.join("AGENTS.md")).unwrap();
     let existing_workspace_output = knit(&workspace, ["bundle", "venue capacity", "--agents"]);
@@ -1720,10 +1690,10 @@ fn project_agents_are_generated_from_project_json() {
     let agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(agents.contains("custom guidance"));
     assert!(agents.contains("<!-- BEGIN KNIT PROJECT AGENTS: demo -->"));
-    assert!(agents.contains("That command adds these default repos from the project data:"));
+    assert!(agents.contains("starts from these default repos of project `demo`"));
     assert!(agents.contains("- `backend`"));
     assert!(agents.contains("### Agent Teamwork"));
-    assert!(agents.contains("minimum capable subagent/model"));
+    assert!(agents.contains("the main agent does not write the code"));
     assert!(!agents.contains("all four Demo repos"));
     assert!(agents.contains("<!-- BEGIN GLOSS AGENTS -->"));
     assert!(agents.contains("<!-- END KNIT PROJECT AGENTS: demo -->\n<!-- BEGIN GLOSS AGENTS -->"));
@@ -1792,19 +1762,11 @@ fn project_agents_are_generated_from_project_json() {
     knit(&workspace, ["project", "agents", "demo"]);
     let landing_agents = fs::read_to_string(workspace.join("AGENTS.md")).unwrap();
     assert!(landing_agents.contains("This project defines a default landing template"));
-    assert!(landing_agents
-        .contains("`knit land` expands it into `.knit/land-plans/<bundle>.land.json`"));
     for guidance in [
-        "New canonical plans use schema `0.2`",
-        "Edit visually or as raw JSON",
-        "knit land validate --plan <path> --json",
-        "knit sync push --plans",
-        "knit sync pull --plans",
-        "landing.steps[]",
-        "immutable plan and receipts",
-        "knit land recover --run <path>",
-        "requires hosted ownership",
-        "Legacy v0.1 rollback only proposes source revert PRs",
+        "`knit land` writes the plan to `.knit/land-plans/<bundle>.land.json`",
+        "then run `knit land apply`",
+        "knit land resume --run <path>",
+        "knit land --target <branch>",
     ] {
         assert!(
             landing_agents.contains(guidance),
@@ -1867,7 +1829,7 @@ fn bundle_agents_are_written_at_bundle_root_not_in_repo_checkouts() {
     assert!(bundle_agents.contains("`backend`: `.knit/worktrees/agent-docs/backend`"));
     assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/agent-docs/frontend`"));
     assert!(bundle_agents.contains("## Agent Teamwork"));
-    assert!(bundle_agents.contains("minimum capable subagent/model"));
+    assert!(bundle_agents.contains("the main agent does not write the code"));
     assert!(bundle_agents.contains("knit commit --all"));
     // The review path is commit then publish: `knit publish create` pushes the
     // branches itself, so the worktree guide must not teach a separate push.

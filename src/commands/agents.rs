@@ -15,13 +15,13 @@ pub(crate) fn agent_teamwork_section(heading: &str) -> String {
     format!(
         r#"{heading}
 
-{sentinel}, use them deliberately:
+{sentinel}, the main agent is the architect of a change:
 
-- The main agent keeps architect ownership: understand the issue, define boundaries, identify cross-repo interfaces, and prepare enough context that delegated agents can work without hidden assumptions.
-- For multi-repo work, split tasks by repo or by clearly stated interface boundary. Include the expected contract, files, commands, and acceptance checks in each handoff.
-- Delegate only the smallest independent task to the minimum capable subagent/model the harness supports. Do not spawn broad or speculative parallel work.
-- When subagents report back, the main agent integrates the work, runs the normal Knit/git/project tests, and fixes or redirects the procedure if verification fails.
-- If subagents are not available, proceed as a single agent while preserving the same boundary-setting and verification discipline.
+- Work out which repositories must change and define the cross-repo contract yourself: names, payload shapes, formats, validation, edge cases, and which repository owns what.
+- Delegate each repository's implementation to its own subagent with the contract, its worktree path, the relevant files, and how to test. Subagents work only inside their own checkout; the main agent does not write the code.
+- Review every diff against the contract and against the other repositories: producers and consumers must agree on names, types, formats and edge cases, and repositories that implement the same contract must behave the same. Do not accept work because a subagent reports it done; send anything wrong, inconsistent or missing back with a precise description, and review again.
+- Commit and publish only when the whole change is correct and the tests pass.
+- Without subagents, work as a single agent with the same contract and review discipline.
 
 "#,
         sentinel = AGENT_TEAMWORK_SENTINEL
@@ -107,17 +107,11 @@ knit commit --all -m "Describe the feature change"
 knit publish create
 ```
 
-`knit publish create` pushes every tracked feature branch itself and then opens
-one review object (PR/MR) per repo, so committing and publishing is the whole
-path to review. Use `knit push --set-upstream` only when you want the branches
-on `origin` without review objects. Project and bundle `publish` policy supplies
-review titles, bodies, and draft choices. Inspect it with `knit publish create
---dry-run`; use `--ready <repo>`, `--draft-repo <repo>`, `--title <repo>=<text>`, or
-`--body-file <repo>=<path>` for deliberate overrides. Body files live relative to
-this bundle worktree root. Without a selected body, `PR-<repo>.md` here becomes
-that repo's review body, else `PR.md` becomes every repo's body; a leading
-`Title: <text>` line becomes the title.
-Publishing sync preserves author text outside the managed Knit block.
+`knit publish create` pushes every tracked feature branch and opens one review
+(PR/MR) per repo, so committing and publishing is the whole path to review. Use
+`knit push --set-upstream` only when you want the branches on `origin` without
+reviews. `knit publish create --dry-run` shows each review's title, body and draft
+choice; `PR-<repo>.md` or `PR.md` in this directory becomes the review body.
 
 {teamwork_section}
 Before editing a path that may have cross-repo coupling, ask Knit which prior bundle work touched it:
@@ -371,36 +365,12 @@ fn project_runtime_agents_section(project: &KnitProject) -> String {
         r#"
 ### Bundle runtime
 
-This project defines a native Knit bundle runtime. The committed source of truth lives in `{config_file}` inside `{stack_repo}`; sync it into the workspace with:
-
-```sh
-knit project pull --repo {stack_repo}
-knit agents
-```
-
-From a bundle worktree that includes `{stack_repo}`:
-
-```sh
-knit run up
-knit run status
-knit run down
-```
-
-Runtime behavior:
-
-- Runs `{compose_file}` from the `{stack_repo}` checkout as isolated compose project `knit-run-<bundle>`; run state is recorded in `.knit/runtime-runs/<bundle>/state.json` after a successful start (`knit run down` cleans up containers by project label even without it; `knit run down --purge` also removes bundle-owned volumes and local build images, and landing/archive cleanup purges automatically when disposing worktrees)
-- A plain compose file is lifted automatically: the shape the repos run on `main`, with paths into tracked repos remapped to bundle worktrees and published host ports reallocated; a compose file named `docker-compose.knit.yml` or referencing `${{KNIT_*}}` variables is instead run as-is with Knit's environment contract injected (`KNIT_CHECKOUT_<repo>`, `KNIT_REV_<repo>`, `KNIT_PORT_<service>`, `KNIT_DB_*`); `runtime.mode` in the project config forces a mode
-- `runtime.bindings` records consumer environment/build argument dependencies by provider repo/service; Knit supplies the current bundle's allocated port even when source ports overlap
-- Shared database attachment respects database identity or explicit `database.repos`; unrelated same-named database services keep their own data and credentials
-- Starts all stacks before verifying their running/healthy state; `startupTimeoutSeconds` bounds verification (default 120 seconds per stack), and failed startup never records a successful run
-- Builds the stack from bundle worktrees, not the source checkout on `main`
-- Allocates stable per-bundle host ports, reusing recorded ports on repeated `up` calls (contract mode pools: {port_pools}, step `{step}`)
-- A project command configured as `up`, `down`, or `status` takes precedence over these runtime verbs
-- Database (contract mode): {database_detail}
-- Opens `{profile_path}` on the frontend port after `knit run status`
-- If the automatic lift mishandles a stack, `knit run eject` materializes it as an editable `docker-compose.knit.yml` in the stack repo (contract mode from then on); edit that file and commit it instead of working around the runtime
-
-Shared database mode attaches bundle stacks to an existing dev database. Bundle database mode activates the compose file's `bundle-db` profile so a dedicated database container starts per runtime with its own empty database.
+From a bundle worktree that includes `{stack_repo}`, `knit run up`, `knit run status` and `knit run down` run
+`{compose_file}` from that checkout as compose project `knit-run-<bundle>`, built from the bundle worktrees on
+the bundle's own host ports (pools: {port_pools}, step `{step}`). Database: {database_detail}. `knit run status`
+opens `{profile_path}` on the frontend port. The runtime config lives in `{config_file}` inside `{stack_repo}`
+(`knit project pull --repo {stack_repo}` syncs it). If the automatic compose lift mishandles the stack, run
+`knit run eject` and commit the generated `docker-compose.knit.yml` instead of working around it.
 
 "#,
         config_file = config_file,
@@ -443,7 +413,7 @@ fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> Stri
         String::new()
     } else {
         format!(
-            "\nObserved repos are available by id but are not included in default bundle starts:\n\n{}\n",
+            "\nObserved repos (add one with `--repo <id>` or `knit bundle add <id>`):\n\n{}\n",
             observed_repos.join("\n")
         )
     };
@@ -457,7 +427,7 @@ fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> Stri
         String::new()
     } else {
         format!(
-            "\n`knit publish create` opens these repos' reviews as drafts (`publish.draft`; change with `knit project set-draft <repo> false`). Other draft choices may come from project or bundle publishing policy and CLI overrides:\n\n{}\n",
+            "\n`knit publish create` opens these repos' reviews as drafts (`knit project set-draft <repo> false` changes it):\n\n{}\n",
             draft_repos.join("\n")
         )
     };
@@ -473,40 +443,12 @@ fn project_agents_section(project: &KnitProject, include_teamwork: bool) -> Stri
         r#"{begin}
 ## Knit Project: {project_id}
 
-This workspace has a reusable Knit project named `{project_id}`.
-
-Use Knit as the source of truth for repo ids, paths, bases, and default/observed status:
-
-```sh
-knit project show {project_id}
-```
-
-Start most new `{project_id}` work with:
-
-```sh
-knit bundle "feature title" --project {project_id}
-```
-
-That command adds these default repos from the project data:
+`knit bundle "feature title"` starts from these default repos of project `{project_id}`:
 
 {default_repos}
 {observed_section}{draft_section}
-For narrower or unusual work, inspect the project first and then choose repo ids deliberately:
-
-```sh
-knit project show {project_id}
-knit bundle "feature title" --project {project_id} --repo <repo-id>
-```
-
-Before changing a file or subsystem, use project history to find Knit-managed work that previously touched it and see any cross-repo companion commits:
-
-```sh
-knit related --repo <repo-id> path/inside/repo
-knit related <repo-id>/path/inside/repo
-knit related --repo <repo-id> path/inside/repo --pull
-```
-
-Use `--pull` when you want to refresh the local history ledger from the sync remote first. The command joins Git's file history with Knit history; Git remains the source of truth for file diffs, and Knit supplies the bundle/commit-group context.
+`knit project show {project_id}` lists paths and base branches. `knit related <repo-id>/<path>` shows earlier
+bundles that touched a file, with their companion commits in other repos.
 {teamwork_section}{runtime_section}{landing_section}
 {end}
 "#,
@@ -590,13 +532,11 @@ fn project_landing_agents_section(project: &KnitProject) -> String {
 
     format!(
         r#"
-This project defines a default landing template. `knit land` expands it into `.knit/land-plans/<bundle>.land.json` for the default destination; target/lane plans use separate destination files. New canonical plans use schema `0.2` and execute the same saved document locally and hosted. Edit visually or as raw JSON in the hosted plan editor, or edit local JSON; validate with `knit land validate --plan <path> --json` before `knit land apply --plan <path>`.
+### Landing
 
-Library release order can be declared with `landing.dependencies`: `library`, `consumers` (`"*"` includes bundle-only repositories), optional `release.instructions`, and optional `bump.instructions`/`bump.paths`. When the library review lands, generated release and update gates pause one immutable run. Continue with `knit land resume --acknowledge release-<library> --note "Released"`, then push consumer dependency updates and resume again. Update gates accept only append-only, path-constrained commits and pin subsequent merges to the accepted SHA with fresh checks. Pauses persist receipts and release ownership without finalizing the bundle. Gates require local executor 0.6 and `landing-gates`; artifact runners refuse them. A fork review into a repository this account cannot push to waits for its maintainers instead: its step is marked `mergedBy: "upstream"`, merged reviews are recorded as landed, open ones pause the run until `knit land resume`, and Knit never merges or reverts them. Custom `landing.steps[]` also accepts `whenChanged`; omitted configured prerequisites are dropped, unknown IDs fail. Named repositories must be project members (`knit project add <id> <path> --observe`); wildcard rules include bundle-only repositories.
-
-Project/repository recipes in `landing.deployments[]` support build, deploy, verify and recovery commands; `landing.steps[]` adds explicit operations. Edit recipes in the hosted recipe editor or local project JSON, preserving unrelated fields. `knit sync push --plans` and `knit sync pull --plans` exchange plan revisions, run receipts and associated recipes. Source or recipe changes require a new reviewed plan revision.
-
-Runs retain their immutable plan and receipts. `knit land resume --run <path>` continues that run; `knit land recover --run <path>` previews recovery and `--apply` executes it. Recovery blocks forward resume, and superseded runs cannot restore over newer executions. Synchronized execution requires hosted ownership; never bypass an unavailable authority or steal an interrupted lock. v0.2 defaults to `onFailure: "stop"`; `recover` requires captured state, idempotent restoration and verification. Legacy v0.1 rollback only proposes source revert PRs, not service restoration.
+This project defines a default landing template. `knit land` writes the plan to `.knit/land-plans/<bundle>.land.json`;
+review it, then run `knit land apply`. A failed apply stops; `knit land resume --run <path>` continues it (recovery:
+`knit land --help`).
 
 Configured landing merge order:
 
@@ -608,11 +548,11 @@ Configured deployment steps:
 
 {deployments}
 
-Configured branch-target deployment steps (`landing.targets`):
+Configured branch-target deployment steps (`landing.targets`, used by `knit land --target <branch>`):
 
 {target_deployments}
 
-Do not use `gh pr merge` for Knit-owned bundles. Use `knit land`, then `knit land apply` after reviewing the generated plan. A successful apply into a terminal destination archives the bundle and removes generated worktrees unless `--keep-worktrees` is passed; landing into an intermediate destination such as a staging lane leaves the bundle open.
+Do not use `gh pr merge` for Knit-owned bundles.
 "#
     )
 }
