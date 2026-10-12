@@ -203,14 +203,15 @@ impl Fixture {
     }
 
     fn cmd(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_knit"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+        command
             .current_dir(&self.root)
             .args(args)
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION")
-            .env("KNIT_HOME", self.root.join("home"))
-            .output()
-            .unwrap()
+            .env("KNIT_HOME", self.root.join("home"));
+        private_temp_env(&self.root, &mut command);
+        command.output().unwrap()
     }
 
     fn plan(&self) -> Value {

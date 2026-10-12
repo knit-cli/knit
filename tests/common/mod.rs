@@ -437,6 +437,39 @@ pub fn isolated_git_config_global() -> String {
     dir.join("gitconfig").to_string_lossy().to_string()
 }
 
+/// A stable temp directory private to one workspace path: the same cwd always
+/// maps to the same directory, and different workspaces map apart.
+fn workspace_temp_dir(cwd: &Path) -> PathBuf {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    let mut hasher = DefaultHasher::new();
+    cwd.hash(&mut hasher);
+    let dir = dunce_canonicalize_or(std::env::temp_dir()).join(format!(
+        "knit-test-{}-{:x}",
+        std::process::id(),
+        hasher.finish()
+    ));
+    fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+/// Give a spawned `knit` process a temp directory private to its workspace.
+///
+/// Landing ownership locks live in `std::env::temp_dir()` and are keyed only
+/// by project id, which most fixtures share (`demo`): parallel tests that land
+/// at the same time would otherwise fight over one lock file (`create_new`
+/// fails while another test holds it, `os error 80` on Windows). A temp dir
+/// keyed by workspace keeps locks shared only inside a single test. Windows
+/// resolves the temp dir from `TMP`/`TEMP` and Unix from `TMPDIR`, so set all
+/// three. Applied before test-provided env, a test can still override.
+pub fn private_temp_env(cwd: &Path, command: &mut Command) {
+    let temp = workspace_temp_dir(cwd).into_os_string();
+    command
+        .env("TMPDIR", &temp)
+        .env("TMP", &temp)
+        .env("TEMP", &temp);
+}
+
 /// Ambient identity overrides (exported by editor/agent harnesses such as a
 /// T3 Code session) would silently override the per-repo `git config` identity
 /// every fixture sets and inject actor attribution, breaking actor/author
@@ -470,6 +503,7 @@ where
         .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     run(command)
 }
@@ -487,6 +521,7 @@ where
         .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     // Test-provided env wins, so a test can still point KNIT_HOME at its own dir.
     for (key, value) in env {
@@ -508,6 +543,7 @@ where
         .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     let output = command.output().unwrap();
     assert!(!output.status.success());
@@ -531,6 +567,7 @@ where
         .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION");
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
@@ -578,6 +615,7 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
@@ -624,6 +662,7 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("GH_FAKE_DIR", fake_gh_dir);
+    private_temp_env(cwd, &mut command);
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {
         command.env(key, value);
@@ -663,6 +702,7 @@ where
         .env_remove("KNIT_SESSION")
         .env("PATH", path)
         .env("FORGE_FAKE_DIR", fake_dir);
+    private_temp_env(cwd, &mut command);
     scrub_ambient_forge_env(&mut command);
     scrub_ambient_git_identity(&mut command);
     for (key, value) in env {

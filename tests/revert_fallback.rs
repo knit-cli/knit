@@ -164,6 +164,7 @@ impl Landed {
             .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION");
+        private_temp_env(&self.workspace, &mut command);
         scrub_ambient_forge_env(&mut command);
         for (key, value) in &self.env {
             command.env(key, value);
