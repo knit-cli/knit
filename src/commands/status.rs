@@ -23,6 +23,10 @@ struct StatusDocument {
     state: String,
     repos: Vec<StatusRepo>,
     publications: StatusPublications,
+    /// Present once a landing merged revert reviews: whether each revert was
+    /// proven the exact inverse of the change it undoes.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    revert_verified: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -120,6 +124,7 @@ pub fn show_status(json: bool) -> Result<()> {
                 repos: active.bundle.repos.len(),
             },
             repos,
+            revert_verified: latest_revert_verification(&active.bundle).map(|v| v.verified),
         };
         println!("{}", serde_json::to_string_pretty(&document)?);
         return Ok(());
@@ -131,11 +136,26 @@ pub fn show_status(json: bool) -> Result<()> {
         out::node(&active.bundle.id),
         active.resolution_source.label()
     );
-    println!(
-        "{} {}\n",
-        out::heading("State:"),
-        out::status(state.as_str())
-    );
+    println!("{} {}", out::heading("State:"), out::status(state.as_str()));
+    if let Some(verification) = latest_revert_verification(&active.bundle) {
+        if verification.verified {
+            println!(
+                "{} {}",
+                out::heading("Revert:"),
+                out::ok("revert verified (exact inverse of the landed change)")
+            );
+        } else {
+            println!(
+                "{} {}",
+                out::heading("Revert:"),
+                out::danger("revert NOT verified")
+            );
+            for (repo_id, files) in &verification.mismatched {
+                println!("  {}: {}", out::repo(repo_id), files.join(", "));
+            }
+        }
+    }
+    println!();
     println!(
         "{} {} {} {} {}",
         out::header_field("repo", 14),
@@ -172,6 +192,18 @@ pub fn show_status(json: bool) -> Result<()> {
     print_closed_summary(&active, state);
 
     Ok(())
+}
+
+fn latest_revert_verification(
+    bundle: &crate::model::ChangeGroup,
+) -> Option<&crate::model::RevertVerification> {
+    bundle
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == "feature.landed")?
+        .revert_verification
+        .as_ref()
 }
 
 fn print_closed_summary(active: &crate::store::ActiveBundle, state: BundleStatus) {

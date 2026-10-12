@@ -966,7 +966,20 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
         .collect::<BTreeSet<_>>()
         .into_iter()
         .collect::<Vec<_>>();
-    active.bundle.nodes.push(BundleNode::feature_landed(
+    let verification =
+        match crate::commands::revert::compensation_landed(&active.bundle, &publication_urls) {
+            Some(compensation) if plan.terminal => {
+                let compensation = compensation.clone();
+                Some(crate::commands::revert::verify_landed_revert(
+                    &active.root,
+                    &active.bundle,
+                    &compensation,
+                    &publication_urls,
+                )?)
+            }
+            _ => None,
+        };
+    let mut node = BundleNode::feature_landed(
         node_id("land"),
         now_iso(),
         plan.id.clone(),
@@ -981,7 +994,9 @@ fn append_landed_node(active: &mut ActiveBundle, plan: &LandPlan, run: &LandRun)
             lane: plan.lane.clone(),
             target_branch: plan.target_branch.clone(),
         }),
-    ));
+    );
+    node.revert_verification = verification;
+    active.bundle.nodes.push(node);
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();
     Ok(())

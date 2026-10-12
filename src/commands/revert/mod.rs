@@ -6,7 +6,9 @@ mod apply;
 mod fallback;
 mod plan;
 mod review;
+mod verify;
 pub(crate) use review::create_review;
+pub(crate) use verify::{compensation_landed, verify_landed_revert};
 
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::ids::short_sha;
@@ -90,12 +92,22 @@ struct RevertOperation {
     selector: Option<String>,
 }
 
-pub fn revert_target(target: &str, apply: bool) -> Result<()> {
-    if apply {
-        apply_revert(target)
-    } else {
-        plan_revert(target)
+pub fn revert_target(target: &str, apply: bool, land: bool) -> Result<()> {
+    if land && (!apply || target != "landed") {
+        let bundle =
+            crate::store::explicit_bundle_override().unwrap_or_else(|| "<bundle>".to_string());
+        bail!(
+            "`--land` merges the revert PRs of a landed bundle, so it needs the `landed` target and `--apply`: run `knit --bundle {bundle} revert landed --apply --land`."
+        );
     }
+    if !apply {
+        return plan_revert(target);
+    }
+    apply_revert(target, land)?;
+    if land {
+        crate::commands::land::land_default_destination()?;
+    }
+    Ok(())
 }
 
 fn plan_revert(target: &str) -> Result<()> {
@@ -114,7 +126,7 @@ fn plan_revert(target: &str) -> Result<()> {
     Ok(())
 }
 
-fn apply_revert(target: &str) -> Result<()> {
+fn apply_revert(target: &str, land: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let target_node = resolve_log_node(&active.bundle.nodes, target)?.clone();
     let path = plan_path(&active, &target_node.id);
@@ -132,7 +144,7 @@ fn apply_revert(target: &str) -> Result<()> {
         write_json(&path, &plan)?;
         print_plan(&plan, &path);
         println!();
-        return apply_provider_revert(&mut active, &plan, path);
+        return apply_provider_revert(&mut active, &plan, path, land);
     }
 
     if !path.exists() {
@@ -160,7 +172,7 @@ fn apply_revert(target: &str) -> Result<()> {
 
     preflight_plan(&active, &plan)?;
     if plan_uses_provider_revert(&plan) {
-        return apply_provider_revert(&mut active, &plan, path);
+        return apply_provider_revert(&mut active, &plan, path, land);
     }
 
     apply_local_revert(&mut active, &plan, path)

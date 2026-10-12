@@ -33,26 +33,13 @@ pub(super) fn create_revert_review(
         .clone()
         .unwrap_or_else(|| repo.base_branch.clone());
     let remote = repository_remote(repo)?;
-    let clone = DisposableClone::new(target)?;
-    let dir = clone.path.as_path();
-    git_output(
-        clone.parent()?,
-        [
-            OsString::from("clone"),
-            OsString::from("--quiet"),
-            OsString::from("--no-tags"),
-            OsString::from("--branch"),
-            OsString::from(&base),
-            OsString::from(&remote),
-            dir.as_os_str().to_owned(),
-        ],
-    )
-    .with_context(|| {
+    let clone = DisposableClone::of_base(target, &remote, &base).with_context(|| {
         format!(
             "{}: failed to clone {remote} to revert PR #{}",
             repo.id, original.number
         )
     })?;
+    let dir = clone.path.as_path();
 
     // The clone has no local identity; take the one `knit commit` would use.
     let identity_source = Path::new(&repo.path);
@@ -115,7 +102,7 @@ pub(super) fn create_revert_review(
 /// A squash merge is one commit that matches none of the review's own
 /// commits. A rebase merge copied every review commit onto the base, ending
 /// at the merge revision, so each copy is found by patch equivalence.
-fn single_parent_commits(
+pub(super) fn single_parent_commits(
     dir: &Path,
     repo: &RepoEntry,
     original: &PullRequest,
@@ -205,7 +192,7 @@ fn review_head(dir: &Path, original: &PullRequest) -> Option<String> {
     has_commit(dir, &head).then_some(head)
 }
 
-fn parents(dir: &Path, commit: &str) -> Result<Vec<String>> {
+pub(super) fn parents(dir: &Path, commit: &str) -> Result<Vec<String>> {
     Ok(
         git_output(dir, ["rev-list", "--parents", "-n", "1", commit])?
             .split_whitespace()
@@ -215,7 +202,7 @@ fn parents(dir: &Path, commit: &str) -> Result<Vec<String>> {
     )
 }
 
-fn has_commit(dir: &Path, commit: &str) -> bool {
+pub(super) fn has_commit(dir: &Path, commit: &str) -> bool {
     git_output_optional(
         dir,
         [
@@ -230,7 +217,7 @@ fn has_commit(dir: &Path, commit: &str) -> bool {
     .is_some()
 }
 
-fn repository_remote(repo: &RepoEntry) -> Result<String> {
+pub(super) fn repository_remote(repo: &RepoEntry) -> Result<String> {
     if let Some(remote) = repo
         .remote
         .as_deref()
@@ -252,8 +239,8 @@ fn repository_remote(repo: &RepoEntry) -> Result<String> {
 
 /// A clone inside the workspace, so project-scoped forge credentials resolve
 /// for its fetches and pushes exactly as they do for bundle checkouts.
-struct DisposableClone {
-    path: PathBuf,
+pub(super) struct DisposableClone {
+    pub(super) path: PathBuf,
 }
 
 impl DisposableClone {
@@ -268,10 +255,25 @@ impl DisposableClone {
         })
     }
 
-    fn parent(&self) -> Result<&Path> {
-        self.path
+    pub(super) fn of_base(target: &PrTarget, remote: &str, base: &str) -> Result<Self> {
+        let clone = Self::new(target)?;
+        let parent = clone
+            .path
             .parent()
-            .context("disposable clone path has no parent")
+            .context("disposable clone path has no parent")?;
+        git_output(
+            parent,
+            [
+                OsString::from("clone"),
+                OsString::from("--quiet"),
+                OsString::from("--no-tags"),
+                OsString::from("--branch"),
+                OsString::from(base),
+                OsString::from(remote),
+                clone.path.as_os_str().to_owned(),
+            ],
+        )?;
+        Ok(clone)
     }
 }
 

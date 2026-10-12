@@ -7,6 +7,32 @@ use std::path::{Path, PathBuf};
 
 const BUNDLE: &str = "venue-capacity";
 
+// Landing ownership locks live in TMPDIR and are keyed by project, and every
+// test here uses project `demo`; a private TMPDIR keeps parallel tests apart.
+fn private_tmp(fake_bin: &Path) -> String {
+    let dir = fake_bin.parent().unwrap().join("tmp");
+    fs::create_dir_all(&dir).unwrap();
+    dir.to_string_lossy().into_owned()
+}
+
+fn knit_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let tmp = private_tmp(fake_bin);
+    knit_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[("TMPDIR", &tmp)])
+}
+
+fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<std::ffi::OsStr>,
+{
+    let tmp = private_tmp(fake_bin);
+    knit_fails_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[("TMPDIR", &tmp)])
+}
+
 /// Two-repo project whose landing merges backend before frontend, published
 /// as `venue-capacity`.
 fn published_project_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {
@@ -247,11 +273,15 @@ fn landed_bundle_is_reverted_and_relanded_in_reverse_order_without_restore() {
     );
     assert!(validated.contains("\"valid\":true"), "{validated}");
 
-    knit_with_fake_gh(
+    let relanding = knit_with_fake_gh(
         &workspace,
         ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
         &fake_bin,
         &fake_gh_dir,
+    );
+    assert!(
+        relanding.contains("Revert verified: venue capacity is undone in all 2 repositories."),
+        "{relanding}"
     );
     assert_eq!(
         merge_order(&fake_gh_dir),
@@ -341,6 +371,326 @@ fn publish_names_sync_when_commits_were_made_outside_knit() {
         error.contains("knit --bundle outside-commit sync"),
         "{error}"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+fn land_forward(workspace: &Path, fake_bin: &Path, fake_gh_dir: &Path) {
+    knit_with_fake_gh(workspace, ["land"], fake_bin, fake_gh_dir);
+    knit_with_fake_gh(
+        workspace,
+        ["land", "apply", "--no-remote"],
+        fake_bin,
+        fake_gh_dir,
+    );
+    assert_eq!(bundle(workspace)["state"], "archived");
+}
+
+/// Prepare the forge's revert branches for every landed repository.
+fn prepare_forge_reverts(root: &Path, workspace: &Path, fake_gh_dir: &Path) {
+    for repo in bundle(workspace)["repos"].as_array().unwrap() {
+        push_forge_revert_branch(
+            root,
+            fake_gh_dir,
+            repo["id"].as_str().unwrap(),
+            repo["headSha"].as_str().unwrap(),
+        );
+    }
+}
+
+fn commit_on_main(root: &Path, repo: &str, edit: impl FnOnce(&Path), message: &str) {
+    let clone = root.join(format!("{repo}-collaborator"));
+    git(&clone, ["checkout", "-q", "main"]);
+    git(&clone, ["pull", "-q", "--ff-only", "origin", "main"]);
+    edit(&clone);
+    git(&clone, ["add", "-A"]);
+    git(&clone, ["commit", "-q", "-m", message]);
+    git(&clone, ["push", "-q", "origin", "main"]);
+}
+
+fn latest_landing(workspace: &Path) -> Value {
+    bundle(workspace)["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .rev()
+        .find(|node| node["type"] == "feature.landed")
+        .unwrap()
+        .clone()
+}
+
+#[test]
+fn revert_landing_verifies_with_later_commits_on_the_base() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_project_bundle(&root);
+    land_forward(&workspace, &fake_bin, &fake_gh_dir);
+
+    commit_on_main(
+        &root,
+        "backend",
+        |clone| fs::write(clone.join("other.txt"), "later work\n").unwrap(),
+        "Later work in another file",
+    );
+    commit_on_main(
+        &root,
+        "frontend",
+        |clone| {
+            let path = clone.join("app.txt");
+            let content = fs::read_to_string(&path).unwrap();
+            fs::write(&path, format!("later header\n{content}")).unwrap();
+        },
+        "Later work in the same file",
+    );
+
+    prepare_forge_reverts(&root, &workspace, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "revert", "landed", "--apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let landed = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        landed.contains("backend: revert verified on main — exact inverse of PR #101 (1 file)"),
+        "{landed}"
+    );
+    assert!(
+        landed.contains("frontend: revert verified on main — exact inverse of PR #202 (1 file)"),
+        "{landed}"
+    );
+    assert!(
+        landed.contains("Revert verified: venue capacity is undone in all 2 repositories."),
+        "{landed}"
+    );
+    assert_eq!(bundle(&workspace)["state"], "archived");
+    assert_eq!(
+        latest_landing(&workspace)["revertVerification"],
+        json!({"verified": true})
+    );
+
+    // The later work is still there; only the bundle's change is gone.
+    let frontend = root.join("frontend-collaborator");
+    git(&frontend, ["pull", "-q", "--ff-only", "origin", "main"]);
+    let content = fs::read_to_string(frontend.join("app.txt")).unwrap();
+    assert!(content.starts_with("later header\n"), "{content}");
+    assert!(!content.contains("frontend landed change"), "{content}");
+
+    let status = knit(&workspace, ["--bundle", BUNDLE, "status"]);
+    assert!(status.contains("revert verified"), "{status}");
+    let log = knit(&workspace, ["--bundle", BUNDLE, "log"]);
+    assert!(log.contains("revert verified"), "{log}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn edited_revert_fails_verification_and_keeps_the_bundle_open() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_project_bundle(&root);
+    land_forward(&workspace, &fake_bin, &fake_gh_dir);
+    prepare_forge_reverts(&root, &workspace, &fake_gh_dir);
+
+    // The backend revert carries an unrelated edit, as a hand-resolved or
+    // edited revert PR would.
+    let clone = root.join("backend-collaborator");
+    git(&clone, ["checkout", "-q", "knit/revert-backend"]);
+    append_line(&clone.join("app.txt"), "hand edit");
+    git(&clone, ["commit", "-q", "-a", "--amend", "--no-edit"]);
+    git(
+        &clone,
+        ["push", "-q", "--force", "origin", "knit/revert-backend"],
+    );
+    let head = git(&clone, ["rev-parse", "HEAD"]);
+    git(&clone, ["checkout", "-q", "main"]);
+    fs::write(fake_gh_dir.join("revert-head-backend"), head.trim()).unwrap();
+
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "revert", "landed", "--apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let failed = knit_fails_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(
+        failed.contains(
+            "backend: revert does not match on main — not the exact inverse of PR #101 in:"
+        ),
+        "{failed}"
+    );
+    assert!(failed.contains("  app.txt"), "{failed}");
+    assert!(
+        failed.contains("frontend: revert verified on main"),
+        "{failed}"
+    );
+    assert!(failed.contains("was not archived"), "{failed}");
+    assert!(!failed.contains("Revert verified:"), "{failed}");
+
+    let after = bundle(&workspace);
+    assert_ne!(after["state"], "archived");
+    assert_eq!(
+        latest_landing(&workspace)["revertVerification"],
+        json!({"verified": false, "mismatched": {"backend": ["app.txt"]}})
+    );
+    let status = knit(&workspace, ["--bundle", BUNDLE, "status"]);
+    assert!(status.contains("revert NOT verified"), "{status}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_landing_runs_deployments_after_their_reversed_merges() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_project_bundle(&root);
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let log = fake_gh_dir.join("merge-order.txt");
+    project["landing"]["deployments"] = json!(["backend", "frontend"]
+        .iter()
+        .map(|repo| json!({
+            "id": format!("deploy-{repo}"),
+            "repoId": repo,
+            "command": ["sh", "-c", format!("echo deploy-{repo} >> '{}'", log.display())]
+        }))
+        .collect::<Vec<_>>());
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap(),
+    )
+    .unwrap();
+    land_forward(&workspace, &fake_bin, &fake_gh_dir);
+    let forward_entries = merge_order(&fake_gh_dir).len();
+
+    prepare_forge_reverts(&root, &workspace, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "revert", "landed", "--apply"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    let plan: Value = serde_json::from_str(
+        &fs::read_to_string(workspace.join(format!(".knit/land-plans/{BUNDLE}.land.json")))
+            .unwrap(),
+    )
+    .unwrap();
+    let step = |id: &str| {
+        plan["steps"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|step| step["id"] == id)
+            .unwrap_or_else(|| panic!("{id} missing from {plan}"))
+            .clone()
+    };
+    assert_eq!(step("deploy-backend")["needs"], json!(["merge-backend"]));
+    assert_eq!(step("deploy-frontend")["needs"], json!(["merge-frontend"]));
+    assert_eq!(step("merge-backend")["needs"], json!(["merge-frontend"]));
+
+    let landed = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(landed.contains("Revert verified:"), "{landed}");
+    let reverse = merge_order(&fake_gh_dir)[forward_entries..].to_vec();
+    let at = |entry: &str| {
+        reverse
+            .iter()
+            .position(|line| line == entry)
+            .unwrap_or_else(|| panic!("{entry} missing from {reverse:?}"))
+    };
+    assert_eq!(reverse.len(), 4, "{reverse:?}");
+    assert!(at("frontend") < at("backend"), "{reverse:?}");
+    assert!(at("frontend") < at("deploy-frontend"), "{reverse:?}");
+    assert!(at("backend") < at("deploy-backend"), "{reverse:?}");
+    assert_eq!(bundle(&workspace)["state"], "archived");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_landed_apply_land_undoes_the_bundle_in_one_command() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_project_bundle(&root);
+    land_forward(&workspace, &fake_bin, &fake_gh_dir);
+    prepare_forge_reverts(&root, &workspace, &fake_gh_dir);
+
+    let undone = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "revert", "landed", "--apply", "--land"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(undone.contains("Recorded PR revert group"), "{undone}");
+    assert!(!undone.contains("Next: run `knit --bundle"), "{undone}");
+    assert!(
+        undone.contains("Revert verified: venue capacity is undone in all 2 repositories."),
+        "{undone}"
+    );
+    assert_eq!(
+        merge_order(&fake_gh_dir),
+        vec!["backend", "frontend", "frontend", "backend"]
+    );
+    assert_eq!(bundle(&workspace)["state"], "archived");
+    assert_eq!(
+        latest_landing(&workspace)["revertVerification"]["verified"],
+        json!(true)
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_flag_requires_landed_target_and_apply() {
+    let root = unique_temp_dir();
+    let (workspace, _fake_bin, _fake_gh_dir) = published_project_bundle(&root);
+
+    for args in [
+        vec!["--bundle", BUNDLE, "revert", "landed", "--land"],
+        vec!["--bundle", BUNDLE, "revert", "HEAD", "--apply", "--land"],
+    ] {
+        let error = knit_fails(&workspace, &args);
+        assert!(
+            error.contains("needs the `landed` target and `--apply`"),
+            "{error}"
+        );
+        assert!(
+            error.contains(&format!(
+                "knit --bundle {BUNDLE} revert landed --apply --land"
+            )),
+            "{error}"
+        );
+    }
+    assert!(!workspace.join(".knit/revert-plans").exists());
 
     fs::remove_dir_all(root).unwrap();
 }

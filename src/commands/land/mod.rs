@@ -241,6 +241,25 @@ pub fn land_default_version(
     )
 }
 
+/// `knit revert landed --apply --land`: plan the default destination afresh
+/// and land it, exactly as `knit land` followed by `knit land apply`.
+pub fn land_default_destination() -> Result<()> {
+    v2::generate(None, None, None, None, None, None, true, false)?;
+    apply_land_plan(
+        None,
+        &[],
+        false,
+        false,
+        false,
+        None,
+        false,
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
 // Command entry point: these arguments are the subcommand's flags.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_land_plan(
@@ -410,6 +429,21 @@ fn finish_successful_land(
         )?;
         print_intermediate_landing_summary(active, plan);
         return Ok(());
+    }
+    if active
+        .bundle
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == "feature.landed")
+        .and_then(|node| node.revert_verification.as_ref())
+        .is_some_and(|verification| !verification.verified)
+    {
+        save_active_bundle(active)?;
+        bail!(
+            "The revert PRs merged, but at least one is not the exact inverse of the change it reverts (files listed above). The bundle was not archived; fix the base branch by hand, then archive it with `knit bundle archive {}`.",
+            active.bundle.id
+        );
     }
     let removed_worktrees = if active.bundle.state == Some(crate::model::BundleState::Archived) {
         if options.keep_worktrees {

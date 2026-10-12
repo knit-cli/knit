@@ -639,7 +639,7 @@ pub enum Commands {
     },
     /// Revert a bundle log entry across its affected repos.
     Revert {
-        /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, or HEAD~N.
+        /// Bundle log selector: git commit SHA, node id, commit group id, HEAD, HEAD~N, or landed.
         target: String,
         /// Write or refresh a revert plan. This is the default when --apply is not passed.
         #[arg(long, conflicts_with = "apply")]
@@ -647,6 +647,10 @@ pub enum Commands {
         /// Apply a previously planned revert.
         #[arg(long)]
         apply: bool,
+        /// With `landed --apply`: land the revert PRs right away, as
+        /// `knit land` followed by `knit land apply` would.
+        #[arg(long)]
+        land: bool,
     },
     /// Run a git command in tracked checkouts.
     Git {

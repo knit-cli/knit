@@ -487,8 +487,15 @@ fn print_node(node: &BundleNode, nodes: &[BundleNode]) {
             );
         }
         "feature.landed" => {
+            let verification = match &node.revert_verification {
+                Some(verification) if verification.verified => {
+                    format!("  {}", out::ok("revert verified"))
+                }
+                Some(_) => format!("  {}", out::danger("revert NOT verified")),
+                None => String::new(),
+            };
             println!(
-                "{}  {}  {}",
+                "{}  {}  {}{verification}",
                 out::node(&node.id),
                 out::ok("landed"),
                 node.provider.as_deref().unwrap_or("provider")
@@ -778,6 +785,20 @@ fn show_node(active: &ActiveBundle, node: &BundleNode) -> Result<()> {
             }
             if let Some(provider) = &node.provider {
                 println!("{} {}", out::heading("Provider:"), provider);
+            }
+            if let Some(verification) = &node.revert_verification {
+                println!(
+                    "{} {}",
+                    out::heading("Revert:"),
+                    if verification.verified {
+                        out::ok("revert verified")
+                    } else {
+                        out::danger("revert NOT verified")
+                    }
+                );
+                for (repo_id, files) in &verification.mismatched {
+                    println!("  {}: {}", out::repo(repo_id), files.join(", "));
+                }
             }
             for url in &node.publication_urls {
                 println!("  {url}");

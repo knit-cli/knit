@@ -1087,7 +1087,8 @@ pub fn run(cli: Cli) -> Result<()> {
             target,
             plan: _,
             apply,
-        } => commands::revert_target(&target, apply),
+            land,
+        } => commands::revert_target(&target, apply, land),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show {
             target,

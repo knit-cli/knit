@@ -14,7 +14,7 @@ use crate::providers::{self, pr_number_from_url, PrTarget, PullRequest};
 use crate::store::{load_effective_config, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -138,6 +138,7 @@ pub(super) fn apply_provider_revert(
     active: &mut ActiveBundle,
     plan: &RevertPlan,
     path: PathBuf,
+    landing_next: bool,
 ) -> Result<()> {
     let mut items = Vec::new();
     for repo_plan in &plan.repos {
@@ -156,7 +157,7 @@ pub(super) fn apply_provider_revert(
     )?;
     let _ = fs::remove_file(path);
     if plan.target_node_type == "feature.landed" {
-        reopen_for_revert_landing(active)?;
+        reopen_for_revert_landing(active, landing_next)?;
     }
     Ok(())
 }
@@ -164,7 +165,7 @@ pub(super) fn apply_provider_revert(
 /// The revert PRs are now the bundle's open reviews, so the bundle lives
 /// again until they land. Landing them merges on the forge and needs no
 /// checkout, so worktrees are not rematerialized.
-fn reopen_for_revert_landing(active: &mut ActiveBundle) -> Result<()> {
+fn reopen_for_revert_landing(active: &mut ActiveBundle, landing_next: bool) -> Result<()> {
     if active.bundle.state == Some(BundleState::Archived) {
         active.bundle.state = Some(BundleState::Open);
         active.bundle.archived_at = None;
@@ -182,13 +183,15 @@ fn reopen_for_revert_landing(active: &mut ActiveBundle) -> Result<()> {
             println!("{} {error:#}", out::warn("remote sync skipped:"));
         }
     }
-    crate::advice::print(
-        &active.root,
-        format!(
-            "run `knit --bundle {id} land`, then `knit --bundle {id} land apply` to merge the revert PRs in reverse merge order.",
-            id = active.bundle.id
-        ),
-    );
+    if !landing_next {
+        crate::advice::print(
+            &active.root,
+            format!(
+                "run `knit --bundle {id} land`, then `knit --bundle {id} land apply` to merge the revert PRs in reverse merge order, or pass `--land` next time to do it in this command.",
+                id = active.bundle.id
+            ),
+        );
+    }
     Ok(())
 }
 
@@ -208,6 +211,7 @@ pub(crate) fn create_provider_revert_prs(
     let logical_message = format!("Revert {target_message}");
     let mut repo_ids = BTreeSet::new();
     let mut publication_urls = BTreeSet::new();
+    let mut reverted_reviews = BTreeMap::new();
     let mut failures = Vec::new();
 
     for (repo_id, selector) in items {
@@ -264,6 +268,7 @@ pub(crate) fn create_provider_revert_prs(
                 }
                 repo_ids.insert(repo_id.clone());
                 publication_urls.insert(summary.url.clone());
+                reverted_reviews.insert(repo_id.clone(), selector.clone());
                 println!(
                     "{}: {} {}",
                     out::repo(repo_id),
@@ -295,6 +300,7 @@ pub(crate) fn create_provider_revert_prs(
         provider,
         repo_ids.into_iter().collect(),
         publication_urls.into_iter().collect(),
+        reverted_reviews,
     ));
     active.bundle.head_node_id = active.bundle.nodes.last().map(|node| node.id.clone());
     active.bundle.updated_at = now_iso();

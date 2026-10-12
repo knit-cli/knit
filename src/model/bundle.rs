@@ -869,10 +869,26 @@ pub struct BundleNode {
     pub source_commit: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub publication_urls: Vec<String>,
+    /// On a `pr.revert` node: the merged review each repository's revert undoes.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub reverted_reviews: BTreeMap<String, String>,
+    /// On a `feature.landed` node that landed revert reviews: whether each
+    /// landed revert is the exact inverse of the change it undoes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert_verification: Option<RevertVerification>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub commits: Vec<CommitRef>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub repo_changes: Vec<RepoChange>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RevertVerification {
+    pub verified: bool,
+    /// Files whose revert is not the exact inverse of the original change, by repository.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub mismatched: BTreeMap<String, Vec<String>>,
 }
 
 /// Ambient session identity for ledger attribution, from KNIT_SESSION.
@@ -953,6 +969,8 @@ impl BundleNode {
             landing: None,
             source_commit: None,
             publication_urls: Vec::new(),
+            reverted_reviews: BTreeMap::new(),
+            revert_verification: None,
             commits: Vec::new(),
             repo_changes: Vec::new(),
         }
@@ -1195,6 +1213,7 @@ impl BundleNode {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub fn pr_revert(
         id: String,
         created_at: String,
@@ -1203,6 +1222,7 @@ impl BundleNode {
         provider: String,
         repo_ids: Vec<String>,
         publication_urls: Vec<String>,
+        reverted_reviews: BTreeMap<String, String>,
     ) -> Self {
         Self {
             repo_ids: Some(repo_ids),
@@ -1210,6 +1230,7 @@ impl BundleNode {
             target_node_id: Some(target_node_id),
             provider: Some(provider),
             publication_urls,
+            reverted_reviews,
             ..Self::base(id, "pr.revert", created_at)
         }
     }

@@ -2523,11 +2523,13 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
         !merges.is_empty() || no_merges,
         "landing lacks completed source merge receipts"
     );
+    let mut verification = None;
     if let Some(node) = typed
         .nodes
         .iter_mut()
         .find(|n| n.node_type == "feature.landed" && n.run_id.as_deref() == Some(run_id))
     {
+        verification = node.revert_verification.clone();
         // A crash or old version may have persisted the summary before cleanup.
         // Resume repairs only missing evidence; it never appends a second landing.
         anyhow::ensure!(
@@ -2579,7 +2581,19 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
             landing.branch_only = Some(true);
         }
     } else {
-        let node = crate::model::BundleNode::feature_landed(
+        if plan["terminal"] != false {
+            if let Some(compensation) =
+                crate::commands::revert::compensation_landed(&typed, &urls).cloned()
+            {
+                verification = Some(crate::commands::revert::verify_landed_revert(
+                    &journal.workspace,
+                    &typed,
+                    &compensation,
+                    &urls,
+                )?);
+            }
+        }
+        let mut node = crate::model::BundleNode::feature_landed(
             unique_id("land"),
             now_iso(),
             plan["id"].as_str().unwrap().into(),
@@ -2595,9 +2609,15 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
                 target_branch: plan["targetBranch"].as_str().map(str::to_owned),
             }),
         );
+        node.revert_verification = verification.clone();
         typed.nodes.push(node);
     }
-    if plan["terminal"] != false && typed.state != Some(crate::model::BundleState::Archived) {
+    let unverified = verification.as_ref().is_some_and(|v| !v.verified);
+    let bundle_id = typed.id.clone();
+    if plan["terminal"] != false
+        && !unverified
+        && typed.state != Some(crate::model::BundleState::Archived)
+    {
         typed.state = Some(crate::model::BundleState::Archived);
         typed.archived_at = Some(now_iso());
         typed.nodes.push(crate::model::BundleNode::feature_archived(
@@ -2613,9 +2633,15 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
     durable(out, bundle)?;
     journal.edit(|r| {
         r["finalization"]["ledger"] = json!("succeeded");
-        r["finalization"]["archive"] = json!("succeeded");
+        r["finalization"]["archive"] = json!(if unverified { "skipped" } else { "succeeded" });
         r["status"] = json!("succeeded");
-    })
+    })?;
+    if unverified {
+        bail!(
+            "The revert PRs merged, but at least one is not the exact inverse of the change it reverts (files listed above). The bundle was not archived; fix the base branch by hand, then archive it with `knit bundle archive {bundle_id}`.",
+        );
+    }
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
