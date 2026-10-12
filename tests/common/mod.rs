@@ -835,8 +835,10 @@ if [ "$1" = "api" ]; then
   done
   endpoint_path="${endpoint%%\?*}"
   case "$endpoint_path" in
-    repos/acme/backend/pulls|repos/acme/backend/pulls/*) pr_repo=backend ;;
-    repos/acme/frontend/pulls|repos/acme/frontend/pulls/*) pr_repo=frontend ;;
+    repos/acme/*/pulls|repos/acme/*/pulls/*)
+      pr_repo="${endpoint_path#repos/acme/}"
+      pr_repo="${pr_repo%%/*}"
+      ;;
     *) pr_repo=other ;;
   esac
   case "$pr_repo" in

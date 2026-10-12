@@ -2585,6 +2585,18 @@ fn finalize(plan: &Value, bundle: &mut Value, journal: &Journal, out: &Path) -> 
             if let Some(compensation) =
                 crate::commands::revert::compensation_landed(&typed, &urls).cloned()
             {
+                if let Ok(started) =
+                    chrono::DateTime::parse_from_rfc3339(r["createdAt"].as_str().unwrap_or(""))
+                {
+                    let seconds = (chrono::Utc::now() - started.with_timezone(&chrono::Utc))
+                        .num_milliseconds() as f64
+                        / 1000.0;
+                    println!(
+                        "Merged {} revert review{} in {seconds:.1}s",
+                        urls.len(),
+                        if urls.len() == 1 { "" } else { "s" }
+                    );
+                }
                 verification = Some(crate::commands::revert::verify_landed_revert(
                     &journal.workspace,
                     &typed,

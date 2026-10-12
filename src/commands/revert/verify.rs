@@ -5,7 +5,7 @@
 
 use super::apply::provider_revert_context;
 use super::fallback::{
-    has_commit, parents, repository_remote, single_parent_commits, DisposableClone,
+    has_commit, parents, repository_remote, single_parent_commits, take_kept_clone, DisposableClone,
 };
 use crate::git::{git_output, is_ancestor};
 use crate::model::{BundleNode, ChangeGroup, RepoEntry, RevertVerification};
@@ -17,6 +17,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::Instant;
 
 /// The `pr.revert` node whose reviews this landing merged, if it landed one.
 pub(crate) fn compensation_landed<'a>(
@@ -52,21 +53,41 @@ pub(crate) fn verify_landed_revert(
     landed_urls: &[String],
 ) -> Result<RevertVerification> {
     let active = ActiveBundle::unlocked(workspace.to_path_buf(), PathBuf::new(), bundle.clone());
+    let jobs: Vec<(&String, &String, &str)> = compensation
+        .reverted_reviews
+        .iter()
+        .filter_map(|(repo_id, original_url)| {
+            let revert = bundle.publications.iter().find(|publication| {
+                publication.repo_id == *repo_id && landed_urls.contains(&publication.url)
+            })?;
+            Some((repo_id, original_url, revert.url.as_str()))
+        })
+        .collect();
+    let started = Instant::now();
+    let limit = crate::parallel::git_jobs()?;
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut proofs: Vec<(String, Result<Proof>)> = std::thread::scope(|scope| {
+        let active = &active;
+        let provider = compensation.provider.as_deref();
+        crate::parallel::spawn_bounded(
+            scope,
+            &jobs,
+            limit,
+            move |&(repo_id, original_url, revert_url)| {
+                let proof = verify_repo(active, provider, repo_id, original_url, revert_url);
+                // The receiver outlives every worker; a send cannot fail.
+                let _ = tx.send((repo_id.clone(), proof));
+            },
+        );
+        rx.iter().collect()
+    });
+    proofs.sort_by(|(left, _), (right, _)| left.cmp(right));
+
     let mut mismatched = BTreeMap::new();
     let mut verified_repos = 0;
-    for (repo_id, original_url) in &compensation.reverted_reviews {
-        let Some(revert) = bundle.publications.iter().find(|publication| {
-            publication.repo_id == *repo_id && landed_urls.contains(&publication.url)
-        }) else {
-            continue;
-        };
-        match verify_repo(
-            &active,
-            compensation.provider.as_deref(),
-            repo_id,
-            original_url,
-            &revert.url,
-        ) {
+    for (repo_id, proof) in proofs {
+        let repo_id = &repo_id;
+        match proof {
             Ok(Proof::Inverse {
                 base,
                 original_number,
@@ -106,6 +127,16 @@ pub(crate) fn verify_landed_revert(
             }
         }
     }
+    println!(
+        "Verified {} repositor{} in {}",
+        verified_repos + mismatched.len(),
+        if verified_repos + mismatched.len() == 1 {
+            "y"
+        } else {
+            "ies"
+        },
+        super::apply::elapsed(started)
+    );
     let verified = mismatched.is_empty() && verified_repos > 0;
     if verified {
         println!(
@@ -174,7 +205,10 @@ fn verify_repo(
 
     let source = Path::new(&repo.path);
     let clone;
-    let dir = if git_output(source, ["rev-parse", "--git-dir"]).is_ok() {
+    let dir = if let Some(kept) = take_kept_clone(repo_id) {
+        clone = kept;
+        clone.path.as_path()
+    } else if git_output(source, ["rev-parse", "--git-dir"]).is_ok() {
         source
     } else {
         clone = DisposableClone::of_base(&target, &remote, &base)?;

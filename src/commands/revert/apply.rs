@@ -18,6 +18,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::time::Instant;
 
 pub(super) fn apply_local_revert(
     active: &mut ActiveBundle,
@@ -195,6 +196,69 @@ fn reopen_for_revert_landing(active: &mut ActiveBundle, landing_next: bool) -> R
     Ok(())
 }
 
+/// One repository's revert review, opened by a worker. The bundle is not
+/// touched here; the caller records it in a fixed repository order.
+struct OpenedRevert {
+    repo_index: usize,
+    forge_id: &'static str,
+    contribution: bool,
+    /// The review as the host reports it, or the failure to report for a
+    /// cross-repository compensation that could not be verified.
+    summary: std::result::Result<PullRequest, String>,
+}
+
+fn open_revert_review(
+    active: &ActiveBundle,
+    provider: Option<&str>,
+    target_node_id: &str,
+    group_id: &str,
+    repo_id: &str,
+    selector: &str,
+) -> Result<OpenedRevert> {
+    let (repo_index, target, forge) =
+        provider_revert_context(active, provider, repo_id, Some(selector))?;
+    let repo = &active.bundle.repos[repo_index];
+    let title = format!("Revert {} ({})", active.bundle.title, repo_id);
+    let body = format!(
+        "Reverts {selector}\n\nKnit-Reverts: {target_node_id}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
+        active.bundle.id
+    );
+    let (url, review_target) =
+        super::create_review(forge.as_ref(), &target, repo, selector, &title, &body)?;
+    let summary = match forge.view(&review_target, &url) {
+        Ok(summary) => Ok(summary),
+        Err(error) if review_target.contribution.is_some() => Err(format!(
+            "{repo_id}: compensation review {url} failed verification: {error:#}"
+        )),
+        Err(_) => Ok(PullRequest {
+            source_repository: None,
+            number: pr_number_from_url(&url).unwrap_or(0),
+            url: url.clone(),
+            state: Some("OPEN".to_string()),
+            title: Some(title.clone()),
+            base_ref_name: Some(repo.base_branch.clone()),
+            head_ref_name: None,
+            body: None,
+            is_draft: None,
+            head_ref_oid: None,
+            mergeable: None,
+            merge_state_status: None,
+            review_decision: None,
+            author: None,
+        }),
+    };
+    Ok(OpenedRevert {
+        repo_index,
+        forge_id: forge.id(),
+        contribution: target.contribution.is_some(),
+        summary,
+    })
+}
+
+pub(super) fn elapsed(started: Instant) -> String {
+    format!("{:.1}s", started.elapsed().as_secs_f64())
+}
+
 /// Create provider-side revert PRs for a group of merged PRs and record the
 /// `pr.revert` ledger node. `items` pairs each repo id with the merged PR's
 /// selector (URL). Shared by `knit revert --apply` (landed nodes) and
@@ -214,71 +278,82 @@ pub(crate) fn create_provider_revert_prs(
     let mut reverted_reviews = BTreeMap::new();
     let mut failures = Vec::new();
 
+    // Resolve every repository before any review exists, so a repository
+    // Knit cannot reach stops the whole revert instead of leaving it partial.
     for (repo_id, selector) in items {
-        let (repo_index, target, forge) =
-            provider_revert_context(active, provider, repo_id, Some(selector))?;
-        let repo = active.bundle.repos[repo_index].clone();
-
-        let title = format!("Revert {} ({})", active.bundle.title, repo_id);
-        let body = format!(
-            "Reverts {selector}\n\nKnit-Reverts: {target_node_id}\nKnit-Group: {group_id}\nKnit-Bundle: {}",
-            active.bundle.id
-        );
-        match super::create_review(forge.as_ref(), &target, &repo, selector, &title, &body) {
-            Ok((url, review_target)) => {
-                let summary = match forge.view(&review_target, &url) {
-                    Ok(summary) => summary,
-                    Err(error) if review_target.contribution.is_some() => {
-                        failures.push(format!(
-                            "{repo_id}: compensation review {url} failed verification: {error:#}"
-                        ));
-                        continue;
-                    }
-                    Err(_) => PullRequest {
-                        source_repository: None,
-                        number: pr_number_from_url(&url).unwrap_or(0),
-                        url: url.clone(),
-                        state: Some("OPEN".to_string()),
-                        title: Some(title.clone()),
-                        base_ref_name: Some(repo.base_branch.clone()),
-                        head_ref_name: None,
-                        body: None,
-                        is_draft: None,
-                        head_ref_oid: None,
-                        mergeable: None,
-                        merge_state_status: None,
-                        review_decision: None,
-                        author: None,
-                    },
-                };
-                // Compensation is a new contribution, not the original bundle
-                // feature. Preserve its original identity and publication pins.
-                if target.contribution.is_none() {
-                    providers::upsert_publication(
-                        &mut active.bundle,
-                        &repo,
-                        forge.as_ref(),
-                        &summary,
-                    );
-                    // Landing pins each review merge to the repo's recorded
-                    // head, so the revert review's own head becomes that pin.
-                    if let Some(head) = &summary.head_ref_oid {
-                        active.bundle.repos[repo_index].head_sha = Some(head.clone());
-                    }
-                }
-                repo_ids.insert(repo_id.clone());
-                publication_urls.insert(summary.url.clone());
-                reverted_reviews.insert(repo_id.clone(), selector.clone());
-                println!(
-                    "{}: {} {}",
-                    out::repo(repo_id),
-                    out::movement("revert PR"),
-                    summary.url
-                );
-            }
-            Err(error) => failures.push(format!("{repo_id}: {error:#}")),
-        }
+        provider_revert_context(active, provider, repo_id, Some(selector))?;
     }
+
+    let started = Instant::now();
+    let limit = crate::parallel::forge_jobs()?.min(crate::parallel::git_jobs()?);
+    let jobs: Vec<(usize, &(String, String))> = items.iter().enumerate().collect();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let mut outcomes: Vec<(usize, Result<OpenedRevert>)> = std::thread::scope(|scope| {
+        let shared: &ActiveBundle = active;
+        let group_id = group_id.as_str();
+        crate::parallel::spawn_bounded(scope, &jobs, limit, move |&(position, item)| {
+            let (repo_id, selector) = item;
+            let result = open_revert_review(
+                shared,
+                provider,
+                target_node_id,
+                group_id,
+                repo_id,
+                selector,
+            );
+            // The receiver outlives every worker; a send cannot fail.
+            let _ = tx.send((position, result));
+        });
+        rx.iter().collect()
+    });
+    outcomes.sort_by_key(|(position, _)| *position);
+
+    let mut opened = 0;
+    for (position, outcome) in outcomes {
+        let (repo_id, selector) = &items[position];
+        let opened_revert = match outcome {
+            Ok(opened_revert) => opened_revert,
+            Err(error) => {
+                failures.push(format!("{repo_id}: {error:#}"));
+                continue;
+            }
+        };
+        let summary = match opened_revert.summary {
+            Ok(summary) => summary,
+            Err(message) => {
+                failures.push(message);
+                continue;
+            }
+        };
+        // Compensation is a new contribution, not the original bundle
+        // feature. Preserve its original identity and publication pins.
+        if !opened_revert.contribution {
+            let repo = active.bundle.repos[opened_revert.repo_index].clone();
+            let forge = providers::by_id(opened_revert.forge_id)
+                .with_context(|| format!("{repo_id}: unknown provider"))?;
+            providers::upsert_publication(&mut active.bundle, &repo, forge.as_ref(), &summary);
+            // Landing pins each review merge to the repo's recorded
+            // head, so the revert review's own head becomes that pin.
+            if let Some(head) = &summary.head_ref_oid {
+                active.bundle.repos[opened_revert.repo_index].head_sha = Some(head.clone());
+            }
+        }
+        repo_ids.insert(repo_id.clone());
+        publication_urls.insert(summary.url.clone());
+        reverted_reviews.insert(repo_id.clone(), selector.clone());
+        opened += 1;
+        println!(
+            "{}: {} {}",
+            out::repo(repo_id),
+            out::movement("revert PR"),
+            summary.url
+        );
+    }
+    println!(
+        "Opened {opened} revert review{} in {}",
+        if opened == 1 { "" } else { "s" },
+        elapsed(started)
+    );
 
     if !failures.is_empty() {
         save_active_bundle(active)?;

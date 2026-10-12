@@ -2,6 +2,7 @@ mod common;
 
 use common::*;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 
@@ -691,6 +692,249 @@ fn land_flag_requires_landed_target_and_apply() {
         );
     }
     assert!(!workspace.join(".knit/revert-plans").exists());
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A published bundle over `repos` whose project lands with `landing`.
+fn published_bundle(root: &Path, repos: &[&str], landing: Value) -> (PathBuf, PathBuf, PathBuf) {
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    for repo in repos {
+        let (_remote, local, _collaborator) = init_remote_repo(root, repo);
+        knit(
+            &workspace,
+            ["project", "add", repo, local.to_str().unwrap()],
+        );
+    }
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    project["landing"] = landing;
+    fs::write(
+        &project_path,
+        serde_json::to_string_pretty(&project).unwrap(),
+    )
+    .unwrap();
+
+    knit(&workspace, ["bundle", "venue capacity"]);
+    for repo in repos {
+        append_line(
+            &workspace.join(format!(".knit/worktrees/{BUNDLE}/{repo}/app.txt")),
+            &format!("{repo} landed change"),
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Landing change"]);
+
+    let fake_gh_dir = root.join("fake-gh");
+    let fake_bin = root.join("fake-bin");
+    write_fake_gh(&fake_bin, &fake_gh_dir);
+    knit_with_fake_gh(
+        &workspace,
+        ["publish", "create", "--github", "--no-sync"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    for repo in bundle(&workspace)["repos"].as_array().unwrap() {
+        let id = repo["id"].as_str().unwrap();
+        fs::write(
+            fake_gh_dir.join(format!("head-{id}")),
+            repo["headSha"].as_str().unwrap(),
+        )
+        .unwrap();
+        fs::write(
+            fake_gh_dir.join(format!("clone-{id}")),
+            root.join(format!("{id}-collaborator")).to_str().unwrap(),
+        )
+        .unwrap();
+    }
+    (workspace, fake_bin, fake_gh_dir)
+}
+
+fn plan_path(workspace: &Path) -> PathBuf {
+    workspace.join(format!(".knit/land-plans/{BUNDLE}.land.json"))
+}
+
+/// Land forward, open the reverts and write the revert landing plan. Returns
+/// each revert merge step's needs.
+fn revert_merge_needs(
+    root: &Path,
+    workspace: &Path,
+    fake_bin: &Path,
+    fake_gh_dir: &Path,
+    edit_forward_plan: impl FnOnce(&mut Value),
+) -> BTreeMap<String, Vec<String>> {
+    knit_with_fake_gh(workspace, ["land"], fake_bin, fake_gh_dir);
+    let mut forward: Value =
+        serde_json::from_str(&fs::read_to_string(plan_path(workspace)).unwrap()).unwrap();
+    edit_forward_plan(&mut forward);
+    fs::write(
+        plan_path(workspace),
+        serde_json::to_string_pretty(&forward).unwrap(),
+    )
+    .unwrap();
+    knit_with_fake_gh(
+        workspace,
+        ["land", "apply", "--no-remote"],
+        fake_bin,
+        fake_gh_dir,
+    );
+    assert_eq!(bundle(workspace)["state"], "archived");
+
+    prepare_forge_reverts(root, workspace, fake_gh_dir);
+    knit_with_fake_gh(
+        workspace,
+        ["--bundle", BUNDLE, "revert", "landed", "--apply"],
+        fake_bin,
+        fake_gh_dir,
+    );
+    knit_with_fake_gh(
+        workspace,
+        ["--bundle", BUNDLE, "land"],
+        fake_bin,
+        fake_gh_dir,
+    );
+    let validated = knit_with_fake_gh(
+        workspace,
+        ["--bundle", BUNDLE, "land", "validate"],
+        fake_bin,
+        fake_gh_dir,
+    );
+    assert!(validated.contains("\"valid\":true"), "{validated}");
+    let plan: Value =
+        serde_json::from_str(&fs::read_to_string(plan_path(workspace)).unwrap()).unwrap();
+    plan["steps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|step| step["type"] == "merge_pr")
+        .map(|step| {
+            let mut needs = step["needs"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .map(|need| need.as_str().unwrap().to_owned())
+                .collect::<Vec<_>>();
+            needs.sort();
+            (step["id"].as_str().unwrap().to_owned(), needs)
+        })
+        .collect()
+}
+
+fn needs(entries: &[(&str, &[&str])]) -> BTreeMap<String, Vec<String>> {
+    entries
+        .iter()
+        .map(|(id, needs)| {
+            (
+                id.to_string(),
+                needs.iter().map(|need| need.to_string()).collect(),
+            )
+        })
+        .collect()
+}
+
+const THREE: [&str; 3] = ["alpha", "beta", "gamma"];
+
+#[test]
+fn revert_of_a_full_merge_order_chains_in_exact_reverse() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_bundle(
+        &root,
+        &THREE,
+        json!({"provider": "github", "merge": {"repoOrder": ["alpha", "beta", "gamma"]}}),
+    );
+    let reverse = revert_merge_needs(&root, &workspace, &fake_bin, &fake_gh_dir, |_| {});
+    assert_eq!(
+        reverse,
+        needs(&[
+            ("merge-alpha", &["merge-beta"]),
+            ("merge-beta", &["merge-gamma"]),
+            ("merge-gamma", &[]),
+        ])
+    );
+    let landed = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(landed.contains("Revert verified:"), "{landed}");
+    assert_eq!(
+        merge_order(&fake_gh_dir)[3..].to_vec(),
+        vec!["gamma", "beta", "alpha"]
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_without_a_merge_order_merges_in_one_wave() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) =
+        published_bundle(&root, &THREE, json!({"provider": "github"}));
+    let reverse = revert_merge_needs(&root, &workspace, &fake_bin, &fake_gh_dir, |_| {});
+    assert_eq!(
+        reverse,
+        needs(&[
+            ("merge-alpha", &[]),
+            ("merge-beta", &[]),
+            ("merge-gamma", &[]),
+        ])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_of_a_partial_merge_order_keeps_unlisted_repositories_parallel() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = published_bundle(
+        &root,
+        &THREE,
+        json!({"provider": "github", "merge": {"repoOrder": ["alpha", "beta"]}}),
+    );
+    let reverse = revert_merge_needs(&root, &workspace, &fake_bin, &fake_gh_dir, |_| {});
+    assert_eq!(
+        reverse,
+        needs(&[
+            ("merge-alpha", &["merge-beta"]),
+            ("merge-beta", &[]),
+            ("merge-gamma", &[]),
+        ])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn revert_follows_the_executed_workflow_with_its_parallel_group() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) =
+        published_bundle(&root, &THREE, json!({"provider": "github"}));
+    let reverse = revert_merge_needs(&root, &workspace, &fake_bin, &fake_gh_dir, |plan| {
+        plan["workflow"] = json!({"sequence": [
+            {"parallel": [{"step": "merge-alpha"}, {"step": "merge-beta"}]},
+            {"step": "merge-gamma"}
+        ]});
+    });
+    assert_eq!(
+        reverse,
+        needs(&[
+            ("merge-alpha", &["merge-gamma"]),
+            ("merge-beta", &["merge-gamma"]),
+            ("merge-gamma", &[]),
+        ])
+    );
+    let landed = knit_with_fake_gh(
+        &workspace,
+        ["--bundle", BUNDLE, "land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_gh_dir,
+    );
+    assert!(landed.contains("Revert verified:"), "{landed}");
+    let reverse_order = merge_order(&fake_gh_dir)[3..].to_vec();
+    assert_eq!(reverse_order[0], "gamma", "{reverse_order:?}");
 
     fs::remove_dir_all(root).unwrap();
 }

@@ -65,13 +65,10 @@ pub(super) fn build_plan_with_project(
     // branch merges use it whole, because reaching an environment does not
     // require a review at all.
     let changed_repo_ids = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
-    let mut scope = ordered_merge_repos(active, merge)
+    let scope = ordered_merge_repos(active, merge)
         .into_iter()
         .filter(|repo| changed_repo_ids.contains(&repo.id))
         .collect::<Vec<_>>();
-    if lands_revert(&active.bundle) {
-        scope.reverse();
-    }
     let scoped = workspace_is_scoped(active);
     let lane = resolve_lane(project.as_ref(), landing, lane_name, scoped)?;
     let (destinations, lane_absent) =
@@ -266,6 +263,14 @@ pub(super) fn build_plan_with_project(
         &mut steps,
         &mut deployments_skipped,
     )?;
+
+    if lands_revert(&active.bundle) {
+        let forward =
+            super::revert_order::executed_forward_precedence(active).unwrap_or_else(|| {
+                super::revert_order::precedence(&serde_json::json!({ "steps": &steps }))
+            });
+        super::revert_order::reverse_merges(&mut steps, &forward);
+    }
 
     if steps.is_empty() && landing.is_none_or(|l| l.steps.is_empty()) {
         bail!(
@@ -597,8 +602,9 @@ fn inferred_plan_provider(active: &ActiveBundle) -> String {
 }
 
 /// Whether the bundle's open reviews are exactly the compensation recorded by
-/// its latest `pr.revert`. Those land in reverse merge order, so consumers
-/// drop their use of a change before the change itself is removed.
+/// its latest `pr.revert`. Those land with the forward landing's merge order
+/// turned around, so consumers drop their use of a change before the change
+/// itself is removed.
 pub(crate) fn lands_revert(bundle: &ChangeGroup) -> bool {
     let Some(latest) = bundle.nodes.iter().rev().find(|node| {
         matches!(

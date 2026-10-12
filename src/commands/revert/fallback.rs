@@ -7,9 +7,11 @@ use crate::git::{git_output, git_output_optional, is_ancestor, merge_base, rev_l
 use crate::model::RepoEntry;
 use crate::providers::{Forge, PrTarget, PullRequest};
 use anyhow::{bail, Context, Result};
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 pub(super) fn create_revert_review(
     forge: &dyn Forge,
@@ -94,7 +96,49 @@ pub(super) fn create_revert_review(
 
     crate::commands::push::push_new_branch(dir, "origin", &branch)
         .with_context(|| format!("{}: failed to push {branch}", repo.id))?;
-    forge.create(target, &base, &branch, title, body, false)
+    let url = forge.create(target, &base, &branch, title, body, false)?;
+    keep_for_verification(&repo.id, clone);
+    Ok(url)
+}
+
+/// Disposable clones from opening revert reviews, kept when the same process
+/// goes on to land and verify them. `None` means nothing is being kept.
+static KEPT_CLONES: Mutex<Option<BTreeMap<String, DisposableClone>>> = Mutex::new(None);
+
+/// Keep each repository's revert clone until [`ClonesKept`] is dropped, so
+/// the verification after landing fetches into it instead of cloning again.
+pub(crate) struct ClonesKept(());
+
+impl ClonesKept {
+    pub(crate) fn start() -> Self {
+        *KEPT_CLONES.lock().expect("kept clones lock poisoned") = Some(BTreeMap::new());
+        Self(())
+    }
+}
+
+impl Drop for ClonesKept {
+    fn drop(&mut self) {
+        let kept = KEPT_CLONES.lock().map(|mut kept| kept.take());
+        drop(kept);
+    }
+}
+
+fn keep_for_verification(repo_id: &str, clone: DisposableClone) {
+    if let Some(kept) = KEPT_CLONES
+        .lock()
+        .expect("kept clones lock poisoned")
+        .as_mut()
+    {
+        kept.insert(repo_id.to_owned(), clone);
+    }
+}
+
+pub(super) fn take_kept_clone(repo_id: &str) -> Option<DisposableClone> {
+    KEPT_CLONES
+        .lock()
+        .expect("kept clones lock poisoned")
+        .as_mut()?
+        .remove(repo_id)
 }
 
 /// The commits a squash or rebase merge put on the base, newest first.

@@ -423,9 +423,10 @@ pub(super) fn build(
             .or_else(|| target.map(|t| format!("landing.targets.{t}")))
             .unwrap_or_else(|| "landing".to_owned()),
     )? {
-        // Revert merges are chained in reverse; the sequence must agree.
         if super::super::plan::lands_revert(&active.bundle) {
-            order.reverse();
+            let forward = super::super::revert_order::executed_forward_precedence(active)
+                .unwrap_or_else(|| super::super::revert_order::sequence_precedence(&order));
+            super::super::revert_order::reverse_sequence(&mut order, &forward);
         }
         let workflow = super::sequence::compile_workflow(&steps, &order)?;
         plan["execution"] = json!({"mode": super::sequence::MODE, "repoOrder": order});

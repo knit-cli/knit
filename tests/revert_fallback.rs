@@ -16,6 +16,8 @@ const BUNDLE: &str = "revert-fallback";
 #[derive(Default)]
 struct FakeForgejo {
     remotes: BTreeMap<String, PathBuf>,
+    /// Clones the fake merges reviews in, as the forge would on its side.
+    collaborators: BTreeMap<String, PathBuf>,
     pulls: BTreeMap<(String, u64), Value>,
     created: Vec<Value>,
 }
@@ -100,6 +102,29 @@ fn handle(stream: &mut TcpStream, state: &Mutex<FakeForgejo>) -> std::io::Result
             state.pulls.insert((repo.to_string(), number), pull.clone());
             (201, pull.to_string())
         }
+        ("POST", ["repos", "acme", repo, "pulls", number, "merge"]) => {
+            let key = (repo.to_string(), number.parse().unwrap_or(0));
+            let head = state.pulls[&key]["head"]["ref"]
+                .as_str()
+                .unwrap()
+                .to_string();
+            let clone = state.collaborators[*repo].clone();
+            git(&clone, ["fetch", "-q", "origin", "main"]);
+            git(&clone, ["checkout", "-q", "main"]);
+            git(&clone, ["reset", "-q", "--hard", "origin/main"]);
+            git(&clone, ["fetch", "-q", "origin", &head]);
+            git(
+                &clone,
+                ["merge", "-q", "--no-ff", "--no-edit", "FETCH_HEAD"],
+            );
+            git(&clone, ["push", "-q", "origin", "main"]);
+            let merge = git(&clone, ["rev-parse", "HEAD"]).trim().to_string();
+            let pull = state.pulls.get_mut(&key).unwrap();
+            pull["merged"] = json!(true);
+            pull["state"] = json!("closed");
+            pull["merge_commit_sha"] = json!(merge);
+            (200, "{}".to_string())
+        }
         _ => (404, format!(r#"{{"unexpected":"{method} {path}"}}"#)),
     };
     write!(
@@ -152,6 +177,10 @@ impl Landed {
         )
     }
 
+    fn set_env(&mut self, key: &str, value: &str) {
+        self.env.push((key.to_string(), value.to_string()));
+    }
+
     fn bundle(&self) -> Value {
         serde_json::from_str(
             &fs::read_to_string(
@@ -167,12 +196,17 @@ impl Landed {
 /// A two-repo bundle whose reviews were merged on the forge — backend with a
 /// merge commit, frontend squashed — and then landed and archived.
 fn landed_on_forgejo() -> Landed {
+    landed_on_forgejo_with(&["backend", "frontend"])
+}
+
+/// Like [`landed_on_forgejo`] over `repos`; only `frontend` is squashed.
+fn landed_on_forgejo_with(repos: &[&str]) -> Landed {
     let root = unique_temp_dir();
     let workspace = root.join("workspace");
     fs::create_dir_all(&workspace).unwrap();
     let mut remotes = BTreeMap::new();
     let mut clones = BTreeMap::new();
-    for repo in ["backend", "frontend"] {
+    for repo in repos {
         let (remote, local, collaborator) = init_remote_repo(&root, repo);
         remotes.insert(repo.to_string(), remote);
         clones.insert(repo.to_string(), (local, collaborator));
@@ -221,7 +255,7 @@ fn landed_on_forgejo() -> Landed {
         );
         let head = git(&feature, ["rev-parse", "HEAD"]).trim().to_string();
         git(collaborator, ["fetch", "-q", "origin"]);
-        if repo == "backend" {
+        if repo != "frontend" {
             git(
                 collaborator,
                 [
@@ -277,7 +311,7 @@ fn landed_on_forgejo() -> Landed {
         "id": "land-fixture",
         "type": "feature.landed",
         "createdAt": "2026-10-11T00:00:01.000Z",
-        "repoIds": ["backend", "frontend"],
+        "repoIds": repos,
         "planId": format!("land-{BUNDLE}"),
         "runId": "run-fixture",
         "provider": "forgejo",
@@ -296,6 +330,10 @@ fn landed_on_forgejo() -> Landed {
 
     let state = Arc::new(Mutex::new(FakeForgejo {
         remotes: remotes.clone(),
+        collaborators: clones
+            .iter()
+            .map(|(repo, (_, collaborator))| (repo.clone(), collaborator.clone()))
+            .collect(),
         pulls,
         created: Vec::new(),
     }));
@@ -432,6 +470,191 @@ fn conflicting_git_revert_fails_without_pushing_and_names_the_review() {
     );
     assert!(branches.trim().is_empty(), "{branches}");
     assert!(!landed.workspace.join(".knit/revert-clones").exists());
+
+    fs::remove_dir_all(&landed.root).unwrap();
+}
+
+const FOUR: [&str; 4] = ["api", "backend", "frontend", "worker"];
+
+#[test]
+fn revert_reviews_open_in_parallel_and_record_in_repo_order() {
+    let mut landed = landed_on_forgejo_with(&FOUR);
+    landed.set_env("KNIT_FORGE_JOBS", "4");
+    // A later rewrite of backend's file makes its revert conflict; the other
+    // three still get their reviews.
+    let collaborator = landed.root.join("backend-collaborator");
+    fs::write(collaborator.join("app.txt"), "rewritten after the merge\n").unwrap();
+    git(&collaborator, ["commit", "-q", "-am", "Rewrite app"]);
+    git(&collaborator, ["push", "-q", "origin", "main"]);
+
+    let error = landed.knit_fails(&["--bundle", BUNDLE, "revert", "landed", "--apply"]);
+    assert!(
+        error.contains("PR revert completed with failures:"),
+        "{error}"
+    );
+    assert!(error.contains("backend: "), "{error}");
+    assert!(error.contains("conflicts"), "{error}");
+    assert!(error.contains("Opened 3 revert reviews in "), "{error}");
+    let lines = ["api", "frontend", "worker"]
+        .iter()
+        .map(|repo| {
+            error
+                .find(&format!(
+                    "{repo}: revert PR https://codeberg.org/acme/{repo}/pulls/"
+                ))
+                .unwrap_or_else(|| panic!("{repo} missing from {error}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(lines.windows(2).all(|pair| pair[0] < pair[1]), "{error}");
+
+    let created = landed.state.lock().unwrap().created.clone();
+    let mut created_repos = created
+        .iter()
+        .map(|entry| entry["repo"].as_str().unwrap().to_owned())
+        .collect::<Vec<_>>();
+    created_repos.sort();
+    assert_eq!(created_repos, vec!["api", "frontend", "worker"]);
+
+    let bundle = landed.bundle();
+    let publications = bundle["publications"].as_array().unwrap();
+    assert_eq!(
+        publications
+            .iter()
+            .map(|publication| publication["repoId"].as_str().unwrap())
+            .collect::<Vec<_>>(),
+        FOUR
+    );
+    for publication in publications {
+        let reverted = publication["repoId"] != "backend";
+        assert_eq!(
+            publication["number"].as_u64().unwrap() >= 10,
+            reverted,
+            "{publication}"
+        );
+    }
+    assert!(!bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|node| node["type"] == "pr.revert"));
+
+    fs::remove_dir_all(&landed.root).unwrap();
+}
+
+/// Log every `git clone` and `git fetch` Knit runs, with the directory it
+/// runs in, then hand the command to the real git. `remote get-url origin`
+/// answers with the configured URL, as it would for a real codeberg.org
+/// remote; the environment's `insteadOf` only redirects transport.
+#[cfg(unix)]
+fn install_clone_counter(landed: &Landed) {
+    use std::os::unix::fs::PermissionsExt;
+    let real = String::from_utf8(
+        std::process::Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let shim = landed.fake_bin.join("git");
+    fs::write(
+        &shim,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in\n  *'remote get-url origin'*) exec '{0}' config --get remote.origin.url ;;\nesac\nfor arg in \"$@\"; do\n  case \"$arg\" in\n    clone) printf '%s\\n' \"$*\" >> \"$FORGE_FAKE_DIR/git-clones.log\"; break ;;\n    fetch) printf '%s :: %s\\n' \"$PWD\" \"$*\" >> \"$FORGE_FAKE_DIR/git-fetches.log\"; break ;;\n  esac\ndone\nexec '{0}' \"$@\"\n",
+            real.trim()
+        ),
+    )
+    .unwrap();
+    fs::set_permissions(&shim, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn land_flag_reuses_revert_clones_and_verifies_in_repo_order() {
+    let mut landed = landed_on_forgejo_with(&FOUR);
+    landed.set_env("KNIT_FORGE_JOBS", "4");
+    landed.set_env("KNIT_GIT_JOBS", "4");
+    // Landing resolves the forge repository from each source checkout's origin.
+    for repo in FOUR {
+        git(
+            &landed.root.join(repo),
+            [
+                "remote",
+                "set-url",
+                "origin",
+                &format!("https://codeberg.org/acme/{repo}.git"),
+            ],
+        );
+    }
+    install_clone_counter(&landed);
+
+    let undone = landed.knit(&["--bundle", BUNDLE, "revert", "landed", "--apply", "--land"]);
+    assert!(undone.contains("Opened 4 revert reviews in "), "{undone}");
+    assert!(undone.contains("Merged 4 revert reviews in "), "{undone}");
+    assert!(undone.contains("Verified 4 repositories in "), "{undone}");
+    assert!(
+        undone.contains("Revert verified: revert fallback is undone in all 4 repositories."),
+        "{undone}"
+    );
+    let verified = FOUR
+        .iter()
+        .map(|repo| {
+            undone
+                .find(&format!("{repo}: revert verified on main"))
+                .unwrap_or_else(|| panic!("{repo} missing from {undone}"))
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        verified.windows(2).all(|pair| pair[0] < pair[1]),
+        "{undone}"
+    );
+
+    let clones = fs::read_to_string(landed.fake_dir.join("git-clones.log")).unwrap();
+    assert_eq!(clones.lines().count(), 4, "{clones}");
+    assert!(
+        clones
+            .lines()
+            .all(|line| line.contains(".knit/revert-clones")),
+        "{clones}"
+    );
+    // Verification fetched the updated base into each revert clone rather
+    // than into a new clone or the source checkout.
+    let fetches = fs::read_to_string(landed.fake_dir.join("git-fetches.log")).unwrap();
+    for repo in FOUR {
+        let base_fetch = format!("https://codeberg.org/acme/{repo}.git main");
+        assert!(
+            fetches
+                .lines()
+                .any(|line| line.contains(".knit/revert-clones") && line.ends_with(&base_fetch)),
+            "{repo}: {fetches}"
+        );
+        assert!(
+            !fetches.lines().any(|line| {
+                line.starts_with(landed.root.join(repo).to_str().unwrap())
+                    && line.ends_with(&base_fetch)
+            }),
+            "{repo}: {fetches}"
+        );
+    }
+    assert!(!landed.workspace.join(".knit/revert-clones").exists());
+
+    let bundle = landed.bundle();
+    assert_eq!(bundle["state"], "archived");
+    let revert = bundle["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|node| node["type"] == "pr.revert")
+        .unwrap();
+    assert_eq!(revert["repoIds"], json!(FOUR));
+    assert_eq!(
+        revert["revertedReviews"]
+            .as_object()
+            .unwrap()
+            .keys()
+            .collect::<Vec<_>>(),
+        FOUR.iter().collect::<Vec<_>>()
+    );
 
     fs::remove_dir_all(&landed.root).unwrap();
 }

@@ -20,6 +20,7 @@ pub(crate) mod git_progress;
 pub(crate) mod lanes;
 mod plan;
 mod process;
+mod revert_order;
 mod rollback;
 mod types;
 mod update;
