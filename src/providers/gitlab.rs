@@ -715,14 +715,10 @@ fn api_base(target: &PrTarget) -> Result<String> {
     {
         return Ok(base);
     }
-    let host = target
-        .repo_remote
-        .as_deref()
-        .map(crate::auth::remote_target)
-        .transpose()?
-        .map(|(host, _)| host)
-        .unwrap_or_else(|| "gitlab.com".to_string());
-    Ok(format!("https://{host}/api/v4"))
+    match target.repo_remote.as_deref() {
+        Some(remote) => super::remote_api_base(remote, "/api/v4"),
+        None => Ok("https://gitlab.com/api/v4".to_string()),
+    }
 }
 
 fn native_api_output(
@@ -1017,6 +1013,13 @@ mod published_host_tests {
             override_base
                 .clone()
                 .unwrap_or_else(|| "https://review.example.test/api/v4".into())
+        );
+        target.repo_remote = Some("https://review.example.test:8443/upstream/widget.git".into());
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test:8443/api/v4".into())
         );
         target.repo_remote = None;
         assert_eq!(

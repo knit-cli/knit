@@ -66,7 +66,7 @@ pub fn configure(
             let Some(credential) = auth::resolve(cwd, Some(&remote))? else {
                 continue;
             };
-            let (host, path) = exact_target(&remote)?;
+            let (scheme, host, path) = exact_target(&remote)?;
             if selected.is_empty() {
                 // Reset inherited helpers for this child, including requests
                 // from recursive submodule fetches. A project binding must not
@@ -104,7 +104,8 @@ pub fn configure(
                 shell_quote(&host),
                 shell_quote(&path),
             );
-            configure_http_auth(command, &host, &path);
+            let url = format!("{scheme}://{host}/{path}");
+            configure_http_auth(command, &url);
             // Send the assigned credential on the first request as well. This
             // prevents libcurl's .netrc from authenticating first on older Git
             // versions that do not understand http.proactiveAuth. --config-env
@@ -113,23 +114,21 @@ pub fn configure(
             let encoded =
                 base64(format!("{}:{}", credential.git_username(), credential.token).as_bytes());
             command.env(&variable, format!("Authorization: Basic {encoded}"));
-            command.arg(format!(
-                "--config-env=http.https://{host}/{path}.extraHeader={variable}"
-            ));
-            let scope = format!("credential.https://{host}/{path}.helper");
+            command.arg(format!("--config-env=http.{url}.extraHeader={variable}"));
+            let scope = format!("credential.{url}.helper");
             command.arg("-c").arg(format!("{scope}="));
             command.arg("-c").arg(format!("{scope}={helper}"));
-            // The selected credential must ride the HTTPS transport: an SSH
-            // origin is rewritten to HTTPS instead of bypassing the token
-            // through the user's SSH agent, and an HTTPS origin gets the same
-            // exact identity rewrite so an inherited broad rewrite (a global
+            // The selected credential must ride its exact HTTP(S) target: an
+            // SSH origin is rewritten to HTTPS instead of bypassing the token
+            // through the user's SSH agent, and an HTTP(S) origin gets the
+            // same exact identity rewrite so an inherited broad rewrite (a global
             // SSH workaround like url.ssh://git@host/.insteadOf=https://host/)
             // cannot divert this exact URL back to SSH. Git resolves insteadOf
             // by longest matching prefix, so the exact key always outranks the
             // inherited one for this invocation only.
             command
                 .arg("-c")
-                .arg(format!("url.https://{host}/{path}.insteadOf={remote}"));
+                .arg(format!("url.{url}.insteadOf={remote}"));
             selected.push(credential);
         }
     }
@@ -174,11 +173,9 @@ const HTTP_AUTH_RESETS: [(&str, &str); 6] = [
 // Git's HTTP URL matching gives scoped settings precedence over global -c
 // values. Reset at the exact repository URL so inherited owner/host settings
 // cannot authenticate with an unrelated header or cookie before our helper.
-fn configure_http_auth(command: &mut Command, host: &str, path: &str) {
+fn configure_http_auth(command: &mut Command, url: &str) {
     for (key, value) in HTTP_AUTH_RESETS {
-        command
-            .arg("-c")
-            .arg(format!("http.https://{host}/{path}.{key}={value}"));
+        command.arg("-c").arg(format!("http.{url}.{key}={value}"));
     }
 }
 
@@ -241,11 +238,23 @@ pub fn credential_helper(
     let fields = read_credential_request()?;
     // Do not load the secret for another host, path, or protocol. Multiple
     // helpers may be installed for `fetch --all`, so a mismatch emits nothing.
-    if fields.get("protocol").map(String::as_str) != Some("https")
-        || fields.get("host").map(String::as_str) != Some(host)
+    let scheme = match fields.get("protocol").map(String::as_str) {
+        Some("https") => "https",
+        Some("http") => "http",
+        _ => return Ok(()),
+    };
+    if fields.get("host").map(String::as_str) != Some(host)
         || fields.get("path").map(String::as_str) != Some(path)
         || fields.contains_key("url")
     {
+        return Ok(());
+    }
+    let origin = auth::RemoteOrigin {
+        scheme,
+        host: host.to_owned(),
+        path: path.to_owned(),
+    };
+    if auth::ensure_token_transport(&auth::load()?, &origin).is_err() {
         return Ok(());
     }
     let credential = auth::credential(name)?;
@@ -336,7 +345,7 @@ pub fn resolve_helper(
     }
 }
 
-/// The per-request selection for `--resolve`: reconstruct the exact HTTPS
+/// The per-request selection for `--resolve`: reconstruct the exact HTTP(S)
 /// target from the split credential fields and resolve it like any Knit
 /// network operation. `Ok(None)` means no Knit selection applies. An explicit
 /// `(workspace, project)` context — persisted by installations that serve
@@ -344,13 +353,17 @@ pub fn resolve_helper(
 /// deriving it from the helper process's cwd.
 fn resolve_helper_get(context: Option<(PathBuf, String)>) -> Result<Option<ResolvedCredential>> {
     let fields = read_credential_request()?;
-    let (host, path) = match (
+    let (scheme, host, path) = match (
         fields.get("protocol").map(String::as_str),
         fields.get("host"),
         fields.get("path"),
     ) {
-        (Some("https"), Some(host), Some(path)) if !fields.contains_key("url") => (host, path),
-        _ => bail!("Knit serves HTTPS credential requests with exact host and path only"),
+        (Some(scheme @ ("https" | "http")), Some(host), Some(path))
+            if !fields.contains_key("url") =>
+        {
+            (scheme, host, path)
+        }
+        _ => bail!("Knit serves HTTP(S) credential requests with exact host and path only"),
     };
     // A host with a path separator would parse as an innocent host plus a
     // longer path (`github.com/org` + `repo.git` -> `github.com` +
@@ -360,9 +373,10 @@ fn resolve_helper_get(context: Option<(PathBuf, String)>) -> Result<Option<Resol
         bail!("Git credential request host must not contain a path separator");
     }
     // Reconstruct and validate the exact request target: this rejects
-    // confused hosts (embedded credentials, custom ports, unusual schemes),
-    // malformed paths, and anything url-normalization could disguise.
-    let url = format!("https://{host}/{path}");
+    // confused hosts (embedded credentials, unusual schemes), malformed paths,
+    // and anything url-normalization could disguise. Resolution then applies
+    // the plain-HTTP token rule to the reconstructed origin.
+    let url = format!("{scheme}://{host}/{path}");
     let (normalized_host, _) =
         auth::remote_target(&url).context("rejected Git credential request target")?;
     // The parsed host must be the host Git asked about (case-insensitively);
@@ -489,7 +503,7 @@ pub fn install_for_project(
 
 /// Install (or refresh) the Knit-owned credential helper for one checkout's
 /// forge remotes. Selection is metadata-only — tokens load per request — and
-/// sections are scoped to the exact HTTPS URLs of taken-over remotes (never a
+/// sections are scoped to the exact HTTP(S) URLs of taken-over remotes (never a
 /// whole host), so a sibling repository with no Knit selection keeps its
 /// ambient helpers. A selection that resolves *or* refuses takes the URL over:
 /// the refusal must fail closed rather than slide to ambient credentials.
@@ -545,27 +559,27 @@ fn install_with_context(
                 }
                 continue;
             }
-            // Every taken-over URL is pinned to its exact HTTPS target. A
+            // Every taken-over URL is pinned to its exact HTTP(S) target. A
             // refused selection must not keep SSH either: the SSH agent
             // would silently bypass the fail-closed helper. A URL with no
             // selection contributes nothing, so ambient access survives.
             if matches!(selected, Ok(None)) {
                 continue;
             }
-            if let Ok((exact_host, exact_path)) = exact_target(&url) {
-                let https_url = format!("https://{exact_host}/{exact_path}");
-                targets.push(https_url.clone());
+            if let Ok((scheme, exact_host, exact_path)) = exact_target(&url) {
+                let exact_url = format!("{scheme}://{exact_host}/{exact_path}");
+                targets.push(exact_url.clone());
                 if !rewrites
                     .iter()
-                    .any(|(target, original)| target == &https_url && original == &url)
+                    .any(|(target, original)| target == &exact_url && original == &url)
                 {
-                    rewrites.push((https_url, url));
+                    rewrites.push((exact_url, url));
                 }
             }
         }
     }
     rewrites.sort();
-    // One credential section per exact HTTPS repository URL represented by
+    // One credential section per exact HTTP(S) repository URL represented by
     // the taken-over remotes — derived from the rewrites, never the host.
     targets.sort();
     targets.dedup();
@@ -627,10 +641,10 @@ fn render_include(
          # `knit auth status`; remove this file and its includeIf entry to\n\
          # restore inherited Git credential behavior.\n",
     );
-    for (https_url, original) in rewrites {
+    for (exact_url, original) in rewrites {
         text.push_str(&format!(
             "[url {}]\n\tinsteadOf = {}\n",
-            config_quote(https_url),
+            config_quote(exact_url),
             config_quote(original)
         ));
     }
@@ -776,29 +790,33 @@ fn config_remove_include(checkout: &Path, git_dir: &Path) {
 }
 
 /// Preserve the actual Git path, including `.git`, for credential matching.
-fn exact_target(remote: &str) -> Result<(String, String)> {
+/// The scheme and host follow [`auth::remote_origin`]: SSH rides HTTPS on the
+/// forge's web origin, so its SSH port is dropped; HTTP(S) ports are kept.
+fn exact_target(remote: &str) -> Result<(&'static str, String, String)> {
     let url = if remote.contains("://") {
         url::Url::parse(remote)?
     } else {
         let (authority, path) = remote.split_once(':').context("invalid forge remote")?;
         url::Url::parse(&format!("ssh://{authority}/{path}"))?
     };
-    if !matches!(url.scheme(), "https" | "ssh") {
-        bail!("project credentials require an HTTPS or SSH forge remote");
-    }
+    let scheme = match url.scheme() {
+        "https" | "ssh" => "https",
+        "http" => "http",
+        _ => bail!("project credentials require an HTTPS, HTTP, or SSH forge remote"),
+    };
     if url.query().is_some() || url.fragment().is_some() || url.password().is_some() {
         bail!("forge remote must not contain a password, query, or fragment");
     }
     let host = url.host_str().context("forge remote has no host")?;
     let host = match url.port() {
-        Some(port) => format!("{host}:{port}"),
-        None => host.to_string(),
+        Some(port) if url.scheme() != "ssh" => format!("{host}:{port}"),
+        _ => host.to_string(),
     };
     let path = url.path().trim_start_matches('/');
     if path.is_empty() || path.contains(['\n', '\r']) {
         bail!("forge remote has no repository path");
     }
-    Ok((host, path.to_owned()))
+    Ok((scheme, host, path.to_owned()))
 }
 
 fn raw_git(cwd: &Path, args: &[&str]) -> Option<String> {
@@ -1053,7 +1071,7 @@ mod tests {
                     "-c",
                     &format!("http.https://github.com/org/repo.git.{key}=repository"),
                 ]);
-            configure_http_auth(&mut command, "github.com", "org/repo.git");
+            configure_http_auth(&mut command, "https://github.com/org/repo.git");
             let output = command
                 .args([
                     "config",
@@ -1083,6 +1101,7 @@ mod tests {
             username: "".into(),
             token_type: None,
             token: "scoped-test-secret".into(),
+            plain_http: false,
         };
         assert_eq!(
             redact(
@@ -1107,11 +1126,27 @@ mod tests {
     fn exact_target_preserves_git_suffix_and_quotes_shell_values() {
         assert_eq!(
             exact_target("git@github.com:org/repo.git").unwrap(),
-            ("github.com".into(), "org/repo.git".into())
+            ("https", "github.com".into(), "org/repo.git".into())
         );
         assert_eq!(
             exact_target("https://github.com/org/repo.git").unwrap(),
-            ("github.com".into(), "org/repo.git".into())
+            ("https", "github.com".into(), "org/repo.git".into())
+        );
+        assert_eq!(
+            exact_target("https://gitlab.company.test:8443/group/repo.git").unwrap(),
+            (
+                "https",
+                "gitlab.company.test:8443".into(),
+                "group/repo.git".into()
+            )
+        );
+        assert_eq!(
+            exact_target("http://127.0.0.1:3000/org/repo.git").unwrap(),
+            ("http", "127.0.0.1:3000".into(), "org/repo.git".into())
+        );
+        assert_eq!(
+            exact_target("ssh://git@forge.company.test:2222/org/repo.git").unwrap(),
+            ("https", "forge.company.test".into(), "org/repo.git".into())
         );
         assert_eq!(shell_quote("a'b"), "'a'\\''b'");
     }

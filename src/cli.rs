@@ -1843,7 +1843,7 @@ pub enum AuthCommand {
         name: String,
         #[arg(long, value_parser = ["github", "gitlab", "bitbucket", "forgejo"])]
         provider: String,
-        /// Forge hostname; defaults to the provider's public host.
+        /// Forge hostname with an optional non-default `:port`; defaults to the provider's public host.
         #[arg(long)]
         host: Option<String>,
         /// Bitbucket Atlassian account email for an API token; omit for a repository access token.
@@ -1888,6 +1888,14 @@ pub enum AuthCommand {
     List,
     /// Remove an unused named credential from this machine.
     Remove { name: String },
+    /// Allow saved and environment forge tokens to travel over plain HTTP to one origin (`host[:port]`). Loopback hosts are always allowed; every other HTTP origin is refused until allowed here.
+    AllowHttp {
+        /// Forge host with an optional non-default port, e.g. `forgejo.example.internal:3000`.
+        host: String,
+        /// Withdraw a previous allowance.
+        #[arg(long)]
+        revoke: bool,
+    },
     /// Remove personal assignments. With none left, the project resumes existing Git/forge login behavior.
     Clear {
         #[arg(long)]

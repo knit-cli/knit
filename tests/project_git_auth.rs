@@ -722,9 +722,9 @@ fn dynamic_helper_serves_resolved_selection_and_fails_closed() {
     for bad in [
         // duplicate scope scalar
         "protocol=https\nhost=github.com\nhost=github.com\npath=org/app.git\n\n",
-        // non-HTTPS scheme
+        // plain HTTP to a non-loopback origin that was never allowed
         "protocol=http\nhost=github.com\npath=org/app.git\n\n",
-        // raw host with a port
+        // explicit default port that does not round-trip
         "protocol=https\nhost=github.com:443\npath=org/app.git\n\n",
         // embedded credentials smuggled through the host field
         "protocol=https\nhost=user:secret@github.com\npath=org/app.git\n\n",

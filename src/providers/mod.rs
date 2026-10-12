@@ -330,7 +330,7 @@ pub fn by_id(id: &str) -> Option<Box<dyn Forge>> {
 }
 
 fn by_host(host: &str) -> Option<Box<dyn Forge>> {
-    let host = host.to_ascii_lowercase();
+    let host = crate::auth::host_name(host).to_ascii_lowercase();
     if host == "github.com" || host.starts_with("github.") {
         Some(Box::new(github::GitHub))
     } else if host == "gitlab.com" || host.contains("gitlab") {
@@ -612,35 +612,50 @@ pub(crate) fn target_credential(
     Ok(credential)
 }
 
-/// Bound secrets only go to the expected HTTPS API origin. Environment API
-/// overrides remain supported for legacy authentication, but cannot redirect a
-/// project's saved token to another server.
+/// Bound secrets only go to the expected API origin: the credential's host and
+/// port, over HTTPS unless resolution permitted plain HTTP for that origin.
+/// Environment API overrides remain supported for legacy authentication, but
+/// cannot redirect a project's saved token to another server.
 pub(crate) fn bound_api_base(credential: &crate::auth::ResolvedCredential) -> Result<String> {
     let host = &credential.host;
+    let scheme = credential.scheme();
     let base = match credential.provider.as_str() {
         "github" if host == "github.com" => "https://api.github.com".to_string(),
-        "github" => format!("https://{host}/api/v3"),
-        "gitlab" => format!("https://{host}/api/v4"),
+        "github" => format!("{scheme}://{host}/api/v3"),
+        "gitlab" => format!("{scheme}://{host}/api/v4"),
         "bitbucket" if host == "bitbucket.org" => "https://api.bitbucket.org/2.0".to_string(),
         "bitbucket" => {
             bail!("project credentials currently support Bitbucket Cloud (bitbucket.org)")
         }
-        "forgejo" => format!("https://{host}/api/v1"),
+        "forgejo" => format!("{scheme}://{host}/api/v1"),
         provider => bail!("unsupported credential provider `{provider}`"),
     };
     let parsed = url::Url::parse(&base).context("invalid credential API host")?;
-    let expected_host = match (credential.provider.as_str(), host.as_str()) {
-        ("github", "github.com") => "api.github.com",
-        ("bitbucket", "bitbucket.org") => "api.bitbucket.org",
-        _ => host,
+    let expected = match (credential.provider.as_str(), host.as_str()) {
+        ("github", "github.com") => "api.github.com".to_string(),
+        ("bitbucket", "bitbucket.org") => "api.bitbucket.org".to_string(),
+        _ => host.clone(),
     };
-    if parsed.host_str() != Some(expected_host)
-        || !parsed.username().is_empty()
-        || parsed.password().is_some()
-    {
+    let actual = match (parsed.host_str(), parsed.port()) {
+        (Some(name), Some(port)) => format!("{name}:{port}"),
+        (Some(name), None) => name.to_string(),
+        (None, _) => String::new(),
+    };
+    if actual != expected || !parsed.username().is_empty() || parsed.password().is_some() {
         bail!("invalid credential API host");
     }
     Ok(base)
+}
+
+/// The API base of the forge serving `remote`, keeping its port and scheme.
+/// Every API call carries a token, so a plain-HTTP base must pass the same
+/// transport rule as saved credentials.
+pub(crate) fn remote_api_base(remote: &str, path: &str) -> Result<String> {
+    let origin = crate::auth::remote_origin(remote)?;
+    if origin.scheme == "http" {
+        crate::auth::ensure_token_transport(&crate::auth::load()?, &origin)?;
+    }
+    Ok(format!("{}{path}", origin.base_url()))
 }
 
 fn configure_cli_credential(
@@ -668,6 +683,7 @@ fn configure_cli_credential(
             }
         }
         "glab" => {
+            let scheme = credential.scheme();
             command
                 .env("GITLAB_HOST", &credential.host)
                 .env("GL_HOST", &credential.host)
@@ -675,8 +691,8 @@ fn configure_cli_credential(
                 .env("GLAB_TOKEN", &credential.token)
                 .env("OAUTH_TOKEN", &credential.token)
                 .env("GITLAB_API_HOST", &credential.host)
-                .env("GLAB_API_PROTOCOL", "https")
-                .env("API_PROTOCOL", "https")
+                .env("GLAB_API_PROTOCOL", scheme)
+                .env("API_PROTOCOL", scheme)
                 .env_remove("GITLAB_REPO")
                 .env_remove("GITLAB_GROUP")
                 .env_remove("GLAB_REPO");
@@ -761,7 +777,7 @@ where
             let repository = if bin == "gh" {
                 format!("{}/{repository}", credential.host)
             } else {
-                format!("https://{}/{repository}", credential.host)
+                format!("{}://{}/{repository}", credential.scheme(), credential.host)
             };
             if let Some(index) = args.iter().position(|arg| arg == "--repo") {
                 let value = args
@@ -1156,6 +1172,7 @@ mod tests {
             username: String::new(),
             token_type: None,
             token: token.into(),
+            plain_http: false,
         }
     }
 
@@ -1190,6 +1207,91 @@ mod tests {
             );
         }
         assert!(bound_api_base(&credential("github", "github.com@evil.test", "secret")).is_err());
+    }
+
+    #[test]
+    fn bound_api_destinations_keep_ports_and_permitted_plain_http() {
+        for (provider, host, plain_http, expected) in [
+            (
+                "github",
+                "github.example.test:8443",
+                false,
+                "https://github.example.test:8443/api/v3",
+            ),
+            (
+                "gitlab",
+                "gitlab.company.test:8443",
+                false,
+                "https://gitlab.company.test:8443/api/v4",
+            ),
+            (
+                "forgejo",
+                "forgejo.example.internal:3000",
+                true,
+                "http://forgejo.example.internal:3000/api/v1",
+            ),
+            ("forgejo", "[::1]:3000", true, "http://[::1]:3000/api/v1"),
+            ("github", "github.com", true, "https://api.github.com"),
+        ] {
+            let mut value = credential(provider, host, "secret");
+            value.plain_http = plain_http;
+            assert_eq!(bound_api_base(&value).unwrap(), expected);
+        }
+        for host in [
+            "gitlab.company.test:8443@evil.test",
+            "gitlab.company.test:8443/evil",
+            "gitlab.company.test:443",
+        ] {
+            assert!(
+                bound_api_base(&credential("gitlab", host, "secret")).is_err(),
+                "{host}"
+            );
+        }
+    }
+
+    #[test]
+    fn remote_api_bases_follow_the_remote_origin() {
+        for (remote, path, expected) in [
+            (
+                "https://gitlab.company.test:8443/group/repo.git",
+                "/api/v4",
+                "https://gitlab.company.test:8443/api/v4",
+            ),
+            (
+                "ssh://git@forgejo.company.test:2222/org/repo.git",
+                "/api/v1",
+                "https://forgejo.company.test/api/v1",
+            ),
+            (
+                "http://127.0.0.1:3000/org/repo.git",
+                "/api/v1",
+                "http://127.0.0.1:3000/api/v1",
+            ),
+        ] {
+            assert_eq!(remote_api_base(remote, path).unwrap(), expected);
+        }
+        let error = remote_api_base(
+            "http://forgejo.example.internal:3000/org/repo.git",
+            "/api/v1",
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(error.contains("knit auth allow-http forgejo.example.internal:3000"));
+    }
+
+    #[test]
+    fn forge_detection_ignores_ports() {
+        for (remote, id) in [
+            ("https://gitlab.company.test:8443/group/repo.git", "gitlab"),
+            (
+                "http://forgejo.example.internal:3000/org/repo.git",
+                "forgejo",
+            ),
+            ("ssh://git@github.example.test:2222/org/repo.git", "github"),
+        ] {
+            assert_eq!(for_remote(remote).unwrap().id(), id);
+        }
+        assert_eq!(by_host("gitea.example.test:3000").unwrap().id(), "forgejo");
     }
 
     #[test]

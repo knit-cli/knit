@@ -287,7 +287,7 @@ fn unsupported_forge_remote_fails_read_check_without_network() {
     let f = Fixture::new();
     let path = f.root.join(".knit/projects/tools.project.json");
     let mut project: Value = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-    project["repos"] = json!([{"id":"unsupported", "path":f.root.join("repo"), "remote":"https://github.com:8443/person/repo.git", "baseBranch":"main"}]);
+    project["repos"] = json!([{"id":"unsupported", "path":f.root.join("repo"), "remote":"ftp://github.com/person/repo.git", "baseBranch":"main"}]);
     fs::write(path, project.to_string()).unwrap();
     let output = f.run(&["auth", "status", "--check", "--json"], None);
     assert!(!output.status.success());
