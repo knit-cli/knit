@@ -1292,7 +1292,6 @@ fn terminating_knit_cancels_deployment_tree_and_records_failure() {
         .env_remove("KNIT_SESSION")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
-    private_temp_env(&workspace, &mut child);
     let child = child.spawn().unwrap();
 
     let marker_deadline = Instant::now() + Duration::from_secs(5);

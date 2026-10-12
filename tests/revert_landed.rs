@@ -8,11 +8,6 @@ use std::path::{Path, PathBuf};
 
 const BUNDLE: &str = "venue-capacity";
 
-// Landing ownership locks live in the temp directory and are keyed by project,
-// and every test here uses project `demo`; the common test harness gives each
-// workspace its own temp directory (TMP/TEMP/TMPDIR), keeping parallel tests
-// apart on every platform.
-
 /// Two-repo project whose landing merges backend before frontend, published
 /// as `venue-capacity`.
 fn published_project_bundle(root: &Path) -> (PathBuf, PathBuf, PathBuf) {

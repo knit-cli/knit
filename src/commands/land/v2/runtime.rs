@@ -26,15 +26,53 @@ pub(super) fn unique_id(prefix: &str) -> String {
     )
 }
 
+/// Local ownership locks and latest-run generations live in the user's Knit
+/// config directory. The OS temp directory is cleaned behind Knit's back, which
+/// would drop a crash-surviving lock or an unresolved generation, and a shared
+/// `/tmp` folder is writable only by the user who created it. Unit tests run
+/// landings in-process and must not write into the developer's real config.
+fn ownership_dir() -> Result<PathBuf> {
+    if cfg!(test) {
+        return Ok(std::env::temp_dir().join("knit-test-landing-ownership"));
+    }
+    Ok(crate::store::global_config_path()?
+        .parent()
+        .context("global config has no parent directory")?
+        .join("landing-ownership"))
+}
+
+/// Where earlier Knit releases kept these records. A landing still
+/// running under such a release, or the unresolved generation it left behind,
+/// keeps blocking after an upgrade.
+fn legacy_ownership_dir() -> PathBuf {
+    std::env::temp_dir().join("knit-landing-ownership")
+}
+
+fn owned_error(path: &Path) -> String {
+    format!(
+        "landing resource is owned; reconcile and verify process quiescence before removing {}",
+        path.display()
+    )
+}
+
 /// Ownership locks intentionally survive a crash. A dead parent does not prove
 /// its external effects or children quiesced. Operators reconcile before removal.
 struct Lock(PathBuf);
 impl Lock {
     fn acquire(key: &str) -> Result<Self> {
-        let dir = std::env::temp_dir().join("knit-landing-ownership");
+        let name = format!("{}.lock", canonical_hash(&json!(key)));
+        let legacy = legacy_ownership_dir().join(&name);
+        if legacy.exists() {
+            bail!(owned_error(&legacy));
+        }
+        let dir = ownership_dir()?;
         fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{}.lock", canonical_hash(&json!(key))));
-        let mut f=OpenOptions::new().write(true).create_new(true).open(&path).with_context(||format!("landing resource is owned; reconcile and verify process quiescence before removing {}",path.display()))?;
+        let path = dir.join(name);
+        let mut f = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&path)
+            .with_context(|| owned_error(&path))?;
         writeln!(f, "{}", std::process::id())?;
         f.sync_all()?;
         Ok(Self(path))
@@ -3021,28 +3059,33 @@ fn execute(
     let workspace = crate::store::find_knit_root(&plan_directory)
         .or_else(|| crate::store::find_knit_root(&current))
         .unwrap_or(current);
-    let generation = std::env::temp_dir()
-        .join("knit-landing-ownership")
-        .join(format!(
-            "{}.generation.json",
-            canonical_hash(&json!(plan["sourceProjectId"].as_str().unwrap_or("local")))
-        ));
+    let generation_name = format!(
+        "{}.generation.json",
+        canonical_hash(&json!(plan["sourceProjectId"].as_str().unwrap_or("local")))
+    );
+    let generation = ownership_dir()?.join(&generation_name);
+    let recorded_generation = [
+        generation.clone(),
+        legacy_ownership_dir().join(&generation_name),
+    ]
+    .into_iter()
+    .find(|path| path.exists());
     let claim = crate::commands::remote::landing::claim_for_run(
         &workspace,
         plan,
         existing.as_ref(),
         recovering,
     )?;
-    if claim.is_none() && existing.is_none() && generation.exists() {
-        let latest: Value = read_json(&generation)?;
+    if let (None, None, Some(recorded)) = (&claim, &existing, &recorded_generation) {
+        let latest: Value = read_json(recorded)?;
         if latest["quiescent"] == false {
             bail!("previous landing generation has unresolved effects; resume or recover it before starting another run");
         }
     }
     if claim.is_none() {
         if let Some(prior) = &existing {
-            if generation.exists() {
-                let latest: Value = read_json(&generation)?;
+            if let Some(recorded) = &recorded_generation {
+                let latest: Value = read_json(recorded)?;
                 if latest["runId"] != prior["id"] {
                     bail!("landing run has been superseded; old resume/recovery cannot overwrite a newer environment generation");
                 }
