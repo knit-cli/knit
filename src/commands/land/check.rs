@@ -231,7 +231,7 @@ pub(crate) fn assess_landing_readiness(
     let branch = publication_for_repo(&active.bundle, &repo.id)
         .map(|p| p.base_branch.as_str())
         .unwrap_or(&repo.base_branch);
-    let target = match crate::contribution::target(&cwd, repo, forge.as_ref(), branch, false) {
+    let mut target = match crate::contribution::target(&cwd, repo, forge.as_ref(), branch, false) {
         Ok(target) => target,
         Err(error) => {
             return LandReadiness {
@@ -241,14 +241,17 @@ pub(crate) fn assess_landing_readiness(
         }
     };
 
-    let pr = match forge.view(&target, publication_url) {
-        Ok(pr) => pr,
-        Err(error) => {
-            return LandReadiness {
-                verdict: format!("PR unavailable: {error}"),
-                ..base
+    let (pr, rewritten) = match forge.view(&target, publication_url) {
+        Ok(pr) => (pr, false),
+        Err(error) => match view_maintainer_rewrite(forge.as_ref(), &mut target, publication_url) {
+            Some(pr) => (pr, true),
+            None => {
+                return LandReadiness {
+                    verdict: format!("PR unavailable: {error}"),
+                    ..base
+                }
             }
-        }
+        },
     };
     let state = pr.state.clone().unwrap_or_else(|| "UNKNOWN".to_string());
 
@@ -257,7 +260,12 @@ pub(crate) fn assess_landing_readiness(
         "MERGED" => {
             return LandReadiness {
                 state,
-                verdict: "already landed".to_string(),
+                verdict: if rewritten {
+                    "already landed (rewritten by a maintainer)"
+                } else {
+                    "already landed"
+                }
+                .to_string(),
                 blocked: false,
                 ..base
             }
@@ -304,15 +312,19 @@ pub(crate) fn assess_landing_readiness(
     let checks = column("checks", ["passed", "pending", "failed", "unknown"]);
     let review = column("review", ["approved", "required", "changes", "unknown"]);
 
-    let upstream = crate::contribution::cross_repository(repo).unwrap_or(false)
-        && gates.iter().any(|gate| gate.kind == "merge_permission");
+    let upstream = rewritten
+        || crate::contribution::cross_repository(repo).unwrap_or(false)
+            && gates.iter().any(|gate| gate.kind == "merge_permission");
     let yours = gates::open(&gates).any(|gate| gate.actor == GateActor::You);
-    let (verdict, blocked) = match gates::headline(&gates) {
-        None => ("ready".to_string(), false),
+    let (mut verdict, blocked) = match gates::headline(&gates) {
         Some(headline) if upstream && yours => (format!("awaiting maintainers; {headline}"), false),
-        Some(_) if upstream => ("awaiting maintainers".to_string(), false),
+        _ if upstream => ("awaiting maintainers".to_string(), false),
+        None => ("ready".to_string(), false),
         Some(headline) => (headline, true),
     };
+    if rewritten {
+        verdict.push_str(" (branch updated by a maintainer)");
+    }
 
     LandReadiness {
         repo_id: repo.id.clone(),
@@ -326,4 +338,20 @@ pub(crate) fn assess_landing_readiness(
         upstream,
         gates,
     }
+}
+
+/// A maintainer may rebase or squash a contribution they are about to merge,
+/// which moves its head away from the recorded one. That is only acceptable
+/// where this account cannot merge: there Knit never merges the review itself.
+fn view_maintainer_rewrite(
+    forge: &dyn providers::Forge,
+    target: &mut providers::PrTarget,
+    publication_url: &str,
+) -> Option<providers::PullRequest> {
+    target.contribution.as_ref()?;
+    if forge.can_merge(target).ok()? != Some(false) {
+        return None;
+    }
+    target.verify_head = false;
+    forge.view(target, publication_url).ok()
 }
