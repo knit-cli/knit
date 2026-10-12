@@ -39,7 +39,7 @@ fn authoritative_guides_do_not_teach_removed_spellings() {
         "architecture must not teach the removed fetch spelling as a current command"
     );
     assert!(
-        agents_template.contains("knit bundle prune --apply --delete --remote-bundles"),
+        reference.contains("knit bundle prune --apply --delete --remote-bundles"),
         "remote deletion guidance must include the required --delete switch"
     );
 }
