@@ -121,6 +121,12 @@ impl Forge for Forgejo {
         full_name(remote)
     }
 
+    // Forgejo reports `mergeable: false` while it is still checking a review,
+    // the same answer it gives for a real conflict.
+    fn mergeability_provisional(&self, pr: &PullRequest) -> bool {
+        pr.mergeability_computing() || pr.is_conflicting()
+    }
+
     fn find_existing(
         &self,
         target: &PrTarget,

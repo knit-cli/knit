@@ -896,6 +896,9 @@ fn gitlab_mergeable(status: Option<&str>) -> Option<String> {
     match status?.to_ascii_lowercase().as_str() {
         "mergeable" | "can_be_merged" => Some("MERGEABLE".to_string()),
         "conflict" | "conflicts" | "cannot_be_merged" => Some("CONFLICTING".to_string()),
+        "checking" | "unchecked" | "preparing" | "cannot_be_merged_recheck" => {
+            Some("UNKNOWN".to_string())
+        }
         _ => None,
     }
 }
@@ -939,6 +942,26 @@ pub(crate) fn full_name(remote: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checking_merge_status_maps_to_unknown_not_conflict() {
+        for status in [
+            "checking",
+            "unchecked",
+            "preparing",
+            "cannot_be_merged_recheck",
+        ] {
+            assert_eq!(
+                gitlab_mergeable(Some(status)).as_deref(),
+                Some("UNKNOWN"),
+                "{status}"
+            );
+        }
+        assert_eq!(
+            gitlab_mergeable(Some("conflict")).as_deref(),
+            Some("CONFLICTING")
+        );
+    }
 
     #[test]
     fn maps_mr_author() {

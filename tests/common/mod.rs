@@ -978,6 +978,14 @@ case "$sub" in
       mergeable="CONFLICTING"
       mergestate="DIRTY"
     fi
+    if [ -f "$GH_FAKE_DIR/computing-$pr_repo" ] && [ "$state" = "OPEN" ]; then
+      left="$(cat "$GH_FAKE_DIR/computing-$pr_repo")"
+      if [ "$left" -gt 0 ]; then
+        mergeable="UNKNOWN"
+        mergestate="UNKNOWN"
+        printf '%s\n' "$((left - 1))" > "$GH_FAKE_DIR/computing-$pr_repo"
+      fi
+    fi
     review="${GH_FAKE_REVIEW:-}"
     printf '{"number":%s,"url":"%s","state":"%s","title":"%s","baseRefName":"%s","headRefName":"%s","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$title" "$base" "$head" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
     ;;

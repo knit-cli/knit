@@ -3,7 +3,8 @@ mod common;
 mod provider_fixture;
 
 use common::{
-    append_line, git, init_remote_repo, knit, knit_with_fake_forge, unique_temp_dir, write_fake_tea,
+    append_line, git, init_remote_repo, knit, knit_fails_with_fake_gh_env, knit_with_fake_forge,
+    unique_temp_dir, write_fake_tea,
 };
 use knit::providers::{forgejo::Forgejo, Forge, PrTarget};
 use serde_json::Value;
@@ -315,4 +316,236 @@ fn configure_cli_landing(bin: &std::path::Path, state: &std::path::Path) {
         .unwrap();
     }
     provider_fixture::install(bin, Some("tea"));
+}
+
+// A native Forgejo API for one review: `mergeable` stays false for the reads
+// counted in `unsettled-reads`, or for good while `conflict` exists.
+fn spawn_forgejo_landing_api(state: &std::path::Path) -> String {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let base = format!("http://{}", listener.local_addr().unwrap());
+    let state = state.to_path_buf();
+    std::thread::spawn(move || {
+        for stream in listener.incoming() {
+            let Ok(mut stream) = stream else { continue };
+            let _ = handle_landing(&mut stream, &state);
+        }
+    });
+    base
+}
+
+fn landing_review_json(state: &std::path::Path) -> String {
+    let head = fs::read_to_string(state.join("head-sha")).unwrap();
+    let merged = state.join("api-merged").exists();
+    let unsettled = state.join("unsettled-reads");
+    let left: u32 = fs::read_to_string(&unsettled)
+        .ok()
+        .and_then(|n| n.trim().parse().ok())
+        .unwrap_or(0);
+    let mergeable = if merged {
+        true
+    } else if left > 0 {
+        fs::write(&unsettled, (left - 1).to_string()).unwrap();
+        false
+    } else {
+        !state.join("conflict").exists()
+    };
+    let merge_sha = merged.then(|| fs::read_to_string(state.join("merge-sha")).unwrap());
+    serde_json::json!({
+        "number": 4,
+        "html_url": "https://codeberg.org/acme/backend/pulls/4",
+        "state": if merged { "closed" } else { "open" },
+        "title": "feature",
+        "body": "body",
+        "draft": false,
+        "merged": merged,
+        "merge_commit_sha": merge_sha,
+        "mergeable": mergeable,
+        "head": {"ref": "knit/forge-workspace", "sha": head.trim()},
+        "base": {"ref": "main", "sha": "base-sha"}
+    })
+    .to_string()
+}
+
+fn handle_landing(stream: &mut TcpStream, state: &std::path::Path) -> std::io::Result<()> {
+    let mut reader = BufReader::new(stream.try_clone()?);
+    let mut line = String::new();
+    reader.read_line(&mut line)?;
+    let mut parts = line.split_whitespace();
+    let method = parts.next().unwrap_or_default().to_string();
+    let target = parts.next().unwrap_or_default().to_string();
+    let mut length = 0usize;
+    loop {
+        let mut header = String::new();
+        reader.read_line(&mut header)?;
+        let header = header.trim_end();
+        if header.is_empty() {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("content-length") {
+                length = value.trim().parse().unwrap_or(0);
+            }
+        }
+    }
+    let mut body = vec![0; length];
+    reader.read_exact(&mut body)?;
+    let path = target.trim_start_matches('/').to_string();
+    let (status, response) = if method == "GET" && path.ends_with("/pulls/4") {
+        let mut reads = fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(state.join("pull-reads"))?;
+        writeln!(reads, "GET")?;
+        (200, landing_review_json(state))
+    } else if method == "GET" && path.ends_with("/pulls/4/reviews") {
+        (200, r#"[{"state":"APPROVED"}]"#.to_string())
+    } else if method == "GET" && path.contains("/commits/") && path.ends_with("/status") {
+        (200, r#"{"statuses":[]}"#.to_string())
+    } else if method == "POST" && path.ends_with("/pulls/4/merge") {
+        let remote = fs::read_to_string(state.join("remote-path")).unwrap();
+        let merged = fs::read_to_string(state.join("merge-sha")).unwrap();
+        git(
+            std::path::Path::new(remote.trim()),
+            ["update-ref", "refs/heads/main", merged.trim()],
+        );
+        fs::write(state.join("api-merged"), "").unwrap();
+        (200, "{}".to_string())
+    } else {
+        (
+            404,
+            format!(r#"{{"message":"unexpected {method} {path}"}}"#),
+        )
+    };
+    write!(
+        stream,
+        "HTTP/1.1 {status} X\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+        response.len()
+    )?;
+    stream.flush()
+}
+
+fn forgejo_api_landing_workspace(
+    root: &std::path::Path,
+) -> (
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    String,
+) {
+    let (remote, backend, _collaborator) = init_remote_repo(root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "forge workspace"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let feature = workspace.join(".knit/worktrees/forge-workspace/backend");
+    append_line(&feature.join("app.txt"), "forgejo");
+    knit(&workspace, ["commit", "--all", "-m", "Forgejo change"]);
+    let bundle_path = workspace.join(".knit/bundles/forge-workspace.bundle.json");
+    let mut bundle: Value =
+        serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap();
+    bundle["repos"][0]["remote"] =
+        Value::String("https://codeberg.org/acme/backend.git".to_string());
+    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+
+    let fake_bin = root.join("fake bin");
+    let fake_dir = root.join("fake forge");
+    write_fake_tea(&fake_bin, &fake_dir);
+    knit_with_fake_forge(
+        &workspace,
+        [
+            "publish",
+            "create",
+            "--provider",
+            "forgejo",
+            "--no-sync",
+            "--no-remote",
+        ],
+        &fake_bin,
+        &fake_dir,
+        &[],
+    );
+    git(
+        &feature,
+        [
+            "remote",
+            "set-url",
+            "origin",
+            "https://codeberg.org/acme/backend.git",
+        ],
+    );
+    let merged = configure_landing_fixture(&fake_dir, &feature, &remote);
+    provider_fixture::install(&fake_bin, None);
+    let base = spawn_forgejo_landing_api(&fake_dir);
+    (
+        workspace,
+        fake_bin,
+        fake_dir,
+        remote,
+        format!("{base}\n{merged}"),
+    )
+}
+
+#[test]
+fn forgejo_api_land_rechecks_provisional_not_mergeable_answers() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_dir, remote, served) = forgejo_api_landing_workspace(&root);
+    let (base, merged) = served.split_once('\n').unwrap();
+    let env = [
+        ("KNIT_FORGEJO_API_BASE", base),
+        ("KNIT_FORGEJO_TOKEN", "test-token"),
+        ("KNIT_MERGEABILITY_SETTLE_MS", "5000"),
+    ];
+    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
+    fs::write(fake_dir.join("unsettled-reads"), "2").unwrap();
+    let landed = knit_with_fake_forge(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_dir,
+        &env,
+    );
+    assert!(
+        landed.contains("backend: PR #4 mergeability still being computed by the forge"),
+        "{landed}"
+    );
+    assert_eq!(git(&remote, ["rev-parse", "main"]).trim(), merged);
+    let bundle_path = workspace.join(".knit/bundles/forge-workspace.bundle.json");
+    let archived: Value = serde_json::from_str(&fs::read_to_string(bundle_path).unwrap()).unwrap();
+    assert_eq!(archived["state"], "archived");
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn forgejo_api_land_still_fails_on_a_persistent_conflict() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_dir, _remote, served) = forgejo_api_landing_workspace(&root);
+    let (base, _merged) = served.split_once('\n').unwrap();
+    let env = [
+        ("KNIT_FORGEJO_API_BASE", base),
+        ("KNIT_FORGEJO_TOKEN", "test-token"),
+        ("KNIT_MERGEABILITY_SETTLE_MS", "300"),
+    ];
+    knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
+    fs::write(fake_dir.join("conflict"), "").unwrap();
+    let fake_dir_env = fake_dir.to_str().unwrap();
+    let mut fail_env = env.to_vec();
+    fail_env.push(("FORGE_FAKE_DIR", fake_dir_env));
+    let error = knit_fails_with_fake_gh_env(
+        &workspace,
+        ["land", "apply", "--no-remote"],
+        &fake_bin,
+        &fake_dir,
+        &fail_env,
+    );
+    assert!(
+        error.contains(
+            "backend: PR #4 has merge conflicts with its base branch. Run `knit land update`"
+        ),
+        "{error}"
+    );
+    assert!(!fake_dir.join("api-merged").exists());
+    let reads = fs::read_to_string(fake_dir.join("pull-reads")).unwrap();
+    assert!(reads.lines().count() > 2, "{reads}");
+    fs::remove_dir_all(root).unwrap();
 }

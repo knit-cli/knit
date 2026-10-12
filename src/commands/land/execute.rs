@@ -543,6 +543,8 @@ fn execute_merge_pr(
             publication_update: Some(PublicationUpdate { repo, pr }),
         });
     }
+    let pr =
+        providers::settle_mergeability(forge.as_ref(), &target, &publication.url, repo_id, pr)?;
     ensure_open_and_ready(repo_id, &pr)?;
 
     let mut detail = Vec::new();

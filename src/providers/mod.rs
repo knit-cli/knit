@@ -82,6 +82,74 @@ impl PullRequest {
         self.mergeable.as_deref() == Some("CONFLICTING")
             || self.merge_state_status.as_deref() == Some("DIRTY")
     }
+
+    /// True when the host reports it is still computing mergeability.
+    pub fn mergeability_computing(&self) -> bool {
+        self.mergeable.as_deref() == Some("UNKNOWN")
+    }
+}
+
+/// How long landing keeps re-reading a review whose mergeability the host has
+/// not settled before it trusts the last answer.
+pub const MERGEABILITY_SETTLE_SECONDS: u64 = 45;
+const MERGEABILITY_RECHECK_MAX: Duration = Duration::from_secs(8);
+
+/// Re-read an open review until its host settles mergeability. A review that is
+/// mergeable on the first read returns at once; after the bounded wait the last
+/// answer stands, so a real conflict still fails where the caller checks it.
+pub fn settle_mergeability(
+    forge: &dyn Forge,
+    target: &PrTarget,
+    selector: &str,
+    label: &str,
+    pr: PullRequest,
+) -> Result<PullRequest> {
+    if !mergeability_unsettled(forge, &pr) {
+        return Ok(pr);
+    }
+    // Tests shorten the wait with `KNIT_MERGEABILITY_SETTLE_MS`.
+    let cap = Duration::from_millis(crate::parallel::env_number(
+        "KNIT_MERGEABILITY_SETTLE_MS",
+        MERGEABILITY_SETTLE_SECONDS * 1000,
+        true,
+    )?);
+    settle_mergeability_within(forge, target, selector, label, pr, cap)
+}
+
+fn mergeability_unsettled(forge: &dyn Forge, pr: &PullRequest) -> bool {
+    pr.state.as_deref() == Some("OPEN")
+        && pr.is_draft != Some(true)
+        && forge.mergeability_provisional(pr)
+}
+
+fn settle_mergeability_within(
+    forge: &dyn Forge,
+    target: &PrTarget,
+    selector: &str,
+    label: &str,
+    mut pr: PullRequest,
+    cap: Duration,
+) -> Result<PullRequest> {
+    if !mergeability_unsettled(forge, &pr) {
+        return Ok(pr);
+    }
+    crate::human!(
+        "{}: PR #{} mergeability still being computed by the forge; re-checking…",
+        label,
+        pr.number
+    );
+    let started = Instant::now();
+    let mut delay = (cap / 10).min(Duration::from_secs(1));
+    while mergeability_unsettled(forge, &pr) {
+        let remaining = cap.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            break;
+        }
+        thread::sleep(delay.min(remaining));
+        delay = (delay * 2).min(MERGEABILITY_RECHECK_MAX);
+        pr = forge.view(target, selector)?;
+    }
+    Ok(pr)
 }
 
 /// A single status/check result for a review object.
@@ -236,6 +304,13 @@ pub trait Forge {
         selector: &str,
         required_only: bool,
     ) -> Result<Vec<CheckRun>>;
+
+    /// Whether this review's mergeability may still change without anyone
+    /// pushing: the host reports it is computing. Hosts without such a signal
+    /// override this to treat a conflict as provisional too.
+    fn mergeability_provisional(&self, pr: &PullRequest) -> bool {
+        pr.mergeability_computing()
+    }
 
     /// What still stands between an open review and its merge.
     fn gates(&self, target: &PrTarget, pr: &PullRequest) -> Result<Vec<Gate>> {
@@ -1292,5 +1367,161 @@ mod tests {
         assert!(!looks_like_gh_auth_failure(
             "gh pr view https://github.com/acme/backend/pull/403 failed: access denied to draft"
         ));
+    }
+}
+
+#[cfg(test)]
+mod mergeability_tests {
+    use super::*;
+    use std::cell::RefCell;
+
+    /// Serves scripted `mergeable` answers, one per `view`, repeating the last.
+    struct ScriptedForge {
+        answers: RefCell<Vec<&'static str>>,
+        reads: RefCell<usize>,
+        plain_bool: bool,
+    }
+
+    impl ScriptedForge {
+        fn new(answers: &[&'static str], plain_bool: bool) -> Self {
+            Self {
+                answers: RefCell::new(answers.to_vec()),
+                reads: RefCell::new(0),
+                plain_bool,
+            }
+        }
+
+        fn review(mergeable: &str) -> PullRequest {
+            PullRequest {
+                source_repository: None,
+                number: 1,
+                url: "https://forge.example/acme/app/pulls/1".to_string(),
+                state: Some("OPEN".to_string()),
+                title: None,
+                base_ref_name: None,
+                head_ref_name: None,
+                body: None,
+                is_draft: Some(false),
+                head_ref_oid: None,
+                mergeable: Some(mergeable.to_string()),
+                merge_state_status: None,
+                review_decision: None,
+                author: None,
+            }
+        }
+    }
+
+    impl Forge for ScriptedForge {
+        fn id(&self) -> &'static str {
+            "scripted"
+        }
+        fn review_kind(&self) -> &'static str {
+            "pull_request"
+        }
+        fn cli(&self) -> &'static str {
+            "scripted"
+        }
+        fn repo_full_name(&self, _remote: &str) -> Option<String> {
+            None
+        }
+        fn find_existing(&self, _: &PrTarget, _: &str, _: &str) -> Result<Option<PullRequest>> {
+            unimplemented!()
+        }
+        fn create(
+            &self,
+            _: &PrTarget,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: bool,
+        ) -> Result<String> {
+            unimplemented!()
+        }
+        fn view(&self, _: &PrTarget, _: &str) -> Result<PullRequest> {
+            *self.reads.borrow_mut() += 1;
+            let mut answers = self.answers.borrow_mut();
+            let answer = if answers.len() > 1 {
+                answers.remove(0)
+            } else {
+                answers[0]
+            };
+            Ok(Self::review(answer))
+        }
+        fn merged_revision(&self, _: &PrTarget, _: &str) -> Result<Option<String>> {
+            unimplemented!()
+        }
+        fn edit_body(&self, _: &PrTarget, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn edit_title(&self, _: &PrTarget, _: &str, _: &str) -> Result<()> {
+            unimplemented!()
+        }
+        fn merge(&self, _: &PrTarget, _: &str, _: &str, _: bool, _: Option<&str>) -> Result<()> {
+            unimplemented!()
+        }
+        fn check_runs(&self, _: &PrTarget, _: &str, _: bool) -> Result<Vec<CheckRun>> {
+            unimplemented!()
+        }
+        fn mergeability_provisional(&self, pr: &PullRequest) -> bool {
+            pr.mergeability_computing() || (self.plain_bool && pr.is_conflicting())
+        }
+    }
+
+    fn settle(forge: &ScriptedForge, cap_ms: u64) -> PullRequest {
+        let first = forge.view(&PrTarget::checkout("."), "1").unwrap();
+        settle_mergeability_within(
+            forge,
+            &PrTarget::checkout("."),
+            "1",
+            "app",
+            first,
+            Duration::from_millis(cap_ms),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn mergeable_first_read_is_not_read_again() {
+        let forge = ScriptedForge::new(&["MERGEABLE"], true);
+        assert_eq!(
+            settle(&forge, 60_000).mergeable.as_deref(),
+            Some("MERGEABLE")
+        );
+        assert_eq!(*forge.reads.borrow(), 1);
+    }
+
+    #[test]
+    fn plain_bool_conflict_is_rechecked_until_mergeable() {
+        let forge = ScriptedForge::new(&["CONFLICTING", "CONFLICTING", "MERGEABLE"], true);
+        assert_eq!(
+            settle(&forge, 1_000).mergeable.as_deref(),
+            Some("MERGEABLE")
+        );
+        assert_eq!(*forge.reads.borrow(), 3);
+    }
+
+    #[test]
+    fn persistent_conflict_stands_after_the_bounded_wait() {
+        let forge = ScriptedForge::new(&["CONFLICTING"], true);
+        let started = Instant::now();
+        let pr = settle(&forge, 200);
+        assert!(pr.is_conflicting());
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(*forge.reads.borrow() > 1);
+    }
+
+    #[test]
+    fn computing_signal_waits_until_the_host_decides() {
+        let forge = ScriptedForge::new(&["UNKNOWN", "UNKNOWN", "CONFLICTING", "MERGEABLE"], false);
+        assert!(settle(&forge, 1_000).is_conflicting());
+        assert_eq!(*forge.reads.borrow(), 3);
+    }
+
+    #[test]
+    fn decided_conflict_with_a_computing_signal_is_final() {
+        let forge = ScriptedForge::new(&["CONFLICTING", "MERGEABLE"], false);
+        assert!(settle(&forge, 60_000).is_conflicting());
+        assert_eq!(*forge.reads.borrow(), 1);
     }
 }

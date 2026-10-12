@@ -319,6 +319,13 @@ pub fn apply_land_from_artifact(
             continue;
         }
 
+        let pr = providers::settle_mergeability(
+            forge.as_ref(),
+            &target,
+            &publication.url,
+            &repo.id,
+            pr,
+        )?;
         ensure_open_and_ready(&repo.id, &pr)?;
 
         let checks_detail = match forge.wait_for_checks(&target, &publication.url, true, 1800, 10) {
