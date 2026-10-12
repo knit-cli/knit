@@ -29,6 +29,17 @@ pub fn resolve_log_node<'a>(nodes: &'a [BundleNode], target: &str) -> Result<&'a
         bail!("No bundle log entries found.");
     }
 
+    if target == "landed" {
+        return loggable
+            .iter()
+            .rev()
+            .find(|node| node.node_type == "feature.landed")
+            .copied()
+            .context(
+                "Log selector `landed` matched nothing: this bundle has no recorded landing.",
+            );
+    }
+
     if target == "HEAD" || target.starts_with("HEAD~") {
         let offset = if target == "HEAD" {
             0

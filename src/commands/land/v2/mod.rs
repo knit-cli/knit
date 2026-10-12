@@ -34,12 +34,28 @@ use serde_json::Value;
 use std::path::Path;
 
 pub fn validate(
-    plan: &Path,
+    plan: Option<&Path>,
     bundle: Option<&Path>,
     project: Option<&Path>,
     _json: bool,
+    target: Option<&str>,
+    lane: Option<&str>,
 ) -> Result<()> {
-    let plan: Value = read_json(plan)?;
+    let plan: Value = match plan {
+        Some(plan) => read_json(plan)?,
+        None => {
+            let active = crate::store::load_active_bundle()?;
+            let path = destination_path(&active, target, lane);
+            if !path.exists() {
+                bail!(
+                    "No land plan found at {}. Run `knit --bundle {} land` to create it, or pass --plan <path>.",
+                    path.display(),
+                    active.bundle.id
+                );
+            }
+            read_json(&path)?
+        }
+    };
     let bundle = bundle.map(read_json::<Value>).transpose()?;
     let project = project.map(read_json::<Value>).transpose()?;
     let result = validation(&plan, bundle.as_ref(), project.as_ref());

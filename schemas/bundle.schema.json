@@ -185,6 +185,23 @@
               }
             }
           },
+          "revertedReviews": {
+            "type": "object",
+            "description": "On a pr.revert node: the merged review each repository's revert undoes, by repository id.",
+            "additionalProperties": { "type": "string", "minLength": 1 }
+          },
+          "revertVerification": {
+            "type": "object",
+            "description": "On a feature.landed node that landed revert reviews: whether each merged revert is the exact inverse of the change it undoes.",
+            "required": ["verified"],
+            "properties": {
+              "verified": { "type": "boolean" },
+              "mismatched": {
+                "type": "object",
+                "additionalProperties": { "type": "array", "items": { "type": "string" } }
+              }
+            }
+          },
           "repoChanges": {
             "type": "array",
             "items": {

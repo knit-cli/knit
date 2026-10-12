@@ -43,8 +43,10 @@ pub fn rollback_land_run(run_path: Option<&Path>, apply: bool) -> Result<()> {
     match run.status {
         LandStatus::Failed => {}
         LandStatus::Succeeded => bail!(
-            "Land run {} succeeded. Use `knit revert <landed-node> --apply` to revert a fully landed bundle.",
-            run.id
+            "Land run {} succeeded, so rollback has nothing to compensate. Undo the landed bundle with `knit --bundle {} revert landed --apply`, then land the revert PRs with `knit --bundle {} land apply`.",
+            run.id,
+            active.bundle.id,
+            active.bundle.id
         ),
         status => bail!(
             "Land run {} is {status}, expected failed. Only failed runs can be rolled back.",

@@ -11,7 +11,7 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
-fn identity(cwd: &Path) -> Result<(String, String)> {
+pub(crate) fn identity(cwd: &Path) -> Result<(String, String)> {
     let read = |key| -> Result<String> {
         let value = git_output_optional(cwd, ["config", "--get", key])?
             .filter(|value| !value.trim().is_empty())

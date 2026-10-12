@@ -632,6 +632,8 @@ knit --bundle <b> push                # update open reviews after more commits
 knit --bundle <b> rebase              # replay onto the latest bases; on a conflict fix it, `git add`,
                                       #   `git rebase --continue` in that repo, then `knit --bundle <b> rebase --continue`
 knit --bundle <b> land                # plan merging the reviews; `knit --bundle <b> land apply` runs it
+knit --bundle <b> revert landed --apply --land  # undo landed work: revert PRs merged in reverse plan order;
+                                      #   its final `Revert verified:` line is the proof, no separate checking
 knit log --all [--repo <repo>]        # history of past bundles and their per-repo commits
 ```
 

@@ -23,10 +23,14 @@ pub(crate) fn create_review(
         bail!("only a verified merged review can be reverted");
     }
     if target.contribution.is_none() {
-        return Ok((
-            forge.revert_pull_request(target, selector, title, body)?,
-            target.clone(),
-        ));
+        let url = if forge.native_revert() {
+            forge.revert_pull_request(target, selector, title, body)?
+        } else {
+            super::fallback::create_revert_review(
+                forge, target, repo, &original, selector, title, body,
+            )?
+        };
+        return Ok((url, target.clone()));
     }
     if forge.id() != "github" {
         bail!("cross-repository compensation requires GitHub");

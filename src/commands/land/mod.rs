@@ -20,6 +20,7 @@ pub(crate) mod git_progress;
 pub(crate) mod lanes;
 mod plan;
 mod process;
+mod revert_order;
 mod rollback;
 mod types;
 mod update;
@@ -120,6 +121,18 @@ pub fn land_default_version(
             target_branch,
             lane_name,
             false,
+            false,
+        );
+    }
+    if version == "0.2" && plan_superseded_by_revert(&active, &candidate)? {
+        return v2::generate(
+            None,
+            None,
+            None,
+            None,
+            target_branch,
+            lane_name,
+            true,
             false,
         );
     }
@@ -229,6 +242,25 @@ pub fn land_default_version(
     )
 }
 
+/// `knit revert landed --apply --land`: plan the default destination afresh
+/// and land it, exactly as `knit land` followed by `knit land apply`.
+pub fn land_default_destination() -> Result<()> {
+    v2::generate(None, None, None, None, None, None, true, false)?;
+    apply_land_plan(
+        None,
+        &[],
+        false,
+        false,
+        false,
+        None,
+        false,
+        None,
+        None,
+        None,
+        false,
+    )
+}
+
 // Command entry point: these arguments are the subcommand's flags.
 #[allow(clippy::too_many_arguments)]
 pub fn apply_land_plan(
@@ -249,6 +281,18 @@ pub fn apply_land_plan(
     }
     let active = crate::store::load_active_bundle()?;
     let destination = v2::destination_path(&active, target_branch, lane_name);
+    if plan_path.is_none() && !json_output && plan_superseded_by_revert(&active, &destination)? {
+        v2::generate(
+            None,
+            None,
+            None,
+            None,
+            target_branch,
+            lane_name,
+            true,
+            false,
+        )?;
+    }
     let candidate = if plan_path.is_none() && destination.exists() {
         destination
     } else {
@@ -386,6 +430,21 @@ fn finish_successful_land(
         )?;
         print_intermediate_landing_summary(active, plan);
         return Ok(());
+    }
+    if active
+        .bundle
+        .nodes
+        .iter()
+        .rev()
+        .find(|node| node.node_type == "feature.landed")
+        .and_then(|node| node.revert_verification.as_ref())
+        .is_some_and(|verification| !verification.verified)
+    {
+        save_active_bundle(active)?;
+        bail!(
+            "The revert PRs merged, but at least one is not the exact inverse of the change it reverts (files listed above). The bundle was not archived; fix the base branch by hand, then archive it with `knit bundle archive {}`.",
+            active.bundle.id
+        );
     }
     let removed_worktrees = if active.bundle.state == Some(crate::model::BundleState::Archived) {
         if options.keep_worktrees {
@@ -902,6 +961,18 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
         display::print_planned_step(&active, step);
     }
     Ok(())
+}
+
+/// The saved plan landed the reviews that revert PRs now undo. It is
+/// replaced rather than reported stale: the reverts are the only thing left
+/// to land for this destination.
+fn plan_superseded_by_revert(active: &ActiveBundle, path: &Path) -> Result<bool> {
+    if !path.exists() || !plan::lands_revert(&active.bundle) {
+        return Ok(false);
+    }
+    let raw: serde_json::Value = read_json(path)?;
+    Ok(raw["schemaVersion"] == "0.2"
+        && v2::bundle_fingerprint_is_stale(&raw, &serde_json::to_value(&active.bundle)?))
 }
 
 fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Result<usize> {

@@ -500,7 +500,14 @@ pub(crate) fn resolve_bundle_id(
     // create one is wrong advice.
     let open_bundles = open_bundle_ids(root)?;
     match open_bundles.as_slice() {
-        [] => bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first."),
+        [] => match latest_finished_bundle_id(root)? {
+            Some(latest) => bail!(
+                "No active Knit bundle found. Landed and archived bundles are reached with `--bundle <slug>`; the most recent is `{latest}`: run the same command with `--bundle {latest}`, or start new work with `knit bundle \"feature title\"`."
+            ),
+            None => {
+                bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first.")
+            }
+        },
         [only] => bail!(
             "No active Knit bundle is selected. Bundle `{only}` is open: run the same command with `--bundle {only}`, run it from `.knit/worktrees/{only}/<repo>/`, or select it with `knit switch {only} --workspace`."
         ),
@@ -602,6 +609,45 @@ fn open_bundle_ids(root: &Path) -> Result<Vec<String>> {
     }
     ids.sort();
     Ok(ids)
+}
+
+/// The landed or archived bundle that finished most recently, by its archive
+/// time or latest landing.
+fn latest_finished_bundle_id(root: &Path) -> Result<Option<String>> {
+    let dir = root.join(".knit/bundles");
+    if !dir.exists() {
+        return Ok(None);
+    }
+
+    let mut latest: Option<(String, String)> = None;
+    for entry in fs::read_dir(&dir)
+        .with_context(|| format!("failed to read bundle directory {}", dir.display()))?
+    {
+        let path = entry?.path();
+        if path.extension().and_then(|ext| ext.to_str()) != Some("json") {
+            continue;
+        }
+        let bundle: ChangeGroup = read_json(&path)?;
+        if bundle.state == Some(BundleState::Deleted) || is_open_bundle(&bundle) {
+            continue;
+        }
+        let landed_at = bundle
+            .nodes
+            .iter()
+            .filter(|node| node.node_type == "feature.landed")
+            .map(|node| node.created_at.clone())
+            .max();
+        let Some(finished_at) = bundle.archived_at.clone().max(landed_at) else {
+            continue;
+        };
+        if latest
+            .as_ref()
+            .is_none_or(|(latest_at, _)| finished_at > *latest_at)
+        {
+            latest = Some((finished_at, bundle.id));
+        }
+    }
+    Ok(latest.map(|(_, id)| id))
 }
 
 /// Whether a bundle artifact is still open (not archived/closed/deleted, and

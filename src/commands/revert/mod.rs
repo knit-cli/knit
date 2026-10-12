@@ -3,9 +3,12 @@
 //! commits, or provider PR reverts for landed nodes.
 
 mod apply;
+mod fallback;
 mod plan;
 mod review;
+mod verify;
 pub(crate) use review::create_review;
+pub(crate) use verify::{compensation_landed, verify_landed_revert};
 
 use crate::checkout::{checkout_dir, ensure_expected_branch};
 use crate::ids::short_sha;
@@ -89,12 +92,23 @@ struct RevertOperation {
     selector: Option<String>,
 }
 
-pub fn revert_target(target: &str, apply: bool) -> Result<()> {
-    if apply {
-        apply_revert(target)
-    } else {
-        plan_revert(target)
+pub fn revert_target(target: &str, apply: bool, land: bool) -> Result<()> {
+    if land && (!apply || target != "landed") {
+        let bundle =
+            crate::store::explicit_bundle_override().unwrap_or_else(|| "<bundle>".to_string());
+        bail!(
+            "`--land` merges the revert PRs of a landed bundle, so it needs the `landed` target and `--apply`: run `knit --bundle {bundle} revert landed --apply --land`."
+        );
     }
+    if !apply {
+        return plan_revert(target);
+    }
+    if !land {
+        return apply_revert(target, false);
+    }
+    let _clones = fallback::ClonesKept::start();
+    apply_revert(target, true)?;
+    crate::commands::land::land_default_destination()
 }
 
 fn plan_revert(target: &str) -> Result<()> {
@@ -109,13 +123,30 @@ fn plan_revert(target: &str) -> Result<()> {
     }
     write_json(&path, &plan)?;
     print_plan(&plan, &path);
+    print_apply_hint(&plan);
     Ok(())
 }
 
-fn apply_revert(target: &str) -> Result<()> {
+fn apply_revert(target: &str, land: bool) -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     let target_node = resolve_log_node(&active.bundle.nodes, target)?.clone();
     let path = plan_path(&active, &target_node.id);
+
+    // Provider reverts of a landing touch no checkout and every PR is
+    // re-verified as merged before anything is created, so a missing plan
+    // is written here instead of costing a separate planning run.
+    if !path.exists() && target_node.node_type == "feature.landed" {
+        let plan = build_plan(&active, target)?;
+        preflight_plan(&active, &plan)?;
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent)
+                .with_context(|| format!("failed to create {}", parent.display()))?;
+        }
+        write_json(&path, &plan)?;
+        print_plan(&plan, &path);
+        println!();
+        return apply_provider_revert(&mut active, &plan, path, land);
+    }
 
     if !path.exists() {
         bail!(
@@ -142,7 +173,7 @@ fn apply_revert(target: &str) -> Result<()> {
 
     preflight_plan(&active, &plan)?;
     if plan_uses_provider_revert(&plan) {
-        return apply_provider_revert(&mut active, &plan, path);
+        return apply_provider_revert(&mut active, &plan, path, land);
     }
 
     apply_local_revert(&mut active, &plan, path)
@@ -157,6 +188,17 @@ fn repo_context(active: &ActiveBundle, repo_id: &str) -> Result<(usize, PathBuf)
         .find(|(_, repo)| repo.id == repo_id)
         .with_context(|| format!("{repo_id}: repo is no longer tracked in this bundle"))?;
     let Some(worktree) = checkout_dir(active, repo) else {
+        if active
+            .bundle
+            .nodes
+            .iter()
+            .any(|node| node.node_type == "feature.landed")
+        {
+            bail!(
+                "{repo_id}: no checkout is recorded in the bundle. Landed work is undone on the forge without checkouts: run `knit --bundle {} revert landed --apply`.",
+                active.bundle.id
+            );
+        }
         bail!("{repo_id}: no checkout is recorded in the bundle.");
     };
     ensure_expected_branch(repo, &worktree)?;
@@ -239,10 +281,18 @@ fn print_plan(plan: &RevertPlan, path: &Path) {
             }
         }
     }
+}
 
+fn print_apply_hint(plan: &RevertPlan) {
     println!();
+    // A landed bundle is archived, so only an explicit selector reaches it.
+    let bundle_flag = if plan.target_node_type == "feature.landed" {
+        format!("--bundle {} ", plan.bundle_id)
+    } else {
+        String::new()
+    };
     println!(
-        "{} knit revert {} --apply",
+        "{} knit {bundle_flag}revert {} --apply",
         out::heading("Apply:"),
         plan.target_ref
     );

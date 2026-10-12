@@ -321,6 +321,10 @@ impl Forge for GitHub {
         Ok(())
     }
 
+    fn native_revert(&self) -> bool {
+        true
+    }
+
     fn revert_pull_request(
         &self,
         target: &PrTarget,

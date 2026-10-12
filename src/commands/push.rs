@@ -330,6 +330,12 @@ pub(crate) fn run_push_to(
     run_push_to_source(cwd, remote, branch, set_upstream, force, None, None)
 }
 
+/// Push a branch that exists only in `cwd`, with the same transient-retry and
+/// timeout handling as bundle pushes.
+pub(crate) fn push_new_branch(cwd: &Path, remote: &str, branch: &str) -> Result<()> {
+    run_push_to_source(cwd, remote, branch, false, PushForce::No, None, None)
+}
+
 fn run_push_to_source(
     cwd: &Path,
     remote: &str,

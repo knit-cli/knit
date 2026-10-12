@@ -667,10 +667,12 @@ pub fn run(cli: Cli) -> Result<()> {
                     project_file,
                     json,
                 }) => commands::land::v2::validate(
-                    &plan,
+                    plan.as_deref(),
                     from_artifact.as_deref(),
                     project_file.as_deref(),
                     json,
+                    target.as_deref(),
+                    lane.as_deref(),
                 ),
                 Some(LandCommand::Source {
                     plan,
@@ -1085,7 +1087,8 @@ pub fn run(cli: Cli) -> Result<()> {
             target,
             plan: _,
             apply,
-        } => commands::revert_target(&target, apply),
+            land,
+        } => commands::revert_target(&target, apply, land),
         Commands::Git { repos, all, args } => commands::run_git(&args, &repos, all),
         Commands::Show {
             target,

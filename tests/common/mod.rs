@@ -772,6 +772,10 @@ api_pr_json() {
   if [ -f "$GH_FAKE_DIR/revert-$pr_repo.number" ] && [ "$number" = "$(cat "$GH_FAKE_DIR/revert-$pr_repo.number")" ]; then
     state="open"
     merged="false"
+    if [ -f "$GH_FAKE_DIR/merged-revert-$pr_repo" ]; then
+      state="closed"
+      merged="true"
+    fi
     title="Revert $pr_repo PR"
     head="knit/revert-$pr_repo"
   fi
@@ -781,7 +785,23 @@ api_pr_json() {
     mergeable="false"
     mergestate="dirty"
   fi
-  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s","body":"Existing body","draft":false,"head":{"ref":"%s","sha":"%s-head"},"base":{"ref":"%s"},"merged":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$title" "$head" "$pr_repo" "$base" "$merged" "$mergeable" "$mergestate"
+  head_oid="$pr_repo-head"
+  if [ "$head" = "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/revert-head-$pr_repo" ]; then
+    head_oid="$(cat "$GH_FAKE_DIR/revert-head-$pr_repo")"
+  elif [ "$head" != "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/head-$pr_repo" ]; then
+    head_oid="$(cat "$GH_FAKE_DIR/head-$pr_repo")"
+  fi
+  merge_sha="null"
+  if [ "$merged" = "true" ]; then
+    merged_marker="merged-$pr_repo"
+    if [ "$head" = "knit/revert-$pr_repo" ]; then
+      merged_marker="merged-revert-$pr_repo"
+    fi
+    if [ -f "$GH_FAKE_DIR/$merged_marker.sha" ]; then
+      merge_sha="\"$(cat "$GH_FAKE_DIR/$merged_marker.sha")\""
+    fi
+  fi
+  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s","body":"Existing body","draft":false,"head":{"ref":"%s","sha":"%s"},"base":{"ref":"%s"},"merged":%s,"merge_commit_sha":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$title" "$head" "$head_oid" "$base" "$merged" "$merge_sha" "$mergeable" "$mergestate"
 }
 
 if [ "$1" = "api" ]; then
@@ -815,8 +835,10 @@ if [ "$1" = "api" ]; then
   done
   endpoint_path="${endpoint%%\?*}"
   case "$endpoint_path" in
-    repos/acme/backend/pulls|repos/acme/backend/pulls/*) pr_repo=backend ;;
-    repos/acme/frontend/pulls|repos/acme/frontend/pulls/*) pr_repo=frontend ;;
+    repos/acme/*/pulls|repos/acme/*/pulls/*)
+      pr_repo="${endpoint_path#repos/acme/}"
+      pr_repo="${pr_repo%%/*}"
+      ;;
     *) pr_repo=other ;;
   esac
   case "$pr_repo" in
@@ -963,6 +985,9 @@ case "$sub" in
     head="knit/venue-capacity"
     if [ -f "$GH_FAKE_DIR/revert-$pr_repo.number" ] && [ "$number" = "$(cat "$GH_FAKE_DIR/revert-$pr_repo.number")" ]; then
       state="OPEN"
+      if [ -f "$GH_FAKE_DIR/merged-revert-$pr_repo" ]; then
+        state="MERGED"
+      fi
       title="Revert $pr_repo PR"
       head="knit/revert-$pr_repo"
     elif [ -f "$GH_FAKE_DIR/merged-$pr_repo" ]; then
@@ -979,7 +1004,25 @@ case "$sub" in
       mergestate="DIRTY"
     fi
     review="${GH_FAKE_REVIEW:-}"
-    printf '{"number":%s,"url":"%s","state":"%s","title":"%s","baseRefName":"%s","headRefName":"%s","body":"Existing body","isDraft":%s,"headRefOid":"%s-head","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s"}\n' "$number" "$url" "$state" "$title" "$base" "$head" "$draft" "$pr_repo" "$mergeable" "$mergestate" "$review"
+    head_oid="$pr_repo-head"
+    if [ "$head" = "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/revert-head-$pr_repo" ]; then
+      head_oid="$(cat "$GH_FAKE_DIR/revert-head-$pr_repo")"
+    elif [ "$head" != "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/head-$pr_repo" ]; then
+      head_oid="$(cat "$GH_FAKE_DIR/head-$pr_repo")"
+    fi
+    merge_commit="null"
+    if [ "$state" = "MERGED" ]; then
+      merged_marker="merged-$pr_repo"
+      if [ "$head" = "knit/revert-$pr_repo" ]; then
+        merged_marker="merged-revert-$pr_repo"
+      fi
+      merge_oid="0123456789abcdef0123456789abcdef01234567"
+      if [ -f "$GH_FAKE_DIR/$merged_marker.sha" ]; then
+        merge_oid="$(cat "$GH_FAKE_DIR/$merged_marker.sha")"
+      fi
+      merge_commit="{\"oid\":\"$merge_oid\"}"
+    fi
+    printf '{"number":%s,"url":"%s","state":"%s","title":"%s","baseRefName":"%s","headRefName":"%s","body":"Existing body","isDraft":%s,"headRefOid":"%s","mergeable":"%s","mergeStateStatus":"%s","reviewDecision":"%s","mergeCommit":%s}\n' "$number" "$url" "$state" "$title" "$base" "$head" "$draft" "$head_oid" "$mergeable" "$mergestate" "$review" "$merge_commit"
     ;;
   edit)
     url="$1"
@@ -1078,6 +1121,25 @@ case "$sub" in
       esac
     done
     printf '%s %s\n' "$pr_repo" "$method" >> "$GH_FAKE_DIR/merge-methods.txt"
+    merge_head="knit/venue-capacity"
+    merged_marker="merged-$pr_repo"
+    if [ -f "$GH_FAKE_DIR/revert-$pr_repo.number" ] && [ "${url##*/}" = "$(cat "$GH_FAKE_DIR/revert-$pr_repo.number")" ]; then
+      merge_head="knit/revert-$pr_repo"
+      merged_marker="merged-revert-$pr_repo"
+    fi
+    # Opt-in real merge: tests that need an immutable merged revision name a
+    # clone whose origin is the repo's remote.
+    if [ -f "$GH_FAKE_DIR/clone-$pr_repo" ]; then
+      clone="$(cat "$GH_FAKE_DIR/clone-$pr_repo")"
+      git -C "$clone" fetch -q origin main
+      git -C "$clone" checkout -q main
+      git -C "$clone" reset -q --hard origin/main
+      git -C "$clone" fetch -q origin "$merge_head"
+      git -C "$clone" merge -q --no-ff --no-edit FETCH_HEAD
+      git -C "$clone" push -q origin main
+      git -C "$clone" rev-parse HEAD > "$GH_FAKE_DIR/$merged_marker.sha"
+    fi
+    touch "$GH_FAKE_DIR/$merged_marker"
     touch "$GH_FAKE_DIR/merged-$pr_repo"
     printf 'Merged pull request %s\n' "$url"
     ;;
