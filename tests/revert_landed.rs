@@ -8,8 +8,9 @@ use std::path::{Path, PathBuf};
 
 const BUNDLE: &str = "venue-capacity";
 
-// Landing ownership locks live in TMPDIR and are keyed by project, and every
-// test here uses project `demo`; a private TMPDIR keeps parallel tests apart.
+// Landing ownership locks live in the temp directory and are keyed by project,
+// and every test here uses project `demo`; a private temp directory keeps
+// parallel tests apart. Windows takes it from TMP/TEMP rather than TMPDIR.
 fn private_tmp(fake_bin: &Path) -> String {
     let dir = fake_bin.parent().unwrap().join("tmp");
     fs::create_dir_all(&dir).unwrap();
@@ -22,7 +23,13 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let tmp = private_tmp(fake_bin);
-    knit_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[("TMPDIR", &tmp)])
+    knit_with_fake_gh_env(
+        cwd,
+        args,
+        fake_bin,
+        fake_gh_dir,
+        &[("TMPDIR", &tmp), ("TMP", &tmp), ("TEMP", &tmp)],
+    )
 }
 
 fn knit_fails_with_fake_gh<I, S>(cwd: &Path, args: I, fake_bin: &Path, fake_gh_dir: &Path) -> String
@@ -31,7 +38,13 @@ where
     S: AsRef<std::ffi::OsStr>,
 {
     let tmp = private_tmp(fake_bin);
-    knit_fails_with_fake_gh_env(cwd, args, fake_bin, fake_gh_dir, &[("TMPDIR", &tmp)])
+    knit_fails_with_fake_gh_env(
+        cwd,
+        args,
+        fake_bin,
+        fake_gh_dir,
+        &[("TMPDIR", &tmp), ("TMP", &tmp), ("TEMP", &tmp)],
+    )
 }
 
 /// Two-repo project whose landing merges backend before frontend, published
