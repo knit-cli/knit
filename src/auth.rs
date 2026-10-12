@@ -229,6 +229,10 @@ pub struct AuthStore {
     /// secret.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub(crate) git_fallbacks: BTreeMap<String, GitFallback>,
+    /// Lowercase forge hosts (`host[:port]`) that may receive saved or
+    /// environment tokens over plain HTTP. Loopback hosts never need an entry.
+    #[serde(default, skip_serializing_if = "BTreeSet::is_empty")]
+    pub plain_http_hosts: BTreeSet<String>,
 }
 
 /// The transport an ordinary-Git fallback should retry over.
@@ -322,9 +326,19 @@ pub struct ResolvedCredential {
     /// follow this; an unclassified credential keeps its legacy heuristic.
     pub token_type: Option<String>,
     pub token: String,
+    /// The resolved remote is plain HTTP and its origin may receive the token.
+    pub plain_http: bool,
 }
 
 impl ResolvedCredential {
+    pub fn scheme(&self) -> &'static str {
+        if self.plain_http {
+            "http"
+        } else {
+            "https"
+        }
+    }
+
     pub fn redact(&self, text: &str) -> String {
         if self.token.is_empty() {
             text.to_owned()
@@ -695,6 +709,10 @@ fn normalize_store(value: &mut AuthStore) {
         .map(|(host, name)| (host.to_ascii_lowercase(), name.clone()))
         .collect::<BTreeMap<_, _>>();
     value.defaults = lowered;
+    value.plain_http_hosts = std::mem::take(&mut value.plain_http_hosts)
+        .into_iter()
+        .map(|host| host.to_ascii_lowercase())
+        .collect();
 }
 
 fn validate_store(value: &mut AuthStore) -> Result<()> {
@@ -1137,6 +1155,7 @@ pub fn credential(name: &str) -> Result<ResolvedCredential> {
         username: spec.username.clone().unwrap_or_default(),
         token_type: spec.token_type.clone(),
         token,
+        plain_http: false,
     })
 }
 
@@ -1215,55 +1234,68 @@ fn context_root(cwd: &Path) -> Option<PathBuf> {
     })
 }
 
+/// A forge remote's credential identity and the transport a token rides on.
+/// `host` is the identity `host[:port]`: a non-default HTTP(S) port is part of
+/// the origin, while an SSH port is not (credentialed Git and the forge API
+/// both use the web origin). `scheme` is `http` only for plain-HTTP remotes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RemoteOrigin {
+    pub scheme: &'static str,
+    pub host: String,
+    pub path: String,
+}
+
+impl RemoteOrigin {
+    pub fn base_url(&self) -> String {
+        format!("{}://{}", self.scheme, self.host)
+    }
+}
+
 /// Normalize a remote to (host, repository path), rejecting embedded secrets and
 /// ambiguous paths. Invalid inputs are never included in error messages.
 pub fn remote_target(remote: &str) -> Result<(String, String)> {
+    remote_origin(remote).map(|origin| (origin.host, origin.path))
+}
+
+pub fn remote_origin(remote: &str) -> Result<RemoteOrigin> {
     if remote.chars().any(char::is_whitespace) || remote.contains(['\\', '%', '?', '#', '\0']) {
         bail!("Invalid forge remote URL");
     }
-    let (host, path) = if remote.contains("://") {
-        let authority = remote
-            .split_once("://")
-            .unwrap()
-            .1
-            .split('/')
-            .next()
-            .unwrap_or("");
-        if authority.rsplit('@').next().unwrap_or("").contains(':') {
-            bail!("Custom ports are not supported for forge credentials");
-        }
+    let (scheme, host, path) = if remote.contains("://") {
         // Reject traversal before URL parsing can normalize it away.
         if remote.split('/').any(|s| s == "." || s == "..") {
             bail!("Invalid forge remote path");
         }
         let url =
             url::Url::parse(remote).map_err(|_| anyhow::anyhow!("Invalid forge remote URL"))?;
-        if !matches!(url.scheme(), "https" | "ssh")
-            || url.port().is_some()
+        if !matches!(url.scheme(), "https" | "http" | "ssh")
             || url.password().is_some()
             || url.query().is_some()
             || url.fragment().is_some()
             || !(url.username().is_empty() || url.scheme() == "ssh" && url.username() == "git")
         {
-            bail!(
-                "Forge remotes must use HTTPS or SSH without embedded credentials or custom ports"
-            );
+            bail!("Forge remotes must use HTTPS, HTTP, or SSH without embedded credentials");
         }
-        (
-            url.host_str()
-                .context("Forge remote has no host")?
-                .to_owned(),
-            url.path().to_owned(),
-        )
+        let name = url.host_str().context("Forge remote has no host")?;
+        let host = match url.port() {
+            Some(port) if url.scheme() != "ssh" => format!("{name}:{port}"),
+            _ => name.to_owned(),
+        };
+        let scheme = if url.scheme() == "http" {
+            "http"
+        } else {
+            "https"
+        };
+        (scheme, host, url.path().to_owned())
     } else {
         let (authority, path) = remote
             .split_once(':')
-            .context("Expected an HTTPS or SSH forge remote")?;
+            .context("Expected an HTTPS, HTTP, or SSH forge remote")?;
         let host = authority.strip_prefix("git@").unwrap_or(authority);
         if host.contains('@') {
             bail!("SSH forge remotes may use only the git username");
         }
-        (host.to_owned(), path.to_owned())
+        ("https", host.to_owned(), path.to_owned())
     };
     validate_host(&host)?;
     let path = path.trim_matches('/');
@@ -1280,23 +1312,93 @@ pub fn remote_target(remote: &str) -> Result<(String, String)> {
     {
         bail!("Invalid forge repository path");
     }
-    Ok((host.to_ascii_lowercase(), path.to_owned()))
+    Ok(RemoteOrigin {
+        scheme,
+        host: host.to_ascii_lowercase(),
+        path: path.to_owned(),
+    })
 }
 
-fn validate_host(host: &str) -> Result<()> {
-    if host.is_empty()
-        || host.starts_with('.')
-        || host.ends_with('.')
-        || host
-            .split('.')
-            .any(|s| s.is_empty() || s.starts_with('-') || s.ends_with('-'))
-        || !host
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b))
-    {
-        bail!("Invalid forge host; provide a hostname without scheme, port, or path");
+/// Split an identity host into its name and optional port; IPv6 literals keep
+/// their brackets.
+fn split_host_port(host: &str) -> (&str, Option<&str>) {
+    if host.starts_with('[') {
+        return match host.split_once(']') {
+            Some((name, rest)) => (&host[..=name.len()], rest.strip_prefix(':')),
+            None => (host, None),
+        };
+    }
+    match host.rsplit_once(':') {
+        Some((name, port)) => (name, Some(port)),
+        None => (host, None),
+    }
+}
+
+/// The host name of an identity host, without its port.
+pub(crate) fn host_name(host: &str) -> &str {
+    split_host_port(host).0
+}
+
+pub(crate) fn validate_host(host: &str) -> Result<()> {
+    let (name, port) = split_host_port(host);
+    let valid_port = port.is_none_or(|port| {
+        !port.is_empty()
+            && !port.starts_with('0')
+            && port.bytes().all(|b| b.is_ascii_digit())
+            && port.parse::<u16>().is_ok()
+    });
+    let valid_name = if let Some(literal) = name.strip_prefix('[') {
+        literal
+            .strip_suffix(']')
+            .is_some_and(|literal| literal.parse::<std::net::Ipv6Addr>().is_ok())
+    } else {
+        !(name.is_empty()
+            || name.starts_with('.')
+            || name.ends_with('.')
+            || name
+                .split('.')
+                .any(|s| s.is_empty() || s.starts_with('-') || s.ends_with('-'))
+            || !name
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b".-".contains(&b)))
+    };
+    if !valid_name || !valid_port {
+        bail!(
+            "Invalid forge host; provide a hostname with an optional :port, without scheme or path"
+        );
     }
     Ok(())
+}
+
+/// Loopback hosts never leave the machine, so plain HTTP cannot expose a token.
+pub(crate) fn is_loopback_host(host: &str) -> bool {
+    let name = host_name(host).to_ascii_lowercase();
+    if name == "localhost" || name.ends_with(".localhost") {
+        return true;
+    }
+    if let Ok(address) = name.parse::<std::net::Ipv4Addr>() {
+        return address.is_loopback();
+    }
+    name.strip_prefix('[')
+        .and_then(|literal| literal.strip_suffix(']'))
+        .and_then(|literal| literal.parse::<std::net::Ipv6Addr>().ok())
+        .is_some_and(|address| address.is_loopback())
+}
+
+/// A forge token may travel to `origin` only over HTTPS, to a loopback host,
+/// or to an origin the user explicitly allowed with `knit auth allow-http`.
+pub(crate) fn ensure_token_transport(registry: &AuthStore, origin: &RemoteOrigin) -> Result<()> {
+    if origin.scheme == "https"
+        || is_loopback_host(&origin.host)
+        || registry.plain_http_hosts.contains(&origin.host)
+    {
+        return Ok(());
+    }
+    bail!(
+        "Refusing to send a forge token over plain HTTP to {}; use an HTTPS remote, or allow this origin with `knit auth allow-http {}`",
+        origin.base_url(),
+        origin.host
+    )
 }
 
 /// Resolve a host-less explicit forge target against the selected project's
@@ -1466,6 +1568,7 @@ pub(crate) fn github_account_credential(repository: &str) -> Option<ResolvedCred
         username: "x-access-token".to_string(),
         token_type: None,
         token,
+        plain_http: false,
     })
 }
 
@@ -1501,16 +1604,19 @@ pub fn resolve(cwd: &Path, remote: Option<&str>) -> Result<Option<ResolvedCreden
     if is_local_remote(remote) {
         return Ok(None);
     }
-    let target = remote_target(remote)?;
+    let origin = remote_origin(remote)?;
+    let target = (origin.host.clone(), origin.path.clone());
     let registry = load()?;
     let Some(name) = select_credential(&registry, cwd, &target)? else {
         return Ok(None);
     };
-    let resolved = credential(&name)?;
+    ensure_token_transport(&registry, &origin)?;
+    let mut resolved = credential(&name)?;
     // Recheck after loading: another process could have replaced the record.
     if resolved.host != target.0 {
         bail!("Assigned credential host does not match the repository host");
     }
+    resolved.plain_http = origin.scheme == "http";
     Ok(Some(resolved))
 }
 
@@ -2113,15 +2219,183 @@ mod tests {
             "https://u:SECRET@github.com/org/app",
             "https://github.com/org/../app",
             "https://github.com/org/%2e%2e/app",
-            "https://github.com:444/org/app",
-            "https://github.com:443/org/app",
+            "https://github.com:0/org/app",
             "https://github.com/org/app?SECRET",
+            "http://SECRET@forge.example.test:3000/org/app",
+            "http://forge.example.test:3000/org/app#SECRET",
+            "http://forge.example.test:3000/org/../app",
+            "ssh://SECRET@forge.example.test:2222/org/app",
+            "ftp://github.com/org/app",
             "user@github.com:org/app",
             "https://github.com/org//app",
         ] {
             let error = remote_target(remote).unwrap_err().to_string();
             assert!(!error.contains("SECRET"));
         }
+    }
+
+    #[test]
+    fn custom_ports_and_plain_http_are_part_of_the_origin() {
+        let origin = |remote: &str| {
+            let origin = remote_origin(remote).unwrap();
+            (origin.scheme, origin.host, origin.path)
+        };
+        for (remote, expected) in [
+            (
+                "https://GitLab.Company.test:8443/group/repo.git",
+                ("https", "gitlab.company.test:8443", "group/repo"),
+            ),
+            (
+                "https://github.com:443/org/app",
+                ("https", "github.com", "org/app"),
+            ),
+            (
+                "http://forgejo.example.internal:3000/org/repo.git",
+                ("http", "forgejo.example.internal:3000", "org/repo"),
+            ),
+            (
+                "http://forgejo.example.internal:80/org/repo",
+                ("http", "forgejo.example.internal", "org/repo"),
+            ),
+            (
+                "http://[::1]:3000/org/repo.git",
+                ("http", "[::1]:3000", "org/repo"),
+            ),
+            // SSH transport ports are not the forge's web origin.
+            (
+                "ssh://git@forge.company.test:2222/org/repo.git",
+                ("https", "forge.company.test", "org/repo"),
+            ),
+            (
+                "git@forge.company.test:org/repo.git",
+                ("https", "forge.company.test", "org/repo"),
+            ),
+        ] {
+            let (scheme, host, path) = expected;
+            assert_eq!(origin(remote), (scheme, host.to_owned(), path.to_owned()));
+        }
+        assert_eq!(
+            remote_origin("http://forgejo.example.internal:3000/org/repo")
+                .unwrap()
+                .base_url(),
+            "http://forgejo.example.internal:3000"
+        );
+    }
+
+    #[test]
+    fn credential_hosts_accept_ports_and_ipv6_literals() {
+        for host in [
+            "gitlab.company.test:8443",
+            "127.0.0.1:3000",
+            "[::1]",
+            "[::1]:3000",
+        ] {
+            validate_host(host).unwrap();
+        }
+        for host in [
+            "gitlab.company.test:",
+            "gitlab.company.test:0",
+            "gitlab.company.test:08443",
+            "gitlab.company.test:65536",
+            "gitlab.company.test:84a3",
+            "https://gitlab.company.test",
+            "gitlab.company.test/path",
+            "user@gitlab.company.test",
+            "[::1",
+            "[not-ipv6]:3000",
+        ] {
+            assert!(validate_host(host).is_err(), "{host}");
+        }
+    }
+
+    #[test]
+    fn plain_http_tokens_go_only_to_loopback_or_allowed_origins() {
+        for host in [
+            "localhost",
+            "localhost:3000",
+            "forge.localhost:3000",
+            "127.0.0.1:3000",
+            "127.8.9.10",
+            "[::1]:3000",
+        ] {
+            assert!(is_loopback_host(host), "{host}");
+        }
+        for host in [
+            "forge.example.test:3000",
+            "localhost.example.test",
+            "10.0.0.1:3000",
+            "128.0.0.1",
+            "[::2]:3000",
+        ] {
+            assert!(!is_loopback_host(host), "{host}");
+        }
+        let mut registry = AuthStore::default();
+        let origin = |remote: &str| remote_origin(remote).unwrap();
+        ensure_token_transport(&registry, &origin("https://forge.example.test/org/app")).unwrap();
+        ensure_token_transport(&registry, &origin("http://127.0.0.1:3000/org/app")).unwrap();
+        let error =
+            ensure_token_transport(&registry, &origin("http://forge.example.test:3000/org/app"))
+                .unwrap_err()
+                .to_string();
+        assert!(error.contains("http://forge.example.test:3000"), "{error}");
+        assert!(
+            error.contains("knit auth allow-http forge.example.test:3000"),
+            "{error}"
+        );
+        registry
+            .plain_http_hosts
+            .insert("forge.example.test:3000".into());
+        ensure_token_transport(&registry, &origin("http://forge.example.test:3000/org/app"))
+            .unwrap();
+        // The allowance names one origin: another port or the default port is
+        // a different one.
+        assert!(ensure_token_transport(
+            &registry,
+            &origin("http://forge.example.test:3001/org/app")
+        )
+        .is_err());
+        assert!(
+            ensure_token_transport(&registry, &origin("http://forge.example.test/org/app"))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn host_defaults_are_keyed_by_host_and_port() {
+        let spec = |host: &str| CredentialSpec {
+            provider: "gitlab".into(),
+            host: host.into(),
+            username: None,
+            token_env: None,
+            token_type: None,
+        };
+        let mut registry = AuthStore::default();
+        registry
+            .credentials
+            .insert("ported".into(), spec("gitlab.company.test:8443"));
+        registry
+            .credentials
+            .insert("legacy".into(), spec("gitlab.company.test"));
+        let cwd = std::env::temp_dir();
+        let selected = |remote: &str| {
+            select_credential(&registry, &cwd, &remote_target(remote).unwrap()).unwrap()
+        };
+        assert_eq!(
+            selected("https://gitlab.company.test:8443/group/app.git").as_deref(),
+            Some("ported")
+        );
+        for remote in [
+            "https://gitlab.company.test/group/app.git",
+            "https://gitlab.company.test:443/group/app.git",
+            "ssh://git@gitlab.company.test:2222/group/app.git",
+            "git@gitlab.company.test:group/app.git",
+        ] {
+            assert_eq!(selected(remote).as_deref(), Some("legacy"), "{remote}");
+        }
+        assert_eq!(
+            selected("https://gitlab.company.test:9443/group/app.git"),
+            None
+        );
     }
 
     #[test]
@@ -2444,6 +2718,7 @@ mod tests {
                 username: username.unwrap_or_default().into(),
                 token_type: token_type.map(str::to_owned),
                 token: "synthetic-secret".into(),
+                plain_http: false,
             };
         // Known kinds decide the scheme even when the recorded username
         // disagrees or is missing.

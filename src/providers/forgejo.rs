@@ -677,13 +677,15 @@ fn api_base(target: &PrTarget) -> Result<String> {
         return Ok(base);
     }
     if let Some(remote) = &target.repo_remote {
-        let (host, _) = crate::auth::remote_target(remote)?;
-        return Ok(format!("https://{host}/api/v1"));
+        return super::remote_api_base(remote, "/api/v1");
     }
     if target.repo_full_name.is_none() {
         if let Some(remote) =
             crate::git::git_output_optional(&target.cwd, ["remote", "get-url", "origin"])?
         {
+            if crate::auth::remote_origin(&remote).is_ok() {
+                return super::remote_api_base(&remote, "/api/v1");
+            }
             if let Some(host) = super::remote_host(&remote) {
                 return Ok(format!("https://{host}/api/v1"));
             }
@@ -847,6 +849,13 @@ mod published_host_tests {
             override_base
                 .clone()
                 .unwrap_or_else(|| "https://review.example.test/api/v1".into())
+        );
+        target.repo_remote = Some("https://review.example.test:8443/upstream/widget.git".into());
+        assert_eq!(
+            api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test:8443/api/v1".into())
         );
         target.repo_remote = None;
         assert_eq!(

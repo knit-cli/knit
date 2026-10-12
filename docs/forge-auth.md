@@ -155,6 +155,20 @@ knit auth status --project tools --json
 
 Omit `--token-env` to paste a token at a hidden prompt, or use `--token-stdin` with a secret manager. Use `--host git.example.com` for a self-hosted forge and `--token-type` to record a known kind. An environment reference must be set when the credential is used. For Bitbucket repository/project/workspace access tokens, omit `--username`.
 
+## Custom ports and plain HTTP
+
+Remotes may use `https://`, `http://`, `ssh://`, or scp-style `git@host:path`. A non-default HTTP(S) port is part of the forge's identity: `https://gitlab.company.test:8443/group/repo.git` is the origin `gitlab.company.test:8443`, a different host from `gitlab.company.test`, so save its credential with `--host gitlab.company.test:8443`. Default ports (443 for HTTPS, 80 for HTTP) are dropped, so existing host-only credentials keep serving `https://host/...` and `https://host:443/...`. An SSH port is a transport detail, not the forge's web origin: `ssh://git@forge.company.test:2222/org/repo.git` uses the `forge.company.test` credential, rides HTTPS on that host when a token is selected, and calls its API there. API bases keep the origin's scheme and port — `https://gitlab.company.test:8443/api/v4`, `http://forgejo.example.internal:3000/api/v1`, `https://ghe.company.test:8443/api/v3` for GitHub Enterprise. `KNIT_GITHUB_API_BASE`, `KNIT_GITLAB_API_BASE`, and `KNIT_FORGEJO_API_BASE` still override the derived base unchanged.
+
+Plain-HTTP remotes work without credentials as they always did in Git. Knit sends a forge token — saved or from the environment — over plain HTTP only to a loopback host (`localhost`, `*.localhost`, `127.0.0.0/8`, `[::1]`) or to an origin you allowed explicitly; any other HTTP origin fails before the token leaves the machine, naming the origin and the command that allows it:
+
+```sh
+knit auth add internal --provider forgejo --host forgejo.example.internal:3000
+knit auth allow-http forgejo.example.internal:3000           # anyone on the path can read the token
+knit auth allow-http forgejo.example.internal:3000 --revoke
+```
+
+The allowance covers exactly one `host[:port]` origin and is stored in your personal `forge-auth.json` (`plainHttpHosts`), never in project or workspace files.
+
 `status` reports coverage without network access. `--check` probes Git read access with a 30-second timeout per repository and exits nonzero on missing credentials or failed access. It does not prove push, API, review, or merge permissions; those are checked by the actual operation.
 
 ```sh
@@ -165,7 +179,7 @@ knit auth remove restricted                           # only when unused
 
 ## Selection and storage
 
-Selection order is **explicit operation/project assignment → exact-host default → permitted ambient Git access**. Missing or rejected explicit credentials fail rather than falling back to a broader token. Hostless API targets must match project membership or the actual checkout origin unambiguously.
+Selection order is **explicit operation/project assignment → exact-host default → permitted ambient Git access**. The exact host includes a non-default port. Missing or rejected explicit credentials fail rather than falling back to a broader token. Hostless API targets must match project membership or the actual checkout origin unambiguously.
 
 A project without assignments retains existing Git helpers, SSH, `gh auth login`, and provider environment behavior where no Knit default applies. Once assignments exist, other forge repositories need a default, an assignment, or a recorded ambient allowance for their exact remote. Declaring an auth group or changing a remote invalidates that ambient allowance. Local filesystem remotes require no credentials.
 
@@ -173,11 +187,11 @@ Assignments are keyed by the workspace's canonical project artifact path. They s
 
 Metadata, defaults, and assignments live in `forge-auth.json`; pasted tokens live in `forge-secrets.json`, a **private plaintext file, not an encrypted vault**. These follow `KNIT_HOME`, `XDG_CONFIG_HOME`, and the platform's user-config location. Unix directories use `0700` and files `0600`; Windows uses the user's inherited access controls. Tokens never appear in command arguments, status output, project exports, or bundles.
 
-Knit applies credentials to child Git processes and forge API calls without changing the parent environment or saved Git remotes. Token-backed SSH URLs use HTTPS for that operation. Git 2.31 or newer is required. Network operations with repository-location overrides (`-C`, `--git-dir`, `--work-tree`) are rejected when project credentials are configured; run from the intended checkout. Bare Git commands outside Knit keep their existing authentication.
+Knit applies credentials to child Git processes and forge API calls without changing the parent environment or saved Git remotes. Token-backed SSH URLs use HTTPS on the forge's web origin for that operation; token-backed HTTP URLs stay on HTTP only under the plain-HTTP rule above. Git 2.31 or newer is required. Network operations with repository-location overrides (`-C`, `--git-dir`, `--work-tree`) are rejected when project credentials are configured; run from the intended checkout. Bare Git commands outside Knit keep their existing authentication.
 
 ## Plain Git inside Knit-managed checkouts
 
-Ordinary `git fetch`, `git pull`, and `git push` — no Knit wrapper — resolve the same selection Knit uses: the repository's explicit assignment, else the exact-host default. For each Git directory it manages (a source checkout's `.git` and every linked bundle worktree's own directory), Knit links one owned include from the shared repository config via a conditional `includeIf.gitdir:` match, so each checkout keeps its own `knit-credentials.inc` and its own resolved context — including source checkouts that live outside the workspace, whose generated helper pins their workspace/project association. The generated file holds no secrets: for the exact repository targets Knit takes over it resets inherited credential helpers and inherited HTTP auth settings (an exact-URL `http.*.extraHeader` can never outrank the selected token), installs the dynamic helper (`knit auth git-credential --resolve`), and for each selected SSH remote adds an exact `url.<https>.insteadOf` rewrite — the saved remote URL itself is never changed. Remotes Knit does not take over keep their existing helpers and SSH configuration, and removing the generated entries restores inherited behavior completely.
+Ordinary `git fetch`, `git pull`, and `git push` — no Knit wrapper — resolve the same selection Knit uses: the repository's explicit assignment, else the exact-host default. For each Git directory it manages (a source checkout's `.git` and every linked bundle worktree's own directory), Knit links one owned include from the shared repository config via a conditional `includeIf.gitdir:` match, so each checkout keeps its own `knit-credentials.inc` and its own resolved context — including source checkouts that live outside the workspace, whose generated helper pins their workspace/project association. The generated file holds no secrets: for the exact repository targets Knit takes over it resets inherited credential helpers and inherited HTTP auth settings (an exact-URL `http.*.extraHeader` can never outrank the selected token), installs the dynamic helper (`knit auth git-credential --resolve`), and for each selected SSH remote adds an exact `url.<https>.insteadOf` rewrite (an HTTP remote keeps its own exact `http://host:port/...` target) — the saved remote URL itself is never changed. Remotes Knit does not take over keep their existing helpers and SSH configuration, and removing the generated entries restores inherited behavior completely.
 
 The helper resolves per request from the checkout's own Knit context, so token rotation, `knit auth default` changes, and per-project overrides apply immediately without regeneration. Requests Knit cannot honor — a malformed request, a missing assignment the project requires, or a broken explicit credential — fail closed: the helper answers `quit=1`, stopping Git's remaining helpers and its password prompt, instead of letting a stale cached or ambient credential answer. `git credential store`/`erase` requests are ignored; the personal Knit store is the only token storage.
 

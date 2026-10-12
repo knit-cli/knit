@@ -337,6 +337,27 @@ fn setup_with_prompt(
     Ok(())
 }
 
+fn allow_http(host: &str, revoke: bool) -> Result<()> {
+    let host = host.to_ascii_lowercase();
+    auth::validate_host(&host)?;
+    let _lock = auth::lock()?;
+    let mut store = auth::load()?;
+    let changed = if revoke {
+        store.plain_http_hosts.remove(&host)
+    } else {
+        store.plain_http_hosts.insert(host.clone())
+    };
+    if changed {
+        auth::save(&store)?;
+    }
+    if revoke {
+        println!("Forge tokens are no longer sent over plain HTTP to http://{host}.");
+    } else {
+        println!("Forge tokens may now be sent over plain HTTP to http://{host}; anyone on the network path can read them.");
+    }
+    Ok(())
+}
+
 pub fn run(command: AuthCommand) -> Result<()> {
     match command {
         AuthCommand::Remote {
@@ -442,6 +463,7 @@ pub fn run(command: AuthCommand) -> Result<()> {
             println!("Removed credential `{name}` from this machine.");
             Ok(())
         }
+        AuthCommand::AllowHttp { host, revoke } => allow_http(&host, revoke),
         AuthCommand::Clear { project, repos } => {
             let cwd = std::env::current_dir()?;
             let (root, project) = auth::project_context(&cwd, project.as_deref())?;
@@ -2570,6 +2592,7 @@ mod tests {
                         username: bb.username.clone().unwrap(),
                         token_type: bb.token_type.clone(),
                         token: String::new(),
+                        plain_http: false,
                     }
                     .git_username(),
                     "x-bitbucket-api-token-auth"

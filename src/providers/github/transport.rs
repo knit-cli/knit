@@ -63,16 +63,12 @@ fn github_api_base(target: &PrTarget) -> Result<String> {
     {
         return Ok(base);
     }
-    let host = target
-        .repo_remote
-        .as_deref()
-        .map(crate::auth::remote_target)
-        .transpose()?
-        .map(|(host, _)| host);
-    Ok(match host.as_deref() {
-        None | Some("github.com") => "https://api.github.com".to_string(),
-        Some(host) => format!("https://{host}/api/v3"),
-    })
+    match target.repo_remote.as_deref() {
+        Some(remote) if crate::auth::remote_target(remote)?.0 != "github.com" => {
+            crate::providers::remote_api_base(remote, "/api/v3")
+        }
+        _ => Ok("https://api.github.com".to_string()),
+    }
 }
 
 /// Resolve hostnames preferring IPv4 addresses. This transport exists for
@@ -225,6 +221,13 @@ mod published_host_tests {
             override_base
                 .clone()
                 .unwrap_or_else(|| "https://review.example.test/api/v3".into())
+        );
+        target.repo_remote = Some("https://review.example.test:8443/upstream/widget.git".into());
+        assert_eq!(
+            github_api_base(&target).unwrap(),
+            override_base
+                .clone()
+                .unwrap_or_else(|| "https://review.example.test:8443/api/v3".into())
         );
         target.repo_remote = None;
         assert_eq!(

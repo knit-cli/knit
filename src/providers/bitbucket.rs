@@ -765,6 +765,7 @@ mod tests {
             username: username.into(),
             token_type: token_type.map(str::to_owned),
             token: "synthetic-secret".into(),
+            plain_http: false,
         };
         // Atlassian API tokens use Basic email:token...
         assert_eq!(
