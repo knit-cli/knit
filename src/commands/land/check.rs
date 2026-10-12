@@ -241,7 +241,9 @@ pub(crate) fn assess_landing_readiness(
         }
     };
 
-    let pr = match forge.view(&target, publication_url) {
+    let pr = match forge.view(&target, publication_url).and_then(|pr| {
+        providers::settle_mergeability(forge.as_ref(), &target, publication_url, &repo.id, pr)
+    }) {
         Ok(pr) => pr,
         Err(error) => {
             return LandReadiness {
@@ -282,7 +284,9 @@ pub(crate) fn assess_landing_readiness(
             }
         }
     };
-    let mergeable = if pr.is_conflicting() {
+    let mergeable = if pr.mergeability_computing() {
+        "computing"
+    } else if pr.is_conflicting() {
         "conflict"
     } else if pr.mergeable.as_deref() == Some("MERGEABLE") {
         "clean"

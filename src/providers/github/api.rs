@@ -651,11 +651,11 @@ fn github_api_state(state: Option<&str>, merged: bool) -> Option<String> {
 }
 
 fn github_api_mergeable(mergeable: Option<bool>, mergeable_state: Option<&str>) -> Option<String> {
+    // GitHub answers `null` / `unknown` while it computes mergeability.
     match (mergeable, mergeable_state) {
         (Some(true), _) => Some("MERGEABLE".to_string()),
-        (Some(false), Some("dirty" | "DIRTY")) => Some("CONFLICTING".to_string()),
+        (None, _) | (_, Some("unknown" | "UNKNOWN")) => Some("UNKNOWN".to_string()),
         (Some(false), _) => Some("CONFLICTING".to_string()),
-        (None, _) => None,
     }
 }
 
@@ -744,6 +744,27 @@ fn encode_path(input: &str, allow_slash: bool) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn computing_mergeability_maps_to_unknown_not_conflict() {
+        assert_eq!(
+            github_api_mergeable(None, Some("unknown")).as_deref(),
+            Some("UNKNOWN")
+        );
+        assert_eq!(github_api_mergeable(None, None).as_deref(), Some("UNKNOWN"));
+        assert_eq!(
+            github_api_mergeable(Some(false), Some("unknown")).as_deref(),
+            Some("UNKNOWN")
+        );
+        assert_eq!(
+            github_api_mergeable(Some(false), Some("dirty")).as_deref(),
+            Some("CONFLICTING")
+        );
+        assert_eq!(
+            github_api_mergeable(Some(true), Some("clean")).as_deref(),
+            Some("MERGEABLE")
+        );
+    }
 
     #[test]
     fn maps_api_pull_request_user_to_author() {

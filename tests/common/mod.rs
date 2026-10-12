@@ -1003,6 +1003,14 @@ case "$sub" in
       mergeable="CONFLICTING"
       mergestate="DIRTY"
     fi
+    if [ -f "$GH_FAKE_DIR/computing-$pr_repo" ] && [ "$state" = "OPEN" ]; then
+      left="$(cat "$GH_FAKE_DIR/computing-$pr_repo")"
+      if [ "$left" -gt 0 ]; then
+        mergeable="UNKNOWN"
+        mergestate="UNKNOWN"
+        printf '%s\n' "$((left - 1))" > "$GH_FAKE_DIR/computing-$pr_repo"
+      fi
+    fi
     review="${GH_FAKE_REVIEW:-}"
     head_oid="$pr_repo-head"
     if [ "$head" = "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/revert-head-$pr_repo" ]; then

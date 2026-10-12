@@ -469,6 +469,13 @@ fn preflight(
                     bail!("{id}: PR #{} was closed without being merged", pr.number);
                 }
             } else if !super::super::state_is_merged(&pr) {
+                let pr = crate::providers::settle_mergeability(
+                    forge.as_ref(),
+                    &target,
+                    &pub_.url,
+                    id,
+                    pr.clone(),
+                )?;
                 super::super::ensure_open_and_ready(id, &pr)?;
             }
             // A gated repository's head legitimately moves when its update
@@ -1262,6 +1269,8 @@ fn provider_step(
             error
         }
     };
+    let pr = crate::providers::settle_mergeability(forge.as_ref(), &target, &pub_.url, id, pr)
+        .map_err(no_merge_effect)?;
     super::super::ensure_open_and_ready(id, &pr).map_err(no_merge_effect)?;
     let effective = effective_pin(plan, journal, id);
     if super::gates::gated_repos(plan).contains(id)
@@ -1323,7 +1332,12 @@ fn provider_step(
         .map_err(no_merge_effect)?;
     }
     if gated {
-        let refreshed = forge.view(&target, &pub_.url).map_err(no_merge_effect)?;
+        let refreshed = forge
+            .view(&target, &pub_.url)
+            .and_then(|pr| {
+                crate::providers::settle_mergeability(forge.as_ref(), &target, &pub_.url, id, pr)
+            })
+            .map_err(no_merge_effect)?;
         gated_review_identity(plan, repo, pub_, &refreshed, Some(&journal.snapshot()))?;
         super::super::ensure_open_and_ready(id, &refreshed).map_err(no_merge_effect)?;
         if refreshed.head_ref_oid.as_deref() != effective.as_deref() {
@@ -1520,6 +1534,13 @@ fn gate_outcome(
     if super::super::state_is_merged(&pr) {
         bail!("{repo_id}: the review merged before {id} accepted an update; reconcile the landing by hand");
     }
+    let pr = crate::providers::settle_mergeability(
+        forge.as_ref(),
+        &target,
+        &publication.url,
+        repo_id,
+        pr,
+    )?;
     super::super::ensure_open_and_ready(repo_id, &pr)?;
     if pr.head_ref_name.as_deref() != Some(publication.head_branch.as_str()) {
         bail!("{repo_id}: review source branch differs from the recorded publication");

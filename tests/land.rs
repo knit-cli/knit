@@ -626,6 +626,58 @@ fn land_apply_conflict_points_to_land_update() {
 }
 
 #[test]
+fn land_apply_waits_while_github_computes_mergeability() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+    knit_with_fake_gh(&workspace, ["land"], &fake_bin, &fake_gh_dir);
+
+    fs::write(fake_gh_dir.join("computing-backend"), "2").unwrap();
+    let apply = common::knit_with_fake_gh_env(
+        &workspace,
+        legacy_args(["land", "apply", "--no-remote"]),
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_MERGEABILITY_SETTLE_MS", "5000")],
+    );
+    assert!(
+        apply.contains("backend: PR #101 mergeability still being computed by the forge"),
+        "{apply}"
+    );
+    assert_eq!(
+        fs::read_to_string(fake_gh_dir.join("computing-backend"))
+            .unwrap()
+            .trim(),
+        "0"
+    );
+    assert_eq!(read_bundle(&workspace)["state"].as_str(), Some("archived"));
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_check_shows_computing_mergeability_instead_of_conflict() {
+    let root = unique_temp_dir();
+    let (workspace, fake_bin, fake_gh_dir) = publish_two_repo_bundle(&root);
+
+    fs::write(fake_gh_dir.join("computing-frontend"), "100").unwrap();
+    let check = common::knit_with_fake_gh_env(
+        &workspace,
+        legacy_args(["land", "check"]),
+        &fake_bin,
+        &fake_gh_dir,
+        &[("KNIT_MERGEABILITY_SETTLE_MS", "100")],
+    );
+    let frontend = check
+        .lines()
+        .find(|line| line.starts_with("frontend ") && line.contains("#202"))
+        .unwrap_or_else(|| panic!("{check}"));
+    assert!(frontend.contains("computing"), "{check}");
+    assert!(!frontend.contains("conflict"), "{check}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn project_landing_template_orders_merges_and_runs_deploy_from_base_checkout() {
     let root = unique_temp_dir();
     let (_backend_remote, backend, backend_collaborator) = init_remote_repo(&root, "backend");
