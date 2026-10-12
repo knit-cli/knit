@@ -489,12 +489,20 @@ fn forgejo_api_landing_workspace(
 #[test]
 fn forgejo_api_land_rechecks_provisional_not_mergeable_answers() {
     let root = unique_temp_dir();
+    // Both landings use the same project, so their ownership locks need separate
+    // temp directories; Windows reads TMP/TEMP rather than TMPDIR.
+    let tmp = root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let tmp = tmp.to_str().unwrap();
     let (workspace, fake_bin, fake_dir, remote, served) = forgejo_api_landing_workspace(&root);
     let (base, merged) = served.split_once('\n').unwrap();
     let env = [
         ("KNIT_FORGEJO_API_BASE", base),
         ("KNIT_FORGEJO_TOKEN", "test-token"),
         ("KNIT_MERGEABILITY_SETTLE_MS", "5000"),
+        ("TMPDIR", tmp),
+        ("TMP", tmp),
+        ("TEMP", tmp),
     ];
     knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
     fs::write(fake_dir.join("unsettled-reads"), "2").unwrap();
@@ -519,12 +527,20 @@ fn forgejo_api_land_rechecks_provisional_not_mergeable_answers() {
 #[test]
 fn forgejo_api_land_still_fails_on_a_persistent_conflict() {
     let root = unique_temp_dir();
+    // Both landings use the same project, so their ownership locks need separate
+    // temp directories; Windows reads TMP/TEMP rather than TMPDIR.
+    let tmp = root.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    let tmp = tmp.to_str().unwrap();
     let (workspace, fake_bin, fake_dir, _remote, served) = forgejo_api_landing_workspace(&root);
     let (base, _merged) = served.split_once('\n').unwrap();
     let env = [
         ("KNIT_FORGEJO_API_BASE", base),
         ("KNIT_FORGEJO_TOKEN", "test-token"),
         ("KNIT_MERGEABILITY_SETTLE_MS", "300"),
+        ("TMPDIR", tmp),
+        ("TMP", tmp),
+        ("TEMP", tmp),
     ];
     knit_with_fake_forge(&workspace, ["land"], &fake_bin, &fake_dir, &env);
     fs::write(fake_dir.join("conflict"), "").unwrap();
