@@ -573,6 +573,9 @@ fn edited_revert_fails_verification_and_keeps_the_bundle_open() {
     fs::remove_dir_all(root).unwrap();
 }
 
+// Deployment commands run through `sh`, like the other command-deployment
+// landing tests, which are Unix-only.
+#[cfg(unix)]
 #[test]
 fn revert_landing_runs_deployments_after_their_reversed_merges() {
     let root = unique_temp_dir();
