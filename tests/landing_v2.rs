@@ -90,7 +90,7 @@ elif sys.argv[1]=='verify': assert state.read_text()==json.loads(os.environ['KNI
             bundle,
         }
     }
-    fn cmd(&self, args: &[&str]) -> std::process::Output {
+    fn command(&self, args: &[&str]) -> Command {
         let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
         command
             .current_dir(&self.root)
@@ -98,8 +98,10 @@ elif sys.argv[1]=='verify': assert state.read_text()==json.loads(os.environ['KNI
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION")
             .env("KNIT_HOME", self.root.join("home"));
-        private_temp_env(&self.root, &mut command);
-        command.output().unwrap()
+        command
+    }
+    fn cmd(&self, args: &[&str]) -> std::process::Output {
+        self.command(args).output().unwrap()
     }
 }
 impl Drop for Fixture {
@@ -351,6 +353,77 @@ fn default_generation_matches_artifact_and_json_failure_restores_real_state() {
     assert_eq!(before, fs::read(f.root.join("run.json")).unwrap());
 }
 #[test]
+fn ownership_records_live_in_knit_home_and_records_left_in_temp_still_block() {
+    use sha2::{Digest, Sha256};
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[
+        {"id":"observe","type":"run","repoId":"service","effect":"read_only","command":[python_executable(),"-c","pass"]}
+    ]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    let temp = f.root.join("os-temp");
+    fs::create_dir_all(&temp).unwrap();
+    let apply = || {
+        f.command(&["land", "apply", "--keep-worktrees", "--no-remote"])
+            .env("TMPDIR", &temp)
+            .env("TMP", &temp)
+            .env("TEMP", &temp)
+            .output()
+            .unwrap()
+    };
+    let hashed =
+        |value: Value| format!("{:x}", Sha256::digest(serde_json::to_vec(&value).unwrap()));
+    let project_id = f.root.file_name().unwrap().to_str().unwrap();
+    let lock_name = format!("{}.lock", hashed(json!(format!("project:{project_id}"))));
+    let generation_name = format!("{}.generation.json", hashed(json!(project_id)));
+    let legacy = temp.join("knit-landing-ownership");
+    fs::create_dir_all(&legacy).unwrap();
+
+    fs::write(legacy.join(&lock_name), "4242\n").unwrap();
+    let owned = apply();
+    assert!(!owned.status.success());
+    let stderr = String::from_utf8_lossy(&owned.stderr);
+    assert!(
+        stderr.contains("landing resource is owned") && stderr.contains(&lock_name),
+        "{stderr}"
+    );
+    fs::remove_file(legacy.join(&lock_name)).unwrap();
+
+    write(
+        &legacy.join(&generation_name),
+        &json!({"runId":"earlier-run","planHash":"earlier-plan","quiescent":false}),
+    );
+    let refused = apply();
+    assert!(!refused.status.success());
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("unresolved effects"),
+        "{}",
+        String::from_utf8_lossy(&refused.stderr)
+    );
+    fs::remove_file(legacy.join(&generation_name)).unwrap();
+
+    let landed = apply();
+    assert!(
+        landed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&landed.stderr)
+    );
+    let ownership = f.root.join("home/landing-ownership");
+    let records: Vec<_> = fs::read_dir(&ownership)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(records, vec![generation_name.clone()]);
+    assert_eq!(read(&ownership.join(&generation_name))["quiescent"], true);
+    assert_eq!(fs::read_dir(&legacy).unwrap().count(), 0);
+}
+#[test]
 fn local_executor_uses_same_saved_plan_and_preserves_forward_failure() {
     let f = Fixture::new();
     let generated = f.cmd(&["land", "plan"]);
@@ -478,6 +551,7 @@ fn intermediate_source_merge_is_pinned_and_partial_receipt_survives_command_fail
     cmd.current_dir(&root)
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
+        .env("KNIT_HOME", root.join("home"))
         .args([
             "land",
             "--target",
@@ -500,6 +574,7 @@ fn intermediate_source_merge_is_pinned_and_partial_receipt_survives_command_fail
         .current_dir(&root)
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
+        .env("KNIT_HOME", root.join("home"))
         .args([
             "land",
             "apply",

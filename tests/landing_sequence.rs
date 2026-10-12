@@ -210,7 +210,6 @@ impl Fixture {
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION")
             .env("KNIT_HOME", self.root.join("home"));
-        private_temp_env(&self.root, &mut command);
         command.output().unwrap()
     }
 

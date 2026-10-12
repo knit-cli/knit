@@ -200,7 +200,6 @@ impl Fixture {
             .env("GH_TOKEN", "synthetic")
             .env("KNIT_GITHUB_API_TRANSPORT", "native")
             .env("KNIT_GITHUB_API_BASE", &self.api);
-        private_temp_env(&self.root, &mut command);
         command.output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {

@@ -144,7 +144,6 @@ else: raise Exception('unexpected forge call '+str(a))
             .env_remove("KNIT_SESSION")
             .env_remove("GH_TOKEN")
             .env_remove("GITHUB_TOKEN");
-        private_temp_env(&self.workspace, &mut command);
         command.output().unwrap()
     }
     fn run_path(&self) -> PathBuf {
