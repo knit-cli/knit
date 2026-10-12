@@ -189,7 +189,8 @@ impl Fixture {
         }
     }
     fn cmd(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_knit"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+        command
             .current_dir(&self.root)
             .args(args)
             .env_remove("KNIT_BUNDLE")
@@ -198,9 +199,9 @@ impl Fixture {
             .env("GIT_CONFIG_GLOBAL", isolated_git_config_global())
             .env("GH_TOKEN", "synthetic")
             .env("KNIT_GITHUB_API_TRANSPORT", "native")
-            .env("KNIT_GITHUB_API_BASE", &self.api)
-            .output()
-            .unwrap()
+            .env("KNIT_GITHUB_API_BASE", &self.api);
+        private_temp_env(&self.root, &mut command);
+        command.output().unwrap()
     }
     fn ok(&self, args: &[&str]) -> String {
         let o = self.cmd(args);

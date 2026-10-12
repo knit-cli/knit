@@ -1283,16 +1283,17 @@ fn terminating_knit_cancels_deployment_tree_and_records_failure() {
 
     knit(&workspace, ["bundle", "cancelled deploy"]);
     knit(&workspace, ["land", "plan"]);
-    let child = Command::new(env!("CARGO_BIN_EXE_knit"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_knit"));
+    child
         .args(["land", "apply"])
         .current_dir(&workspace)
         .env("KNIT_HOME", isolated_knit_home())
         .env_remove("KNIT_BUNDLE")
         .env_remove("KNIT_SESSION")
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
+        .stderr(Stdio::piped());
+    private_temp_env(&workspace, &mut child);
+    let child = child.spawn().unwrap();
 
     let marker_deadline = Instant::now() + Duration::from_secs(5);
     while !child_pid_path.exists() && Instant::now() < marker_deadline {

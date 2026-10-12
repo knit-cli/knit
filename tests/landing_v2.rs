@@ -91,14 +91,15 @@ elif sys.argv[1]=='verify': assert state.read_text()==json.loads(os.environ['KNI
         }
     }
     fn cmd(&self, args: &[&str]) -> std::process::Output {
-        Command::new(env!("CARGO_BIN_EXE_knit"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+        command
             .current_dir(&self.root)
             .args(args)
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION")
-            .env("KNIT_HOME", self.root.join("home"))
-            .output()
-            .unwrap()
+            .env("KNIT_HOME", self.root.join("home"));
+        private_temp_env(&self.root, &mut command);
+        command.output().unwrap()
     }
 }
 impl Drop for Fixture {
@@ -181,7 +182,9 @@ fn ordinary_commands_stream_before_exit_and_keep_receipts_in_both_output_modes()
         drop(send);
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
-        let deadline = Instant::now() + Duration::from_secs(5);
+        // Windows runners start `sh`/Python slowly enough that five seconds
+        // was flaky; the step's own timeout still bounds the command.
+        let deadline = Instant::now() + Duration::from_secs(30);
         while !(String::from_utf8_lossy(if json_mode { &stderr } else { &stdout })
             .contains("LIVE-STDOUT")
             && String::from_utf8_lossy(&stderr).contains("LIVE-STDERR"))

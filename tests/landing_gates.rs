@@ -133,7 +133,8 @@ else: raise Exception('unexpected forge call '+str(a))
                 .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
         )
         .unwrap();
-        Command::new(env!("CARGO_BIN_EXE_knit"))
+        let mut command = Command::new(env!("CARGO_BIN_EXE_knit"));
+        command
             .current_dir(&self.workspace)
             .args(args)
             .env("PATH", path)
@@ -142,9 +143,9 @@ else: raise Exception('unexpected forge call '+str(a))
             .env_remove("KNIT_BUNDLE")
             .env_remove("KNIT_SESSION")
             .env_remove("GH_TOKEN")
-            .env_remove("GITHUB_TOKEN")
-            .output()
-            .unwrap()
+            .env_remove("GITHUB_TOKEN");
+        private_temp_env(&self.workspace, &mut command);
+        command.output().unwrap()
     }
     fn run_path(&self) -> PathBuf {
         fs::read_dir(self.workspace.join(".knit/land-runs"))

@@ -674,10 +674,14 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
             .get(&repo)
             .context("pinned checkout binding missing")?;
         let rev = rev.as_str().context("revision must be string")?;
+        // Keep the checkout directory short: this path sits deep under the
+        // workspace, and a full 64-character hash pushes it past Windows'
+        // 260-character limit (`fatal: '$GIT_DIR' too big`). Twelve hex
+        // characters still separate every repo and revision in one run.
         let checkout = journal
             .path
             .with_extension("checkouts")
-            .join(canonical_hash(&json!([repo, rev])));
+            .join(&canonical_hash(&json!([repo, rev]))[..12]);
         if !checkout.exists() {
             if git(root, &["cat-file", "-e", &format!("{rev}^{{commit}}")]).is_err() {
                 let identity = super::mergeability::repo_identity(&snapshot["sourceBundle"], &repo);
