@@ -176,7 +176,8 @@ def scenario(binary, kind, expect_rejection):
                 workspace = root / slug
                 result = run([binary, 'clone', f'example/{slug}', workspace,
                               '--remote', 'hosted', '--url', f'http://127.0.0.1:{ledger.server_port}',
-                              '--token', 'synthetic-ledger', '--no-worktree'], check=False)
+                              '--token', 'synthetic-ledger', '--no-worktree', '--no-fork'],
+                             check=False)
                 output = result.stdout + result.stderr
                 if expect_rejection:
                     assert not (workspace / 'service' / 'hello.txt').exists()

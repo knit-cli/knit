@@ -46,6 +46,20 @@ pub enum HistoryGroupArg {
     Bundle,
 }
 
+/// How fresh checkouts of project repositories choose where to push.
+#[derive(Args, Clone, Debug, Default)]
+pub struct CheckoutForkArgs {
+    /// Push freshly cloned repositories to your fork, even where you can push upstream.
+    #[arg(long, conflicts_with = "no_fork")]
+    pub fork: bool,
+    /// Push freshly cloned repositories upstream without checking push access.
+    #[arg(long)]
+    pub no_fork: bool,
+    /// Organization to fork into; defaults to your own account.
+    #[arg(long, conflicts_with = "no_fork")]
+    pub owner: Option<String>,
+}
+
 #[derive(Args, Clone, Debug, Default)]
 pub struct LogArgs {
     /// Boolean history expression: NOT > AND > OR; adjacency means AND. Fields: repo, view, bundle, since, until.
@@ -132,6 +146,23 @@ pub struct LogArgs {
 
 #[derive(Subcommand)]
 pub enum Commands {
+    /// Create or reuse your GitHub fork of project repos and push their branches there.
+    Fork {
+        /// Repos to fork; every project repo when omitted.
+        repo_ids: Vec<String>,
+        /// Organization to fork into; defaults to your own account.
+        #[arg(long)]
+        owner: Option<String>,
+        /// Show what would happen without creating forks or changing Git config.
+        #[arg(long)]
+        dry_run: bool,
+        /// Print the results as JSON.
+        #[arg(long)]
+        json: bool,
+        /// Replace a different push URL that origin already has.
+        #[arg(long)]
+        force: bool,
+    },
     /// Set up credentials: bare `knit auth` is a guided menu for both token kinds — personal forge tokens (GitHub/GitLab/Bitbucket/Forgejo) and the separate hosted sync-service token (`r`); `knit auth --project NAME` wires one project's forge tokens.
     Auth {
         /// Scope the wizard to one project: use the default tokens or give the project its own.
@@ -149,6 +180,17 @@ pub enum Commands {
     Init {
         /// Project name.
         name: String,
+        /// Repository references: owner/name, clone URL, or id=reference.
+        repos: Vec<String>,
+        /// Always create or reuse a fork.
+        #[arg(long, conflicts_with = "no_fork")]
+        fork: bool,
+        /// Use repositories directly without checking push access.
+        #[arg(long)]
+        no_fork: bool,
+        /// Organization to fork into; defaults to your own account.
+        #[arg(long, conflicts_with = "no_fork")]
+        owner: Option<String>,
         /// Write or refresh project-specific AGENTS.md guidance.
         #[arg(long)]
         agents: bool,
@@ -233,6 +275,8 @@ pub enum Commands {
         /// lines move to stderr.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        forks: CheckoutForkArgs,
     },
     /// Stage file changes inside tracked checkouts, like git add.
     Add {
@@ -395,6 +439,8 @@ pub enum Commands {
         /// have diverged, instead of keeping local and warning.
         #[arg(long)]
         merge: bool,
+        #[command(flatten)]
+        forks: CheckoutForkArgs,
     },
     /// Push tracked feature branches.
     Push {
@@ -732,6 +778,8 @@ pub enum SyncCommand {
         /// Named sync remote(s). Repeat for several. Defaults to configured sync remotes.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
+        #[command(flatten)]
+        forks: CheckoutForkArgs,
     },
 }
 
@@ -814,6 +862,8 @@ pub enum BundleCommand {
         /// move to stderr.
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        forks: CheckoutForkArgs,
     },
     /// Add repos or project repo ids to the current bundle.
     Add {
@@ -992,8 +1042,18 @@ pub enum ProjectCommand {
     Add {
         /// Stable repo id inside the project.
         repo_id: String,
-        /// Path to a local git repository.
+        /// Path to a local git repository, or a remote URL to clone.
+        #[arg(value_name = "PATH_OR_URL")]
         repo_path: PathBuf,
+        /// Fork the repository and push its branches to the fork (`knit fork`).
+        #[arg(long, conflicts_with = "no_fork")]
+        fork: bool,
+        /// Use the repository directly without checking push access.
+        #[arg(long)]
+        no_fork: bool,
+        /// Organization to fork into; defaults to your own account.
+        #[arg(long, conflicts_with = "no_fork")]
+        owner: Option<String>,
         /// Override the inferred base branch.
         #[arg(long)]
         base: Option<String>,
@@ -1811,6 +1871,8 @@ pub enum HandoffCommand {
         force: bool,
         #[arg(long)]
         json: bool,
+        #[command(flatten)]
+        forks: CheckoutForkArgs,
     },
     /// Show the bundle's advisory handoff location.
     Status {
