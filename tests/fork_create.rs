@@ -1432,6 +1432,43 @@ fn clone_no_fork_skips_the_forge_and_fork_honors_owner() {
 }
 
 #[test]
+fn clone_takes_the_member_not_a_contributors_fork_the_server_also_lists() {
+    let f = Fixture::fresh_workspace();
+    f.settings(json!({"push": true}));
+    let mut export: Value = serde_json::from_str(&hosted_export(&["library"])).unwrap();
+    export["data"]["repositories"]
+        .as_array_mut()
+        .unwrap()
+        .insert(
+            0,
+            json!({"localId": "library", "name": "library",
+                   "remoteUrl": "https://github.com/contributor/library.git",
+                   "defaultBranch": "main", "visibility": "public", "metadata": {}}),
+        );
+    let base_url = spawn_fake_remote_with_body(export.to_string());
+    let target = f.root.join("maintainer-checkout");
+    let (stdout, stderr, ok) = f.clone_split(&[
+        "clone",
+        "acme/demo",
+        target.to_str().unwrap(),
+        "--remote",
+        "hosted",
+        "--url",
+        &base_url,
+        "--no-worktree",
+        "--json",
+    ]);
+    assert!(ok, "{stdout}{stderr}");
+    let repos = cloned_project(&target)["repos"].clone();
+    assert_eq!(repos.as_array().unwrap().len(), 1, "{repos}");
+    assert_eq!(repos[0]["remote"], UPSTREAM);
+    assert_eq!(
+        git(&target.join("library"), ["remote", "get-url", "origin"]),
+        UPSTREAM
+    );
+}
+
+#[test]
 fn sync_pull_forks_new_members_and_leaves_existing_checkouts_alone() {
     let f = Fixture::new();
     init_remote_repo(&f.root, "second");
