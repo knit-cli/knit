@@ -223,7 +223,30 @@ fn clone_project_classified(
     let (remote_name, remote, stored_token, token) =
         resolve_remote_for_clone_classified(remote_name, reference.remote_url.as_deref(), token)?;
     let export = fetch_project_export(&remote, token.as_deref(), &reference.project_identifier)
-        .map_err(|error| (RemoteErrorKind::Http, error))?;
+        .map_err(|error| {
+            // Svartal answers a private project it cannot show an anonymous
+            // caller with 404, so without a token that is the likely cause.
+            let text = format!("{error:#}");
+            if token.is_none()
+                && (text.contains("returned HTTP 404") || text.contains("returned HTTP 401"))
+            {
+                // A URL clone names its unconfigured remote `origin`; a
+                // user-level remote deserves a name of its own.
+                let name = if remote_name == "origin" {
+                    "hosted"
+                } else {
+                    remote_name.as_str()
+                };
+                return (
+                    RemoteErrorKind::NoToken,
+                    error.context(format!(
+                        "Project `{}` was not found without a token: a private project is only visible when signed in. Save your token with `knit remote add {name} {} --global --token-stdin` (or set KNIT_REMOTE_TOKEN), then clone again.",
+                        reference.project_identifier, remote.url
+                    )),
+                );
+            }
+            (RemoteErrorKind::Http, error)
+        })?;
     if scope.view.is_some() && token.is_none() {
         return Err((
             RemoteErrorKind::NoToken,
@@ -297,6 +320,14 @@ pub(super) fn clone_fetched_export(
     let resolved_scope = resolve_clone_scope(&export, scope, remote_views.as_ref())?;
     let (mut scoped_repositories, repos_out_of_scope, repos_unavailable) =
         partition_export_repositories(&export, resolved_scope.as_ref());
+    // A repo the sync remote knows is gone from its forge cannot be cloned by
+    // anyone; leave it out instead of attempting the clone.
+    let repos_gone_from_forge: Vec<String> = scoped_repositories
+        .iter()
+        .filter(|repository| export_repo_forge_missing(repository))
+        .map(export_repo_local_id)
+        .collect();
+    scoped_repositories.retain(|repository| !export_repo_forge_missing(repository));
 
     let target_root = resolve_clone_target(target, project_identifier)?;
     prepare_clone_target(&target_root, &scoped_repositories)?;
@@ -596,6 +627,9 @@ pub(super) fn clone_fetched_export(
                 .to_string(),
         ));
     }
+    for repo_id in &repos_gone_from_forge {
+        failed_repos.push((repo_id.clone(), FORGE_MISSING_REASON.to_string()));
+    }
     if repo_paths.is_empty() {
         bail!(
             "Failed to clone any repository for project `{}`:\n{}\n\n\
@@ -796,15 +830,27 @@ pub(super) fn clone_fetched_export(
     if history_count > 0 {
         crate::human!("{} {} event(s)", out::heading("History:"), history_count);
     }
-    if !failed_repos.is_empty() {
+    let clone_failures: Vec<_> = failed_repos
+        .iter()
+        .filter(|(local_id, _)| !repos_gone_from_forge.contains(local_id))
+        .collect();
+    if !clone_failures.is_empty() {
         crate::human!(
             "{} {} repo(s) could not be cloned and were left out of the workspace:",
             out::heading("Skipped:"),
-            failed_repos.len()
+            clone_failures.len()
         );
-        for (local_id, error) in &failed_repos {
+        for (local_id, error) in clone_failures {
             crate::human!("  {}: {}", out::repo(local_id), out::muted(error));
         }
+    }
+    if !repos_gone_from_forge.is_empty() {
+        crate::human!(
+            "{} {} {}",
+            out::muted("Gone from forge:"),
+            repos_gone_from_forge.join(", "),
+            out::muted("(deleted or renamed on its forge; left out of this workspace)")
+        );
     }
     if let Some(omitted) = export.omitted_repository_count.filter(|count| *count > 0) {
         crate::human!(
@@ -1966,18 +2012,13 @@ pub(super) fn clone_one_export_repository(
         if repo_path.exists() {
             let _ = fs::remove_dir_all(&repo_path);
         }
-        // Blame the right thing: a repo the sync remote knows is gone from its
-        // forge fails for everyone, a failed public clone is not a credential
+        // Blame the right thing: a failed public clone is not a credential
         // problem, a repository covered by the explicit selection names that
         // credential (distinguishing an access denial from a transport
         // failure), and only the genuinely ambiguous case earns the access
         // hint.
         let failure_text = format!("{error:#}");
-        let error = if export_repo_forge_missing(repository) {
-            anyhow::anyhow!(
-                "{error:#}; the sync remote marked this repository missing on its forge — it does not exist (or was deleted/renamed)"
-            )
-        } else if let Some(hint) =
+        let error = if let Some(hint) =
             selected_credential_failure_hint(target_root, remote_url, &failure_text)
         {
             anyhow::anyhow!("{error:#}; {hint}")
@@ -2160,7 +2201,6 @@ fn localized_export_bundles(
     remote_name: &str,
     token: Option<&str>,
 ) -> Result<(Vec<ChangeGroup>, Vec<DroppedBundle>)> {
-    let available: BTreeSet<&str> = project.repos.iter().map(|repo| repo.id.as_str()).collect();
     let mut localized = Vec::new();
     let mut dropped = Vec::new();
 
@@ -2172,8 +2212,9 @@ fn localized_export_bundles(
         if bundle.current_artifact.is_none() {
             continue;
         }
-        let (payload, artifact_hash) = resolve_export_bundle_payload(remote, token, bundle)?;
-        let missing_repos = missing_bundle_repos(&payload, &available);
+        let (mut payload, artifact_hash) = resolve_export_bundle_payload(remote, token, bundle)?;
+        super::client::adopt_remote_lifecycle(&mut payload, &bundle.lifecycle_state);
+        let missing_repos = missing_bundle_repos(&payload, project);
         if !missing_repos.is_empty() {
             dropped.push(DroppedBundle {
                 id: bundle.slug.clone(),
@@ -2195,16 +2236,17 @@ fn localized_export_bundles(
     Ok((localized, dropped))
 }
 
-/// Repo ids a bundle payload references that are absent from the cloned
-/// project, in payload order.
-pub(super) fn missing_bundle_repos(
-    payload: &ChangeGroup,
-    available: &BTreeSet<&str>,
-) -> Vec<String> {
+/// Repo ids an open bundle payload references that are absent from the cloned
+/// project, in payload order. Finished bundles never miss a repo: they import
+/// as history without checkouts.
+pub(super) fn missing_bundle_repos(payload: &ChangeGroup, project: &KnitProject) -> Vec<String> {
+    if super::client::is_history_bundle(payload) {
+        return Vec::new();
+    }
     payload
         .repos
         .iter()
-        .filter(|repo| !available.contains(repo.id.as_str()))
+        .filter(|repo| super::client::project_repo_for(repo, project).is_none())
         .map(|repo| repo.id.clone())
         .collect()
 }
@@ -2263,6 +2305,9 @@ pub(super) fn export_repo_local_id(repository: &RemoteExportRepository) -> Strin
 /// True when the sync remote marked this repository missing on its forge
 /// (an owner-credentialed 404 during visibility refresh) — no credential the
 /// puller could connect would make a clone succeed.
+pub(super) const FORGE_MISSING_REASON: &str =
+    "repository does not exist on its forge (the sync remote marked it missing)";
+
 pub(super) fn export_repo_forge_missing(repository: &RemoteExportRepository) -> bool {
     metadata_string(&repository.metadata, "forgeState").as_deref() == Some("missing")
 }
@@ -2632,6 +2677,44 @@ mod tests {
         assert_eq!(dropped.len(), 1);
         assert_eq!(dropped[0].id, "feature-c");
         assert_eq!(dropped[0].missing_repos, vec!["frontend".to_string()]);
+    }
+
+    #[test]
+    fn localized_export_bundles_keep_renamed_repos_and_finished_history() {
+        let mut renamed = export_bundle_payload("before-rename", &["old-backend"]);
+        renamed["repos"][0]["remote"] = "https://github.com/Example/Backend.git".into();
+        let mut archived = export_bundle_payload("archived-work", &["backend", "removed"]);
+        archived["state"] = "archived".into();
+        let export = export_with_bundles(serde_json::json!([
+            {
+                "id": "rb-1",
+                "slug": "before-rename",
+                "lifecycleState": "open",
+                "currentArtifact": {"artifactHash": "hash-1", "payload": renamed},
+            },
+            {
+                "id": "rb-2",
+                "slug": "archived-work",
+                "lifecycleState": "archived",
+                "currentArtifact": {"artifactHash": "hash-2", "payload": archived},
+            },
+        ]));
+        let mut project = project_with_backend();
+        project.repos[0].remote = Some("git@github.com:example/backend.git".to_string());
+        let remote = KnitRemote {
+            url: "http://127.0.0.1:1".to_string(),
+            token: None,
+        };
+
+        let (localized, dropped) =
+            localized_export_bundles(&export, &project, &remote, "hosted", None).unwrap();
+
+        assert!(dropped.is_empty(), "{dropped:?}");
+        assert_eq!(localized.len(), 2);
+        assert_eq!(localized[0].repos[0].path, "/tmp/backend");
+        assert_eq!(localized[1].repos[0].path, "/tmp/backend");
+        assert_eq!(localized[1].repos[1].id, "removed");
+        assert_eq!(localized[1].repos[1].path, "/tmp/removed");
     }
 
     #[test]

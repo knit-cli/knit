@@ -9,7 +9,9 @@ use crate::git::{
     rev_parse,
 };
 use crate::ids::slugify;
-use crate::model::{ChangeGroup, KnitConfig, KnitProject, KnitRemote, RepoEntry};
+use crate::model::{
+    BundleState, ChangeGroup, KnitConfig, KnitProject, KnitRemote, ProjectRepoEntry, RepoEntry,
+};
 use crate::store::{
     find_knit_root, load_config, load_effective_config, project_path, read_json, ActiveBundle,
 };
@@ -290,35 +292,74 @@ pub(super) fn decode_bundle_payload(payload: &Value, bundle_slug: &str) -> Resul
     })
 }
 
+/// The local project repo a bundle repo entry stands for: the same id, or the
+/// same repository under an older id (a repo renamed in the project keeps its
+/// forge URL in the bundles recorded before the rename).
+pub(super) fn project_repo_for<'a>(
+    repo: &RepoEntry,
+    project: &'a KnitProject,
+) -> Option<&'a ProjectRepoEntry> {
+    project
+        .repos
+        .iter()
+        .find(|project_repo| project_repo.id == repo.id)
+        .or_else(|| {
+            let remote = repo.remote.as_deref()?;
+            project.repos.iter().find(|project_repo| {
+                project_repo.remote.as_deref().is_some_and(|local| {
+                    super::handoff::same_repository_url(
+                        &local.to_ascii_lowercase(),
+                        &remote.to_ascii_lowercase(),
+                    )
+                })
+            })
+        })
+}
+
+/// True for bundles that are finished history: nothing is checked out for
+/// them, so they import even when a repo they touched is gone.
+pub(super) fn is_history_bundle(bundle: &ChangeGroup) -> bool {
+    crate::commands::bundle::bundle_state(bundle) != crate::commands::bundle::BundleStatus::Open
+}
+
+/// Apply the remote record's lifecycle to a payload that still reads open: a
+/// bundle archived on the remote (a delete elsewhere archives only the record)
+/// is finished history even when its last artifact predates that.
+pub(super) fn adopt_remote_lifecycle(bundle: &mut ChangeGroup, lifecycle_state: &str) {
+    if is_history_bundle(bundle) {
+        return;
+    }
+    bundle.state = match lifecycle_state {
+        "open" | "deleted" => return,
+        "closed" => Some(BundleState::Closed),
+        _ => Some(BundleState::Archived),
+    };
+}
+
 pub(super) fn localize_bundle(
     mut bundle: ChangeGroup,
     project: &KnitProject,
 ) -> Result<ChangeGroup> {
     bundle.project_id = Some(project.id.clone());
+    let history = is_history_bundle(&bundle);
     for repo in &mut bundle.repos {
-        let local = project
-            .repos
-            .iter()
-            .find(|project_repo| project_repo.id == repo.id)
-            .or_else(|| {
-                project.repos.iter().find(|project_repo| {
-                    project_repo.remote.is_some()
-                        && project_repo.remote.as_deref() == repo.remote.as_deref()
-                })
-            })
-            .with_context(|| {
-                format!(
-                    "{}: remote bundle references a repo that is not in local project `{}`.",
-                    repo.id, project.id
-                )
-            })?;
+        repo.worktree_path = None;
+        let Some(local) = project_repo_for(repo, project) else {
+            if history {
+                continue;
+            }
+            bail!(
+                "{}: remote bundle references a repo that is not in local project `{}`.",
+                repo.id,
+                project.id
+            );
+        };
         repo.path = local.path.clone();
         if !crate::contribution::configured(repo) {
             repo.remote = local.remote.clone().or_else(|| repo.remote.clone());
             repo.base_branch = local.base_branch.clone();
         }
         repo.checkout_mode = local.checkout_mode;
-        repo.worktree_path = None;
     }
     Ok(bundle)
 }

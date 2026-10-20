@@ -11,6 +11,7 @@ use super::client::{
 use super::clone::{
     apply_membership_base_branches, clone_export_repositories, export_repo_forge_missing,
     export_repo_local_id, materialize_imported_bundle, project_repo_entry_from_export,
+    FORGE_MISSING_REASON,
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
@@ -466,11 +467,7 @@ fn reconcile_project_repositories(
         let local_id = export_repo_local_id(&repository);
         let is_retry = retry_ids.contains(&local_id);
         if export_repo_forge_missing(&repository) {
-            failed.push((
-                local_id,
-                "repository does not exist on its forge (the sync remote marked it missing)"
-                    .to_string(),
-            ));
+            failed.push((local_id, FORGE_MISSING_REASON.to_string()));
             continue;
         }
         let Some(url) = repository
@@ -1139,12 +1136,10 @@ fn save_skipped_artifacts(root: &Path, skipped: &SkippedArtifacts) -> Result<()>
 
 /// Repo ids `bundle` references that the local project does not carry.
 fn repos_missing_locally(root: &Path, bundle: &ChangeGroup, project: &KnitProject) -> Vec<String> {
-    let available: BTreeSet<&str> = project
+    let mut available = project.clone();
+    available
         .repos
-        .iter()
-        .filter(|repo| crate::git::is_git_worktree(&root.join(&repo.path)))
-        .map(|repo| repo.id.as_str())
-        .collect();
+        .retain(|repo| crate::git::is_git_worktree(&root.join(&repo.path)));
     super::clone::missing_bundle_repos(bundle, &available)
 }
 
@@ -1928,6 +1923,7 @@ fn fetch_bundles_with_options(
         let (mut bundle, artifact_hash) =
             resolve_export_bundle_payload(&remote, Some(&token), &remote_bundle)
                 .with_context(|| format!("failed to fetch bundle `{}`", remote_bundle.slug))?;
+        super::client::adopt_remote_lifecycle(&mut bundle, &remote_bundle.lifecycle_state);
         let branch_mapping = bundle_branch_mapping(&bundle);
 
         // A bundle touching repos this workspace does not carry (a scoped

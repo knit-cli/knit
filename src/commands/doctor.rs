@@ -213,10 +213,11 @@ fn inspect_bundle_paths(root: &Path, issues: &mut Vec<String>) {
         let Ok(bundle) = read_json::<ChangeGroup>(&path) else {
             continue;
         };
-        // Archived bundles retain historical paths: generated worktrees are removed,
+        // Finished bundles retain historical paths: generated worktrees are removed,
         // and source checkouts may later be moved or removed. Only live bundles
         // require these paths; archived ledger consistency is still checked.
-        let archived = bundle.state == Some(BundleState::Archived);
+        let archived = crate::commands::bundle::bundle_state(&bundle)
+            != crate::commands::bundle::BundleStatus::Open;
         for repo in &bundle.repos {
             let repo_path = PathBuf::from(&repo.path);
             if !archived && !repo_path.exists() {
