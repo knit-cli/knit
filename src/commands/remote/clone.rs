@@ -15,6 +15,7 @@ use super::{
 use crate::commands::agents::{
     print_bundle_worktree_agents_summary, write_bundle_worktree_agents_md,
 };
+use crate::commands::fork::checkout_forks;
 use crate::commands::worktree::materialize_repos;
 use crate::git::{current_branch, git_output, is_git_worktree, ref_exists};
 use crate::ids::slugify;
@@ -79,6 +80,11 @@ struct CloneDocumentRepo {
     status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
+    /// `direct`, `fork`, or `unknown` for a fresh clone of a forge repository.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    push: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fork: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1351,10 +1357,16 @@ fn clone_document(
         .map(|repository| {
             let local_id = export_repo_local_id(repository);
             if repo_paths.contains_key(&local_id) {
+                let push = checkout_forks().outcome(&local_id);
                 CloneDocumentRepo {
                     id: local_id,
                     status: "cloned",
                     error: None,
+                    push: push.as_ref().map(|push| push.status()),
+                    fork: push
+                        .as_ref()
+                        .and_then(|push| push.fork())
+                        .map(str::to_owned),
                 }
             } else {
                 let error = failed_repos
@@ -1365,6 +1377,8 @@ fn clone_document(
                     id: local_id,
                     status: "failed",
                     error,
+                    push: None,
+                    fork: None,
                 }
             }
         })
@@ -1376,6 +1390,8 @@ fn clone_document(
                 id: failed_id.clone(),
                 status: "failed",
                 error: Some(error.clone()),
+                push: None,
+                fork: None,
             });
         }
     }
@@ -1968,7 +1984,8 @@ pub(super) fn clone_export_repositories(
 
 /// Clone (or adopt) one exported repository. Authentication comes from the
 /// installed Git credential helpers; a failed non-public clone carries the
-/// access hint.
+/// access hint. Only a fresh clone decides between pushing upstream and
+/// pushing to a fork; an adopted checkout keeps its remotes.
 pub(super) fn clone_one_export_repository(
     target_root: &Path,
     repository: &RemoteExportRepository,
@@ -2037,6 +2054,12 @@ pub(super) fn clone_one_export_repository(
     );
 
     checkout_export_base_branch(&repo_path, repository)?;
+    if let Err(error) = checkout_forks().apply(&local_id, &repo_path) {
+        // Leaving the checkout would make the next run adopt it without a
+        // push target.
+        let _ = fs::remove_dir_all(&repo_path);
+        return Err(error.context(format!("{local_id}: failed to set up pushing")));
+    }
     Ok((local_id, repo_path))
 }
 
@@ -2731,11 +2754,15 @@ mod tests {
                     id: "backend".to_string(),
                     status: "cloned",
                     error: None,
+                    push: Some("fork"),
+                    fork: Some("contributor/backend".to_string()),
                 },
                 CloneDocumentRepo {
                     id: "frontend".to_string(),
                     status: "failed",
                     error: Some("git clone failed".to_string()),
+                    push: None,
+                    fork: None,
                 },
             ],
             cloned_repo_count: 1,
@@ -2766,7 +2793,7 @@ mod tests {
                 "project": {"id": "knit-tools", "owner": "marc-merino", "slug": "knit-tools"},
                 "targetPath": "/abs/path/to/knit-tools",
                 "repos": [
-                    {"id": "backend", "status": "cloned"},
+                    {"id": "backend", "status": "cloned", "push": "fork", "fork": "contributor/backend"},
                     {"id": "frontend", "status": "failed", "error": "git clone failed"},
                 ],
                 "clonedRepoCount": 1,

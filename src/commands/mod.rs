@@ -10,6 +10,7 @@ pub mod config;
 pub mod diff;
 pub mod doctor;
 pub mod fetch;
+pub mod fork;
 pub mod git_credential;
 pub mod git_passthrough;
 pub mod handoff;

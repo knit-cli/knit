@@ -1,6 +1,6 @@
 use crate::commands::agents::write_project_agents_md;
 use crate::commands::base::validate_configured_base;
-use crate::git::{current_branch, git_output_optional, git_root, infer_base_branch};
+use crate::git::{current_branch, git_output, git_output_optional, git_root, infer_base_branch};
 use crate::ids::{short_sha, slugify};
 use crate::model::{
     CheckoutMode, KnitConfig, KnitProject, ProjectRepoEntry, ProjectRunCommand, PROJECT_CONFIG_FILE,
@@ -15,7 +15,7 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 pub fn init_project(name: &str, agents: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
@@ -66,12 +66,192 @@ pub fn init_project(name: &str, agents: bool) -> Result<()> {
     Ok(())
 }
 
+pub fn init_project_with_repos(
+    name: &str,
+    refs: &[String],
+    agents: bool,
+    mode: crate::commands::fork::ForkMode,
+    owner: Option<&str>,
+) -> Result<()> {
+    if refs.is_empty() {
+        return init_project(name, agents);
+    }
+    let repos = parse_repo_refs(refs)?;
+    let jobs = crate::parallel::git_jobs()?;
+    init_project(name, false)?;
+    let root = find_knit_root(&std::env::current_dir()?).context("No Knit workspace found")?;
+    let _credentials = crate::auth::activate_clone_root(root.clone());
+    let (send, receive) = std::sync::mpsc::channel();
+    std::thread::scope(|scope| {
+        crate::parallel::spawn_bounded(scope, &repos, jobs, |(id, url)| {
+            let result = clone_url(&root, id, Path::new(url))
+                .and_then(|path| path.context("repository reference is not a clone URL"));
+            let _ = send.send((id.clone(), result));
+        });
+    });
+    drop(send);
+    let mut results: BTreeMap<_, _> = receive.into_iter().collect();
+    let mut failed = false;
+    let mut announced = false;
+    for (id, _) in &repos {
+        let result = results
+            .remove(id)
+            .context("clone worker returned no result")?
+            .and_then(|path| {
+                add_project_repo_inner(id, &path, None, false, false, true)?;
+                apply_project_repo_mode(&root, id, mode, owner, &mut announced)
+            });
+        if let Err(error) = result {
+            eprintln!("{id}: {error:#}");
+            failed = true;
+        }
+    }
+    if agents {
+        let project: KnitProject = read_json(&project_path(&root, &slugify(name)))?;
+        write_project_agents_md(&root, &project)?;
+    }
+    if failed {
+        bail!("one or more repositories could not be initialized");
+    }
+    Ok(())
+}
+
+fn parse_repo_refs(refs: &[String]) -> Result<Vec<(String, String)>> {
+    let mut repos = Vec::new();
+    let mut ids = std::collections::BTreeSet::new();
+    for input in refs {
+        let (explicit_id, reference) = match input.split_once('=') {
+            Some((id, reference)) if !id.contains(['/', ':']) => {
+                if id.is_empty() {
+                    bail!("invalid repository reference `{input}`: empty id");
+                }
+                (Some(id), reference)
+            }
+            _ => (None, input.as_str()),
+        };
+        if reference.is_empty()
+            || reference
+                .chars()
+                .any(|ch| ch.is_whitespace() || ch.is_control())
+            || reference.contains('\\')
+        {
+            bail!("invalid repository reference `{input}`");
+        }
+        let (url, repo_name) = if is_clone_url(reference) {
+            let path = if reference.contains("://") {
+                let url = url::Url::parse(reference)
+                    .with_context(|| format!("invalid repository reference `{input}`"))?;
+                if !matches!(url.scheme(), "https" | "http" | "ssh" | "git" | "file")
+                    || (url.scheme() != "file" && url.host_str().is_none())
+                    || url.query().is_some()
+                    || url.fragment().is_some()
+                {
+                    bail!("invalid repository reference `{input}`");
+                }
+                url.path().to_owned()
+            } else {
+                let (host, path) = reference.split_once(':').unwrap();
+                if host
+                    .split_once('@')
+                    .is_some_and(|(user, host)| user.is_empty() || host.is_empty())
+                {
+                    bail!("invalid repository reference `{input}`");
+                }
+                path.to_owned()
+            };
+            let basename = path.trim_end_matches('/').rsplit('/').next().unwrap_or("");
+            let name = basename.strip_suffix(".git").unwrap_or(basename);
+            if name.is_empty() || name == "." || name == ".." {
+                bail!("invalid repository reference `{input}`");
+            }
+            (reference.to_owned(), name.to_owned())
+        } else {
+            let parts: Vec<_> = reference.split('/').collect();
+            if parts.len() != 2
+                || parts.iter().any(|part| {
+                    part.is_empty()
+                        || *part == "."
+                        || *part == ".."
+                        || !part
+                            .bytes()
+                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+                })
+            {
+                bail!("invalid repository reference `{input}`; use owner/name, a clone URL, or id=reference");
+            }
+            let name = parts[1].strip_suffix(".git").unwrap_or(parts[1]);
+            if name.is_empty() {
+                bail!("invalid repository reference `{input}`");
+            }
+            (
+                format!("https://github.com/{}/{name}.git", parts[0]),
+                name.to_owned(),
+            )
+        };
+        let id = slugify(explicit_id.unwrap_or(&repo_name));
+        if !ids.insert(id.clone()) {
+            bail!("duplicate repository id `{id}`; use id=reference to disambiguate");
+        }
+        repos.push((id, url));
+    }
+    Ok(repos)
+}
+
+pub fn add_project_repo_with_mode(
+    repo_id: &str,
+    repo_path: &Path,
+    base: Option<&str>,
+    observe: bool,
+    agents: bool,
+    mode: Option<crate::commands::fork::ForkMode>,
+    owner: Option<&str>,
+) -> Result<()> {
+    add_project_repo(repo_id, repo_path, base, observe, agents)?;
+    let Some(mode) = mode else {
+        return Ok(());
+    };
+    let root = find_knit_root(&std::env::current_dir()?).context("No Knit workspace found")?;
+    let _credentials = crate::auth::activate_clone_root(root.clone());
+    apply_project_repo_mode(&root, &slugify(repo_id), mode, owner, &mut false)
+        .map_err(|error| anyhow::anyhow!("{}: {error:#}", slugify(repo_id)))
+}
+
+fn apply_project_repo_mode(
+    root: &Path,
+    id: &str,
+    mode: crate::commands::fork::ForkMode,
+    owner: Option<&str>,
+    announced: &mut bool,
+) -> Result<()> {
+    let project_id = load_config(root)?
+        .active_project
+        .context("No active Knit project")?;
+    let project: KnitProject = read_json(&project_path(root, &project_id))?;
+    let repo = project
+        .repos
+        .iter()
+        .find(|repo| repo.id == id)
+        .with_context(|| format!("unknown project repo `{id}`"))?;
+    crate::commands::fork::apply_mode(repo, mode, owner, announced)
+}
+
 pub fn add_project_repo(
     repo_id: &str,
     repo_path: &Path,
     base: Option<&str>,
     observe: bool,
     agents: bool,
+) -> Result<()> {
+    add_project_repo_inner(repo_id, repo_path, base, observe, agents, false)
+}
+
+fn add_project_repo_inner(
+    repo_id: &str,
+    repo_path: &Path,
+    base: Option<&str>,
+    observe: bool,
+    agents: bool,
+    quiet: bool,
 ) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root =
@@ -84,6 +264,9 @@ pub fn add_project_repo(
     let _lock = acquire_named_lock(&root, &format!("project-{project_id}"))?;
     let path = project_path(&root, project_id);
     let mut project: KnitProject = read_json(&path)?;
+    let _credentials = crate::auth::activate_clone_root(root.clone());
+    let cloned = clone_url(&root, repo_id, repo_path)?;
+    let repo_path = cloned.as_deref().unwrap_or(repo_path);
     let (repo, base_source) = resolve_project_repo(repo_id, repo_path, base, observe)?;
 
     let resolved_base = repo.base_branch.clone();
@@ -97,9 +280,13 @@ pub fn add_project_repo(
         let publish = existing.publish.take();
         *existing = repo.clone();
         existing.publish = publish;
-        println!("{} {}", out::movement("updated"), out::repo(&repo.id));
+        if !quiet {
+            println!("{} {}", out::movement("updated"), out::repo(&repo.id));
+        }
     } else {
-        println!("{} {}", out::movement("added"), out::repo(&repo.id));
+        if !quiet {
+            println!("{} {}", out::movement("added"), out::repo(&repo.id));
+        }
         project.repos.push(repo);
     }
 
@@ -118,12 +305,14 @@ pub fn add_project_repo(
             out::warn("Warning:")
         );
     }
-    println!(
-        "{} {} ({})",
-        out::heading("Base branch:"),
-        out::branch(&resolved_base),
-        out::muted(base_source)
-    );
+    if !quiet {
+        println!(
+            "{} {} ({})",
+            out::heading("Base branch:"),
+            out::branch(&resolved_base),
+            out::muted(base_source)
+        );
+    }
     if agents {
         let agents_path = write_project_agents_md(&root, &project)?;
         println!(
@@ -859,4 +1048,70 @@ fn resolve_project_repo(
         },
         base_source,
     ))
+}
+
+fn clone_url(root: &Path, id: &str, input: &Path) -> Result<Option<PathBuf>> {
+    let url = input.to_string_lossy();
+    if input.exists() || !is_clone_url(&url) {
+        return Ok(None);
+    }
+    let target = root.join(slugify(id));
+    if target.exists() {
+        let origin = git_output_optional(&target, ["config", "--get", "remote.origin.url"])
+            .ok()
+            .flatten();
+        if !origin.is_some_and(|origin| {
+            crate::contribution::same_repository(origin.trim(), &url).unwrap_or(false)
+        }) {
+            bail!("{} exists and is not a clone of {url}", target.display());
+        }
+        return Ok(Some(target));
+    }
+    git_output(
+        root,
+        [
+            OsStr::new("clone"),
+            OsStr::new("--filter=blob:none"),
+            OsStr::new("--"),
+            OsStr::new(url.as_ref()),
+            target.as_os_str(),
+        ],
+    )?;
+    Ok(Some(target))
+}
+
+pub(crate) fn is_clone_url(value: &str) -> bool {
+    value.contains("://")
+        || value.split_once(':').is_some_and(|(host, path)| {
+            !(host.is_empty()
+                || host.contains(['/', '\\'])
+                || path.is_empty()
+                || (host.len() == 1 && host.as_bytes()[0].is_ascii_alphabetic()))
+        })
+}
+
+#[cfg(test)]
+mod clone_url_tests {
+    #[test]
+    fn urls_are_told_apart_from_paths() {
+        for url in [
+            "https://github.com/example/repo.git",
+            "ssh://git@github.com/example/repo.git",
+            "git@github.com:example/repo.git",
+            "github.com:upstream-org/library.git",
+            "file:///tmp/repo",
+        ] {
+            assert!(super::is_clone_url(url), "{url}");
+        }
+        for path in [
+            "../repo",
+            "./repo",
+            "/tmp/repo",
+            "repo",
+            "C:\\repo",
+            "dir/a@b:c",
+        ] {
+            assert!(!super::is_clone_url(path), "{path}");
+        }
+    }
 }
