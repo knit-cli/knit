@@ -53,6 +53,24 @@ fn doctor_ignores_missing_recorded_paths_only_for_archived_bundles() {
 }
 
 #[test]
+fn doctor_migrate_and_project_list_skip_project_sidecar_files() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    let sidecar = workspace.join(".knit/projects/demo.known-repos.json");
+    let sidecar_body = "{\n  \"docs\": \"https://example.com/docs.git\"\n}\n";
+    fs::write(&sidecar, sidecar_body).unwrap();
+
+    assert!(knit(&workspace, ["doctor"]).contains("Knit doctor: ok"));
+    assert!(knit(&workspace, ["project", "list"]).contains("demo"));
+    knit(&workspace, ["migrate"]);
+    assert_eq!(fs::read_to_string(&sidecar).unwrap(), sidecar_body);
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn doctor_reports_archived_ledger_inconsistency_with_missing_paths() {
     let root = unique_temp_dir();
     let backend = root.join("backend");

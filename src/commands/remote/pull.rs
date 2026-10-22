@@ -119,6 +119,10 @@ pub struct RemotePullContext {
     /// bundles on parallel threads, and bounded server memory — one payload
     /// built at a time — is the entire point of the incremental fetch.
     fetch_gate: Mutex<()>,
+    /// Serializes per-bundle landing plan syncs. Each takes the workspace
+    /// `landing-sync` file lock, which refuses a second holder outright, even
+    /// a sibling thread of this same pull.
+    plans_gate: Mutex<()>,
 }
 
 impl RemotePullContext {
@@ -130,6 +134,19 @@ impl RemotePullContext {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         resolve_export_bundle_payload(&self.remote, self.token.as_deref(), entry)
+    }
+
+    fn pull_bundle_plans(&self, bundle_id: &str) -> Result<()> {
+        let _gate = self
+            .plans_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        super::landing::pull_plans_scoped(
+            Some(&self.project.id),
+            &self.remote_name,
+            false,
+            Some(bundle_id),
+        )
     }
 }
 
@@ -226,6 +243,7 @@ pub fn prepare_remote_pull(
                     remote,
                     token: Some(token),
                     fetch_gate: Mutex::new(()),
+                    plans_gate: Mutex::new(()),
                 }));
             }
             Err(error) => {
@@ -1192,12 +1210,7 @@ pub fn pull_bundle_remote_state(
             "no remote artifact".to_string(),
         ));
     };
-    super::landing::pull_plans_scoped(
-        Some(&context.project.id),
-        &context.remote_name,
-        false,
-        Some(bundle_id),
-    )?;
+    context.pull_bundle_plans(bundle_id)?;
     // The export only carries artifact metadata. When its hash is the one this
     // artifact was last reconciled with, the remote holds nothing new and the
     // payload is never downloaded — only the checkouts are refreshed.

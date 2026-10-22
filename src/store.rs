@@ -269,6 +269,14 @@ pub fn bundle_path(root: &Path, bundle_id: &str) -> PathBuf {
         .join(format!("{bundle_id}.bundle.json"))
 }
 
+/// True for a project document in `.knit/projects/`. Per-project sidecars
+/// (known repos, history sync state) share that directory under other names.
+pub fn is_project_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".project.json"))
+}
+
 pub fn project_path(root: &Path, project_id: &str) -> PathBuf {
     root.join(".knit/projects")
         .join(format!("{project_id}.project.json"))

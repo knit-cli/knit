@@ -13,7 +13,6 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
 use std::ffi::OsString;
 use std::fs;
 use std::path::Path;
@@ -390,7 +389,7 @@ pub fn list_projects() -> Result<()> {
         .with_context(|| format!("failed to read {}", dir.display()))?
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.path())
-        .filter(|path| path.extension() == Some(OsStr::new("json")))
+        .filter(|path| crate::store::is_project_file(path))
         .collect::<Vec<_>>();
     entries.sort();
 
