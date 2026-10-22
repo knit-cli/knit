@@ -2,7 +2,8 @@ use crate::commands::bundle::bundle_state;
 use crate::model::{BundleState, ChangeGroup, KnitConfig, KnitProject};
 use crate::output as out;
 use crate::store::{
-    find_knit_root, global_config_path, load_effective_config, read_json, write_json,
+    find_knit_root, global_config_path, is_project_file, load_effective_config, read_json,
+    write_json,
 };
 use crate::tracking::ledger_recorded_head_sha;
 use anyhow::{bail, Context, Result};
@@ -28,8 +29,13 @@ pub fn doctor_workspace() -> Result<()> {
     if let Ok(effective) = load_effective_config(&root) {
         inspect_effective_remotes(&effective, &mut issues);
     }
-    inspect_json_dir::<ChangeGroup>(&root.join(".knit/bundles"), "bundle", &mut issues);
-    inspect_json_dir::<KnitProject>(&root.join(".knit/projects"), "project", &mut issues);
+    inspect_json_dir::<ChangeGroup>(&root.join(".knit/bundles"), is_json, "bundle", &mut issues);
+    inspect_json_dir::<KnitProject>(
+        &root.join(".knit/projects"),
+        is_project_file,
+        "project",
+        &mut issues,
+    );
     inspect_operational_json_dir(&root.join(".knit/merge-runs"), "merge run", &mut issues);
     inspect_operational_json_dir(&root.join(".knit/land-runs"), "land run", &mut issues);
     inspect_locks(&root, &mut issues);
@@ -52,7 +58,12 @@ pub fn migrate_workspace(check: bool) -> Result<()> {
     let mut changed = Vec::new();
     migrate_one::<KnitConfig>(&root.join(".knit/config.json"), check, &mut changed)?;
     migrate_bundles(&root.join(".knit/bundles"), check, &mut changed)?;
-    migrate_dir::<KnitProject>(&root.join(".knit/projects"), check, &mut changed)?;
+    migrate_dir::<KnitProject>(
+        &root.join(".knit/projects"),
+        is_project_file,
+        check,
+        &mut changed,
+    )?;
     let mut removed = Vec::new();
     migrate_remove_legacy(&root.join(".knit/contexts.json"), check, &mut removed)?;
 
@@ -129,8 +140,16 @@ fn inspect_effective_remotes(config: &KnitConfig, issues: &mut Vec<String>) {
     }
 }
 
-fn inspect_json_dir<T>(dir: &Path, label: &str, issues: &mut Vec<String>)
-where
+fn is_json(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("json")
+}
+
+fn inspect_json_dir<T>(
+    dir: &Path,
+    include: fn(&Path) -> bool,
+    label: &str,
+    issues: &mut Vec<String>,
+) where
     T: serde::de::DeserializeOwned,
 {
     if !dir.exists() {
@@ -142,7 +161,7 @@ where
     };
     for entry in entries.flatten() {
         let path = entry.path();
-        if path.extension().and_then(|extension| extension.to_str()) != Some("json") {
+        if !include(&path) {
             continue;
         }
         if let Err(error) = read_json::<T>(&path) {
@@ -250,7 +269,12 @@ fn inspect_bundle_paths(root: &Path, issues: &mut Vec<String>) {
     }
 }
 
-fn migrate_dir<T>(dir: &Path, check: bool, changed: &mut Vec<PathBuf>) -> Result<()>
+fn migrate_dir<T>(
+    dir: &Path,
+    include: fn(&Path) -> bool,
+    check: bool,
+    changed: &mut Vec<PathBuf>,
+) -> Result<()>
 where
     T: serde::de::DeserializeOwned + serde::Serialize,
 {
@@ -259,7 +283,7 @@ where
     }
     for entry in fs::read_dir(dir).with_context(|| format!("failed to read {}", dir.display()))? {
         let path = entry?.path();
-        if path.extension().and_then(|extension| extension.to_str()) == Some("json") {
+        if include(&path) {
             migrate_one::<T>(&path, check, changed)?;
         }
     }
