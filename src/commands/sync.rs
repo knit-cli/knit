@@ -120,6 +120,12 @@ pub fn repair_commit_groups(apply: bool) -> Result<()> {
                 continue;
             }
             match map_group(group, &repos, &subjects) {
+                // Already restored under another creation time (by hand, or by
+                // an older repair): its commits belong to a current group.
+                Ok(mapped)
+                    if mapped.iter().all(|commit| {
+                        present.contains(&(commit.repo_id.clone(), commit.sha.clone()))
+                    }) => {}
                 Ok(mapped) => restorable.push(Restorable {
                     group: group.clone(),
                     mapped,

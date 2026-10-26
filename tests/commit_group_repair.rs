@@ -163,11 +163,13 @@ fn an_amended_commit_still_retires_its_group() {
     fs::remove_dir_all(fixture.root).unwrap();
 }
 
-#[test]
-fn repair_groups_restores_superseded_names_onto_the_current_shas() {
-    let fixture = two_group_bundle("collapsed work");
+/// Rewrite the commits' headers in place, then reproduce what the older
+/// reconcile wrote: one `git.observed` node that superseded every named group,
+/// with the names kept inside it. Returns the groups before the collapse and
+/// the new SHAs of the first and second commit.
+fn collapse_groups(fixture: &Fixture) -> (Vec<(String, String)>, String, String) {
     let before = fixture.groups();
-    let base = recorded_base(&fixture);
+    let base = recorded_base(fixture);
     rewrite_headers_in_place(&fixture.worktree, &base);
     let new_head = git(&fixture.worktree, ["rev-parse", "HEAD"])
         .trim()
@@ -176,8 +178,6 @@ fn repair_groups_restores_superseded_names_onto_the_current_shas() {
         .trim()
         .to_string();
 
-    // Reproduce what the older reconcile wrote: one `git.observed` node that
-    // superseded every named group, with the names kept inside it.
     let mut bundle = fixture.bundle();
     let superseded: Vec<Value> = bundle["commitGroups"].as_array().unwrap().clone();
     bundle["commitGroups"] = json!([]);
@@ -218,6 +218,13 @@ fn repair_groups_restores_superseded_names_onto_the_current_shas() {
         serde_json::to_string_pretty(&bundle).unwrap(),
     )
     .unwrap();
+    (before, new_first, new_head)
+}
+
+#[test]
+fn repair_groups_restores_superseded_names_onto_the_current_shas() {
+    let fixture = two_group_bundle("collapsed work");
+    let (before, new_first, new_head) = collapse_groups(&fixture);
 
     // A preview explains the mapping and writes nothing.
     let preview = knit(&fixture.worktree, ["sync", "--repair-groups"]);
@@ -245,6 +252,34 @@ fn repair_groups_restores_superseded_names_onto_the_current_shas() {
     let again = knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
     assert!(again.contains("No superseded commit groups"), "{again}");
     assert_eq!(fixture.groups().len(), 2);
+
+    fs::remove_dir_all(fixture.root).unwrap();
+}
+
+#[test]
+fn repair_groups_skips_groups_restored_under_another_creation_time() {
+    let fixture = two_group_bundle("hand restored work");
+    let (_, new_first, new_head) = collapse_groups(&fixture);
+    knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
+
+    // A restore done by hand stamps the groups with the time it ran, not the
+    // original creation time. Their commits are current all the same.
+    let mut bundle = fixture.bundle();
+    for group in bundle["commitGroups"].as_array_mut().unwrap() {
+        group["createdAt"] = json!("2030-06-01T00:00:00.000Z");
+    }
+    fs::write(
+        fixture.bundle_path(),
+        serde_json::to_string_pretty(&bundle).unwrap(),
+    )
+    .unwrap();
+
+    let again = knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
+    assert!(again.contains("No superseded commit groups"), "{again}");
+    let groups = fixture.groups();
+    assert_eq!(groups.len(), 2, "{:?}", fixture.bundle()["commitGroups"]);
+    assert_eq!(groups[0].1, new_first);
+    assert_eq!(groups[1].1, new_head);
 
     fs::remove_dir_all(fixture.root).unwrap();
 }

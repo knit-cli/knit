@@ -186,7 +186,10 @@ pub fn sync_observed_changes_for_repo_ids(
         // bundle's commits outside Knit looks like.
         if change.movement == Movement::Diverged
             && new_base == old_base
-            && !content_identical_rewrite(&path, &old_base, &old_head, &change.after_sha)?
+            // A pruned old head can't be compared, so it stays ordinary
+            // observed work rather than failing the whole reconcile.
+            && !content_identical_rewrite(&path, &old_base, &old_head, &change.after_sha)
+                .unwrap_or(false)
         {
             continue;
         }
