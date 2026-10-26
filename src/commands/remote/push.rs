@@ -902,21 +902,68 @@ pub fn maybe_sync_bundle_to_remote_with_history(
     force: PushForce,
     history: bool,
 ) -> Result<()> {
+    sync_bundle_to_remote_inner(active, remote_overrides, no_remote, force, history, true)?;
+    Ok(())
+}
+
+/// The artifact half of `knit push`: the same sync as
+/// [`maybe_sync_bundle_to_remote_with_history`], but the `push_sync` config
+/// never turns it off. `knit push` moves the branches *and* the hosted copy
+/// every time — a workspace that opted out of sync-on-push would otherwise
+/// leave the bundle page every review links to silently stale. `--no-remote`
+/// stays the explicit opt-out for one invocation, and the note about
+/// `push_sync` only appears when a sync actually ran.
+pub fn sync_bundle_to_remote_after_push(
+    active: &mut ActiveBundle,
+    remote_overrides: &[String],
+    no_remote: bool,
+    force: PushForce,
+    history: bool,
+) -> Result<()> {
+    let push_sync_off = remote_overrides.is_empty() && !no_remote && {
+        effective_workspace_config()
+            .map(|(_, config)| !config.push_sync)
+            .unwrap_or(false)
+    };
+    let synced =
+        sync_bundle_to_remote_inner(active, remote_overrides, no_remote, force, history, false)?;
+    if push_sync_off && synced > 0 {
+        crate::human!(
+            "{}",
+            out::muted(
+                "(push-sync is off; `knit push` synced anyway so the hosted copy cannot trail — `knit push --no-remote` skips it)"
+            )
+        );
+    }
+    Ok(())
+}
+
+/// Sync the resolved bundle to its sync remotes; returns how many remotes
+/// actually received the artifact.
+fn sync_bundle_to_remote_inner(
+    active: &mut ActiveBundle,
+    remote_overrides: &[String],
+    no_remote: bool,
+    force: PushForce,
+    history: bool,
+    respect_push_sync: bool,
+) -> Result<usize> {
     if no_remote {
-        return Ok(());
+        return Ok(0);
     }
     let Ok((_, config)) = effective_workspace_config() else {
-        return Ok(());
+        return Ok(0);
     };
-    if !config.push_sync && remote_overrides.is_empty() {
-        return Ok(());
+    if respect_push_sync && !config.push_sync && remote_overrides.is_empty() {
+        return Ok(0);
     }
     let remote_names = resolve_sync_remote_names(&config, remote_overrides);
     if remote_names.is_empty() {
-        return Ok(());
+        return Ok(0);
     }
     let explicit = !remote_overrides.is_empty();
     let multiple = remote_names.len() > 1;
+    let mut synced = 0usize;
 
     for remote_name in remote_names {
         if let Err(error) = resolve_remote(&config, &remote_name) {
@@ -941,9 +988,11 @@ pub fn maybe_sync_bundle_to_remote_with_history(
                 "{} {error:#}",
                 out::warn(format!("remote sync skipped ({remote_name}):"))
             );
+        } else {
+            synced += 1;
         }
     }
-    Ok(())
+    Ok(synced)
 }
 
 /// Push the resolved bundle artifact to the sync remotes when push-sync is enabled.
@@ -1502,12 +1551,17 @@ fn rejected_artifact_message(bundle: &ChangeGroup) -> String {
 /// ledger. Bundles whose remote ledger is ahead of this workspace are skipped
 /// with a warning (catching up is `knit sync pull`'s job); other per-bundle
 /// failures are collected and fail the sweep at the end.
+///
+/// Returns how many artifacts this sweep pushed. It deliberately prints no
+/// total: `exclude_bundle` hands the resolved bundle to a richer push, and a
+/// sweep that reported only its own share contradicted the "pushed <bundle>"
+/// line the caller had just printed. The caller owns the total.
 pub fn push_all_bundles_to_remote(
     remote_name: &str,
     project: Option<&str>,
     exclude_bundle: Option<&str>,
     force: PushForce,
-) -> Result<()> {
+) -> Result<usize> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
     let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
     let config = load_effective_config(&root)?;
@@ -1516,7 +1570,7 @@ pub fn push_all_bundles_to_remote(
 
     let dir = root.join(".knit/bundles");
     if !dir.exists() {
-        return Ok(());
+        return Ok(0);
     }
     let mut paths: Vec<_> = std::fs::read_dir(&dir)
         .with_context(|| format!("failed to read {}", dir.display()))?
@@ -1660,7 +1714,6 @@ pub fn push_all_bundles_to_remote(
         }
     }
 
-    println!("{} {pushed} bundle artifact(s)", out::movement("pushed"));
     for message in remote_ahead {
         println!("{} {message}", out::warn("Skipped"));
     }
@@ -1671,7 +1724,7 @@ pub fn push_all_bundles_to_remote(
             failures.join("\n")
         );
     }
-    Ok(())
+    Ok(pushed)
 }
 
 // Recipe fingerprints and CAS use the authored JSON, including empty arrays and

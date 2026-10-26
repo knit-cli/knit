@@ -157,21 +157,26 @@ pub fn sync_push(
             // local ledger. From a root with several open bundles nothing
             // resolves; the sweep covers everything and history is pushed
             // separately.
+            // One honest total: the resolved bundle's own push plus the
+            // sweep's. Reporting the sweep's count alone said "pushed 0
+            // bundle artifact(s)" right under "pushed <bundle>".
+            let mut pushed = 0usize;
             match &active_id {
-                Some(_) => {
-                    if let Err(error) = push_bundle_to_remote(remote, None, force) {
-                        failures.push(format!("{remote} bundle: {error:#}"));
-                    }
-                }
+                Some(_) => match push_bundle_to_remote(remote, None, force) {
+                    Ok(()) => pushed += 1,
+                    Err(error) => failures.push(format!("{remote} bundle: {error:#}")),
+                },
                 None => {
                     if let Err(error) = push_history_to_remote(project, remote) {
                         failures.push(format!("{remote} history: {error:#}"));
                     }
                 }
             }
-            if let Err(error) = push_all_bundles_to_remote(remote, None, active_id, force) {
-                failures.push(format!("{remote} bundles: {error:#}"));
+            match push_all_bundles_to_remote(remote, None, active_id, force) {
+                Ok(swept) => pushed += swept,
+                Err(error) => failures.push(format!("{remote} bundles: {error:#}")),
             }
+            println!("{} {pushed} bundle artifact(s)", out::movement("pushed"));
         } else if targets.history {
             if let Err(error) = push_history_to_remote(project, remote) {
                 failures.push(format!("{remote} history: {error:#}"));

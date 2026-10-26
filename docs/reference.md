@@ -104,6 +104,7 @@ knit bundle print
 knit bundle validate
 knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
+knit sign [--all] [--force] [--no-push] [repo-id-or-path...]
 knit squash [-m <message>]
 knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
@@ -113,6 +114,7 @@ knit diff [--published] [--stat] [repo-id-or-path...]
 knit fetch [--mode all|git|knit] [--remote <name>] [repo-id-or-path...]
 knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [--remote <name>] [--no-remote] [--merge] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [--no-history] [repo-id-or-path...]
+knit sync [--repair-groups [--apply]]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
 knit run up|status                             # bundle runtime stack
@@ -1054,7 +1056,7 @@ part of the API origin. A token is sent over plain HTTP only to a loopback host
 or an origin allowed with `knit auth allow-http <host[:port]>`; see
 [Custom ports and plain HTTP](forge-auth.md#custom-ports-and-plain-http).
 
-When sync remotes are configured, `knit publish create` and `knit push` also push the bundle artifact to those remotes so the host and sync remotes stay in sync. This is on by default; disable it globally with `knit config set push-sync false`, skip it for one command with `--no-remote`, or force one or more remotes with repeated `--remote <name>`. `knit push --no-history` skips only the history upload while still pushing branches and the bundle artifact. History uploads print the pending event count before sending; the final count includes only events sent by this invocation. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
+When sync remotes are configured, `knit publish create` also pushes the bundle artifact to those remotes so the host and sync remotes stay in sync; this implicit sync is on by default, disabled globally with `knit config set push-sync false`, skipped for one command with `--no-remote`, or forced onto one or more remotes with repeated `--remote <name>`. `knit push` makes the same artifact-and-history sync part of every push — the `push-sync` setting never turns it off, so a hosted copy cannot trail the branches. `knit push --no-history` skips only the history upload while still pushing branches and the bundle artifact. History uploads print the pending event count before sending; the final count includes only events sent by this invocation. A missing implicit sync remote is skipped after the git branch push; explicitly requested remotes still have to exist.
 
 ### Rewriting a bundle
 
@@ -1098,9 +1100,49 @@ Publish rewritten branches with the lease-protected push:
 knit push --force-with-lease
 ```
 
+### Signing a bundle's commits
+
+Knit creates and rewrites commits through the git CLI with the repository's own
+configuration, so they carry signatures exactly when plain git would sign them:
+`commit.gpgsign`, `user.signingkey`, `gpg.format` and the rest of the usual git
+signing config decide, for `knit commit`, `knit squash`, `knit rebase`,
+`knit cherrypick`, merges, and every other path that writes a commit. Knit adds
+no signing policy of its own and never inspects a forge's signature rules.
+
+Commits that were made unsigned — by an older run, or before the signing config
+existed — are re-signed in place:
+
+```sh
+knit sign                      # every tracked repo with unsigned bundle commits
+knit sign backend              # one repo
+knit sign --force              # re-sign signed commits too
+knit sign --no-push            # record the rewrite locally, publish later
+```
+
+`knit sign` replays each repo's `base..HEAD` onto the same base with
+`git rebase --gpg-sign`. Trees, messages, authors and order are unchanged; only
+the signature header and the resulting SHAs move, and signing uses this repo's
+git configuration as-is — with no usable signing key configured, git's own
+error is the answer. Each named commit group maps 1:1 onto the new SHAs keeping
+its message and author, and the rewrite is recorded under its own ledger kind,
+`rewrite.kind: "resign"` (shown as such by `knit log`, with the old SHAs kept
+traceable in the superseded observation). Unless `--no-push` is given, the same
+command then pushes the rewritten branches with `--force-with-lease` and syncs
+the bundle artifact and project history to the sync remotes, so the hosted copy
+never trails the re-sign.
+
 ### Syncing artifacts with sync remotes
 
-`knit sync` with no subcommand is a local-only reconcile: it records git commits made outside Knit as `git.observed` nodes and never touches the network. Its `push`/`pull` subcommands are the one verb family for moving Knit artifacts (bundles, project history, saved views, project architecture, and the explicit knowledge-graph slice) between the workspace and sync remotes:
+`knit sync` with no subcommand is a local-only reconcile: it records git commits made outside Knit as `git.observed` nodes and never touches the network. A rewrite that replaced every commit with a content-identical copy on the same base — re-signing or re-dating the bundle's commits outside Knit — is recognized as such: the commits map one to one with identical trees, authors and subjects, so each commit group is carried forward onto the new SHAs instead of being superseded as anonymous observed work. Any other divergence (a changed tree, a reworded subject, a different count, a reorder) keeps the existing observation semantics.
+
+Bundles that were hit by the older behavior can be repaired: the superseding node still records the names under `rewrite.supersededGroups`.
+
+```sh
+knit --bundle <slug> sync --repair-groups           # preview
+knit --bundle <slug> sync --repair-groups --apply   # write the restored groups
+```
+
+A group is restored only when every one of its recorded commits maps to exactly one current commit with the same tree, author and subject (or, when the superseded object is no longer in the repository, the same subject the observation recorded alongside it). Restored groups get fresh ids — the superseded ids already belong to recorded nodes — and keep the original message, author and creation time. Publish the repaired ledger with `knit sync push --bundles --force-with-lease`. Its `push`/`pull` subcommands are the one verb family for moving Knit artifacts (bundles, project history, saved views, project architecture, and the explicit knowledge-graph slice) between the workspace and sync remotes:
 
 ```sh
 knit sync push                 # push bundle + history + views + architecture for the resolved project/bundle
@@ -1120,6 +1162,8 @@ knit sync push --remote hosted    # use an explicit remote
 `knit sync pull` moves artifacts only by default, for every target selection. It does not clone repositories, change project repo membership, or prune saved views for removed members. When membership metadata is available, it summarizes membership changes and missing checkouts, excluding repositories intentionally omitted by the workspace scope. For narrow artifact selections without `--repos`, an unavailable membership export only skips this diagnostic; it does not fail an otherwise successful artifact pull. Pass `--repos` to apply membership changes and clone missing members within the workspace scope. `--artifacts-only` remains accepted as a compatibility alias for the default. The git-style `knit pull` and `knit pull --bundles` keep their existing reconciliation behavior.
 
 With no target flag (`--bundles`/`--history`/`--views`/`--architecture`/`--all`), `knit sync push`/`pull` move every routine artifact family. The knowledge-graph viz slice (produced by `urdir kg viz`, often several MB) is deliberately excluded from `--all` and bare invocations — push it with an explicit `knit sync push --kg` after regenerating it. By default every configured remote is a sync remote — the remotes list itself is the sync set, and names carry no special meaning. `knit config set sync-remotes ...` (or the legacy `sync-remote`) narrows that set when some remotes should stay out of routine sync; override per invocation with one or more `--remote <name>`. Push-style syncs fan out to every sync remote and keep going past a failing one, reporting each failure at the end. Pull-style syncs walk the sync remotes in priority order and use the first one that responds. A pull first reads the project's bundle list, which carries each bundle's artifact metadata but no payloads, and then downloads the payloads it actually needs — one bundle at a time, only where the remote's artifact hash differs from the one the local artifact was last reconciled with (recorded per remote under `syncTargets`). Bundle payloads are never requested in one bulk response.
+
+`knit push` and `knit sync push` are two planes, and `knit push` moves both in one command: the feature branches to git `origin`, then the bundle artifact and project history to the configured sync remotes, always — the `push-sync` setting (default on) governs only the syncs Knit starts on its own, such as after landing, and switching it off never leaves a hosted copy stale behind a push. `--no-remote` is the explicit skip for one invocation: branches only, nothing hosted. `knit sync push` remains the artifact-only door when the ledger should move without touching git. The generated workspace and bundle `AGENTS.md` name the sync remotes each command reaches in that workspace.
 
 The git-shaped verbs keep their git semantics but route through the same internal sync module: `knit push --remote <name>` still pushes branches and then the bundle artifact, while `knit fetch --mode knit` and `knit pull --bundles` pull recorded bundle state. Landing's automatic artifact sync (when `push-sync` is enabled) goes through the same module too. There is one implementation behind several differently shaped doors.
 
@@ -1338,7 +1382,7 @@ Sparse advice is enabled by default for new workspaces. It prints a `Next:` line
 - Worktree creation relies on `git worktree add` and inherits its constraints, including branch checkout conflicts.
 - `knit fetch` fetches the `origin` remote for each selected repo. Repos without `origin` are reported as failures.
 - `knit pull` coordinates ordinary git pulls but does not resolve merge/rebase conflicts across repos. If git stops for a conflict, resolve that repo's git state before retrying.
-- `knit push` pushes feature branches to `origin` and, when sync remotes are configured and `push-sync` is enabled, the bundle artifact to those remotes; it opens no review objects, so use `knit publish create` (which pushes the branches itself) for the PR path.
+- `knit push` pushes feature branches to `origin` and, when sync remotes are configured, the bundle artifact and history to those remotes in the same command (`--no-remote` skips the sync; the `push-sync` setting never does); it opens no review objects, so use `knit publish create` (which pushes the branches itself) for the PR path.
 - `knit publish` detects GitHub, GitLab, Codeberg/Forgejo, and Bitbucket Cloud from each repo remote; unrecognized remotes default to GitHub for compatibility. GitLab and Forgejo keep their CLI paths for the basic workspace loop and use REST for granular CI, review state, mergeability, SHA guards, and retargeting. Without a Forgejo REST token, those richer fields degrade to empty/unknown and the basic `tea` loop remains available. Bitbucket does not expose pre-merge conflict state, so conflicts surface as merge API errors. Bitbucket and Forgejo have no provider-native revert-PR API; GitHub and GitLab do.
 - `knit publish create` is not perfectly transactional. Phases run in order: selected branch pushes, a best-effort hosted bundle sync (so PR bodies can link the hosted bundle page), review creation, and body updates. A failed body update is repaired by `knit publish sync`; a failed branch push or review creation is repaired by re-running `knit publish create` (repos that already have a review object are left alone).
 - `knit land` resolves the host adapter per repo from its remote. A merge lands into the recorded base branch. Remote merges cannot be automatically unmerged by Knit, so failed land runs are recorded in `.knit/land-runs/`; fix the failed step and use `knit land resume`, or use `knit land rollback` to open revert PRs for the steps that already merged.

@@ -220,11 +220,14 @@ pub fn push_repos(
         save_active_bundle(&active)?;
     }
 
-    // After git branches are pushed, also sync the bundle artifact to the
-    // configured sync remote (default on; see `knit config set push-sync`).
-    // The force mode carries over: a forced branch push implies the ledger
-    // rewrite must be forced onto the sync remote too.
-    crate::commands::remote::maybe_sync_bundle_to_remote_with_history(
+    // After git branches are pushed, sync the bundle artifact and history to
+    // the configured sync remotes. `knit push` means both planes every time:
+    // the branches move and the hosted copy follows, whatever `push_sync`
+    // says (that setting only governs syncs Knit starts on its own, such as
+    // landing). The force mode carries over: a forced branch push implies the
+    // ledger rewrite must be forced onto the sync remote too. `--no-remote`
+    // is the explicit opt-out.
+    crate::commands::remote::sync_bundle_to_remote_after_push(
         &mut active,
         remote,
         no_remote,

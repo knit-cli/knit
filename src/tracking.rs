@@ -180,8 +180,14 @@ pub fn sync_observed_changes_for_repo_ids(
         };
         // Ordinary divergence (amends, resets and unrelated replacement work)
         // keeps the existing observation semantics. Only an advanced upstream
-        // merge base identifies a manual rebase that can recreate groups.
-        if change.movement == Movement::Diverged && new_base == old_base {
+        // merge base identifies a manual rebase that can recreate groups —
+        // or a rewrite that replaced every commit with a content-identical
+        // copy on the same base, which is what re-signing or re-dating the
+        // bundle's commits outside Knit looks like.
+        if change.movement == Movement::Diverged
+            && new_base == old_base
+            && !content_identical_rewrite(&path, &old_base, &old_head, &change.after_sha)?
+        {
             continue;
         }
         rewrites.push(RepoRewrite {
@@ -281,6 +287,53 @@ pub fn sync_observed_changes_for_repo_ids(
 
 pub fn repo_worktree_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<PathBuf> {
     checkout_dir(active, repo)
+}
+
+/// Whether `base..new_head` is the same work as `base..old_head` with new
+/// commit identities: the replaced commits map one to one, in order, with
+/// identical trees, subjects and authors.
+///
+/// That is the shape of a rewrite that only touched commit *headers* — a
+/// `git rebase --gpg-sign` to satisfy a signing rule, a committer-date
+/// rewrite — and it is the one divergence where the bundle's existing commit
+/// groups still describe exactly the commits in front of us. Anything else
+/// (a changed tree, a reworded subject, a different count, a reorder) stays
+/// anonymous observed work, because Knit cannot claim the named group is
+/// still the same change.
+fn content_identical_rewrite(
+    path: &Path,
+    base: &str,
+    old_head: &str,
+    new_head: &str,
+) -> Result<bool> {
+    let old = rev_list(path, base, old_head)?;
+    let new = rev_list(path, base, new_head)?;
+    // Commits both sides share are untouched; only the replacements matter.
+    let replaced: Vec<&String> = old.iter().filter(|sha| !new.contains(sha)).collect();
+    let created: Vec<&String> = new.iter().filter(|sha| !old.contains(sha)).collect();
+    if replaced.is_empty() || replaced.len() != created.len() {
+        return Ok(false);
+    }
+    for (before, after) in replaced.into_iter().zip(created) {
+        if commit_identity(path, before)? != commit_identity(path, after)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+/// A commit's content and authorship, with nothing that a header-only rewrite
+/// is allowed to change: tree, subject, author name and author email.
+fn commit_identity(path: &Path, sha: &str) -> Result<String> {
+    git_output(
+        path,
+        [
+            "show",
+            "-s",
+            "--format=%T%n%an%n%ae%n%s",
+            &format!("{sha}^{{commit}}"),
+        ],
+    )
 }
 
 fn build_repo_change(

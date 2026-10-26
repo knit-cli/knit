@@ -572,9 +572,18 @@ pub enum Commands {
     /// Bare `knit sync` records git commits made outside Knit into the bundle
     /// ledger (a local-only reconcile). The `push`/`pull` subcommands are the one
     /// way to move bundle, history, and view artifacts to and from the sync remotes.
+    /// `knit push` moves git branches (and the artifact only when push-sync is on).
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommand>,
+        /// Put back commit groups an earlier sync turned into anonymous observed
+        /// work, mapping each recorded commit onto the commit that replaced it.
+        /// Previews without `--apply`.
+        #[arg(long)]
+        repair_groups: bool,
+        /// Write the restored commit groups found by `--repair-groups`.
+        #[arg(long, requires = "repair_groups")]
+        apply: bool,
     },
     /// Show and sync project-wide commit history.
     History {
@@ -613,6 +622,29 @@ pub enum Commands {
         /// Stage every tracked change first, then commit, like `git commit -a`.
         #[arg(short = 'a', long = "all", alias = "stage")]
         all: bool,
+    },
+    /// Re-sign this bundle's commits in place, on the same base.
+    ///
+    /// Trees, messages, authors and order are unchanged; only the signature
+    /// and the resulting SHAs move, and every commit group is carried forward
+    /// 1:1 onto the new SHAs. Signing uses this repo's git configuration —
+    /// `commit.gpgsign`, `user.signingkey`, `gpg.format` — exactly as
+    /// `git rebase --gpg-sign` would; with no signing key configured, git's
+    /// own error is the answer. The rewritten branches are pushed with
+    /// `--force-with-lease` and the bundle artifact and history follow to the
+    /// sync remotes in the same command.
+    Sign {
+        /// Repo ids or paths to sign. Defaults to every tracked repo with unsigned bundle commits.
+        repos: Vec<String>,
+        /// Sign every tracked repo, not only a selection.
+        #[arg(short, long)]
+        all: bool,
+        /// Re-sign commits that already carry a signature too.
+        #[arg(long)]
+        force: bool,
+        /// Record the rewrite locally without pushing branches or syncing artifacts.
+        #[arg(long)]
+        no_push: bool,
     },
     /// Squash bundle commits into one commit per repository and one ledger group.
     Squash {
