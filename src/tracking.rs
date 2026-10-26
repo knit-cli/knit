@@ -300,7 +300,7 @@ pub fn repo_worktree_dir(active: &ActiveBundle, repo: &RepoEntry) -> Option<Path
 /// `git rebase --gpg-sign` to satisfy a signing rule, a committer-date
 /// rewrite — and it is the one divergence where the bundle's existing commit
 /// groups still describe exactly the commits in front of us. Anything else
-/// (a changed tree, a reworded subject, a different count, a reorder) stays
+/// (a changed tree, a reworded message, a different count, a reorder) stays
 /// anonymous observed work, because Knit cannot claim the named group is
 /// still the same change.
 fn content_identical_rewrite(
@@ -326,14 +326,14 @@ fn content_identical_rewrite(
 }
 
 /// A commit's content and authorship, with nothing that a header-only rewrite
-/// is allowed to change: tree, subject, author name and author email.
+/// is allowed to change: tree, author name, author email and full message.
 fn commit_identity(path: &Path, sha: &str) -> Result<String> {
     git_output(
         path,
         [
             "show",
             "-s",
-            "--format=%T%n%an%n%ae%n%s",
+            "--format=%T%n%an%n%ae%n%B",
             &format!("{sha}^{{commit}}"),
         ],
     )

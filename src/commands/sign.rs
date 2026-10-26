@@ -270,6 +270,17 @@ fn inspect(active: &ActiveBundle, index: usize) -> Result<Option<Target>> {
             short_sha(&base)
         );
     }
+    // `git rebase` without `--rebase-merges` drops merge commits and replays
+    // everything they brought in, so re-signing a branch that merged its base
+    // would copy upstream commits onto it under new SHAs.
+    let merges = git_output(&path, ["rev-list", "--merges", &format!("{base}..{head}")])?;
+    if let Some(merge) = merges.lines().next() {
+        bail!(
+            "{}: merge commit {} is in the bundle's history; signing rebases the branch, which would flatten the merge and rewrite the commits it brought in. Run knit rebase to replay the work onto the new base first, then sign",
+            repo.id,
+            short_sha(merge)
+        );
+    }
     let commits = crate::git::rev_list(&path, &base, &head)?;
     if commits.is_empty() {
         return Ok(None);

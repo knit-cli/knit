@@ -306,3 +306,31 @@ fn sign_without_a_signing_config_fails_with_gits_error() {
 
     fs::remove_dir_all(fixture.root).unwrap();
 }
+
+#[test]
+fn sign_refuses_a_branch_that_merged_its_base() {
+    let fixture = fixture("merged base");
+    fixture.unsigned_commit("feature change", "Feature change");
+    fs::write(fixture.backend.join("upstream.txt"), "upstream change\n").unwrap();
+    git(&fixture.backend, ["add", "upstream.txt"]);
+    git(&fixture.backend, ["commit", "-m", "Upstream change"]);
+    let upstream = git(&fixture.backend, ["rev-parse", "HEAD"])
+        .trim()
+        .to_string();
+    git(&fixture.worktree, ["merge", "--no-edit", "main"]);
+    let before = git(&fixture.worktree, ["rev-parse", "HEAD"]);
+    fixture.configure_signing();
+
+    let error = knit_fails(&fixture.worktree, ["sign", "--no-push"]);
+    assert!(error.contains("merge commit"), "{error}");
+
+    // The branch is untouched: the merge and the upstream commit it brought
+    // in are still there under their own SHAs.
+    assert_eq!(git(&fixture.worktree, ["rev-parse", "HEAD"]), before);
+    git(
+        &fixture.worktree,
+        ["merge-base", "--is-ancestor", &upstream, "HEAD"],
+    );
+
+    fs::remove_dir_all(fixture.root).unwrap();
+}

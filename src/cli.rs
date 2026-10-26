@@ -572,7 +572,7 @@ pub enum Commands {
     /// Bare `knit sync` records git commits made outside Knit into the bundle
     /// ledger (a local-only reconcile). The `push`/`pull` subcommands are the one
     /// way to move bundle, history, and view artifacts to and from the sync remotes.
-    /// `knit push` moves git branches (and the artifact only when push-sync is on).
+    /// `knit push` moves git branches and syncs the artifact too (`--no-remote` skips it).
     Sync {
         #[command(subcommand)]
         command: Option<SyncCommand>,
