@@ -86,6 +86,7 @@ fn bundle_worktree_agents_section(active: &ActiveBundle, bundle_root: &Path) -> 
         .join("\n");
     let runtime_section = worktree_runtime_section(active);
     let checks_section = worktree_checks_section(active);
+    let sync_section = sync_guidance(&active.root);
     let teamwork_section = agent_teamwork_section("## Agent Teamwork");
 
     format!(
@@ -127,7 +128,8 @@ Knit uses Git history to find commits for the path, then expands matching Knit h
 
 - `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
 - `knit rebase [--squash] [--offline]` replays work onto upstream bases; use `--continue` after resolving conflicts or `--abort` to restore original heads.
-
+- `knit sign` re-signs the bundle's commits in place with this repo's git signing config (`commit.gpgsign`, `user.signingkey`), keeps every commit group 1:1, then force-pushes with lease and syncs the hosted copy (`--no-push` stays local).
+{sync_section}
 {runtime_section}{checks_section}For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.
 
 Tracked checkouts for this bundle:
@@ -139,6 +141,7 @@ Do not edit the original source checkout for feature work unless the bundle was 
 "#,
         bundle = active.bundle.id,
         bundle_root = bundle_root_display,
+        sync_section = sync_section,
         teamwork_section = teamwork_section,
         runtime_section = runtime_section,
         checks_section = checks_section,
@@ -263,6 +266,46 @@ fn ensure_trailing_newline(mut text: String) -> String {
         text.push('\n');
     }
     text
+}
+
+/// What `knit push` moves, written from the workspace's own configuration.
+///
+/// The two verbs are easy to confuse and the confusion is expensive: a bundle
+/// whose reviews link to a hosted page can have its branches pushed while the
+/// hosted copy stays behind. `knit push` closes that gap itself — it syncs the
+/// artifact and history after the branch pushes, always — so the guidance
+/// names the remotes that receive it and what `--no-remote` skips.
+pub(crate) fn sync_guidance(root: &Path) -> String {
+    let Ok(config) = crate::store::load_effective_config(root) else {
+        return String::new();
+    };
+    let remotes = crate::commands::remote::configured_sync_remote_names(&config);
+    if remotes.is_empty() {
+        return String::new();
+    }
+    let names = remotes
+        .iter()
+        .map(|name| format!("`{name}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let behaviour = if config.push_sync {
+        format!("Push-sync is on here, so Knit's other automatic syncs (landing, archive) also update {names} on their own.")
+    } else {
+        format!("Push-sync is off here, so only `knit push` and explicit `knit sync push` update {names}; Knit's other automatic syncs (landing, archive) stay local.")
+    };
+    format!(
+        r#"
+## Pushing vs Syncing
+
+`knit push` moves both planes in one command: the feature branches to git
+`origin`, then the bundle artifact and project history to the sync remotes
+({names}) so the hosted bundle page never trails the branches. `knit push
+--no-remote` is the explicit skip that pushes branches only. `knit sync push`
+remains the artifact-only door when you want to move the ledger without
+touching git. {behaviour}
+
+"#
+    )
 }
 
 fn worktree_runtime_section(active: &ActiveBundle) -> String {

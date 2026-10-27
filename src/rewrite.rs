@@ -15,6 +15,11 @@ use std::process::{Command, Stdio};
 pub enum RewriteKind {
     Squash,
     Rebase,
+    /// A same-base rebase that only added signatures (`knit sign`). Its own
+    /// kind so `knit log` shows a re-sign rather than a rebase, while the
+    /// ledger machinery maps commits and carries groups exactly as a rebase
+    /// does.
+    Resign,
     Observed,
 }
 
@@ -182,7 +187,7 @@ pub fn record_rewrite(
         .flat_map(|g| &g.commits)
         .map(|c| (c.repo_id.clone(), c.sha.clone()))
         .collect();
-    if kind == RewriteKind::Rebase {
+    if matches!(kind, RewriteKind::Rebase | RewriteKind::Resign) {
         let commits: Vec<_> = changes
             .iter()
             .flat_map(|c| {
@@ -219,6 +224,7 @@ pub fn record_rewrite(
         kind: match kind {
             RewriteKind::Squash => "squash",
             RewriteKind::Rebase => "rebase",
+            RewriteKind::Resign => "resign",
             RewriteKind::Observed => "observed",
         }
         .into(),
@@ -308,7 +314,7 @@ fn map_commits(
             }
         }
     }
-    if kind == RewriteKind::Rebase && old.len() == new.len() {
+    if matches!(kind, RewriteKind::Rebase | RewriteKind::Resign) && old.len() == new.len() {
         let unmatched_old: Vec<_> = old
             .iter()
             .filter(|sha| !result.contains_key(*sha))

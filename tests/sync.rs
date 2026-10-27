@@ -565,6 +565,101 @@ fn push_skips_missing_implicit_sync_remote_after_git_branch_push() {
 }
 
 #[test]
+fn push_syncs_the_hosted_copy_even_when_push_sync_is_off() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    let fake_dir = root.join("fake-remote");
+    let base_url = spawn_fake_remote_push_api(&fake_dir);
+    knit(&workspace, ["remote", "add", "hosted", &base_url]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    knit(&workspace, ["bundle", "hosted copy", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/hosted-copy/backend");
+    append_line(&feature.join("app.txt"), "work after the hosted push");
+    knit(
+        &workspace,
+        ["commit", "--all", "-m", "Work after the hosted push"],
+    );
+
+    // The workspace opted out of sync-on-push. `knit push` must not leave the
+    // hosted copy — the page every review links to — silently stale because
+    // of it: the same command moves the branches and the artifact.
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["pushSync"] = serde_json::json!(false);
+    fs::write(
+        &config_path,
+        format!("{}\n", serde_json::to_string_pretty(&config).unwrap()),
+    )
+    .unwrap();
+
+    let push = knit_with_env(&workspace, ["push", "backend"], &env);
+    assert!(push.contains("pushed"), "{push}");
+    assert!(push.contains("syncing hosted-copy to hosted"), "{push}");
+    assert!(push.contains("push-sync is off"), "{push}");
+
+    // The hosted copy followed the branches.
+    let states = fs::read_to_string(fake_dir.join("artifact-hosted-copy.states")).unwrap();
+    assert_eq!(states.lines().last(), Some("open"), "{states}");
+
+    // `--no-remote` is the explicit opt-out: branches only, nothing hosted.
+    append_line(&feature.join("app.txt"), "second round");
+    knit(&workspace, ["commit", "--all", "-m", "Second round"]);
+    let quiet = knit_with_env(&workspace, ["push", "backend", "--no-remote"], &env);
+    assert!(quiet.contains("pushed"), "{quiet}");
+    assert!(!quiet.contains("syncing"), "{quiet}");
+    assert!(!quiet.contains("push-sync is off"), "{quiet}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn push_without_a_sync_remote_is_a_git_push_only() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "local only", "--repo", "backend"]);
+    let feature = workspace.join(".knit/worktrees/local-only/backend");
+    append_line(&feature.join("app.txt"), "purely local work");
+    knit(&workspace, ["commit", "--all", "-m", "Purely local work"]);
+
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&config_path).unwrap()).unwrap();
+    config["pushSync"] = serde_json::json!(false);
+    fs::write(
+        &config_path,
+        format!("{}\n", serde_json::to_string_pretty(&config).unwrap()),
+    )
+    .unwrap();
+
+    // No sync remote is configured, so there is nothing to sync and no note
+    // about one.
+    let push = knit(&workspace, ["push", "backend"]);
+    assert!(push.contains("pushed"), "{push}");
+    assert!(!push.contains("syncing"), "{push}");
+    assert!(!push.contains("push-sync is off"), "{push}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 #[cfg(unix)]
 fn push_sends_selected_feature_branches_in_parallel() {
     let root = unique_temp_dir();
@@ -1720,6 +1815,23 @@ fn sync_push_bundles_sweeps_open_and_archived_artifacts() {
         ),
         "archived bundle sweep must not push branches"
     );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_push_counts_the_resolved_bundle_in_its_artifact_total() {
+    // One bundle resolves, so the rich per-bundle push covers it and the
+    // project-wide sweep has nothing left. The total must not contradict the
+    // "pushed <bundle>" line above it.
+    let (root, workspace, _fake_dir) = force_push_scaffold(&["only bundle"]);
+    let env = [("KNIT_REMOTE_TOKEN", "test-token")];
+
+    let output = knit_with_env(&workspace, ["sync", "push", "--bundles"], &env);
+    assert!(output.contains("pushed"), "{output}");
+    assert!(output.contains("only-bundle"), "{output}");
+    assert!(output.contains("pushed 1 bundle artifact(s)"), "{output}");
+    assert!(!output.contains("pushed 0 bundle artifact(s)"), "{output}");
 
     fs::remove_dir_all(root).unwrap();
 }
