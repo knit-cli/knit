@@ -68,10 +68,34 @@ pub fn run(cli: Cli) -> Result<()> {
                 workspace,
                 force,
                 json,
-            } => commands::handoff::handoff_in(&project, &slug, workspace.as_deref(), force, json),
+                forks,
+            } => {
+                install_checkout_forks(forks);
+                commands::handoff::handoff_in(&project, &slug, workspace.as_deref(), force, json)
+            }
             cli::HandoffCommand::Status { json } => commands::handoff::handoff_status(json),
         },
-        Commands::Init { name, agents } => commands::init_project(&name, agents),
+        Commands::Fork {
+            repo_ids,
+            owner,
+            dry_run,
+            json,
+            force,
+        } => commands::fork::fork_repos(&repo_ids, owner.as_deref(), dry_run, json, force),
+        Commands::Init {
+            name,
+            repos,
+            agents,
+            fork,
+            no_fork,
+            owner,
+        } => commands::project::init_project_with_repos(
+            &name,
+            &repos,
+            agents,
+            commands::fork::ForkMode::from_flags(fork, no_fork),
+            owner.as_deref(),
+        ),
         Commands::Agents { project } => commands::refresh_agents(project.as_deref()),
         Commands::Project { command } => match command {
             ProjectCommand::Auth { project, repos } => {
@@ -83,7 +107,22 @@ pub fn run(cli: Cli) -> Result<()> {
                 base,
                 observe,
                 agents,
-            } => commands::add_project_repo(&repo_id, &repo_path, base.as_deref(), observe, agents),
+                fork,
+                no_fork,
+                owner,
+            } => commands::project::add_project_repo_with_mode(
+                &repo_id,
+                &repo_path,
+                base.as_deref(),
+                observe,
+                agents,
+                (fork
+                    || no_fork
+                    || (commands::project::is_clone_url(&repo_path.to_string_lossy())
+                        && !repo_path.exists()))
+                .then(|| commands::fork::ForkMode::from_flags(fork, no_fork)),
+                owner.as_deref(),
+            ),
             ProjectCommand::SetBase {
                 repo_id,
                 branch,
@@ -250,22 +289,26 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             credentials,
             json,
-        } => commands::clone_project_from_remote(
-            &project,
-            target.as_deref(),
-            remote.as_deref(),
-            url.as_deref(),
-            token.as_deref(),
-            active_bundle.as_deref(),
-            !no_worktree,
-            prefer_https,
-            commands::CloneScopeRequest {
-                view: view.as_deref(),
-                repos: &repos,
-            },
-            &credentials,
-            json,
-        ),
+            forks,
+        } => {
+            install_checkout_forks(forks);
+            commands::clone_project_from_remote(
+                &project,
+                target.as_deref(),
+                remote.as_deref(),
+                url.as_deref(),
+                token.as_deref(),
+                active_bundle.as_deref(),
+                !no_worktree,
+                prefer_https,
+                commands::CloneScopeRequest {
+                    view: view.as_deref(),
+                    repos: &repos,
+                },
+                &credentials,
+                json,
+            )
+        }
         Commands::Add {
             repos,
             intent_to_add,
@@ -311,7 +354,10 @@ pub fn run(cli: Cli) -> Result<()> {
                 },
             },
             Some(BundleCommand::Worktree) => commands::create_worktrees(),
-            Some(BundleCommand::Pull { slug, json }) => commands::pull_bundle_by_slug(&slug, json),
+            Some(BundleCommand::Pull { slug, json, forks }) => {
+                install_checkout_forks(forks);
+                commands::pull_bundle_by_slug(&slug, json)
+            }
             Some(BundleCommand::Add {
                 repos,
                 base,
@@ -444,20 +490,24 @@ pub fn run(cli: Cli) -> Result<()> {
             remote,
             no_remote,
             merge,
-        } => commands::pull(
-            &repos,
-            all,
-            rebase,
-            force,
-            feature,
-            main,
-            base,
-            current,
-            bundles,
-            remote.as_deref(),
-            no_remote,
-            merge,
-        ),
+            forks,
+        } => {
+            install_checkout_forks(forks);
+            commands::pull(
+                &repos,
+                all,
+                rebase,
+                force,
+                feature,
+                main,
+                base,
+                current,
+                bundles,
+                remote.as_deref(),
+                no_remote,
+                merge,
+            )
+        }
         Commands::Push {
             allow_foreign_author,
             repos,
@@ -1020,7 +1070,9 @@ pub fn run(cli: Cli) -> Result<()> {
                 remote,
                 artifacts_only: _,
                 repos,
+                forks,
             }) => {
+                install_checkout_forks(forks);
                 let targets = commands::remote::SyncTargets::resolve(
                     targets.bundles,
                     targets.history,
@@ -1148,4 +1200,11 @@ fn effective_publish_provider(provider: Option<String>, github: bool) -> Option<
     } else {
         provider
     }
+}
+
+fn install_checkout_forks(forks: cli::CheckoutForkArgs) {
+    commands::fork::set_checkout_forks(
+        commands::fork::ForkMode::from_flags(forks.fork, forks.no_fork),
+        forks.owner,
+    );
 }

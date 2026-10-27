@@ -281,9 +281,24 @@ Knit infers each repo's base from Git's remote-default metadata when available, 
 
 See [reference.md](reference.md) for the complete behavior of every command and subsystem.
 
-For an existing GitHub fork, configure ordinary Git remotes and run
-`knit publish create <repo-id> --source-remote origin --target-remote upstream`.
-Knit pushes the fork and opens the review on upstream; it does not create the
-fork. A split origin push URL is detected automatically. See
-[the contribution publishing reference](reference.md) for portable artifacts and
-credential configuration.
+## Contribute to an upstream project
+
+```sh
+mkdir ~/oss && cd ~/oss
+knit init oss upstream-org/library upstream-org/website
+knit bundle "Describe the change"
+# Edit files in the bundle worktrees, then commit.
+knit commit --all -m "Describe the change"
+knit push --set-upstream          # branches to upstream or your forks, no PRs
+knit publish create               # PRs on upstream, when you decide
+```
+
+Knit asks GitHub whether you can push to each repository. Repositories you can
+push to are not forked. For the others, Knit creates or reuses your fork, keeping
+origin fetching from upstream and pushing to the fork. If permissions cannot be
+determined, sign in with `knit auth` or choose `--fork` or `--no-fork`.
+Add another repository with `knit project add library <url>`. For repositories
+already in the project, run `knit fork [repo-id...]`; `--dry-run` shows what it
+would do. The project itself keeps only upstream URLs, so anyone who later
+clones it with `knit clone` gets the same check for their own checkouts. See
+[the reference](reference.md#create-contribution-forks).

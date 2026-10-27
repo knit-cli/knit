@@ -20,6 +20,7 @@ use anyhow::{bail, Context, Result};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 use serde_json::Value;
+use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -219,7 +220,32 @@ pub(super) fn fetch_project_export(
         }
         None => format!("/projects/{slug}/export?artifacts=none&history=false"),
     };
-    request_json_with_optional_token(remote, token, "GET", &path, None)
+    let mut export: RemoteProjectExport =
+        request_json_with_optional_token(remote, token, "GET", &path, None)?;
+    drop_records_contradicting_membership(&mut export);
+    Ok(export)
+}
+
+/// A bundle pushed from a fork checkout leaves the fork in the server's
+/// repository inventory under the member's id. Membership names the
+/// repository everyone clones, so a record that shares a member's id but not
+/// its remote is that fork, never a second copy of the member.
+fn drop_records_contradicting_membership(export: &mut RemoteProjectExport) {
+    let Some(membership) = export.knit_project.as_ref() else {
+        return;
+    };
+    let remotes: BTreeMap<&str, &str> = membership
+        .repos
+        .iter()
+        .filter_map(|entry| Some((entry.id.as_str(), entry.remote.as_deref()?)))
+        .collect();
+    export.repositories.retain(|record| {
+        let local_id = super::clone::export_repo_local_id(record);
+        match (remotes.get(local_id.as_str()), record.remote_url.as_deref()) {
+            (Some(member), Some(url)) => super::handoff::same_repository_url(member, url),
+            _ => true,
+        }
+    });
 }
 
 /// Fetch one bundle's current artifact by remote bundle id, returning the

@@ -487,7 +487,7 @@ fn bundle_recorded_tip(bundle: &ChangeGroup, repo: &RepoEntry, tip: &str) -> boo
         })
 }
 
-fn sanitized_push_url(remote: &str) -> String {
+pub(crate) fn sanitized_push_url(remote: &str) -> String {
     if let Ok(mut url) = url::Url::parse(remote) {
         if url.has_host() {
             let _ = url.set_username("");

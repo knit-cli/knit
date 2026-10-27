@@ -48,11 +48,12 @@ User-global Knit config lives outside the workspace at `$KNIT_HOME/config.json`,
 ## Commands
 
 ```sh
-knit clone https://<host>/<owner>/<project> [target] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--json]
-knit clone <owner>/<project> [target] [--remote <name>] [--url <url>] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--json]
-knit init <name> [--agents]
+knit clone https://<host>/<owner>/<project> [target] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--fork | --no-fork] [--owner <org>] [--json]
+knit clone <owner>/<project> [target] [--remote <name>] [--url <url>] [--token <token>] [--active-bundle <bundle>] [--view <name>|--repo <id>...] [--no-worktree] [--fork | --no-fork] [--owner <org>] [--json]
+knit init <name> [<repo>...] [--fork | --no-fork] [--owner <org>] [--agents]
 knit agents [project]                         # refresh workspace + project AGENTS.md sections
-knit project add <repo-id> <repo-path> [--base <branch>] [--observe] [--agents]
+knit project add <repo-id> <path-or-url> [--base <branch>] [--observe] [--agents] [--fork | --no-fork] [--owner <org>]
+knit fork [<repo-id>...] [--owner <org>] [--force] [--dry-run] [--json]
 knit project set-base <repo-id> <branch> [--project <name>]
 knit project set-draft <repo-id> [true|false] [--project <name>]
 knit project push [name] [--remote <name>] [--prune]
@@ -92,7 +93,7 @@ knit bundle "<title>" [--project <name>] [--repo <repo-id>]... [--all-repos] [--
 knit bundle add <repo-path-or-project-repo-id>... [--base <branch>] [--offline|--from-local-base] [--in-place] [--no-worktree]
 knit bundle remove <repo-id>... [--keep-worktree|--delete-branch] [--force]
 knit bundle worktree
-knit bundle pull <slug> [--json]
+knit bundle pull <slug> [--fork | --no-fork] [--owner <org>] [--json]
 knit bundle apply-view <name> [--keep-worktree|--delete-branch] [--force]
 knit bundle list [--all] [--archived] [--deleted] [--json]
 knit bundle archive <bundle> [--reason <reason>] [--keep-worktrees] [--force]
@@ -112,7 +113,7 @@ knit status [--json]
 knit workspace status
 knit diff [--published] [--stat] [repo-id-or-path...]
 knit fetch [--mode all|git|knit] [--remote <name>] [repo-id-or-path...]
-knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [--remote <name>] [--no-remote] [--merge] [repo-id-or-path...]
+knit pull [--base] [--current] [--bundles] [--all] [--rebase] [--force] [--feature] [--remote <name>] [--no-remote] [--merge] [--fork | --no-fork] [--owner <org>] [repo-id-or-path...]
 knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [--no-history] [repo-id-or-path...]
 knit sync [--repair-groups [--apply]]
 knit run <project-command> [--repo <repo>]... [--all]
@@ -162,7 +163,7 @@ knit doctor
 knit migrate [--check]
 knit sync                                      # record git commits made outside Knit (local reconcile)
 knit sync push [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--remote <name>]...
-knit sync pull [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--repos] [--remote <name>]...
+knit sync pull [--bundles] [--history] [--views] [--architecture] [--kg] [--all] [--repos] [--fork | --no-fork] [--owner <org>] [--remote <name>]...
 knit history [list] [-n <count>] [--repo <repo>] [--bundle <bundle>] [--kind <kind>]... [--project <project>]
 knit history refresh [--rebuild] [--project <project>]
 knit related [--repo <repo>] [--project <project>] [--pull] [--remote <name>] [--limit <count>] [--commit-limit <count>] <path>...
@@ -958,6 +959,83 @@ Commits Knit creates (`commit` and `squash`) use the Git-config identity. Inject
 
 When the configured sync remote reports a canonical web URL for the bundle, the managed section starts with `## Knit Bundle`, followed immediately by a generic `[View bundle](URL)` link. This section moves to the top of the PR description, ahead of any author prose. The CLI never derives that URL itself: it records the server-reported value under `syncTargets[].webUrl` (retained across pushes to a server that stops reporting it, dropped when the hosted identity changes) and omits the link entirely when no usable URL is known. Authors' text outside the managed block is preserved until its body file changes; repeated syncs replace the link cleanly without duplicates.
 
+### Create contribution forks
+
+```sh
+knit init contributions upstream-org/library web=https://github.com/upstream-org/website.git
+knit project add tools https://github.com/upstream-org/tools
+knit project add website https://github.com/upstream-org/website --fork --owner contributor-org --observe
+knit fork library                  # an already registered source checkout
+knit fork --dry-run                # preview every project repository
+knit fork --json                   # machine-readable per-repository results
+```
+
+`knit init <name> [<repo>...]` creates a project and clones its repositories into
+the workspace. Each reference is `owner/name` (expanded to
+`https://github.com/owner/name.git`), a clone URL, or `id=<owner/name or URL>`.
+Without `id=`, the repository name becomes its ID; IDs are slugified just like
+other project repository IDs. All references and duplicate IDs are checked
+before creating anything. Clones run in parallel, then repositories are added
+and their permissions checked in argument order. A failure does not stop the
+remaining repositories; the command exits nonzero. Without repository arguments,
+`knit init <name>` creates the same empty project as before.
+
+`knit project add <repo-id> <path-or-url>` accepts a local checkout or a remote
+URL. A URL is cloned into `<workspace-root>/<repo-id>` with `--filter=blob:none`;
+an existing directory there is reused only when it is a clone of the same
+repository. `init` uses the same clone behavior.
+
+Both commands accept these contribution modes:
+
+- Automatic (the default for URL inputs): Knit asks GitHub whether you can push
+  to the upstream repository. If you can, it keeps the direct clone and prints
+  `<id>: direct (you can push)`. Otherwise it creates or reuses your fork and
+  prints `<id>: via fork <owner>/<name>`.
+- `--fork`: create or reuse a fork even when you can push upstream.
+- `--no-fork`: keep the direct clone without making forge API calls. Local paths
+  passed to `project add` use this mode by default; `--fork` also works on them.
+
+`--fork` and `--no-fork` conflict. `--owner <org>` selects the fork owner in
+automatic or forced fork mode and cannot be combined with `--no-fork`.
+Automatic permission checks currently support `github.com` only. If credentials
+or permission information are unavailable, or the forge is unsupported, that
+repository fails with guidance to sign in using `knit auth` or pass `--fork` or
+`--no-fork`. Its clone remains registered in the project.
+
+`knit fork` works on the active project's source checkouts, every repository
+when no IDs are given. It creates your GitHub fork, or reuses the one you
+already have (renamed forks included), waits until GitHub has created it, and
+checks that its parent is the upstream repository. It then sets origin's push
+URL to the fork, over the same transport (HTTPS or SSH) as origin's fetch URL.
+The fetch URL stays upstream, so bases and updates keep coming from upstream,
+while `knit push` and `knit publish create` send branches to the fork and open
+reviews upstream. Linked bundle worktrees share this configuration.
+
+Forks are public, so Knit names the owner before creating the first one.
+`--owner <org>` forks into an organization. An existing push URL for the same
+fork is kept; a different one is replaced only with `--force`, and only when
+it is set in the repository's own Git config. Several push URLs are refused.
+`--dry-run` reads from GitHub but creates nothing and changes no Git config.
+A repository that fails does not stop the others; the exit status is then
+nonzero. Fork creation supports `github.com` only for now. Knit never pushes
+branches or opens pull requests as part of forking.
+
+The project records only upstream URLs; a fork lives in one person's checkout
+as origin's push URL. So the same choice is made again whenever Knit clones a
+project repository for you: `knit clone`, `knit sync pull --repos`, `knit pull`,
+`knit bundle pull`, and `knit handoff in`. Each accepts `--fork`, `--no-fork`,
+and `--owner <org>` with the meanings above. Automatic mode forks a fresh
+GitHub checkout you cannot push to and prints `<id>: via fork <owner>/<name>`.
+When Knit cannot tell, the clone still succeeds and Knit says so, naming
+`knit fork <id>` for the case where you cannot push. Checkouts that already
+exist are never changed, and other forges keep pushing upstream.
+`knit clone --json` reports the outcome per repository as
+`"push": "direct" | "fork" | "unknown"`, with `"fork"` naming the fork.
+
+Because nothing in the project points at a fork, a project a contributor set up
+can be handed over as it is: the new owner's members clone it and push
+directly, while the contributor's checkouts keep pushing to their forks.
+
 For an existing GitHub fork, select the Git remotes for one repository:
 
 ```sh
@@ -968,7 +1046,7 @@ The source uses the remote's push URL; the target uses its fetch URL. A split
 `origin` push URL, `branch.<branch>.pushRemote`, or `remote.pushDefault` is also
 discovered automatically against origin's fetch URL. Knit records portable
 `sourceRemote`/`targetRemote` URLs and reuses them on subsequent commands; it
-neither creates forks nor rewrites remotes. `--source-remote` and
+never rewrites origin's fetch URL; `knit fork` sets only its push URL. `--source-remote` and
 `--target-remote` require one selected repository and are unavailable in artifact
 mode, where the URLs must already be recorded. `--remote` still selects hosted
 bundle sync destinations, and `--target` still selects a base **branch**.

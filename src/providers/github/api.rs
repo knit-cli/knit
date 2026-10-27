@@ -133,11 +133,7 @@ pub(crate) fn preflight_contribution(target: &PrTarget, verify_head: bool) -> Re
     {
         bail!("GitHub repository identity differs from recorded contribution");
     }
-    if !(id.source.eq_ignore_ascii_case(&id.target)
-        || source["fork"] == true
-            && source["parent"]["id"].as_u64().is_some()
-            && source["parent"]["id"] == target_repo["id"])
-    {
+    if !(id.source.eq_ignore_ascii_case(&id.target) || is_direct_fork(&source, &target_repo)) {
         bail!("sourceRemote is not a verified direct fork of targetRemote");
     }
     let base = encode_query_component(&id.base);
@@ -739,6 +735,134 @@ fn encode_path(input: &str, allow_slash: bool) -> String {
         }
     }
     encoded
+}
+
+fn is_direct_fork(source: &serde_json::Value, upstream: &serde_json::Value) -> bool {
+    source["fork"] == true
+        && source["parent"]["id"].as_u64().is_some()
+        && source["parent"]["id"] == upstream["id"]
+}
+
+pub(super) fn can_push(target: &PrTarget) -> Result<Option<bool>> {
+    let name = target
+        .repo_full_name
+        .as_deref()
+        .context("missing repository")?;
+    let output = github_api_output(target, "GET", &format!("repos/{name}"), None)?;
+    let repo: serde_json::Value =
+        serde_json::from_str(&output).context("failed to parse GitHub repository JSON")?;
+    Ok(repo["permissions"]["push"].as_bool())
+}
+
+pub(super) fn ensure_fork(
+    target: &PrTarget,
+    owner: Option<&str>,
+    dry_run: bool,
+) -> Result<crate::providers::ForkRepository> {
+    let upstream_name = target
+        .repo_full_name
+        .as_deref()
+        .context("missing upstream repository")?;
+    let get = |endpoint: &str| -> Result<serde_json::Value> {
+        Ok(serde_json::from_str(&github_api_output(
+            target, "GET", endpoint, None,
+        )?)?)
+    };
+    let upstream = get(&format!("repos/{upstream_name}"))?;
+    let explicit_owner = owner.is_some();
+    let owner = match owner {
+        Some(owner) => owner.to_owned(),
+        None => get("user")?["login"]
+            .as_str()
+            .context("GitHub user has no login")?
+            .to_owned(),
+    };
+    let name = upstream["name"]
+        .as_str()
+        .context("GitHub repository has no name")?;
+    let expected = format!("{owner}/{name}");
+    match get(&format!("repos/{expected}")) {
+        Ok(repo) if is_direct_fork(&repo, &upstream) => {
+            return fork_repository(&repo, &owner, &upstream, true)
+        }
+        Ok(_) => {}
+        Err(error) if is_not_found(&error) => {}
+        Err(error) => return Err(error),
+    }
+    if dry_run {
+        return Ok(crate::providers::ForkRepository {
+            clone_url: format!("https://github.com/{expected}.git"),
+            ssh_url: format!("git@github.com:{expected}.git"),
+            full_name: expected,
+            existed: false,
+        });
+    }
+    let payload = match explicit_owner {
+        true => json!({ "organization": owner }),
+        false => json!({}),
+    };
+    // Returns the caller's existing fork, even a renamed one, instead of a second copy.
+    let created: serde_json::Value = serde_json::from_str(&github_api_output(
+        target,
+        "POST",
+        &format!("repos/{upstream_name}/forks"),
+        Some(&payload.to_string()),
+    )?)?;
+    let full_name = created["full_name"]
+        .as_str()
+        .context("GitHub fork response has no full_name")?;
+    let interval = std::time::Duration::from_millis(
+        std::env::var("KNIT_FORK_POLL_INTERVAL_MS")
+            .ok()
+            .and_then(|value| value.parse().ok())
+            .unwrap_or(1000),
+    );
+    for _ in 0..60 {
+        match get(&format!("repos/{full_name}")) {
+            Ok(repo) => return fork_repository(&repo, &owner, &upstream, false),
+            Err(error) if is_not_found(&error) => std::thread::sleep(interval),
+            Err(error) => return Err(error),
+        }
+    }
+    bail!("timed out waiting for GitHub to create {full_name}")
+}
+
+fn fork_repository(
+    repo: &serde_json::Value,
+    owner: &str,
+    upstream: &serde_json::Value,
+    existed: bool,
+) -> Result<crate::providers::ForkRepository> {
+    let full_name = repo["full_name"]
+        .as_str()
+        .context("fork has no full_name")?;
+    let upstream_name = upstream["full_name"].as_str().unwrap_or_default();
+    if !full_name
+        .split_once('/')
+        .is_some_and(|(login, _)| login.eq_ignore_ascii_case(owner))
+        || !is_direct_fork(repo, upstream)
+    {
+        bail!("{full_name} is not a direct fork of {upstream_name} owned by {owner}");
+    }
+    Ok(crate::providers::ForkRepository {
+        full_name: full_name.into(),
+        clone_url: repo["clone_url"]
+            .as_str()
+            .context("fork has no clone_url")?
+            .into(),
+        ssh_url: repo["ssh_url"]
+            .as_str()
+            .context("fork has no ssh_url")?
+            .into(),
+        existed,
+    })
+}
+
+fn is_not_found(error: &anyhow::Error) -> bool {
+    error
+        .downcast_ref::<crate::retry::HttpFailure>()
+        .is_some_and(|failure| failure.status == 404)
+        || format!("{error:#}").contains("HTTP 404")
 }
 
 #[cfg(test)]
