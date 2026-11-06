@@ -264,9 +264,12 @@ fn rewrite_summary(node: &BundleNode, nodes: &[BundleNode]) -> Option<String> {
             nodes[index + 1..]
                 .iter()
                 .take_while(|candidate| candidate.node_type == "commit.group")
+                // A successor group may also keep commits from repositories
+                // this rewrite left alone; one rewritten member makes it a
+                // replacement.
                 .filter(|candidate| {
                     !candidate.commits.is_empty()
-                        && candidate.commits.iter().all(|commit| {
+                        && candidate.commits.iter().any(|commit| {
                             node.repo_changes.iter().any(|rewritten| {
                                 rewritten.repo_id == commit.repo_id
                                     && rewritten.commit_details.contains_key(&commit.sha)

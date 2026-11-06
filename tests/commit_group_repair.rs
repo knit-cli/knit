@@ -136,6 +136,112 @@ fn a_content_identical_rewrite_keeps_its_commit_groups() {
 }
 
 #[test]
+fn rewriting_one_repository_keeps_cross_repository_groups_whole() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _c) = init_remote_repo(&root, "backend");
+    let (_remote, frontend, _c) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "shared work"]);
+    let checkouts = workspace.join(".knit/worktrees/shared-work");
+    for message in ["First change", "Second change"] {
+        for repo in ["backend", "frontend"] {
+            append_line(&checkouts.join(repo).join("app.txt"), message);
+        }
+        knit(&workspace, ["commit", "--all", "-m", message]);
+    }
+    let bundle_path = workspace.join(".knit/bundles/shared-work.bundle.json");
+    let bundle =
+        || -> Value { serde_json::from_str(&fs::read_to_string(&bundle_path).unwrap()).unwrap() };
+    let frontend_shas = |bundle: &Value| -> Vec<String> {
+        bundle["commitGroups"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .flat_map(|g| g["commits"].as_array().unwrap().clone())
+            .filter(|c| c["repoId"] == "frontend")
+            .map(|c| c["sha"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let frontend_before = frontend_shas(&bundle());
+    let backend_base = bundle()["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["id"] == "backend")
+        .unwrap()["baseSha"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    let backend_checkout = checkouts.join("backend");
+    rewrite_headers_in_place(&backend_checkout, &backend_base);
+    let output = knit(&workspace, ["sync"]);
+    assert!(output.contains("(+2 -2"), "{output}");
+
+    // Still one group per change, each spanning both repositories: the
+    // rewritten backend SHAs and the untouched frontend ones.
+    let after = bundle();
+    let groups = after["commitGroups"].as_array().unwrap();
+    assert_eq!(groups.len(), 2, "{groups:?}");
+    let backend_log = git(&backend_checkout, ["log", "--format=%H", "-2", "--reverse"]);
+    let backend_heads: Vec<&str> = backend_log.lines().collect();
+    for (index, message) in ["First change", "Second change"].iter().enumerate() {
+        let group = &groups[index];
+        assert_eq!(group["message"], *message);
+        let mut repos: Vec<&str> = group["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["repoId"].as_str().unwrap())
+            .collect();
+        repos.sort();
+        assert_eq!(repos, ["backend", "frontend"], "{group}");
+        let backend_sha = group["commits"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["repoId"] == "backend")
+            .unwrap()["sha"]
+            .as_str()
+            .unwrap();
+        assert_eq!(backend_sha, backend_heads[index].trim());
+    }
+    assert_eq!(frontend_shas(&after), frontend_before);
+
+    // Selecting the successor group reaches both repositories.
+    let group_id = groups[1]["id"].as_str().unwrap();
+    let node = after["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|n| n["commitGroupId"] == group_id)
+        .unwrap();
+    assert_eq!(node["commits"].as_array().unwrap().len(), 2, "{node}");
+
+    // The log names both successor groups as the rewrite's replacements.
+    let log = knit(&workspace, ["log"]);
+    let first_id = groups[0]["id"].as_str().unwrap();
+    let summary = log
+        .lines()
+        .find(|line| line.contains("rewrote (observed)"))
+        .unwrap_or_else(|| panic!("{log}"));
+    assert!(summary.contains(first_id), "{summary}");
+    assert!(summary.contains(group_id), "{summary}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn an_amended_commit_still_retires_its_group() {
     let fixture = two_group_bundle("amended work");
     // Changing the content is not a header-only rewrite, so the old group
