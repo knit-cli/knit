@@ -122,7 +122,10 @@ fn run_with_output(
         command.process_group(0);
     }
     let stdout_to_stderr = crate::output::human_lines_to_stderr();
-    let mut child = command
+    if managed {
+        super::ownership::spawning()?;
+    }
+    let spawned = command
         .stdin(if attached {
             Stdio::inherit()
         } else {
@@ -141,7 +144,13 @@ fn run_with_output(
             Stdio::piped()
         })
         .spawn()
-        .context("failed to spawn command")?;
+        .context("failed to spawn command");
+    if managed {
+        // A failed write leaves the record mid-spawn, which only keeps a
+        // crash's locks held.
+        let _ = super::ownership::spawned(spawned.as_ref().ok().map(Child::id));
+    }
+    let mut child = spawned?;
     #[cfg(unix)]
     let _foreground = if attached {
         match ForegroundTerminal::attach(child.id()) {
@@ -215,6 +224,7 @@ fn run_with_output(
         unsafe {
             libc::kill(group, libc::SIGKILL);
         }
+        let _ = super::ownership::quiesced(child.id());
     }
 
     // Always drain and join both readers, including after a wait failure, so a

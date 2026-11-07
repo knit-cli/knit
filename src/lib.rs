@@ -655,6 +655,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::land::v2::show(&plan, target.as_deref(), lane.as_deref())
                 }
                 Some(LandCommand::Destinations { json }) => commands::land::v2::destinations(json),
+                Some(LandCommand::Unlock { confirm_quiescent }) => {
+                    commands::land::v2::unlock(confirm_quiescent)
+                }
                 Some(LandCommand::Remove { steps, plan }) => commands::land::v2::remove(
                     plan.as_deref(),
                     &steps,

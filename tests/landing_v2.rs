@@ -1568,3 +1568,96 @@ fn landing_record_native_merge_disabled_plan_finalizes_valid_bundle() {
         .unwrap()
         .is_valid(&resumed));
 }
+
+#[cfg(unix)]
+fn read_only_crash_fixture() -> Fixture {
+    let f = Fixture::new();
+    let mut project = read(&f.project);
+    // The first run kills Knit mid-step, the way a closed terminal or a
+    // SIGKILL does; the resumed run finds the marker and passes.
+    let marker = f.root.join("crashed-once");
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[
+        {"id":"observe","type":"run","repoId":"service","effect":"read_only","env":{"MARKER":marker},"command":[python_executable(),"-c",
+            "import os,pathlib,signal\nm=pathlib.Path(os.environ['MARKER'])\nif not m.exists():\n m.write_text('x')\n os.kill(os.getppid(),signal.SIGKILL)"]}
+    ]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    f
+}
+
+#[cfg(unix)]
+fn lock_files(f: &Fixture) -> Vec<PathBuf> {
+    fs::read_dir(f.root.join("home/landing-ownership"))
+        .map(|entries| {
+            entries
+                .flatten()
+                .map(|e| e.path())
+                .filter(|p| p.extension().is_some_and(|e| e == "lock"))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+#[test]
+#[cfg(unix)]
+fn a_killed_landing_leaves_locks_that_resume_takes_over_once_its_steps_are_gone() {
+    let f = read_only_crash_fixture();
+    let killed = f.cmd(&["land", "apply", "--keep-worktrees", "--no-remote"]);
+    assert!(!killed.status.success());
+    assert!(!lock_files(&f).is_empty(), "the killed run left no locks");
+
+    let resumed = f.cmd(&["land", "resume", "--keep-worktrees", "--no-remote"]);
+    let output = format!(
+        "{}{}",
+        String::from_utf8_lossy(&resumed.stdout),
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert!(resumed.status.success(), "{output}");
+    assert!(output.contains("Took over the landing lock"), "{output}");
+
+    // Nothing of the dead owner is left behind: no locks, no owner records.
+    let names: Vec<String> = fs::read_dir(f.root.join("home/landing-ownership"))
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert!(
+        names.iter().all(|name| name.ends_with(".generation.json")),
+        "{names:?}"
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn unlock_releases_unverifiable_locks_only_when_confirmed_and_never_a_running_one() {
+    let f = Fixture::new();
+    let dir = f.root.join("home/landing-ownership");
+    fs::create_dir_all(&dir).unwrap();
+    let mut exited = Command::new("true").spawn().unwrap();
+    let dead = exited.id();
+    exited.wait().unwrap();
+    // A lock as earlier releases wrote it: a bare PID, nothing about steps.
+    fs::write(dir.join("earlier.lock"), format!("{dead}\n")).unwrap();
+    fs::write(
+        dir.join("running.lock"),
+        json!({"pid": std::process::id(), "key": "project:running", "owner": "owner-x.json"})
+            .to_string(),
+    )
+    .unwrap();
+
+    let listed = f.cmd(&["land", "unlock"]);
+    let stdout = String::from_utf8_lossy(&listed.stdout).to_string();
+    assert!(listed.status.success(), "{stdout}");
+    assert!(dir.join("earlier.lock").exists());
+    assert!(stdout.contains("--confirm-quiescent"), "{stdout}");
+    assert!(stdout.contains("project:running"), "{stdout}");
+
+    let confirmed = f.cmd(&["land", "unlock", "--confirm-quiescent"]);
+    assert!(confirmed.status.success());
+    assert!(!dir.join("earlier.lock").exists());
+    assert!(dir.join("running.lock").exists());
+}

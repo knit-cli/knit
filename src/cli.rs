@@ -1751,6 +1751,18 @@ pub enum LandCommand {
         #[arg(long)]
         apply: bool,
     },
+    /// Release local landing locks left by a landing process that exited.
+    ///
+    /// A lock is released without asking when its owner exited and no step
+    /// process it started is still running. Locks Knit cannot verify, such as
+    /// those taken by earlier releases, need --confirm-quiescent. Locks of a
+    /// running process are never released.
+    Unlock {
+        /// Also release locks whose owner exited but whose step processes
+        /// cannot be verified, after checking nothing it started still runs.
+        #[arg(long)]
+        confirm_quiescent: bool,
+    },
     /// Resume a failed or incomplete landing run.
     Resume {
         /// Confirm a landing gate. Repeat for multiple gates.
