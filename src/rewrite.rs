@@ -126,24 +126,26 @@ pub fn record_rewrite(
             continue;
         }
         superseded.push(group.clone());
-        if !untouched.is_empty() {
-            let mut remainder = group.clone();
-            remainder.commits = untouched;
-            retained.push(remainder);
-        }
+        // A group spans repositories. When only some of them were rewritten
+        // and every rewritten commit has a successor, the successor group
+        // keeps the untouched repositories' commits too, so the change stays
+        // one group instead of splitting into same-named halves.
         if kind != RewriteKind::Squash {
-            let mapped: Option<Vec<_>> = affected
+            let whole: Option<Vec<_>> = group
+                .commits
                 .iter()
                 .map(|c| {
-                    mapping
-                        .get(&(c.repo_id.clone(), c.sha.clone()))
-                        .map(|sha| CommitRef {
-                            repo_id: c.repo_id.clone(),
-                            sha: sha.clone(),
-                        })
+                    let key = (c.repo_id.clone(), c.sha.clone());
+                    if !replaced.contains(&key) {
+                        return Some(c.clone());
+                    }
+                    mapping.get(&key).map(|sha| CommitRef {
+                        repo_id: c.repo_id.clone(),
+                        sha: sha.clone(),
+                    })
                 })
                 .collect();
-            if let Some(commits) = mapped {
+            if let Some(commits) = whole {
                 created.push(CommitGroup {
                     id: commit_group_id(),
                     message: group.message.clone(),
@@ -151,7 +153,13 @@ pub fn record_rewrite(
                     commits,
                     author: group.author.clone(),
                 });
+                continue;
             }
+        }
+        if !untouched.is_empty() {
+            let mut remainder = group.clone();
+            remainder.commits = untouched;
+            retained.push(remainder);
         }
     }
     if kind == RewriteKind::Squash {
@@ -684,9 +692,11 @@ mod tests {
         let extra = commit(dir.path(), "extra", "extra");
         let reported = crate::tracking::sync_observed_changes(&mut active).unwrap();
         assert_eq!(reported.len(), 1);
-        assert_eq!(reported[0].commits, vec![extra.clone()]);
+        assert_eq!(reported[0].commits.len(), 3);
+        assert_eq!(reported[0].commits.last(), Some(&extra));
+        assert!(!reported[0].commits.contains(&upstream));
         assert!(!reported[0].commit_details.contains_key(&upstream));
-        assert!(crate::tracking::sync_note(&reported[0]).contains("(+1 -2"));
+        assert!(crate::tracking::sync_note(&reported[0]).contains("(+3 -2"));
         assert_eq!(active.bundle.repos[0].base_sha.as_ref(), Some(&upstream));
         assert_eq!(active.bundle.commit_groups.len(), 2);
         let observed = active

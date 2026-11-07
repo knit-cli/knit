@@ -203,11 +203,50 @@ pub fn sync_observed_changes_for_repo_ids(
     }
     let first_new_node = active.bundle.nodes.len();
     record_rewrite(active, &rewrites, RewriteKind::Observed, None)?;
-    let rewritten_changes: Vec<_> = active.bundle.nodes[first_new_node..]
+    let new_nodes = &active.bundle.nodes[first_new_node..];
+    let mut rewritten_changes: Vec<RepoChange> = new_nodes
         .iter()
         .filter(|node| node.node_type == "git.observed")
         .flat_map(|node| node.repo_changes.iter().cloned())
         .collect();
+    // The observation node leaves out commits that went straight into a
+    // successor group. The report still counts them: they are new commits on
+    // the branch, and leaving them out read "+0 -2" for a re-dated history.
+    for change in &mut rewritten_changes {
+        for group_change in new_nodes
+            .iter()
+            .filter(|node| node.node_type == "commit.group")
+            .flat_map(|node| &node.repo_changes)
+            .filter(|c| c.repo_id == change.repo_id)
+        {
+            for sha in &group_change.commits {
+                if !change.commits.contains(sha) {
+                    change.commits.push(sha.clone());
+                }
+            }
+            for (sha, detail) in &group_change.commit_details {
+                change
+                    .commit_details
+                    .entry(sha.clone())
+                    .or_insert_with(|| detail.clone());
+            }
+        }
+        if let Some(rewrite) = rewrites.iter().find(|r| r.repo_id == change.repo_id) {
+            let repo = active
+                .bundle
+                .repos
+                .iter()
+                .find(|r| r.id == change.repo_id)
+                .unwrap();
+            if let Some(path) = repo_worktree_dir(active, repo) {
+                if let Ok(order) = rev_list(&path, &rewrite.new_base, &rewrite.new_head) {
+                    change
+                        .commits
+                        .sort_by_key(|sha| order.iter().position(|o| o == sha));
+                }
+            }
+        }
+    }
     let ordinary: Vec<_> = changes
         .iter()
         .filter(|c| !rewrites.iter().any(|r| r.repo_id == c.repo_id))
