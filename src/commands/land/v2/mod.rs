@@ -28,7 +28,7 @@ pub use generate::generate;
 #[cfg(test)]
 pub(crate) use graph::bundle_fingerprint;
 pub(crate) use graph::{bundle_fingerprint_is_stale, canonical_hash, validation};
-pub use runtime::{apply, apply_with_checks, recover};
+pub use runtime::{apply, apply_with_checks, recover, unlock};
 pub(super) use runtime::{immutable_plan_path, local_apply};
 use serde_json::Value;
 use std::path::Path;

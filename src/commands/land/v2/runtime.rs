@@ -1,3 +1,4 @@
+use super::super::ownership::{Holder, Owner};
 use super::graph::{canonical_hash, compile, effect, recovery, strings, validation};
 use crate::store::read_json;
 use crate::time::now_iso;
@@ -55,11 +56,27 @@ fn owned_error(path: &Path) -> String {
     )
 }
 
+fn held_error(path: &Path, holder: &Holder) -> String {
+    match holder {
+        Holder::Running { pid } => format!(
+            "landing resource is owned by running process {pid}; wait for it to finish ({})",
+            path.display()
+        ),
+        Holder::Unverified { pid, reason } => format!(
+            "landing resource is owned by {}, which exited, but Knit cannot verify that nothing it started is still running: {reason}. Once you have checked, release its locks with `knit land unlock --confirm-quiescent` ({})",
+            pid.map_or_else(|| "a process".to_string(), |pid| format!("process {pid}")),
+            path.display()
+        ),
+        Holder::Exited { .. } => owned_error(path),
+    }
+}
+
 /// Ownership locks intentionally survive a crash. A dead parent does not prove
-/// its external effects or children quiesced. Operators reconcile before removal.
+/// its external effects or children quiesced, so a lock is only taken over
+/// when its owner record shows that every step process group is gone too.
 struct Lock(PathBuf);
 impl Lock {
-    fn acquire(key: &str) -> Result<Self> {
+    fn acquire(key: &str, owner: &Owner) -> Result<Self> {
         let name = format!("{}.lock", canonical_hash(&json!(key)));
         let legacy = legacy_ownership_dir().join(&name);
         if legacy.exists() {
@@ -68,12 +85,28 @@ impl Lock {
         let dir = ownership_dir()?;
         fs::create_dir_all(&dir)?;
         let path = dir.join(name);
-        let mut f = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-            .with_context(|| owned_error(&path))?;
-        writeln!(f, "{}", std::process::id())?;
+        let contents = json!({"pid": std::process::id(), "key": key, "owner": owner.file_name()});
+        let mut f = match create_lock(&path) {
+            Ok(file) => file,
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+                let assessed = fs::read(&path).unwrap_or_default();
+                let holder = super::super::ownership::assess(&path);
+                let Holder::Exited { pid } = holder else {
+                    bail!(held_error(&path, &holder));
+                };
+                // Another landing may have taken the stale lock over since.
+                if fs::read(&path).unwrap_or_default() != assessed {
+                    bail!(owned_error(&path));
+                }
+                fs::remove_file(&path).with_context(|| owned_error(&path))?;
+                crate::human!(
+                    "Took over the landing lock for {key}: process {pid} exited and no step it started is still running."
+                );
+                create_lock(&path).with_context(|| owned_error(&path))?
+            }
+            Err(error) => return Err(error).with_context(|| owned_error(&path)),
+        };
+        writeln!(f, "{contents}")?;
         f.sync_all()?;
         Ok(Self(path))
     }
@@ -82,6 +115,96 @@ impl Drop for Lock {
     fn drop(&mut self) {
         let _ = fs::remove_file(&self.0);
     }
+}
+
+fn create_lock(path: &Path) -> std::io::Result<fs::File> {
+    OpenOptions::new().write(true).create_new(true).open(path)
+}
+
+/// Locks for one landing and the owner record they name. Fields drop in
+/// order, so the locks are released before their owner record disappears.
+struct Ownership {
+    _locks: Vec<Lock>,
+    _owner: Owner,
+}
+
+/// List the local landing locks and release the ones whose owner exited.
+/// Verified locks go without asking; a lock Knit cannot verify goes only when
+/// the operator confirms nothing its owner started is still running. A lock
+/// held by a running process is never touched.
+pub fn unlock(confirm_quiescent: bool) -> Result<()> {
+    let dir = ownership_dir()?;
+    let mut locks: Vec<PathBuf> = [dir.clone(), legacy_ownership_dir()]
+        .iter()
+        .filter_map(|dir| fs::read_dir(dir).ok())
+        .flatten()
+        .flatten()
+        .map(|entry| entry.path())
+        .filter(|path| path.extension().is_some_and(|ext| ext == "lock"))
+        .collect();
+    locks.sort();
+    if locks.is_empty() {
+        println!("No landing locks are held.");
+        return Ok(());
+    }
+    println!("Landing locks in {}:", dir.display());
+    let (mut released, mut kept) = (0usize, 0usize);
+    for path in &locks {
+        let key = fs::read_to_string(path)
+            .ok()
+            .and_then(|text| serde_json::from_str::<Value>(text.trim()).ok())
+            .and_then(|value| value["key"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| {
+                path.file_name()
+                    .map(|name| name.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            });
+        let holder = super::super::ownership::assess(path);
+        let release = match &holder {
+            Holder::Running { pid } => {
+                println!("held      {key}: process {pid} is running");
+                false
+            }
+            Holder::Exited { pid } => {
+                println!("released  {key}: process {pid} exited and no step it started is running");
+                true
+            }
+            Holder::Unverified { pid, reason } if confirm_quiescent && pid.is_some() => {
+                println!(
+                    "released  {key}: process {} exited; {reason} (confirmed quiescent)",
+                    pid.unwrap_or_default()
+                );
+                true
+            }
+            Holder::Unverified { pid, reason } => {
+                let owner =
+                    pid.map_or_else(|| "its owner".to_string(), |pid| format!("process {pid}"));
+                println!("unverified {key}: {owner} exited; {reason}");
+                false
+            }
+        };
+        if release {
+            fs::remove_file(path)
+                .with_context(|| format!("failed to remove {}", path.display()))?;
+            released += 1;
+        } else {
+            kept += 1;
+        }
+    }
+    super::super::ownership::sweep_owner_records(&dir);
+    println!("Released {released} lock(s); {kept} still held.");
+    if !confirm_quiescent
+        && locks.iter().any(|path| {
+            path.exists()
+                && matches!(
+                    super::super::ownership::assess(path),
+                    Holder::Unverified { pid: Some(_), .. }
+                )
+        })
+    {
+        println!("Once you have checked that nothing those processes started is still running, run `knit land unlock --confirm-quiescent`.");
+    }
+    Ok(())
 }
 
 pub(super) fn durable(path: &Path, value: &Value) -> Result<()> {
@@ -2507,7 +2630,7 @@ fn compensation(plan: &Value, bundle: &Value, roots: &Roots, journal: &Journal) 
     Ok(())
 }
 
-fn lock_resources(plan: &Value, roots: &Roots) -> Result<Vec<Lock>> {
+fn lock_resources(plan: &Value, roots: &Roots) -> Result<Ownership> {
     // Aliased lanes and target branches can deploy the same service. Until a
     // recipe proves disjoint resources, ownership is conservatively project-wide.
     let mut keys = BTreeSet::from([format!(
@@ -2522,7 +2645,17 @@ fn lock_resources(plan: &Value, roots: &Roots) -> Result<Vec<Lock>> {
             keys.insert(format!("resource:{l}"));
         }
     }
-    keys.iter().map(|k| Lock::acquire(k)).collect()
+    let dir = ownership_dir()?;
+    let owner = Owner::begin(&dir)?;
+    let locks = keys
+        .iter()
+        .map(|k| Lock::acquire(k, &owner))
+        .collect::<Result<Vec<_>>>()?;
+    super::super::ownership::sweep_owner_records(&dir);
+    Ok(Ownership {
+        _locks: locks,
+        _owner: owner,
+    })
 }
 fn new_run(plan: &Value, plan_path: &Path, bundle: &Value) -> Value {
     json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":unique_id("land-run"),"planId":plan["id"],"bundleId":plan["bundleId"],"provider":plan["provider"],"planPath":absolute(plan_path).unwrap_or_else(|_|plan_path.into()),"planHash":canonical_hash(plan),"plan":plan,"sourceBundle":bundle,"status":"pending","createdAt":now_iso(),"updatedAt":now_iso(),"serviceStatus":"unchanged","sourceStatus":"unchanged","finalization":{},"steps":plan["steps"].as_array().unwrap().iter().map(|s|json!({"id":s["id"],"type":s["type"],"repoId":s["repoId"],"status":"pending"})).collect::<Vec<_>>()})
