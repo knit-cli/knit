@@ -565,7 +565,7 @@ fn warn_dangling_view_repo(project: &KnitProject, view_name: &str, repo_id: &str
 
 fn write_agents_md(root: &Path) -> Result<std::path::PathBuf> {
     let path = root.join("AGENTS.md");
-    let section = agents_section();
+    let section = agents_section(root);
     let next = if path.exists() {
         let existing = fs::read_to_string(&path)
             .with_context(|| format!("failed to read existing {}", path.display()))?;
@@ -610,7 +610,7 @@ pub fn refresh_agents(project: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn agents_section() -> String {
+fn agents_section(root: &Path) -> String {
     format!(
         r#"<!-- BEGIN KNIT AGENTS -->
 ## Knit Workspace Guide
@@ -642,9 +642,10 @@ knit log --all [--repo <repo>]        # history of past bundles and their per-re
 - Plain `git` works inside any worktree checkout for inspection (log, diff, status).
 - Land through `knit land`; do not merge Knit-owned reviews with `gh pr merge` or by hand.
 - Refresh this guide with `knit agents`. For anything else, use `knit <command> --help`.
-
+{sync_section}
 {agent_teamwork_section}<!-- END KNIT AGENTS -->
 "#,
+        sync_section = crate::commands::agents::sync_guidance(root),
         agent_teamwork_section = agent_teamwork_section("## Agent Teamwork")
     )
 }

@@ -705,6 +705,9 @@ pub fn run(cli: Cli) -> Result<()> {
                     commands::land::v2::show(&plan, target.as_deref(), lane.as_deref())
                 }
                 Some(LandCommand::Destinations { json }) => commands::land::v2::destinations(json),
+                Some(LandCommand::Unlock { confirm_quiescent }) => {
+                    commands::land::v2::unlock(confirm_quiescent)
+                }
                 Some(LandCommand::Remove { steps, plan }) => commands::land::v2::remove(
                     plan.as_deref(),
                     &steps,
@@ -1026,7 +1029,15 @@ pub fn run(cli: Cli) -> Result<()> {
             repos,
             dry_run,
         } => commands::cherrypick_from_bundle(&from_bundle, &targets, &repos, dry_run),
-        Commands::Sync { command } => match command {
+        Commands::Sync {
+            command,
+            repair_groups,
+            apply,
+        } => match command {
+            Some(_) if repair_groups => anyhow::bail!(
+                "--repair-groups is part of the local reconcile; run `knit sync --repair-groups` without a subcommand."
+            ),
+            None if repair_groups => commands::sync::repair_commit_groups(apply),
             None => commands::sync_bundle(),
             Some(SyncCommand::Push {
                 targets,
@@ -1126,6 +1137,12 @@ pub fn run(cli: Cli) -> Result<()> {
             remote.as_deref(),
         ),
         Commands::Commit { message, all } => commands::commit_staged(&message, all),
+        Commands::Sign {
+            repos,
+            all,
+            force,
+            no_push,
+        } => commands::sign::sign_bundle_commits(&repos, all, force, no_push),
         Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
         Commands::Rebase {
             squash,

@@ -18,6 +18,7 @@ mod display;
 mod execute;
 pub(crate) mod git_progress;
 pub(crate) mod lanes;
+mod ownership;
 mod plan;
 mod process;
 mod revert_order;

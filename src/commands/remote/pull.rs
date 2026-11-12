@@ -11,6 +11,7 @@ use super::client::{
 use super::clone::{
     apply_membership_base_branches, clone_export_repositories, export_repo_forge_missing,
     export_repo_local_id, materialize_imported_bundle, project_repo_entry_from_export,
+    FORGE_MISSING_REASON,
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
@@ -118,6 +119,10 @@ pub struct RemotePullContext {
     /// bundles on parallel threads, and bounded server memory — one payload
     /// built at a time — is the entire point of the incremental fetch.
     fetch_gate: Mutex<()>,
+    /// Serializes per-bundle landing plan syncs. Each takes the workspace
+    /// `landing-sync` file lock, which refuses a second holder outright, even
+    /// a sibling thread of this same pull.
+    plans_gate: Mutex<()>,
 }
 
 impl RemotePullContext {
@@ -129,6 +134,19 @@ impl RemotePullContext {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         resolve_export_bundle_payload(&self.remote, self.token.as_deref(), entry)
+    }
+
+    fn pull_bundle_plans(&self, bundle_id: &str) -> Result<()> {
+        let _gate = self
+            .plans_gate
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        super::landing::pull_plans_scoped(
+            Some(&self.project.id),
+            &self.remote_name,
+            false,
+            Some(bundle_id),
+        )
     }
 }
 
@@ -225,6 +243,7 @@ pub fn prepare_remote_pull(
                     remote,
                     token: Some(token),
                     fetch_gate: Mutex::new(()),
+                    plans_gate: Mutex::new(()),
                 }));
             }
             Err(error) => {
@@ -466,11 +485,7 @@ fn reconcile_project_repositories(
         let local_id = export_repo_local_id(&repository);
         let is_retry = retry_ids.contains(&local_id);
         if export_repo_forge_missing(&repository) {
-            failed.push((
-                local_id,
-                "repository does not exist on its forge (the sync remote marked it missing)"
-                    .to_string(),
-            ));
+            failed.push((local_id, FORGE_MISSING_REASON.to_string()));
             continue;
         }
         let Some(url) = repository
@@ -1139,12 +1154,10 @@ fn save_skipped_artifacts(root: &Path, skipped: &SkippedArtifacts) -> Result<()>
 
 /// Repo ids `bundle` references that the local project does not carry.
 fn repos_missing_locally(root: &Path, bundle: &ChangeGroup, project: &KnitProject) -> Vec<String> {
-    let available: BTreeSet<&str> = project
+    let mut available = project.clone();
+    available
         .repos
-        .iter()
-        .filter(|repo| crate::git::is_git_worktree(&root.join(&repo.path)))
-        .map(|repo| repo.id.as_str())
-        .collect();
+        .retain(|repo| crate::git::is_git_worktree(&root.join(&repo.path)));
     super::clone::missing_bundle_repos(bundle, &available)
 }
 
@@ -1197,12 +1210,7 @@ pub fn pull_bundle_remote_state(
             "no remote artifact".to_string(),
         ));
     };
-    super::landing::pull_plans_scoped(
-        Some(&context.project.id),
-        &context.remote_name,
-        false,
-        Some(bundle_id),
-    )?;
+    context.pull_bundle_plans(bundle_id)?;
     // The export only carries artifact metadata. When its hash is the one this
     // artifact was last reconciled with, the remote holds nothing new and the
     // payload is never downloaded — only the checkouts are refreshed.
@@ -1928,6 +1936,7 @@ fn fetch_bundles_with_options(
         let (mut bundle, artifact_hash) =
             resolve_export_bundle_payload(&remote, Some(&token), &remote_bundle)
                 .with_context(|| format!("failed to fetch bundle `{}`", remote_bundle.slug))?;
+        super::client::adopt_remote_lifecycle(&mut bundle, &remote_bundle.lifecycle_state);
         let branch_mapping = bundle_branch_mapping(&bundle);
 
         // A bundle touching repos this workspace does not carry (a scoped
