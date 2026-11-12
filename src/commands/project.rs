@@ -13,7 +13,7 @@ use crate::store::{
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
 
