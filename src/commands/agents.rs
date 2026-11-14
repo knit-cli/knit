@@ -127,7 +127,7 @@ Knit uses Git history to find commits for the path, then expands matching Knit h
 ## Useful Commands
 
 - `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
-- `knit rebase [--squash] [--offline]` replays work onto upstream bases; use `--continue` after resolving conflicts or `--abort` to restore original heads.
+- `knit rebase [repos...] [--squash] [--offline]` replays work onto each recorded review's base (else the configured base; upstream for forks); use `--continue` after resolving conflicts or `--abort` to restore original heads.
 - `knit sign` re-signs the bundle's commits in place with this repo's git signing config (`commit.gpgsign`, `user.signingkey`), keeps every commit group 1:1, then force-pushes with lease and syncs the hosted copy (`--no-push` stays local).
 {sync_section}
 {runtime_section}{checks_section}For repo-local file reads, edits, tests, and git commands, make the specific repo checkout the actual cwd/workdir.

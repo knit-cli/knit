@@ -10,6 +10,7 @@ use crate::model::{BundleNode, Movement, RepoChange};
 use crate::output as out;
 use crate::providers::{self, publication_for_repo};
 use crate::repo_selectors::resolve_repo_indexes;
+use crate::review_base::{self, ReviewBase};
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
 use anyhow::{bail, Context, Result};
@@ -144,10 +145,9 @@ struct LandUpdateTarget {
     repo_id: String,
     cwd: PathBuf,
     feature_branch: String,
-    base_branch: String,
+    base: ReviewBase,
     publication_url: String,
     source_remote: String,
-    target_remote: String,
     recorded_head: String,
 }
 
@@ -176,33 +176,27 @@ fn update_target(active: &ActiveBundle, repo_index: usize) -> Result<LandUpdateT
     })?;
 
     let source_remote = crate::contribution::push_remote(&cwd, repo)?;
-    let target_remote = if crate::contribution::configured(repo) {
+    let base =
+        review_base::recorded(&active.bundle, repo)?.context("missing recorded review base")?;
+    if let Some(repository) = base.review_outside_origin(&cwd) {
+        bail!(base.outside_origin_error(&active.bundle.id, repo, &repository));
+    }
+    if crate::contribution::configured(repo) {
         let forge = providers::for_repo(repo)?;
-        let mut target = crate::contribution::target(
-            &cwd,
-            repo,
-            forge.as_ref(),
-            &publication.base_branch,
-            false,
-        )?;
+        let mut target =
+            crate::contribution::target(&cwd, repo, forge.as_ref(), &base.branch, false)?;
         // The local recorded head may already include an unpushed base update.
         // Verify repository/ref identity now; the refreshed post-push read pins SHA.
         target.verify_head = false;
         forge.view(&target, &publication.url)?;
-        crate::contribution::destination(repo)
-            .context("missing targetRemote")?
-            .to_owned()
-    } else {
-        "origin".into()
-    };
+    }
     Ok(LandUpdateTarget {
         source_remote,
-        target_remote,
+        base,
         repo_index,
         repo_id: repo.id.clone(),
         cwd,
         feature_branch,
-        base_branch: publication.base_branch.clone(),
         publication_url: publication.url.clone(),
         recorded_head,
     })
@@ -263,21 +257,15 @@ fn merge_base_into_feature(
     active: &mut ActiveBundle,
     target: &LandUpdateTarget,
 ) -> Result<Option<RepoChange>> {
-    git_output(
-        &target.cwd,
-        [
-            OsString::from("fetch"),
-            OsString::from(&target.target_remote),
-            OsString::from(&target.base_branch),
-        ],
-    )
-    .with_context(|| {
+    let repo = &active.bundle.repos[target.repo_index];
+    let reference = target.base.fetch(&target.cwd, repo).with_context(|| {
         format!(
-            "{}: failed to fetch origin/{}",
-            target.repo_id, target.base_branch
+            "{}: failed to fetch {}",
+            target.repo_id,
+            target.base.label()
         )
     })?;
-    let base_sha = rev_parse(&target.cwd, "FETCH_HEAD")
+    let base_sha = rev_parse(&target.cwd, &reference)
         .with_context(|| format!("{}: failed to read fetched base head", target.repo_id))?;
     let before = rev_parse(&target.cwd, "HEAD")
         .with_context(|| format!("{}: failed to read feature head", target.repo_id))?;
@@ -419,7 +407,7 @@ fn refresh_update_publications(
             &target.cwd,
             &repo,
             forge.as_ref(),
-            &target.base_branch,
+            &target.base.branch,
             false,
         )?;
         let pr = forge
