@@ -7,7 +7,7 @@ use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBund
 use crate::time::now_iso;
 use crate::tracking::{sync_note, sync_observed_changes};
 use anyhow::Result;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
 pub fn sync_bundle() -> Result<()> {
@@ -140,7 +140,22 @@ pub fn repair_commit_groups(apply: bool) -> Result<()> {
     let mut seen = std::collections::BTreeSet::new();
     restorable.retain(|candidate| seen.insert(candidate.group.id.clone()));
 
-    if restorable.is_empty() {
+    // Commits a group records must not also be listed by the observation
+    // that once superseded it, or history shows each of them twice. Earlier
+    // repairs left such doubles behind; this one cleans them up as well.
+    let grouped: BTreeSet<(String, String)> = present
+        .iter()
+        .cloned()
+        .chain(restorable.iter().flat_map(|candidate| {
+            candidate
+                .mapped
+                .iter()
+                .map(|commit| (commit.repo_id.clone(), commit.sha.clone()))
+        }))
+        .collect();
+    let doubled = observed_also_grouped(&active, &grouped);
+
+    if restorable.is_empty() && doubled == 0 {
         for line in &refused {
             println!("{} {line}", out::warn("Not restorable:"));
         }
@@ -169,6 +184,12 @@ pub fn repair_commit_groups(apply: bool) -> Result<()> {
     }
     for line in &refused {
         println!("{} {line}", out::warn("Not restorable:"));
+    }
+    if doubled > 0 {
+        println!(
+            "{} {doubled} commit(s) a Git observation also lists; keep them only in their group",
+            out::heading("Record once:")
+        );
     }
     if !apply {
         println!(
@@ -205,6 +226,16 @@ pub fn repair_commit_groups(apply: bool) -> Result<()> {
         );
         active.bundle.commit_groups.push(group);
     }
+    for node in &mut active.bundle.nodes {
+        if !is_observed_rewrite(node) {
+            continue;
+        }
+        for change in &mut node.repo_changes {
+            change
+                .commits
+                .retain(|sha| !grouped.contains(&(change.repo_id.clone(), sha.clone())));
+        }
+    }
     // Groups read in the order they were recorded, so the ledger stays in
     // chronological order after the restore.
     active
@@ -219,6 +250,31 @@ pub fn repair_commit_groups(apply: bool) -> Result<()> {
         out::heading("Next:")
     );
     Ok(())
+}
+
+fn is_observed_rewrite(node: &BundleNode) -> bool {
+    node.node_type == "git.observed"
+        && node
+            .rewrite
+            .as_ref()
+            .is_some_and(|rewrite| rewrite.kind == "observed")
+}
+
+fn observed_also_grouped(active: &ActiveBundle, grouped: &BTreeSet<(String, String)>) -> usize {
+    active
+        .bundle
+        .nodes
+        .iter()
+        .filter(|node| is_observed_rewrite(node))
+        .flat_map(|node| &node.repo_changes)
+        .flat_map(|change| {
+            change
+                .commits
+                .iter()
+                .map(move |sha| (change.repo_id.clone(), sha.clone()))
+        })
+        .filter(|commit| grouped.contains(commit))
+        .count()
 }
 
 /// Map every commit of a superseded group onto the current commit that
