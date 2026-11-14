@@ -130,6 +130,39 @@ struct RemoteProjectExport {
 }
 
 impl RemoteProjectExport {
+    /// A hosted project can hold several repository records that clone to the
+    /// same local id, such as a contributor's fork and its upstream. A local
+    /// id names one checkout, so keep one record per id: the one whose remote
+    /// the shared membership records for that id, else the first listed.
+    fn keep_one_record_per_local_id(&mut self) {
+        let membership_remote = |id: &str| {
+            self.knit_project
+                .as_ref()
+                .and_then(|project| project.repos.iter().find(|repo| repo.id == id))
+                .and_then(|repo| repo.remote.as_deref())
+        };
+        let mut kept: Vec<(String, RemoteExportRepository)> = Vec::new();
+        for record in std::mem::take(&mut self.repositories) {
+            let local_id = clone::export_repo_local_id(&record);
+            let names_member = |candidate: &RemoteExportRepository| match (
+                membership_remote(&local_id),
+                candidate.remote_url.as_deref(),
+            ) {
+                (Some(member), Some(url)) => handoff::same_repository_url(member, url),
+                _ => false,
+            };
+            match kept.iter_mut().find(|(id, _)| *id == local_id) {
+                None => kept.push((local_id, record)),
+                Some((_, existing)) => {
+                    if !names_member(existing) && names_member(&record) {
+                        *existing = record;
+                    }
+                }
+            }
+        }
+        self.repositories = kept.into_iter().map(|(_, record)| record).collect();
+    }
+
     fn decoded_history_events(&self, project_id: &str) -> Vec<HistoryEvent> {
         decode_history_events(&self.history_events, project_id)
     }
@@ -298,8 +331,64 @@ fn has_local_rewrite(local: &crate::model::ChangeGroup) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode_history_events, RemoteViews};
+    use super::{decode_history_events, RemoteProjectExport, RemoteViews};
     use serde_json::json;
+
+    fn export_with(knit_project: serde_json::Value, urls: &[&str]) -> RemoteProjectExport {
+        let repositories: Vec<_> = urls
+            .iter()
+            .map(|url| json!({"localId": "app", "name": "app", "remoteUrl": url, "metadata": {}}))
+            .collect();
+        serde_json::from_value(json!({
+            "project": {"slug": "demo"},
+            "knitProject": knit_project,
+            "repositories": repositories,
+            "bundles": [],
+        }))
+        .unwrap()
+    }
+
+    fn kept_urls(export: &RemoteProjectExport) -> Vec<&str> {
+        export
+            .repositories
+            .iter()
+            .map(|record| record.remote_url.as_deref().unwrap())
+            .collect()
+    }
+
+    #[test]
+    fn export_keeps_the_record_the_membership_names_for_a_repeated_local_id() {
+        let mut export = export_with(
+            json!({
+                "schemaVersion": "0.1", "kind": "KnitProject", "id": "demo",
+                "createdAt": "2026-01-01T00:00:00Z", "updatedAt": "2026-01-01T00:00:00Z",
+                "repos": [{"id": "app", "path": "/x/app", "remote": "git@github.com:org/app.git",
+                           "baseBranch": "main"}],
+            }),
+            &[
+                "https://github.com/contributor/app.git",
+                "https://github.com/org/app.git",
+            ],
+        );
+        export.keep_one_record_per_local_id();
+        assert_eq!(kept_urls(&export), ["https://github.com/org/app.git"]);
+    }
+
+    #[test]
+    fn export_without_membership_keeps_the_first_record_for_a_repeated_local_id() {
+        let mut export = export_with(
+            serde_json::Value::Null,
+            &[
+                "https://github.com/contributor/app.git",
+                "https://github.com/org/app.git",
+            ],
+        );
+        export.keep_one_record_per_local_id();
+        assert_eq!(
+            kept_urls(&export),
+            ["https://github.com/contributor/app.git"]
+        );
+    }
 
     #[test]
     fn remote_views_decode_tolerates_a_server_without_templates() {
