@@ -787,6 +787,10 @@ api_pr_json() {
     mergeable="false"
     mergestate="dirty"
   fi
+  draft="false"
+  if [ "${GH_FAKE_DRAFT:-0}" = "1" ]; then
+    draft="true"
+  fi
   head_oid="$pr_repo-head"
   if [ "$head" = "knit/revert-$pr_repo" ] && [ -f "$GH_FAKE_DIR/revert-head-$pr_repo" ]; then
     head_oid="$(cat "$GH_FAKE_DIR/revert-head-$pr_repo")"
@@ -803,7 +807,7 @@ api_pr_json() {
       merge_sha="\"$(cat "$GH_FAKE_DIR/$merged_marker.sha")\""
     fi
   fi
-  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s","body":"Existing body","draft":false,"head":{"ref":"%s","sha":"%s"},"base":{"ref":"%s"},"merged":%s,"merge_commit_sha":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$title" "$head" "$head_oid" "$base" "$merged" "$merge_sha" "$mergeable" "$mergestate"
+  printf '{"number":%s,"html_url":"https://github.com/acme/%s/pull/%s","state":"%s","title":"%s","body":"Existing body","draft":%s,"head":{"ref":"%s","sha":"%s"},"base":{"ref":"%s"},"merged":%s,"merge_commit_sha":%s,"mergeable":%s,"mergeable_state":"%s"}\n' "$number" "$pr_repo" "$number" "$state" "$title" "$draft" "$head" "$head_oid" "$base" "$merged" "$merge_sha" "$mergeable" "$mergestate"
 }
 
 if [ "$1" = "api" ]; then

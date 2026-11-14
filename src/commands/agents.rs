@@ -126,6 +126,8 @@ Knit uses Git history to find commits for the path, then expands matching Knit h
 
 ## Useful Commands
 
+- `knit publish status --live` asks the host for each review's current state: mergeable, checks, review, and what blocks it. `knit status` works offline and shows only the review state last recorded, with its age; check live before landing.
+- `knit land update [REPOS] --push` merges each review's current base into its feature branch and pushes it, which resolves a review that conflicts with or is behind its base. On a merge conflict, resolve and commit in that checkout, then run `knit land update --continue-merge --push`.
 - `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
 - `knit rebase [--squash] [--offline]` replays work onto upstream bases; use `--continue` after resolving conflicts or `--abort` to restore original heads.
 - `knit sign` re-signs the bundle's commits in place with this repo's git signing config (`commit.gpgsign`, `user.signingkey`), keeps every commit group 1:1, then force-pushes with lease and syncs the hosted copy (`--no-push` stays local).
