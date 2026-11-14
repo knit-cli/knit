@@ -2365,6 +2365,9 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             fake_recipe_request(dir, &method, &payload)?
         }
 
+        ("GET", path) if path == "/api/v1/projects/demo" && dir.join("hosted-project.json").exists() => {
+            (200, fs::read_to_string(dir.join("hosted-project.json"))?)
+        }
         ("GET", path) if path == "/api/v1/projects/demo" && dir.join("landing-artifacts.json").exists() => {
             (200, "{\"data\":{\"id\":\"p-1\",\"slug\":\"demo\"}}".to_string())
         }
@@ -2458,6 +2461,7 @@ fn handle_fake_remote_request(stream: &mut std::net::TcpStream, dir: &Path) -> s
             )
         }
         ("POST", path) if path.starts_with("/api/v1/projects/") && path.ends_with("/repositories") => {
+            writeln!(fs::OpenOptions::new().create(true).append(true).open(dir.join("repository-posts.jsonl"))?, "{body}")?;
             (200, "{\"data\":{\"id\":\"r-1\"}}".to_string())
         }
         _ => (

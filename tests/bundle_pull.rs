@@ -476,3 +476,114 @@ fn review_corrections_first_push_preserves_raw_recipe_identity() {
     assert_eq!(posted["plans"][0]["plan"], plan);
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn ordinary_push_adds_local_repos_the_hosted_project_lacks_and_keeps_its_recipes() {
+    use serde_json::{json, Value};
+    let root = unique_temp_dir();
+    let fake = root.join("fake");
+    let (export, _) = export_with_feature_bundle(&root);
+    let url = spawn_fake_remote_api(&fake, export.to_string());
+    let workspace = cloned_workspace(&root, &url);
+    fs::write(
+        fake.join("landing-artifacts.json"),
+        json!({"data":{"plans":[],"runs":[]}}).to_string(),
+    )
+    .unwrap();
+    knit(&workspace, ["bundle", "pull", "feature-a"]);
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let local: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    assert!(local["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|repo| repo["id"] == "backend"));
+    let web_recipe = json!({"merge":{"enabled":false},"steps":[{"id":"inspect","type":"run","repoId":"backend","command":["git","--version"],"effect":"read_only"}]});
+    let hosted_shape = json!({
+        "schemaVersion": local["schemaVersion"],
+        "kind": "KnitProject",
+        "id": "demo",
+        "repos": [{"id":"docs","path":"","baseBranch":"main"}],
+        "landing": web_recipe,
+    });
+    fs::write(
+        fake.join("hosted-project.json"),
+        json!({"data":{"id":"p-1","slug":"demo","metadata":{"knitProject":hosted_shape}}})
+            .to_string(),
+    )
+    .unwrap();
+    let before = recorded_project_upserts(&fake).len();
+    let (_, stderr, success) = knit_split_output(
+        &workspace,
+        &["--bundle", "feature-a", "push", "--remote", "hosted"],
+        &[],
+    );
+    assert!(success, "{stderr}");
+    let upserts = recorded_project_upserts(&fake);
+    assert_eq!(upserts.len(), before + 1, "{upserts:?}");
+    let shape = &upserts.last().unwrap()["metadata"]["knitProject"];
+    let ids: Vec<&str> = shape["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| repo["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids[0], "docs");
+    assert!(ids.contains(&"backend"), "{ids:?}");
+    assert!(shape["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|repo| repo["path"] == ""));
+    assert_eq!(shape["landing"], web_recipe);
+    let posts = fs::read_to_string(fake.join("repository-posts.jsonl")).unwrap();
+    assert!(posts.contains("\"localId\":\"backend\""), "{posts}");
+    assert!(!posts.contains("\"localId\":\"docs\""), "{posts}");
+
+    // Uploading a landing plan brings the hosted repositories up first: the
+    // remote validates the plan against them.
+    let plan = json!({"kind":"KnitLandPlan","schemaVersion":"0.2","requiredExecutorVersion":"0.3","id":"synthetic","bundleId":"feature-a","lane":"preview","steps":[]});
+    fs::create_dir_all(workspace.join(".knit/land-plans")).unwrap();
+    fs::write(
+        workspace.join(".knit/land-plans/authored.land.json"),
+        plan.to_string(),
+    )
+    .unwrap();
+    let before = recorded_project_upserts(&fake).len();
+    knit(
+        &workspace,
+        [
+            "--bundle",
+            "feature-a",
+            "sync",
+            "push",
+            "--plans",
+            "--remote",
+            "hosted",
+        ],
+    );
+    let upserts = recorded_project_upserts(&fake);
+    assert_eq!(upserts.len(), before + 1, "{upserts:?}");
+    assert_eq!(
+        upserts.last().unwrap()["metadata"]["knitProject"]["landing"],
+        web_recipe
+    );
+    let posted = fs::read_to_string(fake.join("landing-posts.jsonl")).unwrap();
+    assert!(posted.contains("\"synthetic\""), "{posted}");
+
+    // Once the hosted shape lists every local repo, pushes leave it alone.
+    let mut converged = hosted_shape.clone();
+    converged["repos"] = shape["repos"].clone();
+    fs::write(
+        fake.join("hosted-project.json"),
+        json!({"data":{"id":"p-1","slug":"demo","metadata":{"knitProject":converged}}}).to_string(),
+    )
+    .unwrap();
+    let before = recorded_project_upserts(&fake).len();
+    knit(
+        &workspace,
+        ["--bundle", "feature-a", "push", "--remote", "hosted"],
+    );
+    assert_eq!(recorded_project_upserts(&fake).len(), before);
+    fs::remove_dir_all(root).unwrap();
+}

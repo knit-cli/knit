@@ -46,7 +46,7 @@ pub fn remove(
         out::path(path.display())
     );
     // A synced plan only runs once the edited revision is on the sync remotes.
-    crate::commands::remote::landing::sync_finished_run(&active.root, &plan, &[], false).map_err(
+    crate::commands::remote::landing::sync_bundle_landing(&active.root, &plan, &[], false).map_err(
         |error| {
             anyhow::anyhow!(
                 "removed, but the edited plan could not be synced, so it cannot run yet: {error:#}"

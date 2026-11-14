@@ -1207,7 +1207,7 @@ fn upsert_or_fetch_project(
     remote: &KnitRemote,
     token: &str,
     project_id: &str,
-    project: Option<&KnitProject>,
+    local: Option<&KnitProject>,
 ) -> Result<(RemoteProject, ProjectShapePush)> {
     // Existing recipe-capable projects own landing metadata through recipe
     // CAS. An ordinary bundle/history push must not PATCH an older local
@@ -1230,10 +1230,12 @@ fn upsert_or_fetch_project(
             None,
         )?;
         if project.status != 404 {
-            return Ok((decode_response(project)?, ProjectShapePush::ReadOnly));
+            let hosted: Value = decode_response(project)?;
+            add_missing_hosted_repos(root, remote, token, project_id, local, &hosted)?;
+            return Ok((serde_json::from_value(hosted)?, ProjectShapePush::ReadOnly));
         }
     }
-    let project = publishable_project(root, remote, token, project_id, project)?;
+    let project = publishable_project(root, remote, token, project_id, local)?;
     let payload = project_payload_with_raw_landing(root, project_id, project.as_ref())?;
     let path = format!("/projects/{project_id}");
     let response = request(remote, token, "PATCH", &path, Some(&payload))?;
@@ -1248,6 +1250,108 @@ fn upsert_or_fetch_project(
         )),
         _ => Ok((decode_response(response)?, ProjectShapePush::Pushed)),
     }
+}
+
+/// The sync remote validates landing plans against its copy of the project's
+/// repositories, so a repository missing there refuses every plan that names
+/// it. Add the local repositories it lacks. Hosted entries are never removed
+/// or rewritten here: a collaborator's older local project must not undo a
+/// newer shape. `knit project push` remains the way to replace the shape.
+fn add_missing_hosted_repos(
+    root: &Path,
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+    local: Option<&KnitProject>,
+    hosted: &Value,
+) -> Result<()> {
+    let Some(mut shape) = hosted["metadata"]["knitProject"].as_object().cloned() else {
+        return Ok(());
+    };
+    let mut repos = shape
+        .get("repos")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    let missing: Vec<ProjectRepoEntry> = local
+        .map(|local| {
+            local
+                .repos
+                .iter()
+                .filter(|repo| !repos.iter().any(|hosted| hosted["id"] == repo.id.as_str()))
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    let Some(local) = publishable_project(root, remote, token, project_id, local)? else {
+        return Ok(());
+    };
+    let missing: Vec<ProjectRepoEntry> = local
+        .repos
+        .into_iter()
+        .filter(|repo| missing.iter().any(|m| m.id == repo.id))
+        .map(|mut repo| {
+            repo.path = String::new();
+            repo
+        })
+        .collect();
+    for repo in &missing {
+        repos.push(serde_json::to_value(repo)?);
+    }
+    let count = repos.len();
+    shape.insert("repos".into(), Value::Array(repos));
+    let payload = json!({
+        "name": project_id,
+        "slug": project_id,
+        "metadata": {"knitProject": shape, "repoCount": count, "pushedBy": "knit"}
+    });
+    let response = request(
+        remote,
+        token,
+        "PATCH",
+        &format!("/projects/{project_id}"),
+        Some(&payload),
+    )?;
+    if response.status == 403 {
+        return Ok(());
+    }
+    let updated: RemoteProject = decode_response(response)?;
+    push_repositories(remote, token, &updated.slug, &missing)?;
+    crate::human!(
+        "Added {} to the hosted project {project_id}",
+        missing
+            .iter()
+            .map(|repo| repo.id.as_str())
+            .collect::<Vec<_>>()
+            .join(", ")
+    );
+    Ok(())
+}
+
+/// Bring the hosted project's repositories up to the local project before
+/// landing plans that name them are uploaded.
+pub(super) fn add_missing_hosted_repos_for_landing(
+    root: &Path,
+    remote: &KnitRemote,
+    token: &str,
+    project_id: &str,
+) -> Result<()> {
+    let response = request(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project_id}"),
+        None,
+    )?;
+    if response.status == 404 {
+        return Ok(());
+    }
+    let hosted: Value = decode_response(response)?;
+    let local = load_project_if_present(root, project_id)?;
+    add_missing_hosted_repos(root, remote, token, project_id, local.as_ref(), &hosted)
 }
 
 pub(super) fn upsert_project_for_history(

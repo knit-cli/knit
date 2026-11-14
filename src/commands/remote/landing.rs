@@ -790,10 +790,11 @@ pub(super) fn push_plans(project: Option<&str>, remote_name: &str, required: boo
     push_plans_scoped(project, remote_name, required, None)
 }
 
-/// Publish the completed local receipt to the configured sync destinations.
-/// Ownership completion has already recorded its exact hash at the authority,
-/// so that destination is a no-op; other mirrors receive only the final receipt.
-pub(crate) fn sync_finished_run(
+/// Push the bundle's landing plans and receipts to the configured sync
+/// destinations. Before a fresh run this makes the plan known to the authority
+/// so the run claims hosted ownership; after a run, receipts the authority
+/// already accepted with ownership are no-ops and other mirrors catch up.
+pub(crate) fn sync_bundle_landing(
     root: &Path,
     plan: &Value,
     remotes: &[String],
@@ -860,6 +861,9 @@ pub(super) fn push_plans_scoped_at(
     if payload.plans.is_empty() && payload.runs.is_empty() {
         return Ok(());
     }
+    if !payload.plans.is_empty() {
+        super::push::add_missing_hosted_repos_for_landing(root, remote, &token, &project)?;
+    }
     let mut body = serde_json::to_value(&payload)?;
     if let Some(slug) = bundle_slug {
         body["bundleSlug"] = json!(slug);
@@ -870,7 +874,8 @@ pub(super) fn push_plans_scoped_at(
         "POST",
         &format!("/projects/{project}/landing-artifacts"),
         Some(&body),
-    )?;
+    )
+    .map_err(|error| hosted_project_hint(error, &project))?;
     // The server commits the import atomically. Only record ancestry after it
     // accepts; a lost response is safe to retry by immutable content hash.
     for record in &payload.plans {
@@ -994,6 +999,17 @@ pub(super) fn pull_plans_scoped(
         artifacts.runs.len()
     );
     Ok(())
+}
+
+/// The sync remote validates plans against its own copy of the project, so
+/// its advice to add a repository locally misleads when the local project
+/// already has it.
+fn hosted_project_hint(error: anyhow::Error, project: &str) -> anyhow::Error {
+    if format!("{error:#}").contains("unknown project repository") {
+        error.context(format!("the sync remote checks landing plans against its copy of project `{project}`. If the repository is in your local project, a project owner can publish it with `knit project push {project}`"))
+    } else {
+        error
+    }
 }
 
 /// Private handle intentionally has no Debug/Serialize: it contains credentials.
@@ -1122,7 +1138,8 @@ pub(crate) fn claim_for_run(
         "POST",
         &format!("/projects/{}/landing-ownership", index.project),
         Some(&payload),
-    )?;
+    )
+    .map_err(|error| hosted_project_hint(error, &index.project))?;
     let id = text(&lease, "id")?.to_string();
     let token = text(&lease, "token")?.to_string();
     private_save(

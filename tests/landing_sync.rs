@@ -853,7 +853,7 @@ fn legacy_run_without_project_snapshot_uses_compatible_current_project() {
 #[test]
 fn local_finalization_publishes_only_complete_receipts_and_retries_without_execution() {
     let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    // Cover an already-synchronized plan and the first push of an offline plan.
+    // Cover an already-synchronized plan and a plan first pushed by apply.
     for synchronized in [true, false] {
         let server = Server::new();
         // Git for Windows includes the checkout name in its admin path.
@@ -921,10 +921,6 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
                 &workspace,
                 ["sync", "push", "--plans", "--remote", "hosted"],
             );
-        } else {
-            // The hosted project may predate a repo added to this local
-            // project. A plan without its execution snapshots is rejected.
-            server.state.lock().unwrap()["rejectUnsnapshottedPlan"] = json!(true);
         }
         let plan_bytes = fs::read(&plan_path).unwrap();
         let apply = [
@@ -934,6 +930,20 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
             plan_path.to_str().unwrap(),
             "--no-tag",
         ];
+        if !synchronized {
+            // A plan the authority refuses stops the landing before any step.
+            server.state.lock().unwrap()["rejectUnsnapshottedPlan"] = json!(true);
+            let refused = knit_fails(&workspace, apply);
+            assert!(refused.contains("--no-remote"), "{refused}");
+            assert!(
+                !workspace.join(".knit/land-runs").exists()
+                    || fs::read_dir(workspace.join(".knit/land-runs"))
+                        .unwrap()
+                        .next()
+                        .is_none()
+            );
+            server.state.lock().unwrap()["rejectUnsnapshottedPlan"] = json!(false);
+        }
         knit(&workspace, apply);
         let runs = workspace.join(".knit/land-runs");
         let run_path = fs::read_dir(&runs)
@@ -948,12 +958,9 @@ fn local_finalization_publishes_only_complete_receipts_and_retries_without_execu
         assert!(first["finalization"]["error"].is_null());
         {
             let state = server.state.lock().unwrap();
-            if !synchronized {
-                assert_eq!(state["plans"][0]["bundleSnapshot"], first["sourceBundle"]);
-                assert_eq!(state["plans"][0]["projectSnapshot"], first["sourceProject"]);
-            }
+            assert_eq!(state["plans"].as_array().unwrap().len(), 1);
             assert_eq!(state["uploads"].as_array().unwrap().len(), 1);
-            assert_eq!(state["uploads"][0]["owned"], synchronized);
+            assert_eq!(state["uploads"][0]["owned"], true);
             assert_eq!(state["uploads"][0]["run"], first);
             assert_eq!(state["runs"][0]["run"], first);
         }
@@ -1081,4 +1088,122 @@ fn paused_gate_uploads_quiescent_receipt_releases_and_reclaims_hosted_ownership(
         assert_eq!(run["planHash"], initial["planHash"]);
     }
     fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn first_run_of_an_unsynced_plan_claims_ownership_so_a_failure_resumes() {
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    let allocated = unique_temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = allocated.with_file_name(format!("kr-{nonce:x}"));
+    fs::rename(&allocated, &dir).unwrap();
+    let workspace = dir.clone();
+    setup(&workspace, &server.url);
+    let service = workspace.join("service");
+    init_repo(&service, "service");
+    let origin = dir.join("origin.git");
+    git(&workspace, ["init", "--bare", origin.to_str().unwrap()]);
+    git(
+        &service,
+        ["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&service, ["checkout", "-b", "knit/demo"]);
+    git(&service, ["push", "-u", "origin", "knit/demo"]);
+    let head = git(&service, ["rev-parse", "HEAD"]).trim().to_string();
+    let mut bundle = serde_json::to_value(knit::model::ChangeGroup::new(
+        "demo".into(),
+        "Synthetic landing".into(),
+        "2026-01-01T00:00:00Z".into(),
+    ))
+    .unwrap();
+    bundle["projectId"] = json!("demo");
+    bundle["repos"] = json!([{"id":"service","path":service,"worktreePath":service,
+        "featureBranch":"knit/demo","baseBranch":"main","baseSha":head,"headSha":head}]);
+    write(&workspace.join(".knit/bundles/demo.bundle.json"), &bundle);
+    let config_path = workspace.join(".knit/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["activeBundle"] = json!("demo");
+    config["pushSync"] = json!(true);
+    config["syncRemotes"] = json!(["hosted"]);
+    write(&config_path, &config);
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{
+        "id":"deploy","type":"run","repoId":"service","effect":"read_only",
+        "command":["git","rev-parse","--verify","refs/tags/ready"]
+    }]});
+    write(&project_path, &project);
+    {
+        let mut state = server.state.lock().unwrap();
+        state["execution"] = json!(true);
+        state["uploads"] = json!([]);
+        state["landing"] = project["landing"].clone();
+    }
+    let plan_path = workspace.join(".knit/land-plans/demo.land.json");
+    knit(
+        &workspace,
+        ["land", "plan", "--out", plan_path.to_str().unwrap()],
+    );
+    let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    plan["terminal"] = json!(false);
+    write(&plan_path, &plan);
+    assert!(server.state.lock().unwrap()["plans"]
+        .as_array()
+        .unwrap()
+        .is_empty());
+
+    knit_fails(
+        &workspace,
+        [
+            "land",
+            "apply",
+            "--plan",
+            plan_path.to_str().unwrap(),
+            "--no-tag",
+        ],
+    );
+    let run_path = fs::read_dir(workspace.join(".knit/land-runs"))
+        .unwrap()
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .find(|p| p.to_string_lossy().ends_with(".run.json"))
+        .unwrap();
+    let failed: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    assert_eq!(failed["status"], "failed");
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state["boundRun"], failed["id"]);
+        assert_eq!(state["uploads"][0]["owned"], true);
+        assert_eq!(state["uploads"][0]["run"]["id"], failed["id"]);
+    }
+
+    git(&service, ["tag", "ready"]);
+    knit(
+        &workspace,
+        [
+            "land",
+            "resume",
+            "--run",
+            run_path.to_str().unwrap(),
+            "--keep-worktrees",
+        ],
+    );
+    let resumed: Value = serde_json::from_slice(&fs::read(&run_path).unwrap()).unwrap();
+    assert_eq!(resumed["id"], failed["id"]);
+    assert_eq!(resumed["status"], "succeeded");
+    let state = server.state.lock().unwrap();
+    assert!(state["ownership"].is_null());
+    assert_eq!(state["releases"], 2);
+    assert!(state["uploads"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .all(|upload| upload["owned"] == true));
+    drop(state);
+    fs::remove_dir_all(dir).unwrap();
 }

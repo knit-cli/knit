@@ -447,6 +447,12 @@ knit land resume --acknowledge release-core-lib --note "Release published"
 knit land resume
 ```
 
+With push-sync on (or `--remote`), `knit land apply` uploads a plan the sync
+remote has not seen before it runs, so even the first run of a new plan holds
+hosted ownership and a failed run can be resumed with `knit land resume`. If the
+remote refuses the plan, nothing runs; `--no-remote` lands without hosted
+ownership.
+
 Apply/resume exit successfully when paused. The run has `status: "paused"` and
 `pause: {step, instructions, since}`; `--json` emits that receipt. Receipts persist,
 parallel work settles, and local locks and hosted ownership are released. Resume
@@ -542,7 +548,7 @@ The command resolves `origin/compatibility` to its exact current SHA (`--sha` re
 
 Executor 0.4 plans give commands an authoritative environment contract: `KNIT_LAND_ENVIRONMENT` names the environment being landed into (the lane name or the target branch), `KNIT_SOURCE_SHA` is the selected integration input — the pinned integration SHA, or the reviewed bundle head when no pin exists; distinct from the merge output — `KNIT_TARGET_BRANCH` is the repository's resolved merge destination for this plan, and `KNIT_REV` is the exact merged revision the step's checkout runs from. Recipe-provided values are applied first, so a recipe can supplement the environment but never rewrite the landing's own pins. The contract is authoritative for executor-0.4 plans only: older plans retain their previous handling of these four variables. `KNIT_DEPLOY_CHECKOUT` remains the actual command working directory resolved from the pinned checkout and recipe `cwd`; it already applies to older plans as well.
 
-Normal `knit push --remote hosted` sends the selected bundle's authored destination plans and receipts; `knit pull` and `knit bundle pull <bundle>` import that bundle's destinations and receipts. Bundle transport also synchronizes project landing recipes through their existing shared ancestry and compare-and-swap rules, so a web recipe edit and its plan arrive together. Divergent or untracked local recipes are preserved with a remote candidate for reconciliation; they are never overwritten. Ordinary push uses the existing identity of a recipe-capable project and leaves project-shape replacement to explicit `knit project push`, preventing a metadata update from bypassing recipe CAS. Explicit `knit sync push --plans` / `knit sync pull --plans` remains project-wide. Sync never generates, overwrites divergent edits, or executes a plan; conflicts keep both the authored document and a separate remote candidate.
+Normal `knit push --remote hosted` sends the selected bundle's authored destination plans and receipts; `knit pull` and `knit bundle pull <bundle>` import that bundle's destinations and receipts. Bundle transport also synchronizes project landing recipes through their existing shared ancestry and compare-and-swap rules, so a web recipe edit and its plan arrive together. Divergent or untracked local recipes are preserved with a remote candidate for reconciliation; they are never overwritten. Ordinary push uses the existing identity of a recipe-capable project and leaves project-shape replacement to explicit `knit project push`, preventing a metadata update from bypassing recipe CAS. The remote validates landing plans against its own copy of the project's repositories, so ordinary push and every landing plan upload first add the local project's repositories that copy lacks, keeping its recipes and every entry it already has; nothing is removed or rewritten. Only a project owner can do this; for others the remote's copy stays as it is until an owner pushes. Explicit `knit sync push --plans` / `knit sync pull --plans` remains project-wide. Sync never generates, overwrites divergent edits, or executes a plan; conflicts keep both the authored document and a separate remote candidate.
 
 Command specifications contain exact `command` argv, repo-relative `cwd`, nonsecret `env` values and positive `timeoutSeconds`. Secret values come from runner bindings. A deployment can declare:
 
