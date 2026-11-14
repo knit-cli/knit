@@ -206,10 +206,28 @@ pub fn record_rewrite(
             })
             .filter(|c| !assigned.contains(&(c.repo_id.clone(), c.sha.clone())))
             .collect();
-        if !commits.is_empty() {
+        // Commits no earlier group maps onto are named by their own subject;
+        // the same subject across repositories is one change, as `knit commit`
+        // records it.
+        let mut by_subject: Vec<(String, Vec<CommitRef>)> = Vec::new();
+        for commit in commits {
+            let subject = commit_details(
+                &paths[&commit.repo_id],
+                std::slice::from_ref(&commit.sha),
+            )
+            .remove(&commit.sha)
+            .map(|detail| detail.subject)
+            .filter(|subject| !subject.trim().is_empty())
+            .unwrap_or_else(|| commit.sha.clone());
+            match by_subject.iter_mut().find(|(known, _)| *known == subject) {
+                Some((_, members)) => members.push(commit),
+                None => by_subject.push((subject, vec![commit])),
+            }
+        }
+        for (subject, commits) in by_subject {
             created.push(CommitGroup {
                 id: commit_group_id(),
-                message: active.bundle.title.clone(),
+                message: subject,
                 created_at: now.clone(),
                 author: commit_author(&paths[&commits[0].repo_id], &commits[0].sha).ok(),
                 commits,
@@ -613,6 +631,41 @@ mod tests {
         assert_eq!(
             crate::tracking::latest_recorded_head_sha(&active.bundle, &active.bundle.repos[0]),
             Some(head)
+        );
+    }
+
+    #[test]
+    fn rebase_names_unrecorded_commits_after_their_own_subjects() {
+        let (dir, mut active, base, _first, old) = fixture();
+        git(dir.path(), &["checkout", "main"]);
+        let upstream = commit(dir.path(), "upstream", "upstream");
+        git(dir.path(), &["checkout", "feature"]);
+        git(dir.path(), &["rebase", "main"]);
+        commit(dir.path(), "third", "third change");
+        commit(dir.path(), "fourth", "fourth change");
+        let head = rev_parse(dir.path(), "HEAD").unwrap();
+        record_rewrite(
+            &mut active,
+            &[RepoRewrite {
+                repo_id: "repo".into(),
+                old_head: old,
+                new_head: head,
+                old_base: base,
+                new_base: upstream,
+            }],
+            RewriteKind::Rebase,
+            None,
+        )
+        .unwrap();
+        let messages: Vec<_> = active
+            .bundle
+            .commit_groups
+            .iter()
+            .map(|group| group.message.as_str())
+            .collect();
+        assert_eq!(
+            messages,
+            ["first-group", "second-group", "third change", "fourth change"]
         );
     }
 
