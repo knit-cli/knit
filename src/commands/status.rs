@@ -2,6 +2,7 @@ use crate::advice;
 use crate::checkout::{checkout_dir, checkout_display_path, checkout_mode_label, is_in_place};
 use crate::commands::bundle::bundle_state;
 use crate::commands::bundle::BundleStatus;
+use crate::commands::review_reading::{self, Readiness, ReviewReading};
 use crate::git::current_branch;
 use crate::git::git_output;
 use crate::model::PublicationEntry;
@@ -47,6 +48,9 @@ struct StatusRepo {
     /// Commits made outside knit that the ledger has not recorded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     unrecorded: Option<String>,
+    /// The repo's review as last recorded; `knit status` never asks the host.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review: Option<ReviewReading>,
 }
 
 #[derive(Debug, Serialize)]
@@ -56,6 +60,13 @@ struct StatusPublications {
     reviews: usize,
     /// Repos tracked in the bundle, for the "1/3 published" reading.
     repos: usize,
+    /// `blocked`, `unverified` or `ready`, from the recorded reviews only.
+    /// Absent when no review is recorded.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    readiness: Option<Readiness>,
+    /// How long a recorded review reading counts as current.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    fresh_for_seconds: Option<i64>,
 }
 
 pub fn show_status(json: bool) -> Result<()> {
@@ -64,6 +75,8 @@ pub fn show_status(json: bool) -> Result<()> {
     ensure_workspace_fallback_status_is_unambiguous(&active)?;
     let unrecorded = detect_unrecorded_changes(&active)?;
     let state = bundle_state(&active.bundle);
+    let readings = review_reading::read_reviews(&active.bundle, chrono::Utc::now());
+    let review_for = |repo_id: &str| readings.iter().find(|r| r.repo_id == repo_id).cloned();
 
     let mut repos = Vec::with_capacity(active.bundle.repos.len());
     for repo in &active.bundle.repos {
@@ -91,6 +104,7 @@ pub fn show_status(json: bool) -> Result<()> {
                 status: missing.to_string(),
                 wrong_branch: false,
                 unrecorded: unrecorded_note,
+                review: review_for(&repo.id),
             });
             continue;
         };
@@ -111,6 +125,7 @@ pub fn show_status(json: bool) -> Result<()> {
             status: status_label(&short_status).to_string(),
             wrong_branch,
             unrecorded: unrecorded_note,
+            review: review_for(&repo.id),
         });
     }
 
@@ -122,6 +137,9 @@ pub fn show_status(json: bool) -> Result<()> {
             publications: StatusPublications {
                 reviews: recorded_review_count(&active),
                 repos: active.bundle.repos.len(),
+                readiness: (!readings.is_empty()).then(|| review_reading::readiness(&readings)),
+                fresh_for_seconds: (!readings.is_empty())
+                    .then_some(review_reading::FRESH_FOR_MINUTES * 60),
             },
             repos,
             revert_verified: latest_revert_verification(&active.bundle).map(|v| v.verified),
@@ -188,7 +206,7 @@ pub fn show_status(json: bool) -> Result<()> {
         );
     }
 
-    print_publication_summary(&active);
+    print_publication_summary(&active, &readings);
     print_closed_summary(&active, state);
 
     Ok(())
@@ -224,7 +242,7 @@ fn print_closed_summary(active: &crate::store::ActiveBundle, state: BundleStatus
     );
 }
 
-fn print_publication_summary(active: &crate::store::ActiveBundle) {
+fn print_publication_summary(active: &crate::store::ActiveBundle, readings: &[ReviewReading]) {
     if active.bundle.publications.is_empty() || bundle_state(&active.bundle) != BundleStatus::Open {
         return;
     }
@@ -241,10 +259,34 @@ fn print_publication_summary(active: &crate::store::ActiveBundle) {
         review_count,
         tracked_count
     );
-    advice::print(
-        &active.root,
-        "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection; do not merge the host review objects directly.",
-    );
+    for reading in readings {
+        println!(
+            "  {} {} {}",
+            out::repo_field(&reading.repo_id, 14),
+            out::sha(format!("{:<6}", format!("#{}", reading.number))),
+            review_line(reading)
+        );
+    }
+    match review_reading::advice(readings) {
+        Some(advice) => advice::print(&active.root, advice),
+        None => advice::print(
+            &active.root,
+            "when the user says to land/release, run `knit land` to create or show the plan, then `knit land apply` after inspection; do not merge the host review objects directly.",
+        ),
+    }
+}
+
+fn review_line(reading: &ReviewReading) -> String {
+    let line = review_reading::describe(reading);
+    if reading.blocked {
+        out::danger(&line)
+    } else if reading.needs_live_check() {
+        out::warn(&line)
+    } else if reading.mergeable.is_some() {
+        out::ok(&line)
+    } else {
+        line
+    }
 }
 
 fn recorded_review_count(active: &crate::store::ActiveBundle) -> usize {

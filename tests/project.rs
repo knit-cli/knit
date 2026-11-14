@@ -1124,6 +1124,9 @@ fn bundle_start_cd_opens_project_worktree_root() {
     assert!(bundle_agents.contains("Knit Bundle Worktree Guide"));
     assert!(bundle_agents.contains("bundle `project-feature`"));
     assert!(bundle_agents.contains("knit status"));
+    assert!(bundle_agents.contains("`knit publish status --live` asks the host"));
+    assert!(bundle_agents.contains("`knit land update [REPOS] --push`"));
+    assert!(bundle_agents.contains("conflicts with or is behind its base"));
     assert!(bundle_agents.contains("`backend`: `.knit/worktrees/project-feature/backend`"));
     assert!(bundle_agents.contains("`frontend`: `.knit/worktrees/project-feature/frontend`"));
     assert!(output.contains("cd:"));

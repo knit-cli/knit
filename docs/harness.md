@@ -86,6 +86,41 @@ CLI prints is for humans: do not parse it.
 `unrecorded` appears on a repo when a tracked branch moved outside Knit and the
 ledger has not caught up; `knit sync` records those commits.
 
+`knit status` never calls the host. Once a review is recorded for a repo, its
+entry carries `review`, the review state Knit last recorded (by `knit publish
+create` or `knit publish sync`), and `publications` gains `readiness` and
+`freshForSeconds`:
+
+```json
+"review": {
+  "number": 12,
+  "url": "https://github.com/acme/backend/pull/12",
+  "state": "open",
+  "mergeable": "conflict",
+  "verdict": "action needed: conflict",
+  "blocked": true,
+  "openGates": [
+    { "kind": "conflict", "state": "blocked", "actor": "you",
+      "summary": "conflicts with its base: run `knit land update`" }
+  ],
+  "recordedAt": "2026-03-07T12:00:00.000Z",
+  "ageSeconds": 259200,
+  "stale": true
+}
+```
+
+- `mergeable` is `conflict`, `behind`, `clean` (gates recorded, none reported a
+  conflict) or `unknown` (no gates recorded); null once the review is merged or
+  closed. `verdict` is `ready` or the open gates' headline, null when unknown.
+- `recordedAt` is when the recorded gates last changed; a refresh that finds
+  the same gates keeps it, so `ageSeconds` can only overstate the age.
+- `stale` is true when the record is older than `freshForSeconds` or commits
+  were recorded in that repo after it.
+- `readiness` is `blocked` (a recorded gate needs your action), `unverified`
+  (an open review is unknown or stale) or `ready`. Only `ready` means the
+  record supports landing; otherwise ask the host with
+  `knit publish status --live`.
+
 ## 3. Bundle context
 
 Every bundle-scoped command resolves which bundle it is talking about, in this
