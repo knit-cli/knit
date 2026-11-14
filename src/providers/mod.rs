@@ -216,8 +216,29 @@ pub enum BranchMergeStatus {
     AlreadyContained,
 }
 
+#[derive(Debug, Clone)]
+pub struct ForkRepository {
+    pub full_name: String,
+    pub clone_url: String,
+    pub ssh_url: String,
+    pub existed: bool,
+}
+
 /// A code host that exposes review objects through a CLI tool.
 pub trait Forge {
+    fn can_push(&self, _target: &PrTarget) -> Result<Option<bool>> {
+        Ok(None)
+    }
+
+    fn ensure_fork(
+        &self,
+        _target: &PrTarget,
+        _owner: Option<&str>,
+        _dry_run: bool,
+    ) -> Result<ForkRepository> {
+        bail!("{} forks cannot be created by Knit yet", self.id())
+    }
+
     /// Stable provider id recorded on publications, e.g. `github`.
     fn id(&self) -> &'static str;
     /// Review object kind recorded on publications.

@@ -1421,3 +1421,72 @@ fn fork_source_fetch_does_not_rewrite_custom_tracking_destinations() {
         ]
     ));
 }
+
+#[test]
+fn a_review_outside_origin_is_refused_until_its_target_is_recorded() {
+    let f = Fixture::new();
+    f.create();
+    // A plain fork clone: `origin` fetches and pushes the fork, and the bundle
+    // records no contribution target although the review lives upstream.
+    git(&f.checkout, ["config", "--unset", "remote.origin.pushurl"]);
+    git(&f.checkout, ["remote", "set-url", "origin", SOURCE]);
+    let path = f.workspace.join(".knit/bundles/contribution.bundle.json");
+    let mut bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    let repo = bundle["repos"][0].as_object_mut().unwrap();
+    repo.remove("sourceRemote");
+    repo.remove("targetRemote");
+    let source_path = repo["path"].as_str().unwrap().to_owned();
+    fs::write(&path, serde_json::to_vec_pretty(&bundle).unwrap()).unwrap();
+    configure_git_user(&f.upstream);
+    let upstream_main = git(
+        &f.upstream,
+        [
+            "commit-tree",
+            "main^{tree}",
+            "-p",
+            "main",
+            "-m",
+            "Upstream moves",
+        ],
+    )
+    .trim()
+    .to_owned();
+    git(
+        &f.upstream,
+        ["update-ref", "refs/heads/main", &upstream_main],
+    );
+    let head = git(&f.checkout, ["rev-parse", "HEAD"]);
+
+    let expected = format!(
+        "widget: review https://github.com/upstream/widget/pull/7 is in github.com/upstream/widget, but the bundle records no contribution target and `origin` is another repository, so `origin/main` is not the review's base. Add a remote for it and record it, then retry:\n  git -C {source_path} remote add upstream https://github.com/upstream/widget.git\n  knit --bundle contribution publish create widget --source-remote origin --target-remote upstream"
+    );
+    for args in [&["rebase"][..], &["land", "update"][..]] {
+        let error = f.fail(args);
+        assert!(error.contains(&expected), "{error}");
+    }
+    assert_eq!(git(&f.checkout, ["rev-parse", "HEAD"]), head);
+
+    git(
+        std::path::Path::new(&source_path),
+        ["remote", "add", "upstream", TARGET],
+    );
+    f.run(&[
+        "publish",
+        "create",
+        "widget",
+        "--source-remote",
+        "origin",
+        "--target-remote",
+        "upstream",
+        "--no-remote",
+    ]);
+    let bundle: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    assert_eq!(bundle["repos"][0]["targetRemote"], TARGET);
+    assert_eq!(bundle["publications"].as_array().unwrap().len(), 1);
+
+    f.run(&["rebase"]);
+    assert_eq!(
+        git(&f.checkout, ["rev-parse", "HEAD^"]).trim(),
+        upstream_main
+    );
+}

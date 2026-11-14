@@ -49,6 +49,19 @@ pub fn commit_check_runs(
 }
 
 impl Forge for GitHub {
+    fn can_push(&self, target: &PrTarget) -> Result<Option<bool>> {
+        api::can_push(target)
+    }
+
+    fn ensure_fork(
+        &self,
+        target: &PrTarget,
+        owner: Option<&str>,
+        dry_run: bool,
+    ) -> Result<super::ForkRepository> {
+        api::ensure_fork(target, owner, dry_run)
+    }
+
     fn id(&self) -> &'static str {
         "github"
     }

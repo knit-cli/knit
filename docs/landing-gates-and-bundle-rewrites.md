@@ -189,9 +189,10 @@ bases in place, and append one audit node. Nothing is hand-edited.
 
 - `knit squash [-m <message>]`: one commit per repository on the recorded
   base, one commit group.
-- `knit rebase [--squash] [-m <message>] [--offline]`: fetch each repository's
-  base (the upstream target for forks) and rebase onto it; `--continue` /
-  `--abort` across repositories after a conflict.
+- `knit rebase [repos...] [--squash] [-m <message>] [--offline]`: fetch each
+  repository's base (the recorded review's base branch when there is one, the
+  configured base otherwise; the upstream target for forks) and rebase onto it;
+  `--continue` / `--abort` across repositories after a conflict.
 - `knit sync` recognises a rebase done with plain Git: commits reachable from
   the upstream base are the new base, not bundle work, and `baseSha` moves.
 
