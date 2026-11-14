@@ -219,7 +219,10 @@ pub(super) fn fetch_project_export(
         }
         None => format!("/projects/{slug}/export?artifacts=none&history=false"),
     };
-    request_json_with_optional_token(remote, token, "GET", &path, None)
+    let mut export: RemoteProjectExport =
+        request_json_with_optional_token(remote, token, "GET", &path, None)?;
+    export.keep_one_record_per_local_id();
+    Ok(export)
 }
 
 /// Fetch one bundle's current artifact by remote bundle id, returning the

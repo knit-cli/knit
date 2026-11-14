@@ -2276,3 +2276,139 @@ fn saved_bitbucket_default_authenticates_mixed_clone_across_hosted_rename() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A hosted project can list two repository records under one local id: a
+/// contributor's fork and the upstream it was forked from. The clone must
+/// record one project entry per local id, the one whose remote the project's
+/// shared membership names, so `knit workspace status` and `knit auth status`
+/// list each repository once.
+#[cfg(unix)]
+#[test]
+fn clone_records_one_project_entry_per_local_id_when_the_export_lists_a_fork_and_its_upstream() {
+    let root = unique_temp_dir();
+    let (home, git_config) = isolated_home(&root);
+
+    let app_source = root.join("app-source");
+    init_repo(&app_source, "app");
+    let lib_source = root.join("lib-source");
+    init_repo(&lib_source, "lib");
+
+    let fork_url = "https://github.com/contributor/app.git";
+    let upstream_url = "https://github.com/org/app.git";
+    let lib_url = "https://github.com/org/lib.git";
+    let record = |id: &str, url: &str| {
+        json!({
+            "localId": id,
+            "name": id,
+            "defaultBranch": "main",
+            "remoteUrl": url,
+            "visibility": "public",
+            "metadata": {},
+        })
+    };
+    let member = |id: &str, url: &str| {
+        json!({
+            "id": id,
+            "path": format!("/elsewhere/{id}"),
+            "remote": url,
+            "baseBranch": "main",
+            "checkoutMode": "worktree",
+            "includeByDefault": true,
+        })
+    };
+    let export = json!({
+        "data": {
+            "project": {"slug": "demo"},
+            "knitProject": {
+                "schemaVersion": "0.1",
+                "kind": "KnitProject",
+                "id": "demo",
+                "createdAt": "2026-01-01T00:00:00Z",
+                "updatedAt": "2026-01-01T00:00:00Z",
+                "repos": [member("app", upstream_url), member("lib", lib_url)],
+            },
+            "repositories": [
+                record("app", fork_url),
+                record("app", upstream_url),
+                record("lib", lib_url),
+            ],
+            "omittedRepositoryCount": 0,
+            "bundles": [],
+            "historyEvents": [],
+        }
+    })
+    .to_string();
+    let base_url = spawn_recording_remote(&root.join("fake-remote"), export);
+    let fake_bin = write_fake_git(
+        &root,
+        &[
+            (fork_url, app_source.to_str().unwrap(), "public"),
+            (upstream_url, app_source.to_str().unwrap(), "public"),
+            (lib_url, lib_source.to_str().unwrap(), "public"),
+        ],
+    );
+    let path_env = fake_path_env(&fake_bin);
+    let env = [
+        ("PATH", path_env.as_str()),
+        ("KNIT_HOME", home.to_str().unwrap()),
+        ("GIT_CONFIG_GLOBAL", git_config.to_str().unwrap()),
+    ];
+    let target = root.join("workspace");
+    let (stdout, stderr, ok) = knit_run(
+        &root,
+        &[
+            "clone",
+            "org/demo",
+            target.to_str().unwrap(),
+            "--remote",
+            "hosted",
+            "--url",
+            &base_url,
+            "--token",
+            "test-token",
+            "--no-worktree",
+        ],
+        &env,
+        None,
+    );
+    assert!(ok, "{stdout}{stderr}");
+
+    let project = read_json_cargo(&target.join(".knit/projects/demo.project.json"));
+    let entries: Vec<(String, String)> = project["repos"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|repo| {
+            (
+                repo["id"].as_str().unwrap().to_string(),
+                repo["remote"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        entries,
+        vec![
+            ("app".to_string(), upstream_url.to_string()),
+            ("lib".to_string(), lib_url.to_string()),
+        ],
+        "{project:#}"
+    );
+    assert_eq!(
+        git(&target.join("app"), ["remote", "get-url", "origin"]).trim(),
+        upstream_url
+    );
+
+    for args in [&["workspace", "status"][..], &["auth", "status"][..]] {
+        let (stdout, stderr, ok) = knit_run(&target, args, &env, None);
+        assert!(ok, "{args:?}: {stdout}{stderr}");
+        for id in ["app", "lib"] {
+            let rows = stdout
+                .lines()
+                .filter(|line| line.split_whitespace().next() == Some(id))
+                .count();
+            assert_eq!(rows, 1, "{args:?} lists {id} {rows} times:\n{stdout}");
+        }
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}

@@ -194,6 +194,57 @@ fn workspace_status_distinguishes_current_checkout_from_configured_base() {
     fs::remove_dir_all(root).unwrap();
 }
 
+/// Project files written by `knit clone` before it recorded one entry per
+/// local id can list a repository twice. Every command reading the project
+/// must see it once.
+#[test]
+fn status_commands_list_each_repo_once_when_the_project_file_repeats_an_entry() {
+    let root = unique_temp_dir();
+    let (_backend_remote, backend, _backend_collab) = init_remote_repo(&root, "backend");
+    let (_frontend_remote, frontend, _frontend_collab) = init_remote_repo(&root, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["init", "demo"]);
+    knit(
+        &workspace,
+        ["project", "add", "backend", backend.to_str().unwrap()],
+    );
+    knit(
+        &workspace,
+        ["project", "add", "frontend", frontend.to_str().unwrap()],
+    );
+    knit(&workspace, ["bundle", "some feature"]);
+
+    let project_path = workspace.join(".knit/projects/demo.project.json");
+    let mut project: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(&project_path).unwrap()).unwrap();
+    let repos = project["repos"].as_array_mut().unwrap();
+    let mut repeated = repos.clone();
+    for entry in &mut repeated {
+        entry["remote"] = serde_json::json!("https://github.com/contributor/fork.git");
+    }
+    repos.extend(repeated);
+    fs::write(
+        &project_path,
+        format!("{}\n", serde_json::to_string_pretty(&project).unwrap()),
+    )
+    .unwrap();
+
+    let bundle_root = workspace.join(".knit/worktrees/some-feature");
+    for args in [&["workspace", "status"][..], &["auth", "status"][..]] {
+        let output = knit(&bundle_root, args);
+        for id in ["backend", "frontend"] {
+            let rows = output
+                .lines()
+                .filter(|line| line.split_whitespace().next() == Some(id))
+                .count();
+            assert_eq!(rows, 1, "{args:?} lists {id} {rows} times:\n{output}");
+        }
+    }
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 #[test]
 fn plain_pull_updates_project_without_an_active_bundle() {
     let root = unique_temp_dir();
