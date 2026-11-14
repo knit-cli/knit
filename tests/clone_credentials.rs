@@ -517,6 +517,7 @@ fn selected_credential_clones_scoped_private_repo_without_borrowing_the_parent()
         &parent,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -538,7 +539,7 @@ fn selected_credential_clones_scoped_private_repo_without_borrowing_the_parent()
         .unwrap_or_else(|error| panic!("stdout must be pure JSON ({error}): {stdout}"));
     assert_eq!(
         document["repos"],
-        json!([{"id": "backend", "status": "cloned"}])
+        json!([{"id": "backend", "status": "cloned", "push": "direct"}])
     );
     assert_eq!(document["clonedRepoCount"], 1);
     assert_eq!(document["scopeView"], json!("scope"));
@@ -729,6 +730,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -824,7 +826,12 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         ]),
     )
     .unwrap();
-    let (out, err, ok) = knit_run(&target, &["pull", "--bundles"], &retry_env, None);
+    let (out, err, ok) = knit_run(
+        &target,
+        &["pull", "--bundles", "--no-fork"],
+        &retry_env,
+        None,
+    );
     assert!(ok, "{out}{err}");
     assert!(target.join("backend/.git").exists(), "{out}{err}");
     assert_eq!(
@@ -853,6 +860,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             blocked.to_str().unwrap(),
             "--remote",
@@ -897,6 +905,7 @@ fn denied_selected_credential_fails_closed_with_an_actionable_redacted_error() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             unavailable.to_str().unwrap(),
             "--remote",
@@ -950,6 +959,7 @@ fn credential_selection_fails_before_export_fetch_or_target_mutation() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             unknown_target.to_str().unwrap(),
             "--remote",
@@ -982,6 +992,7 @@ fn credential_selection_fails_before_export_fetch_or_target_mutation() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             duplicate_target.to_str().unwrap(),
             "--remote",
@@ -1090,6 +1101,7 @@ fn interrupted_clone_resumes_into_same_root_adopting_matching_checkouts() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -1186,6 +1198,7 @@ fn clone_refuses_unrelated_entries_and_foreign_checkouts() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             with_file.to_str().unwrap(),
             "--remote",
@@ -1231,6 +1244,7 @@ fn clone_refuses_unrelated_entries_and_foreign_checkouts() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             with_foreign.to_str().unwrap(),
             "--remote",
@@ -1267,6 +1281,7 @@ fn clone_refuses_unrelated_entries_and_foreign_checkouts() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             configured.to_str().unwrap(),
             "--remote",
@@ -1374,6 +1389,7 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
         &parent,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -1431,6 +1447,7 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
             &parent,
             &[
                 "clone",
+                "--no-fork",
                 "acme/demo",
                 gh_target.to_str().unwrap(),
                 "--remote",
@@ -1496,6 +1513,7 @@ fn clone_without_selection_keeps_ambient_access_and_never_borrows_the_parent() {
         &parent,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             private_target.to_str().unwrap(),
             "--remote",
@@ -1593,6 +1611,7 @@ fn resume_rejects_renamed_checkouts_masqueraded_folders_and_scaffold_symlinks() 
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             renamed.to_str().unwrap(),
             "--remote",
@@ -1626,6 +1645,7 @@ fn resume_rejects_renamed_checkouts_masqueraded_folders_and_scaffold_symlinks() 
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             inside.to_str().unwrap(),
             "--remote",
@@ -1657,6 +1677,7 @@ fn resume_rejects_renamed_checkouts_masqueraded_folders_and_scaffold_symlinks() 
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             linked.to_str().unwrap(),
             "--remote",
@@ -1758,6 +1779,7 @@ fn noninteractive_declared_group_clone_is_partial_with_scriptable_guidance() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -1882,6 +1904,7 @@ fn partial_selection_records_ambient_after_assignments_so_check_passes() {
         &root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             target.to_str().unwrap(),
             "--remote",
@@ -1993,7 +2016,14 @@ fn ordinary_ledger_token_skips_optional_export_but_environment_denials_remain_vi
                 ),
             );
             assert!(ok, "{out}{err}");
-            let mut args = vec!["clone", "demo", "--remote", "hosted", "--no-worktree"];
+            let mut args = vec![
+                "clone",
+                "--no-fork",
+                "demo",
+                "--remote",
+                "hosted",
+                "--no-worktree",
+            ];
             if prefer_https {
                 args.push("--prefer-https");
             }
@@ -2108,6 +2138,7 @@ fn saved_bitbucket_default_authenticates_mixed_clone_across_hosted_rename() {
             cwd,
             &[
                 "clone",
+                "--no-fork",
                 &reference,
                 target.to_str().unwrap(),
                 "--remote",

@@ -277,13 +277,15 @@ set -eu
 state={state}
 lock="$state/lock"
 enter() {{
-  while ! mkdir "$lock" 2>/dev/null; do sleep 0.01; done
+  # The shell's noclobber create is atomic. uutils `mkdir` (Ubuntu 26.04)
+  # can report success to two processes creating the same directory.
+  while ! (set -C; : > "$lock") 2>/dev/null; do sleep 0.01; done
   live=$(cat "$state/live" 2>/dev/null || echo 0)
   live=$((live + $1))
   printf '%s\n' "$live" > "$state/live"
   peak=$(cat "$state/peak" 2>/dev/null || echo 0)
   if [ "$live" -gt "$peak" ]; then printf '%s\n' "$live" > "$state/peak"; fi
-  rmdir "$lock"
+  rm -f "$lock"
 }}
 enter 1
 sleep 0.3

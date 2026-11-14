@@ -410,6 +410,7 @@ impl World {
             &self.root,
             &[
                 "clone",
+                "--no-fork",
                 "acme/demo",
                 self.target.to_str().unwrap(),
                 "--remote",
@@ -428,7 +429,12 @@ impl World {
     fn pull_bundles(&self) -> (String, String, bool) {
         let mut env: Vec<(&str, &str)> = self.env_vec();
         env.push(("KNIT_REMOTE_HOSTED_TOKEN", "test-ledger-token"));
-        knit_run(&self.target, &["pull", "--bundles"], &env, None)
+        knit_run(
+            &self.target,
+            &["pull", "--bundles", "--no-fork"],
+            &env,
+            None,
+        )
     }
 }
 
@@ -722,6 +728,7 @@ fn explicit_credential_failure_never_falls_back() {
         &world.root,
         &[
             "clone",
+            "--no-fork",
             "acme/demo",
             world.target.to_str().unwrap(),
             "--remote",
