@@ -5,6 +5,7 @@ use crate::git::{
     current_branch, git_output, git_output_with_env, is_ancestor, ref_commit_sha, rev_parse,
 };
 use crate::model::ChangeGroup;
+use crate::review_base;
 use crate::rewrite::{record_rewrite, RepoRewrite, RewriteKind};
 use crate::store::{load_active_bundle_for_update, save_active_bundle, write_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
@@ -43,6 +44,8 @@ struct RepoState {
     rebase_head: Option<String>,
     #[serde(default)]
     repin: Option<Repin>,
+    #[serde(default)]
+    base_label: Option<String>,
 }
 
 #[derive(Serialize, Deserialize)]
@@ -294,10 +297,11 @@ fn verify_repin(repo: &RepoState, repin: &Repin) -> Result<()> {
 }
 
 pub fn squash(message: Option<&str>) -> Result<()> {
-    start(true, message, true, false)
+    start(&[], true, message, true, false)
 }
 
 pub fn rebase(
+    selectors: &[String],
     squash: bool,
     message: Option<&str>,
     offline: bool,
@@ -321,7 +325,7 @@ pub fn rebase(
             execute(&mut active, &mut state, &path)
         }
     } else {
-        start(squash, message, offline, true)
+        start(selectors, squash, message, offline, true)
     }
 }
 
@@ -368,9 +372,16 @@ fn rebasing(path: &Path) -> Result<bool> {
     Ok(git_path_exists(path, "rebase-merge")? || git_path_exists(path, "rebase-apply")?)
 }
 
-fn start(squash: bool, message: Option<&str>, offline: bool, do_rebase: bool) -> Result<()> {
-    start_active(
+fn start(
+    selectors: &[String],
+    squash: bool,
+    message: Option<&str>,
+    offline: bool,
+    do_rebase: bool,
+) -> Result<()> {
+    start_selected(
         load_active_bundle_for_update()?,
+        selectors,
         squash,
         message,
         offline,
@@ -378,8 +389,20 @@ fn start(squash: bool, message: Option<&str>, offline: bool, do_rebase: bool) ->
     )
 }
 
+#[cfg(test)]
 fn start_active(
+    active: ActiveBundle,
+    squash: bool,
+    message: Option<&str>,
+    offline: bool,
+    do_rebase: bool,
+) -> Result<()> {
+    start_selected(active, &[], squash, message, offline, do_rebase)
+}
+
+fn start_selected(
     mut active: ActiveBundle,
+    selectors: &[String],
     squash: bool,
     message: Option<&str>,
     offline: bool,
@@ -399,9 +422,10 @@ fn start_active(
     if squash && message.trim().is_empty() {
         bail!("Squash message must not be empty");
     }
+    let selected = crate::repo_selectors::resolve_repo_indexes(&active, selectors, false)?;
     let mut repos = Vec::new();
     // Complete local preflight for every repo before even fetching a base.
-    for repo in &active.bundle.repos {
+    for repo in selected.iter().map(|i| &active.bundle.repos[*i]) {
         let checkout = checkout_dir(&active, repo)
             .with_context(|| format!("{}: checkout is not materialized", repo.id))?;
         let branch = repo
@@ -454,41 +478,45 @@ fn start_active(
             needs_squash,
             rebase_head: None,
             repin: None,
+            base_label: None,
         });
     }
     if repos.is_empty() {
         bail!("No tracked repositories to rewrite");
     }
     if do_rebase {
-        for (repo, state) in active.bundle.repos.iter().zip(&mut repos) {
-            let reference = if contribution::configured(repo) {
-                if offline {
-                    contribution::role_ref(repo, &repo.base_branch, false)?
-                } else {
-                    contribution::fetch_ref(&state.path, repo, &repo.base_branch, false)?
-                }
+        let mut bases = Vec::new();
+        for (index, state) in selected.iter().zip(&repos) {
+            let repo = &active.bundle.repos[*index];
+            let base = review_base::effective(&active.bundle, repo)?;
+            if let Some(repository) = base.review_outside_origin(&state.path) {
+                bail!(base.outside_origin_error(&active.bundle.id, repo, &repository));
+            }
+            bases.push(base);
+        }
+        for ((index, state), base) in selected.iter().zip(&mut repos).zip(bases) {
+            let repo = &active.bundle.repos[*index];
+            let reference = if offline {
+                base.tracking_ref(repo)?
             } else {
-                let reference = format!("refs/remotes/origin/{}", repo.base_branch);
-                if !offline {
-                    git_output(
-                        &state.path,
-                        [
-                            "fetch",
-                            "--no-tags",
-                            "origin",
-                            &format!("+refs/heads/{}:{reference}", repo.base_branch),
-                        ],
-                    )?;
-                }
-                reference
+                base.fetch(&state.path, repo)
+                    .with_context(|| format!("{}: failed to fetch {}", repo.id, base.label()))?
             };
             state.new_base = match ref_commit_sha(&state.path, &reference)? {
                 Some(sha) => sha,
-                None if offline => {
-                    rev_parse(&state.path, &format!("refs/heads/{}", repo.base_branch))?
+                None if offline && (base.is_origin() || base.review_url.is_none()) => {
+                    rev_parse(&state.path, &format!("refs/heads/{}", base.branch))?
                 }
+                None if offline => bail!(
+                    "{}: {} has not been fetched; rerun without --offline",
+                    repo.id,
+                    base.label()
+                ),
                 None => bail!("{}: fetched base is missing", repo.id),
             };
+            if base.review_url.is_some() && !base.is_origin_branch(&state.path, &repo.base_branch) {
+                state.base_label = Some(format!("review base {}", base.label()));
+            }
         }
     }
     let mut state = RewriteState {
@@ -501,10 +529,45 @@ fn start_active(
         groups: Vec::new(),
         aborting: false,
     };
+    ensure_unselected_pins_unaffected(&active, &state)?;
     order_libraries_first(&mut state)?;
     fs::create_dir_all(path.parent().context("Missing state directory")?)?;
     persist(&path, &state)?;
     execute(&mut active, &mut state, &path)
+}
+
+/// A repo left out of the selection must not pin a selected repo's feature
+/// branch in Cargo.lock: rewriting the library would strand that pin.
+fn ensure_unselected_pins_unaffected(active: &ActiveBundle, state: &RewriteState) -> Result<()> {
+    let urls = library_urls(state);
+    for repo in &active.bundle.repos {
+        if state
+            .repos
+            .iter()
+            .any(|selected| selected.repo_id == repo.id)
+        {
+            continue;
+        }
+        let Some(checkout) = checkout_dir(active, repo).filter(|path| path.exists()) else {
+            continue;
+        };
+        for file in lockfiles(&checkout)? {
+            for line in fs::read_to_string(checkout.join(file))?.lines() {
+                let Some((remote, branch, _)) = lock_source(line) else {
+                    continue;
+                };
+                if let Some(library) = matching_library(state, &urls, &repo.id, remote, &branch)? {
+                    bail!(
+                        "{} pins {}'s feature branch in Cargo.lock; include {} in the selection or rebase the whole bundle",
+                        repo.id,
+                        library.repo_id,
+                        repo.id
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 fn validate_state(active: &ActiveBundle, state: &RewriteState) -> Result<()> {
@@ -617,8 +680,13 @@ fn execute(active: &mut ActiveBundle, state: &mut RewriteState, path: &Path) -> 
 
 fn print_result(state: &RewriteState) {
     for repo in &state.repos {
+        let label = repo
+            .base_label
+            .as_deref()
+            .map(|label| format!(", {label}"))
+            .unwrap_or_default();
         crate::human!(
-            "{}: {} -> {} (base {})",
+            "{}: {} -> {} (base {}{label})",
             repo.repo_id,
             crate::ids::short_sha(&repo.old_head),
             crate::ids::short_sha(repo.new_head.as_deref().unwrap()),

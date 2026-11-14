@@ -57,7 +57,8 @@ For repos with an `origin`, bundle creation first fetches each project's
 configured base branch and records the exact remote commit before creating any
 feature branch. Dirty or differently checked-out source repos are left alone.
 Local-only repos use their local configured base. Use `knit workspace status`
-to compare current checkouts with configured bases; `--offline` uses cached
+to compare current checkouts with configured bases; it also lists open reviews
+whose base is not `origin/<base>`, such as a fork's upstream; `--offline` uses cached
 remote refs and `--from-local-base` deliberately starts from local bases.
 
 If your tool opens the *source* folder instead — Cursor, Codex, or any

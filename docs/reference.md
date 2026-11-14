@@ -106,7 +106,7 @@ knit switch <bundle> --workspace
 knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit sign [--all] [--force] [--no-push] [repo-id-or-path...]
 knit squash [-m <message>]
-knit rebase [--squash] [-m <message>] [--offline] [--continue|--abort]
+knit rebase [repo-id-or-path...] [--squash] [-m <message>] [--offline] [--continue|--abort]
 knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
 knit status [--json]
 knit workspace status
@@ -867,7 +867,7 @@ Target flags drive the aggregate, best-effort report directly and may be combine
 Aggregate pulls run in parallel — git work on the same source repo is serialized, distinct repos run concurrently — and report every target instead of stopping at the first problem. Current-checkout and bundle targets remain best-effort. Explicit `--base` is a preparation gate, so any failed base update makes the command exit nonzero after printing the full report. The remote artifact side is tolerant: Knit walks the configured sync remotes in order and uses the first one that responds, reporting and skipping each unreachable remote. When no remote answers, the pull says so and the git work still runs — an offline sync remote never blocks updating checkouts. An explicit `--remote <name>` still fails hard, because you named the remote you wanted.
 
 ```sh
-knit workspace status     # show current checkout, configured base, cached origin divergence, dirt, and open bundles
+knit workspace status     # show current checkout, configured base, cached origin divergence, dirt, open bundles, and reviews whose base is not origin/<base>
 knit pull                 # at the base: current source checkouts + every open bundle, reported
 knit pull --base          # fetch and fast-forward configured stable/base branches
 knit pull --current       # update source checkouts' current branches (fast-forward only)
@@ -1073,9 +1073,19 @@ knit rebase --squash -m "Add widget support"
 `knit squash` combines the bundle's work into one commit per repository and one
 commit group. Without `-m`, it uses the only existing group's message or the
 bundle title. `knit rebase` fetches each repository's base and replays the bundle
-commits on it, preserving group messages where possible. Contribution repos use
-the upstream destination base. `--offline` uses cached base refs, falling back to
-the local base branch. `--squash` combines the work before rebasing.
+commits on it, preserving group messages where possible. A repository with a
+recorded review uses that review's base branch, the same base `knit land update`
+merges; otherwise it uses the configured base branch. Contribution repos fetch
+that branch from the upstream destination, not from the fork. When a review
+lives in another repository than `origin` but the bundle records no contribution
+target, `knit rebase` and `knit land update` refuse and print the `git remote add`
+and `knit publish create --source-remote origin --target-remote upstream` commands
+that record it; `knit workspace status` lists such reviews too. `--offline` uses
+cached base refs, falling back to the local base branch when the base lives in
+`origin`. `--squash` combines the work before rebasing. Name repositories
+(`knit rebase api web`) to rebase only those; a selection is refused when a
+repository left out pins a selected one's feature branch in `Cargo.lock`, and
+it cannot be combined with `--squash`.
 
 On a conflict, resolve files in the printed checkout and stage the resolution:
 

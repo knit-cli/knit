@@ -19,6 +19,7 @@ pub mod pending;
 pub mod providers;
 pub mod repo_selectors;
 pub mod retry;
+pub mod review_base;
 pub mod rewrite;
 pub mod selectors;
 pub mod status;
@@ -1093,12 +1094,20 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::sign::sign_bundle_commits(&repos, all, force, no_push),
         Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
         Commands::Rebase {
+            repos,
             squash,
             message,
             offline,
             continue_rebase,
             abort,
-        } => commands::rewrite::rebase(squash, message.as_deref(), offline, continue_rebase, abort),
+        } => commands::rewrite::rebase(
+            &repos,
+            squash,
+            message.as_deref(),
+            offline,
+            continue_rebase,
+            abort,
+        ),
         Commands::Log { args } => commands::show_log(&args, bundle_context.as_deref()),
         Commands::Revert {
             target,

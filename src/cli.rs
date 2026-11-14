@@ -651,8 +651,13 @@ pub enum Commands {
         #[arg(short, long)]
         message: Option<String>,
     },
-    /// Rebase bundle branches onto their refreshed configured bases.
+    /// Rebase bundle branches onto their refreshed bases: each recorded
+    /// review's base (repository and branch, as `knit land update` uses it),
+    /// otherwise the configured base.
     Rebase {
+        /// Repo ids or paths to rebase. Defaults to every tracked repo.
+        #[arg(conflicts_with_all = ["squash", "continue_rebase", "abort"])]
+        repos: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         squash: bool,
         #[arg(short, long, requires = "squash")]
