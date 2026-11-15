@@ -704,6 +704,18 @@ type BundleLock = KnitLock;
 
 impl Drop for KnitLock {
     fn drop(&mut self) {
-        let _ = fs::remove_file(&self.path);
+        // On Windows a scanner or indexer can briefly hold a new file open, so
+        // a single delete may fail and leave the lock held by a live process.
+        let attempts = if cfg!(windows) { 50 } else { 1 };
+        for attempt in 1..=attempts {
+            match fs::remove_file(&self.path) {
+                Err(error)
+                    if error.kind() != std::io::ErrorKind::NotFound && attempt < attempts =>
+                {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                _ => return,
+            }
+        }
     }
 }
