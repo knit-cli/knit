@@ -1787,10 +1787,10 @@ pub enum LandCommand {
         /// When omitted, the updated artifact is printed to stdout.
         #[arg(long)]
         out: Option<PathBuf>,
-        /// Also push the landed bundle artifact to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
+        /// Also push the landing plan before the run, and the landed bundle artifact after it, to these sync remotes. Repeat to push to multiple remotes and override push-sync config.
         #[arg(long, value_name = "REMOTE")]
         remote: Vec<String>,
-        /// Skip the remote bundle sync after landing.
+        /// Skip the sync remotes: no plan push before the run (so no hosted landing ownership) and no bundle sync after landing.
         #[arg(long, conflicts_with = "remote")]
         no_remote: bool,
         /// After a successful land, tag the configured project bases as known-good. Optionally name it; defaults to the bundle slug.

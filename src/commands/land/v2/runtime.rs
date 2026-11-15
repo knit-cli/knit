@@ -3203,6 +3203,21 @@ fn execute(
     ]
     .into_iter()
     .find(|path| path.exists());
+    let local_sync = local.as_ref().and_then(|(active, options)| {
+        options.map(|options| {
+            (
+                active.root.clone(),
+                options.remote.to_vec(),
+                options.no_remote,
+            )
+        })
+    });
+    if existing.is_none() && !recovering {
+        if let Some((root, remotes, no_remote)) = &local_sync {
+            crate::commands::remote::landing::sync_bundle_landing(root, plan, remotes, *no_remote)
+                .context("push the landing plan to the sync remotes before running it (pass --no-remote to land without hosted ownership)")?;
+        }
+    }
     let claim = crate::commands::remote::landing::claim_for_run(
         &workspace,
         plan,
@@ -3303,15 +3318,6 @@ fn execute(
             }
         }
     };
-    let local_sync = local.as_ref().and_then(|(active, options)| {
-        options.map(|options| {
-            (
-                active.root.clone(),
-                options.remote.to_vec(),
-                options.no_remote,
-            )
-        })
-    });
     let result = result.and_then(|()| {
         if !recovering && journal.snapshot()["status"] != "paused" {
             if let Some((active, options)) = local {
@@ -3359,7 +3365,9 @@ fn execute(
     // a secondary sync destination fails. Ordinary sync can retry those bytes.
     let completion = completion.and_then(|()| {
         if let Some((root, remotes, no_remote)) = local_sync {
-            crate::commands::remote::landing::sync_finished_run(&root, plan, &remotes, no_remote)?;
+            crate::commands::remote::landing::sync_bundle_landing(
+                &root, plan, &remotes, no_remote,
+            )?;
         }
         Ok(())
     });
