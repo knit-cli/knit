@@ -242,6 +242,10 @@ pub fn query_project_history(
     with_project_index(root, project_id, |db| execute(db, &query, false))
 }
 
+/// Another query may be rebuilding the index, which takes seconds on a cold or
+/// busy disk.
+const QUERY_LOCK_WAIT: Duration = Duration::from_secs(30);
+
 fn query_lock(root: &Path, project_id: &str, timeout: Duration) -> Result<crate::store::KnitLock> {
     let started = std::time::Instant::now();
     loop {
@@ -269,7 +273,7 @@ fn with_project_index<T>(
     read: impl FnOnce(&Connection) -> Result<T>,
 ) -> Result<T> {
     validate_project(project_id)?;
-    let _lock = query_lock(root, project_id, Duration::from_secs(5))?;
+    let _lock = query_lock(root, project_id, QUERY_LOCK_WAIT)?;
     let path = crate::store::history_path(root, project_id);
     let bytes = match fs::read(&path) {
         Ok(b) => b,
