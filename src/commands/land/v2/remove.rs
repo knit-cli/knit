@@ -46,13 +46,12 @@ pub fn remove(
         out::path(path.display())
     );
     // A synced plan only runs once the edited revision is on the sync remotes.
-    crate::commands::remote::landing::sync_bundle_landing(&active.root, &plan, &[], false).map_err(
-        |error| {
+    crate::commands::remote::landing::sync_bundle_landing(&active.root, &plan, &[], false)
+        .map_err(|error| {
             anyhow::anyhow!(
                 "removed, but the edited plan could not be synced, so it cannot run yet: {error:#}"
             )
-        },
-    )?;
+        })?;
     if target.is_none() && lane.is_none() && plan_path.is_none_or(|p| p == path) {
         let mut locked = crate::store::load_active_bundle_for_update()?;
         crate::commands::bundle::close_if_merged(&mut locked, Some(&plan))?;
