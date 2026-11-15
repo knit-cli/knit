@@ -353,6 +353,11 @@ fn repair_groups_restores_superseded_names_onto_the_current_shas() {
     assert_eq!(restored[0].1, new_first);
     assert_eq!(restored[1].0, before[1].0);
     assert_eq!(restored[1].1, new_head);
+    assert!(
+        observed_commits(&fixture).is_empty(),
+        "{}",
+        fixture.bundle()["nodes"]
+    );
 
     // Idempotent: the restored groups are current, so there is nothing left.
     let again = knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
@@ -386,6 +391,52 @@ fn repair_groups_skips_groups_restored_under_another_creation_time() {
     assert_eq!(groups.len(), 2, "{:?}", fixture.bundle()["commitGroups"]);
     assert_eq!(groups[0].1, new_first);
     assert_eq!(groups[1].1, new_head);
+
+    fs::remove_dir_all(fixture.root).unwrap();
+}
+
+fn observed_commits(fixture: &Fixture) -> Vec<String> {
+    fixture.bundle()["nodes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|node| node["type"] == "git.observed")
+        .flat_map(|node| node["repoChanges"].as_array().unwrap().clone())
+        .flat_map(|change| change["commits"].as_array().unwrap().clone())
+        .map(|sha| sha.as_str().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn repair_groups_drops_commits_an_older_repair_left_in_the_observation() {
+    let fixture = two_group_bundle("doubled work");
+    let (_, new_first, new_head) = collapse_groups(&fixture);
+    knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
+
+    // An older repair put the groups back but left the observation listing
+    // the same commits, so history showed each of them twice.
+    let mut bundle = fixture.bundle();
+    for node in bundle["nodes"].as_array_mut().unwrap() {
+        if node["id"] == "git_collapsed" {
+            node["repoChanges"][0]["commits"] = json!([new_first, new_head]);
+        }
+    }
+    fs::write(
+        fixture.bundle_path(),
+        serde_json::to_string_pretty(&bundle).unwrap(),
+    )
+    .unwrap();
+
+    let preview = knit(&fixture.worktree, ["sync", "--repair-groups"]);
+    assert!(preview.contains("Record once: 2 commit(s)"), "{preview}");
+    assert_eq!(observed_commits(&fixture).len(), 2);
+
+    knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
+    assert!(observed_commits(&fixture).is_empty());
+    assert_eq!(fixture.groups().len(), 2);
+
+    let again = knit(&fixture.worktree, ["sync", "--repair-groups", "--apply"]);
+    assert!(again.contains("No superseded commit groups"), "{again}");
 
     fs::remove_dir_all(fixture.root).unwrap();
 }

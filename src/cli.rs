@@ -623,7 +623,8 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<SyncCommand>,
         /// Put back commit groups an earlier sync turned into anonymous observed
-        /// work, mapping each recorded commit onto the commit that replaced it.
+        /// work, mapping each recorded commit onto the commit that replaced it,
+        /// and drop those commits from the observation so history lists them once.
         /// Previews without `--apply`.
         #[arg(long)]
         repair_groups: bool,
