@@ -211,14 +211,12 @@ pub fn record_rewrite(
         // records it.
         let mut by_subject: Vec<(String, Vec<CommitRef>)> = Vec::new();
         for commit in commits {
-            let subject = commit_details(
-                &paths[&commit.repo_id],
-                std::slice::from_ref(&commit.sha),
-            )
-            .remove(&commit.sha)
-            .map(|detail| detail.subject)
-            .filter(|subject| !subject.trim().is_empty())
-            .unwrap_or_else(|| commit.sha.clone());
+            let subject =
+                commit_details(&paths[&commit.repo_id], std::slice::from_ref(&commit.sha))
+                    .remove(&commit.sha)
+                    .map(|detail| detail.subject)
+                    .filter(|subject| !subject.trim().is_empty())
+                    .unwrap_or_else(|| commit.sha.clone());
             match by_subject.iter_mut().find(|(known, _)| *known == subject) {
                 Some((_, members)) => members.push(commit),
                 None => by_subject.push((subject, vec![commit])),
@@ -665,7 +663,12 @@ mod tests {
             .collect();
         assert_eq!(
             messages,
-            ["first-group", "second-group", "third change", "fourth change"]
+            [
+                "first-group",
+                "second-group",
+                "third change",
+                "fourth change"
+            ]
         );
     }
 
