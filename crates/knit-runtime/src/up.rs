@@ -1230,6 +1230,7 @@ mod tests {
                 checkout: Some(root.join("knithub")),
             }],
             extra_checkouts: vec![("gloss-web-ui".to_string(), root.join("gloss-web-ui"))],
+            engine: None,
         };
 
         let database = ResolvedDatabase {

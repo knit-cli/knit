@@ -566,6 +566,11 @@ pub fn run(cli: Cli) -> Result<()> {
                 }
             },
         },
+        Commands::RuntimeWorker {
+            action,
+            purge,
+            json,
+        } => commands::runtime::worker(&action, purge, json),
         Commands::Run {
             name,
             repos,
@@ -573,8 +578,18 @@ pub fn run(cli: Cli) -> Result<()> {
             list,
             force,
             purge,
+            json,
             args,
-        } => commands::run_project_command(name.as_deref(), &repos, all, list, force, purge, &args),
+        } => commands::run_project_command(
+            name.as_deref(),
+            &repos,
+            all,
+            list,
+            force,
+            purge,
+            json,
+            &args,
+        ),
         Commands::Publish { target } => match target {
             PublishCommand::Create {
                 allow_foreign_author,

@@ -10,6 +10,9 @@ use std::process::{Command, Stdio};
 
 const RUNTIME_COMMANDS: [&str; 4] = ["up", "down", "status", "eject"];
 
+// One parameter per `Commands::Run` flag: the signature mirrors the clap
+// definition rather than inventing a struct that only ever has one caller.
+#[allow(clippy::too_many_arguments)]
 pub fn run_project_command(
     name: Option<&str>,
     explicit_repos: &[String],
@@ -17,10 +20,14 @@ pub fn run_project_command(
     list: bool,
     force: bool,
     purge: bool,
+    json: bool,
     raw_args: &[OsString],
 ) -> Result<()> {
     if purge && name != Some("down") {
         bail!("`--purge` is only valid with `knit run down`.");
+    }
+    if json && name != Some("status") {
+        bail!("`--json` is only valid with `knit run status`.");
     }
     if list {
         if name.is_some()
@@ -29,6 +36,7 @@ pub fn run_project_command(
             || !explicit_repos.is_empty()
             || force
             || purge
+            || json
         {
             bail!("Use `knit run --list` without a command or repo selector.");
         }
@@ -41,6 +49,11 @@ pub fn run_project_command(
 
     if raw_args.is_empty() {
         if let Some(runtime_command) = name.filter(|name| RUNTIME_COMMANDS.contains(name)) {
+            if ["up", "down", "status"].contains(&runtime_command)
+                && crate::commands::runtime::remote_enabled()
+            {
+                return crate::commands::runtime::forward_active(runtime_command, purge, json);
+            }
             // An explicitly configured project command of the same name wins
             // over the built-in runtime verbs.
             let shadowed = load_active_bundle()
@@ -52,7 +65,7 @@ pub fn run_project_command(
                         .contains_key(&crate::ids::slugify(runtime_command))
                 });
             if !shadowed {
-                if crate::commands::runtime::try_handle(runtime_command, force, purge)? {
+                if crate::commands::runtime::try_handle(runtime_command, force, purge, json)? {
                     return Ok(());
                 }
 
@@ -70,6 +83,11 @@ pub fn run_project_command(
             if purge {
                 bail!(
                     "Project command `down` shadows the built-in bundle runtime, so `--purge` cannot be applied."
+                );
+            }
+            if json {
+                bail!(
+                    "Project command `status` shadows the built-in bundle runtime, so `--json` cannot be applied."
                 );
             }
         }
