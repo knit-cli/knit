@@ -38,6 +38,7 @@ pub fn doctor_workspace() -> Result<()> {
     );
     inspect_operational_json_dir(&root.join(".knit/merge-runs"), "merge run", &mut issues);
     inspect_operational_json_dir(&root.join(".knit/land-runs"), "land run", &mut issues);
+    inspect_land_run_checkouts(&root, &mut issues);
     inspect_locks(&root, &mut issues);
     inspect_bundle_paths(&root, &mut issues);
 
@@ -194,6 +195,26 @@ fn inspect_operational_json_dir(dir: &Path, label: &str, issues: &mut Vec<String
             }
             Err(error) => issues.push(format!("{label} {}: {error:#}", path.display())),
         }
+    }
+}
+
+/// Pinned checkouts of landing runs that finished: each is a full working
+/// tree still registered in its source repository.
+fn inspect_land_run_checkouts(root: &Path, issues: &mut Vec<String>) {
+    let runs = root.join(".knit/land-runs");
+    match crate::commands::land::v2::checkouts::scan(&runs, Some(root), chrono::Utc::now()) {
+        Ok((leftovers, _)) => {
+            for leftover in leftovers {
+                issues.push(format!(
+                    "land run {}: {} pinned checkout(s) left in {} ({}); remove them with `knit clean --land-runs`",
+                    leftover.run.display(),
+                    leftover.count,
+                    leftover.checkouts.display(),
+                    leftover.reason
+                ));
+            }
+        }
+        Err(error) => issues.push(format!("land run checkouts: {error:#}")),
     }
 }
 

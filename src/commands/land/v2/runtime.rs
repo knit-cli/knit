@@ -839,9 +839,7 @@ fn pinned_roots(step: &Value, roots: &Roots, journal: &Journal, phase: &str) -> 
         // workspace, and a full 64-character hash pushes it past Windows'
         // 260-character limit (`fatal: '$GIT_DIR' too big`). Twelve hex
         // characters still separate every repo and revision in one run.
-        let checkout = journal
-            .path
-            .with_extension("checkouts")
+        let checkout = super::checkouts::dir_for(&journal.path)
             .join(&canonical_hash(&json!([repo, rev]))[..12]);
         if !checkout.exists() {
             if git(root, &["cat-file", "-e", &format!("{rev}^{{commit}}")]).is_err() {
@@ -3354,6 +3352,11 @@ fn execute(
         &generation,
         &json!({"runId":snapshot["id"],"planHash":canonical_hash(plan),"quiescent":quiescent}),
     )?;
+    if quiescent {
+        // Still inside this project's landing ownership, so no other run of
+        // the project is executing in the checkouts being removed.
+        super::checkouts::after_run(&journal.path, &snapshot, Some(&workspace));
+    }
     let completion = crate::commands::remote::landing::finish_for_plan(claim, &snapshot, quiescent);
     if let Err(e) = &completion {
         journal.edit(|r| {
