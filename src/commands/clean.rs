@@ -18,17 +18,21 @@ pub fn clean_generated(
     worktrees: bool,
     archived: bool,
     merge_worktrees: bool,
+    land_runs: bool,
     all: bool,
     force: bool,
 ) -> Result<()> {
-    if all && (plans || worktrees || archived || merge_worktrees) {
+    if all && (plans || worktrees || archived || merge_worktrees || land_runs) {
         bail!("Use either --all or specific clean targets, not both.");
     }
     let clean_plans = all || plans;
     let clean_worktrees = all || worktrees;
     let clean_merge_worktrees = all || merge_worktrees;
-    if !clean_plans && !clean_worktrees && !clean_merge_worktrees {
-        bail!("Choose what to clean: --plans, --worktrees, --merge-worktrees, or --all.");
+    let clean_land_runs = all || land_runs;
+    if !clean_plans && !clean_worktrees && !clean_merge_worktrees && !clean_land_runs {
+        bail!(
+            "Choose what to clean: --plans, --worktrees, --merge-worktrees, --land-runs, or --all."
+        );
     }
 
     if clean_plans {
@@ -47,6 +51,11 @@ pub fn clean_generated(
     }
     if clean_merge_worktrees {
         clean_merge_worktrees_for_completed_runs(force)?;
+    }
+    if clean_land_runs {
+        let cwd = std::env::current_dir().context("failed to read current directory")?;
+        let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+        crate::commands::land::v2::checkouts::clean(&root, force)?;
     }
 
     Ok(())
@@ -348,9 +357,72 @@ fn remove_git_worktree(repo_root: &Path, worktree: &Path, force: bool) -> Result
         args.push(OsString::from("--force"));
     }
     args.push(worktree.as_os_str().to_os_string());
-    git_output(repo_root, args)?;
+    if let Err(error) = git_output(repo_root, args) {
+        finish_interrupted_removal(repo_root, worktree).map_err(|finish| match finish {
+            Some(finish) => finish,
+            None => error,
+        })?;
+    }
     prune_git_worktrees(repo_root);
     Ok(())
+}
+
+/// `git worktree remove` first checks the checkout is clean, then deletes its
+/// files, then drops git's record of it — even when deleting the files
+/// failed. A process still writing into the checkout (a dev server, a file
+/// watcher, a language server) recreates files mid-delete, so git stops with
+/// "Directory not empty" after it has already removed the `.git` link and
+/// its own record, leaving a partial tree behind. Every later `git worktree
+/// remove` of that path then fails with "not a working tree", so without
+/// this the directory is never removed.
+///
+/// When git no longer knows the path as a worktree and it holds no
+/// repository of its own, git already decided to delete it: finish the job,
+/// retrying while the writer settles. `Err(None)` means this was not an
+/// interrupted removal and git's own error stands.
+fn finish_interrupted_removal(
+    repo_root: &Path,
+    worktree: &Path,
+) -> std::result::Result<(), Option<anyhow::Error>> {
+    if !worktree.exists() {
+        return Ok(());
+    }
+    if worktree.join(".git").is_dir() || is_registered_worktree(repo_root, worktree) != Some(false)
+    {
+        return Err(None);
+    }
+    let mut last = None;
+    for attempt in 0..5 {
+        if attempt > 0 {
+            std::thread::sleep(std::time::Duration::from_millis(200 * attempt));
+        }
+        match fs::remove_dir_all(worktree) {
+            Ok(()) => return Ok(()),
+            Err(_) if !worktree.exists() => return Ok(()),
+            Err(error) => last = Some(error),
+        }
+    }
+    Err(Some(anyhow::anyhow!(
+        "git removed the worktree but could not delete {}: a process is still writing into it (for example a dev server or file watcher). Stop it, then run `knit clean --archived --worktrees`. Last error: {}",
+        worktree.display(),
+        last.map(|error| error.to_string()).unwrap_or_default()
+    )))
+}
+
+/// Whether `repo_root` lists `worktree` among its worktrees; `None` when git
+/// cannot say.
+fn is_registered_worktree(repo_root: &Path, worktree: &Path) -> Option<bool> {
+    let listing = git_output(repo_root, ["worktree", "list", "--porcelain"]).ok()?;
+    let wanted = dunce::canonicalize(worktree).unwrap_or_else(|_| worktree.to_path_buf());
+    Some(
+        listing
+            .lines()
+            .filter_map(|line| line.strip_prefix("worktree "))
+            .any(|listed| {
+                let listed = PathBuf::from(listed);
+                dunce::canonicalize(&listed).unwrap_or(listed) == wanted
+            }),
+    )
 }
 
 /// Remove a linked worktree whose source repo is only known through the

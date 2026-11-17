@@ -1661,3 +1661,196 @@ fn unlock_releases_unverifiable_locks_only_when_confirmed_and_never_a_running_on
     assert!(!dir.join("earlier.lock").exists());
     assert!(dir.join("running.lock").exists());
 }
+
+/// Linked worktrees git still records for `repo`, besides the main checkout.
+fn linked_worktrees(repo: &Path) -> Vec<String> {
+    git(repo, ["worktree", "list", "--porcelain"])
+        .lines()
+        .filter_map(|line| line.strip_prefix("worktree "))
+        .skip(1)
+        .map(str::to_owned)
+        .collect()
+}
+
+fn checkout_entries(run: &Path) -> Vec<PathBuf> {
+    match fs::read_dir(run.with_extension("checkouts")) {
+        Ok(entries) => entries.map(|e| e.unwrap().path()).collect(),
+        Err(_) => Vec::new(),
+    }
+}
+
+fn single_run(f: &Fixture) -> PathBuf {
+    let runs: Vec<_> = fs::read_dir(f.root.join(".knit/land-runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .filter(|p| p.to_string_lossy().ends_with(".run.json"))
+        .collect();
+    assert_eq!(runs.len(), 1, "{runs:?}");
+    runs[0].clone()
+}
+
+/// A landing whose one command runs in a pinned checkout, records where it
+/// ran, and fails until `allow` exists.
+fn gated_checkout_fixture() -> (Fixture, PathBuf, PathBuf) {
+    let f = Fixture::new();
+    let allow = f.root.join("allow");
+    let cwd = f.root.join("cwd.txt");
+    let mut project = read(&f.project);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{
+        "id":"build","type":"run","repoId":"service","effect":"read_only",
+        "command":[python_executable(),"-c",
+            "import os,pathlib,sys; pathlib.Path(sys.argv[2]).write_text(os.getcwd()); sys.exit(0 if pathlib.Path(sys.argv[1]).exists() else 7)",
+            allow, cwd]
+    }]});
+    write(&f.project, &project);
+    let generated = f.cmd(&["land", "plan", "--out", "plan.json"]);
+    assert!(
+        generated.status.success(),
+        "{}",
+        String::from_utf8_lossy(&generated.stderr)
+    );
+    (f, allow, cwd)
+}
+
+#[test]
+fn a_successful_run_removes_its_pinned_checkouts_from_disk_and_git() {
+    let (f, allow, cwd) = gated_checkout_fixture();
+    fs::write(&allow, "").unwrap();
+    let applied = f.cmd(&["land", "apply", "--plan", "plan.json", "--no-remote"]);
+    assert!(
+        applied.status.success(),
+        "{}",
+        String::from_utf8_lossy(&applied.stderr)
+    );
+    let run = single_run(&f);
+    assert_eq!(read(&run)["status"], "succeeded");
+    // The command really ran in a pinned checkout next to the receipt.
+    assert!(fs::read_to_string(&cwd).unwrap().contains(".run.checkouts"));
+    assert!(!run.with_extension("checkouts").exists());
+    assert_eq!(linked_worktrees(&f.service), Vec::<String>::new());
+    let doctor = f.cmd(&["doctor"]);
+    assert!(!String::from_utf8_lossy(&doctor.stdout).contains("pinned checkout"));
+}
+
+#[test]
+fn a_failed_run_keeps_its_checkouts_and_resumes_after_clean_removes_stale_ones() {
+    let (f, allow, cwd) = gated_checkout_fixture();
+    let failed = f.cmd(&["land", "apply", "--plan", "plan.json", "--no-remote"]);
+    assert!(!failed.status.success());
+    let run = single_run(&f);
+    assert_eq!(read(&run)["status"], "failed");
+    let kept = checkout_entries(&run);
+    assert_eq!(kept.len(), 1);
+    assert_eq!(linked_worktrees(&f.service).len(), 1);
+
+    // Synthetic leftovers next to it: a succeeded run's checkout, a paused
+    // run's checkout, and a checkouts directory whose receipt is gone.
+    let runs = f.root.join(".knit/land-runs");
+    let head = git(&f.service, ["rev-parse", "HEAD"]).trim().to_owned();
+    let planted = |name: &str, status: Option<&str>| {
+        let receipt = runs.join(format!("{name}.run.json"));
+        if let Some(status) = status {
+            write(
+                &receipt,
+                &json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":name,"bundleId":"other",
+                    "status":status,"createdAt":"2026-01-01T00:00:00.000Z","updatedAt":"2026-01-01T00:00:00.000Z",
+                    "plan":{"sourceProjectId":"other"},"steps":[]}),
+            );
+        }
+        let checkout = receipt.with_extension("checkouts").join("pinned");
+        git(
+            &f.service,
+            [
+                "worktree",
+                "add",
+                "--detach",
+                checkout.to_str().unwrap(),
+                &head,
+            ],
+        );
+        checkout
+    };
+    let succeeded = planted("synthetic-succeeded", Some("succeeded"));
+    let paused = planted("synthetic-paused", Some("paused"));
+    let orphan = planted("synthetic-orphan", None);
+    assert_eq!(linked_worktrees(&f.service).len(), 4);
+
+    let doctor = String::from_utf8_lossy(&f.cmd(&["doctor"]).stdout).into_owned();
+    assert!(doctor.contains("synthetic-succeeded.run.json"), "{doctor}");
+    assert!(doctor.contains("synthetic-orphan.run.json"), "{doctor}");
+    assert!(!doctor.contains("synthetic-paused.run.json"), "{doctor}");
+    assert!(
+        !doctor.contains(run.file_name().unwrap().to_str().unwrap()),
+        "{doctor}"
+    );
+
+    // Clean removes only the finished runs' checkouts; the fresh failure and
+    // the paused run can still resume and keep theirs.
+    let cleaned = f.cmd(&["clean", "--land-runs"]);
+    assert!(
+        cleaned.status.success(),
+        "{}",
+        String::from_utf8_lossy(&cleaned.stderr)
+    );
+    assert!(!succeeded.exists());
+    assert!(!succeeded.parent().unwrap().exists());
+    assert!(!orphan.parent().unwrap().exists());
+    assert!(paused.exists());
+    assert_eq!(checkout_entries(&run), kept);
+    let remaining = linked_worktrees(&f.service);
+    assert_eq!(remaining.len(), 2, "{remaining:?}");
+
+    // Once the failure is older than the retention window it is a leftover
+    // too, and clean (part of --all) removes it.
+    let mut receipt = read(&run);
+    receipt["updatedAt"] = json!("2026-01-01T00:00:00.000Z");
+    write(&run, &receipt);
+    let doctor = String::from_utf8_lossy(&f.cmd(&["doctor"]).stdout).into_owned();
+    assert!(doctor.contains("failed more than 3 days ago"), "{doctor}");
+    let cleaned = f.cmd(&["clean", "--land-runs"]);
+    assert!(cleaned.status.success());
+    assert!(!run.with_extension("checkouts").exists());
+    assert_eq!(linked_worktrees(&f.service).len(), 1);
+
+    // Resume recreates the pinned checkout from the receipt, succeeds, and
+    // then removes it again.
+    fs::write(&allow, "").unwrap();
+    let resumed = f.cmd(&[
+        "land",
+        "resume",
+        "--run",
+        run.to_str().unwrap(),
+        "--no-remote",
+    ]);
+    assert!(
+        resumed.status.success(),
+        "{}",
+        String::from_utf8_lossy(&resumed.stderr)
+    );
+    assert_eq!(read(&run)["status"], "succeeded");
+    assert!(fs::read_to_string(&cwd).unwrap().contains(".run.checkouts"));
+    assert!(!run.with_extension("checkouts").exists());
+    assert_eq!(linked_worktrees(&f.service).len(), 1);
+}
+
+#[test]
+fn a_new_run_of_the_bundle_removes_the_checkouts_of_the_failed_run_it_replaces() {
+    let (f, _, _) = gated_checkout_fixture();
+    let failed = f.cmd(&["land", "apply", "--plan", "plan.json", "--no-remote"]);
+    assert!(!failed.status.success());
+    let first = single_run(&f);
+    assert_eq!(checkout_entries(&first).len(), 1);
+    // A separate failing run of the same bundle supersedes the first.
+    let again = f.cmd(&["land", "apply", "--plan", "plan.json", "--no-remote"]);
+    assert!(!again.status.success());
+    assert!(!first.with_extension("checkouts").exists());
+    // The newer failure keeps its own checkout for debugging and resume.
+    let second = fs::read_dir(f.root.join(".knit/land-runs"))
+        .unwrap()
+        .map(|e| e.unwrap().path())
+        .find(|p| p.to_string_lossy().ends_with(".run.json") && *p != first)
+        .unwrap();
+    assert_eq!(read(&second)["status"], "failed");
+    assert_eq!(checkout_entries(&second).len(), 1);
+    assert_eq!(linked_worktrees(&f.service).len(), 1);
+}

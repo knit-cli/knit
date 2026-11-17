@@ -361,6 +361,10 @@ pub enum Commands {
         /// Remove clean merge worktrees for completed merge runs.
         #[arg(long = "merge-worktrees")]
         merge_worktrees: bool,
+        /// Remove pinned checkouts of finished landing runs (succeeded,
+        /// recovered, superseded, or failed more than three days ago).
+        #[arg(long = "land-runs")]
+        land_runs: bool,
         /// Remove all cleanable generated state.
         #[arg(long)]
         all: bool,

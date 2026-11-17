@@ -30,6 +30,8 @@ Knit stores local state under the directory where `knit init`, or `knit bundle` 
     <slug>.land.json
   land-runs/
     <plan-id>-<timestamp>.run.json
+    <plan-id>-<timestamp>.run.checkouts/
+      <hash>/
   land-worktrees/
     <slug>/
       <repo-name>/
@@ -108,7 +110,7 @@ knit add [-r <repo>] [-N] [-u] [repo-or-pathspec...]
 knit sign [--all] [--force] [--no-push] [repo-id-or-path...]
 knit squash [-m <message>]
 knit rebase [repo-id-or-path...] [--squash] [-m <message>] [--offline] [--continue|--abort]
-knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--all] [--force]
+knit clean [--plans] [--worktrees] [--archived] [--merge-worktrees] [--land-runs] [--all] [--force]
 knit status [--json]
 knit workspace status
 knit diff [--published] [--stat] [repo-id-or-path...]
@@ -806,12 +808,17 @@ knit clean --plans
 knit clean --worktrees
 knit clean --archived --worktrees
 knit clean --merge-worktrees
+knit clean --land-runs
 knit clean --all
 ```
 
-`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. `--archived --worktrees` sweeps finished bundles, including archived bundles kept with `--keep-worktrees` and landed bundles whose cleanup was interrupted. `--merge-worktrees` removes clean branch-target merge worktrees for succeeded or aborted merge runs. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
+`--plans` removes `.knit/revert-plans`. `--worktrees` removes generated worktrees for the resolved bundle with `git worktree remove` and clears their recorded `worktreePath`; in-place checkouts are preserved. `--archived --worktrees` sweeps finished bundles, including archived bundles kept with `--keep-worktrees` and landed bundles whose cleanup was interrupted. `--merge-worktrees` removes clean branch-target merge worktrees for succeeded or aborted merge runs. `--land-runs` removes the pinned checkouts of finished landing runs (see below). `--all` covers every target except `--archived`. Use `--force` to pass `--force` to `git worktree remove` for dirty generated worktrees.
 
 Every worktree removal also prunes the source repo's worktree list (`git worktree prune`), including when the checkout was already deleted by hand, so stale registrations never pile up or keep a feature branch "checked out". After the tracked repos are handled, anything else left under `.knit/worktrees/<bundle>/` is swept too: a leftover checkout for a repo the bundle no longer tracks is removed like any generated worktree, while stray files (notes, screenshots, a bundle created with `--no-worktree` that was written into by hand) are preserved with a warning unless `--force` discards them. This applies to every path that removes a bundle's worktrees: `knit clean`, `knit bundle archive`, `knit bundle prune --apply`, and a terminal `knit land apply`.
+
+A process still writing into a checkout while it is removed — a dev server, a file watcher — can recreate files after `git worktree remove` has checked the checkout is clean and started deleting it. Git then drops the `.git` link and its own record of the worktree but reports `Directory not empty` and leaves part of the tree behind. Knit finishes that removal: when git no longer lists the path as a worktree and it holds no repository of its own, Knit deletes the rest, retrying briefly while the writer settles. If the writer keeps going, the landing or archive reports it; stop the process and run `knit clean --archived --worktrees`.
+
+Landing command steps run in detached checkouts pinned to immutable revisions under `.knit/land-runs/<run>.run.checkouts/<hash>/`, each registered as a worktree of its source repository. The run receipt records every pinned revision, and resume or recovery recreates a missing checkout from it, so the checkouts are disposable. When a run ends, Knit removes its checkouts with `git worktree remove` (never `--force`) if it succeeded or its recovery restored everything. A failed run keeps its checkouts so the failure can be debugged and resumed as it was, until a newer run of the same bundle replaces it, its bundle is archived or closed, or three days pass without activity; each landing run also removes those leftovers for its own project. Paused runs and runs left `running` by an interruption keep theirs until they are replaced. `knit clean --land-runs` removes the leftovers of every project and keeps checkouts of runs that can still resume; a checkout holding untracked build output is kept and named, and `--force` discards it. `knit doctor` lists leftover checkouts.
 
 `knit add` stages file changes inside tracked checkouts, like `git add`. With no arguments, it runs `git add -A` in every tracked checkout, including untracked files. You can limit it by repo or path:
 

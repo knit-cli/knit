@@ -1385,3 +1385,54 @@ fn prune_lists_and_cleans_finished_bundles_with_worktrees_on_disk() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn clean_finishes_a_worktree_removal_git_could_not_complete() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+
+    knit(&workspace, ["bundle", "interrupted removal"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let container = workspace.join(".knit/worktrees/interrupted-removal");
+    let feature = container.join("backend");
+    assert!(feature.exists());
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "archive",
+            "interrupted-removal",
+            "--keep-worktrees",
+        ],
+    );
+
+    // What `git worktree remove` leaves when a process keeps writing into
+    // the checkout while it deletes it: git has dropped the `.git` link and
+    // its own record, then failed with "Directory not empty", leaving tracked
+    // files and the writer's output behind.
+    fs::remove_file(feature.join(".git")).unwrap();
+    git(&backend, ["worktree", "prune"]);
+    fs::create_dir_all(feature.join(".vite/deps")).unwrap();
+    fs::write(feature.join(".vite/deps/chunk.js"), "cache\n").unwrap();
+    assert!(!git(&backend, ["worktree", "list", "--porcelain"]).contains("interrupted-removal"));
+    let scan = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(scan.contains("Finished bundles with worktrees still on disk"));
+
+    // The archived bundle still records the checkout, so cleanup finishes
+    // the removal git started instead of failing on "not a working tree".
+    let cleaned = knit(&workspace, ["clean", "--archived", "--worktrees"]);
+    assert!(cleaned.contains("removed"), "{cleaned}");
+    assert!(!feature.exists());
+    assert!(!container.exists());
+    let rescan = knit(&workspace, ["bundle", "prune", "--no-refresh"]);
+    assert!(!rescan.contains("Finished bundles with worktrees still on disk"));
+    assert!(
+        git(&backend, ["branch", "--list", "knit/interrupted-removal"])
+            .contains("knit/interrupted-removal")
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
