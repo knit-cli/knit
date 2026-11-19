@@ -827,6 +827,7 @@ pub fn run(cli: Cli) -> Result<()> {
                     repo_roots,
                     run_out,
                     resume,
+                    no_cache,
                     json,
                     plan,
                     from_artifact,
@@ -876,6 +877,7 @@ pub fn run(cli: Cli) -> Result<()> {
                                 json,
                                 skip_checks,
                                 expected_plan_hash.as_deref(),
+                                no_cache,
                             );
                         }
                         if expected_plan_hash.is_some() {
@@ -927,6 +929,7 @@ pub fn run(cli: Cli) -> Result<()> {
                             lane.as_deref(),
                             expected_plan_hash.as_deref(),
                             json,
+                            no_cache,
                         )
                     }
                 },
@@ -1153,7 +1156,7 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             no_push,
         } => commands::sign::sign_bundle_commits(&repos, all, force, no_push),
-        Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
+        Commands::Squash { message } => commands::rewrite::squash(&message),
         Commands::Rebase {
             repos,
             squash,
@@ -1164,7 +1167,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::rewrite::rebase(
             &repos,
             squash,
-            message.as_deref(),
+            &message,
             offline,
             continue_rebase,
             abort,

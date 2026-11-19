@@ -128,7 +128,7 @@ Knit uses Git history to find commits for the path, then expands matching Knit h
 
 - `knit publish status --live` asks the host for each review's current state: mergeable, checks, review, and what blocks it. `knit status` works offline and shows only the review state last recorded, with its age; check live before landing.
 - `knit land update [REPOS] --push` merges each review's current base into its feature branch and pushes it, which resolves a review that conflicts with or is behind its base. On a merge conflict, resolve and commit in that checkout, then run `knit land update --continue-merge --push`.
-- `knit squash [-m <message>]` rewrites bundle work as one commit per repo and one group; publish with `knit push --force-with-lease`.
+- `knit squash [-m <message>|<repo>=<message>]...` rewrites bundle work as one commit per repo and one group; repeat `-m <repo>=<message>` for per-repo messages, with one plain `-m` as the default; publish with `knit push --force-with-lease`.
 - `knit rebase [repos...] [--squash] [--offline]` replays work onto each recorded review's base (else the configured base; upstream for forks); use `--continue` after resolving conflicts or `--abort` to restore original heads.
 - `knit sign` re-signs the bundle's commits in place with this repo's git signing config (`commit.gpgsign`, `user.signingkey`), keeps every commit group 1:1, then force-pushes with lease and syncs the hosted copy (`--no-push` stays local).
 {sync_section}
@@ -650,8 +650,14 @@ fn landing_deployment_agents_line(deployment: &ProjectLandingDeployment) -> Stri
             .map(|repo| format!(", when `{repo}` changed"))
             .unwrap_or_else(|| ", runs on every landing".to_string()),
     };
+    // `unchanged` is the only cache mode, so presence is the whole answer.
+    let cache = if deployment.cache.is_some() {
+        ", cache=unchanged".to_string()
+    } else {
+        String::new()
+    };
     format!(
-        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}{watches}",
+        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}{watches}{cache}",
         id = deployment.id
     )
 }
