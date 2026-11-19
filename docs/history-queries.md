@@ -88,7 +88,7 @@ knit log --all --grep=api --grep=timeout --all-match
 knit log --all -E --grep='api|web'
 ```
 
-Dates accept ISO 8601 timestamps, `YYYY-MM-DD` (midnight UTC), `now`, `today`,
+Dates accept ISO 8601 timestamps, `YYYY-MM-DD` (a whole UTC day), `now`, `today`,
 `yesterday`, `tomorrow`, and relative forms such as `2 weeks ago`. Both bounds
 are inclusive. This is a defined local date syntax, not Git's complete natural
 language date parser.
@@ -157,8 +157,9 @@ view member, which can be a different event in the same unit. The legacy CLI
 `--repo` and `--view` flags retain their repository-set intersection semantics.
 
 Expression date bounds include the entire selected UTC day in both the page and
-CLI. Legacy CLI `--since`/`--until` date-only bounds represent midnight UTC; use
-an explicit timestamp for a precise cutoff with those flags.
+CLI. Legacy CLI `--since`/`--until` date-only bounds do too: `--since` starts at
+midnight UTC and `--until` includes the whole day. Use an explicit timestamp for
+a precise cutoff with those flags.
 
 Hosted filtering runs against the server's existing history database before
 pagination. Repository visibility still applies to every matching entry and

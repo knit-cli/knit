@@ -107,8 +107,9 @@ fn unique(values: &[String]) -> Vec<String> {
         .collect()
 }
 
-/// Plain dates mean midnight UTC for both inclusive boundaries. Relative dates
-/// are evaluated against the current UTC time without consulting a checkout.
+/// Plain dates are whole UTC days: `--since` starts at midnight and `--until`
+/// includes the entire day, matching `until:` in query expressions. Relative
+/// dates are evaluated against the current UTC time without consulting a checkout.
 pub(crate) fn parse_history_date(_root: &Path, value: &str, since: bool) -> Result<DateTime<Utc>> {
     parse_date_at(value, since, Utc::now())
 }
@@ -119,10 +120,12 @@ fn parse_date_at(value: &str, since: bool, now: DateTime<Utc>) -> Result<DateTim
         return Ok(parsed.with_timezone(&Utc));
     }
     if let Ok(date) = NaiveDate::parse_from_str(value, "%Y-%m-%d") {
-        return Ok(DateTime::from_naive_utc_and_offset(
-            date.and_hms_opt(0, 0, 0).expect("midnight is valid"),
-            Utc,
-        ));
+        let time = if since {
+            date.and_hms_opt(0, 0, 0)
+        } else {
+            date.and_hms_nano_opt(23, 59, 59, 999_999_999)
+        };
+        return Ok(time.expect("time of day is valid").and_utc());
     }
     let normalized = value.to_ascii_lowercase();
     let words: Vec<_> = normalized.split_whitespace().collect();
@@ -151,7 +154,7 @@ fn parse_date_at(value: &str, since: bool, now: DateTime<Utc>) -> Result<DateTim
         _ => None,
     };
     let flag = if since { "--since" } else { "--until" };
-    parsed.with_context(|| format!("Invalid {flag} date `{value}`. Use ISO 8601, YYYY-MM-DD (midnight UTC), now, today, yesterday, tomorrow, or `<number> seconds/minutes/hours/days/weeks/months/years ago`."))
+    parsed.with_context(|| format!("Invalid {flag} date `{value}`. Use ISO 8601, YYYY-MM-DD (a whole UTC day), now, today, yesterday, tomorrow, or `<number> seconds/minutes/hours/days/weeks/months/years ago`."))
 }
 
 /// Resolve every expression view, preserving exact identifier spelling.
@@ -177,6 +180,7 @@ pub(crate) fn expression(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::SecondsFormat;
 
     #[test]
     fn dates_have_explicit_utc_boundaries_and_validated_relative_units() {
@@ -193,14 +197,16 @@ mod tests {
                 .to_rfc3339(),
             "2026-02-28T12:34:56+00:00"
         );
-        for since in [true, false] {
-            assert_eq!(
-                parse_date_at("2026-03-01", since, now)
-                    .unwrap()
-                    .to_rfc3339(),
-                "2026-03-01T00:00:00+00:00"
-            );
-        }
+        assert_eq!(
+            parse_date_at("2026-03-01", true, now).unwrap().to_rfc3339(),
+            "2026-03-01T00:00:00+00:00"
+        );
+        assert_eq!(
+            parse_date_at("2026-03-01", false, now)
+                .unwrap()
+                .to_rfc3339_opts(SecondsFormat::Nanos, true),
+            "2026-03-01T23:59:59.999999999Z"
+        );
         for invalid in [
             "",
             "123notadate",

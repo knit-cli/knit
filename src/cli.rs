@@ -92,7 +92,7 @@ pub struct LogArgs {
     /// Show entries at or after this ISO date or relative date (plain dates mean midnight UTC).
     #[arg(long, alias = "after", value_name = "DATE")]
     pub since: Option<String>,
-    /// Show entries at or before this ISO date or relative date (plain dates mean midnight UTC).
+    /// Show entries at or before this ISO date or relative date (plain dates include that whole UTC day).
     #[arg(long, alias = "before", value_name = "DATE")]
     pub until: Option<String>,
     /// Match an entry message. Repeat to add patterns.
