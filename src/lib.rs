@@ -2,6 +2,7 @@ pub mod advice;
 pub mod auth;
 pub mod auth_git;
 pub mod author;
+mod bounded_http;
 pub mod checkout;
 pub mod cli;
 pub mod commands;

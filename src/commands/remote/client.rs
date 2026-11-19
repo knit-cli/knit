@@ -3,6 +3,9 @@
 //! local project's repos.
 
 use super::{HttpResponse, RemoteBundleDetail, RemoteExportBundle, RemoteProjectExport};
+use crate::bounded_http::{
+    is_timeout, run_with_stall_limit, seconds, transport_timed_out, ProgressReader, Stalled,
+};
 use crate::checkout::is_in_place;
 use crate::git::{
     branch_exists, current_branch, git_output, git_output_with_env, is_ancestor, ref_exists,
@@ -24,6 +27,7 @@ use std::collections::BTreeMap;
 use std::ffi::OsString;
 use std::io::Read;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -723,6 +727,14 @@ pub(super) fn request(
 
 const MAX_RESPONSE_BYTES: u64 = 512 * 1024 * 1024;
 
+/// How long a sync remote may make no progress before the request fails:
+/// from the start of the request until the response head has arrived, and
+/// between any two reads of the body after that. There is deliberately no
+/// limit on the whole transfer, so a large export on a slow link finishes as
+/// long as bytes keep arriving.
+const REMOTE_STALL_LIMIT: Duration = Duration::from_secs(120);
+const REMOTE_CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn request_with_optional_token(
     remote: &KnitRemote,
     token: Option<&str>,
@@ -730,10 +742,36 @@ fn request_with_optional_token(
     path: &str,
     payload: Option<&Value>,
 ) -> Result<HttpResponse> {
+    request_with_stall_limit(remote, token, method, path, payload, REMOTE_STALL_LIMIT)
+}
+
+/// How one exchange with a sync remote ended short of a response.
+enum ExchangeFailure {
+    Transport { message: String, timed_out: bool },
+    Body(std::io::Error),
+}
+
+fn request_with_stall_limit(
+    remote: &KnitRemote,
+    token: Option<&str>,
+    method: &str,
+    path: &str,
+    payload: Option<&Value>,
+    stall_limit: Duration,
+) -> Result<HttpResponse> {
     let url = format!("{}{}", api_base_url(&remote.url), path);
+    let body = payload
+        .map(serde_json::to_string)
+        .transpose()
+        .context("failed to serialize request body")?;
+    // The socket timeouts make an idle connection fail on its own. ureq
+    // applies them to one read or write at a time and not at all to name
+    // resolution, so `run_with_stall_limit` enforces the same limit on the
+    // clock, whatever the socket is doing.
     let agent = ureq::AgentBuilder::new()
-        .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout_connect(REMOTE_CONNECT_TIMEOUT.min(stall_limit))
+        .timeout_read(stall_limit)
+        .timeout_write(stall_limit)
         .build();
     let request = agent
         .request(method, &url)
@@ -742,38 +780,75 @@ fn request_with_optional_token(
         Some(token) => request.set("authorization", &format!("Bearer {token}")),
         None => request,
     };
-    let result = match payload {
-        Some(value) => {
-            let body = serde_json::to_string(value).context("failed to serialize request body")?;
-            request.send_string(&body)
+    let exchange = run_with_stall_limit(stall_limit, move |heartbeat| {
+        let result = match &body {
+            Some(body) => request.send_string(body),
+            None => request.call(),
+        };
+        let response = match result {
+            Ok(response) => response,
+            // Non-2xx responses still carry the API's error envelope; surface
+            // them as an HttpResponse so callers keep their status-based
+            // error paths.
+            Err(ureq::Error::Status(_, response)) => response,
+            Err(ureq::Error::Transport(transport)) => {
+                return Err(ExchangeFailure::Transport {
+                    timed_out: transport_timed_out(&transport),
+                    message: transport.to_string(),
+                })
+            }
+        };
+        let status = response.status();
+        // `into_string` stops at 10 MB, which a project's landing history
+        // passes. Every chunk counts as progress, so only a body that stops
+        // arriving is a stall.
+        let mut body = String::new();
+        ProgressReader::new(response.into_reader(), heartbeat)
+            .take(MAX_RESPONSE_BYTES + 1)
+            .read_to_string(&mut body)
+            .map_err(ExchangeFailure::Body)?;
+        Ok(HttpResponse { status, body })
+    });
+    let limit = seconds(stall_limit);
+    let response = match exchange {
+        Ok(Ok(response)) => response,
+        Ok(Err(ExchangeFailure::Transport {
+            message,
+            timed_out: false,
+        })) => bail!("Remote request failed for {url}: {message}"),
+        Ok(Err(ExchangeFailure::Transport { message, .. })) => {
+            // ureq leads with the URL as it parsed it; the message has it already.
+            let detail = message
+                .split_once(": ")
+                .filter(|(prefix, _)| prefix.starts_with("http"))
+                .map_or(message.as_str(), |(_, detail)| detail);
+            bail!("Remote request timed out for {url}: {detail}\n{STALLED_HINT}")
         }
-        None => request.call(),
-    };
-    let response = match result {
-        Ok(response) => response,
-        // Non-2xx responses still carry the API's error envelope; surface them
-        // as an HttpResponse so callers keep their status-based error paths.
-        Err(ureq::Error::Status(_, response)) => response,
-        Err(ureq::Error::Transport(transport)) => {
-            bail!("Remote request failed for {url}: {transport}")
+        Ok(Err(ExchangeFailure::Body(error))) if is_timeout(&error) => bail!(
+            "Remote request timed out for {url}: the response stopped arriving for {limit}\n{STALLED_HINT}"
+        ),
+        Ok(Err(ExchangeFailure::Body(error))) => {
+            return Err(error).context("failed to read remote response body")
         }
+        Err(Stalled { progress: 0, .. }) => {
+            bail!("Remote request timed out for {url}: no response within {limit}\n{STALLED_HINT}")
+        }
+        Err(Stalled { progress, .. }) => bail!(
+            "Remote request timed out for {url}: the response stopped arriving for {limit} after {progress} bytes\n{STALLED_HINT}"
+        ),
     };
-    let status = response.status();
-    // `into_string` stops at 10 MB, which a project's landing history passes.
-    let mut body = String::new();
-    response
-        .into_reader()
-        .take(MAX_RESPONSE_BYTES + 1)
-        .read_to_string(&mut body)
-        .context("failed to read remote response body")?;
-    if body.len() as u64 > MAX_RESPONSE_BYTES {
+    if response.body.len() as u64 > MAX_RESPONSE_BYTES {
         bail!(
             "Remote response from {url} is larger than {} MB",
             MAX_RESPONSE_BYTES / (1024 * 1024)
         );
     }
-    Ok(HttpResponse { status, body })
+    Ok(response)
 }
+
+/// Knit does not repeat a stalled request by itself: the caller decides.
+const STALLED_HINT: &str =
+    "Hint: the connection to the sync remote stalled. Run the command again to retry.";
 
 pub(super) fn normalize_base_url(url: &str) -> String {
     url.trim().trim_end_matches('/').to_string()
@@ -1004,5 +1079,174 @@ mod tests {
         );
 
         fs::remove_dir_all(root).unwrap();
+    }
+
+    // -----------------------------------------------------------------------
+    // Stalled sync remotes. Each server accepts the connection and then
+    // misbehaves in one way; the request must come back with a timeout that
+    // names the URL instead of blocking. `HANG_BOUND` turns a request that
+    // never returns into a failed test instead of a hung suite.
+    // -----------------------------------------------------------------------
+
+    use std::io::Write;
+    use std::net::{SocketAddr, TcpListener, TcpStream};
+    use std::time::Instant;
+
+    const STALL_LIMIT: Duration = Duration::from_secs(1);
+    const HANG_BOUND: Duration = Duration::from_secs(20);
+
+    fn loopback_server(serve: impl Fn(TcpStream) + Send + Sync + 'static) -> SocketAddr {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        let serve = std::sync::Arc::new(serve);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { continue };
+                let serve = serve.clone();
+                std::thread::spawn(move || serve(stream));
+            }
+        });
+        address
+    }
+
+    fn read_request(stream: &mut TcpStream) {
+        let mut buffer = [0u8; 4096];
+        let _ = stream.read(&mut buffer);
+    }
+
+    /// Hold the connection open without another byte, for longer than any
+    /// test waits.
+    fn go_silent(stream: TcpStream) {
+        std::thread::sleep(HANG_BOUND * 3);
+        drop(stream);
+    }
+
+    /// One byte every 100 ms until the client goes away: never idle long
+    /// enough for a socket read timeout, never finished.
+    fn trickle(mut stream: TcpStream, byte: u8) {
+        while stream.write_all(&[byte]).is_ok() {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+
+    fn request_on_a_thread(
+        base_url: String,
+        stall_limit: Duration,
+    ) -> (Result<HttpResponse>, Duration) {
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let started = Instant::now();
+        std::thread::spawn(move || {
+            let remote = KnitRemote {
+                url: base_url,
+                token: None,
+            };
+            let _ = sender.send(request_with_stall_limit(
+                &remote,
+                None,
+                "GET",
+                "/projects/demo/export",
+                None,
+                stall_limit,
+            ));
+        });
+        let result = receiver.recv_timeout(HANG_BOUND).unwrap_or_else(|_| {
+            panic!(
+                "the request was still blocked after {HANG_BOUND:?}; its limit was {stall_limit:?}"
+            )
+        });
+        (result, started.elapsed())
+    }
+
+    fn assert_times_out(base_url: String) {
+        let url = format!("{base_url}/api/v1/projects/demo/export");
+        let (result, elapsed) = request_on_a_thread(base_url, STALL_LIMIT);
+        let message = match result {
+            Ok(response) => panic!("a stalled remote answered HTTP {}", response.status),
+            Err(error) => format!("{error:#}"),
+        };
+        assert!(message.contains("timed out"), "{message}");
+        assert!(message.contains(&url), "{message}");
+        assert!(
+            elapsed < STALL_LIMIT * 5,
+            "a {STALL_LIMIT:?} limit took {elapsed:?}: {message}"
+        );
+    }
+
+    #[test]
+    fn a_remote_that_accepts_and_never_answers_times_out() {
+        let address = loopback_server(go_silent);
+        assert_times_out(format!("http://{address}"));
+    }
+
+    #[test]
+    fn an_https_remote_that_never_starts_the_tls_handshake_times_out() {
+        let address = loopback_server(go_silent);
+        assert_times_out(format!("https://{address}"));
+    }
+
+    #[test]
+    fn a_tls_handshake_that_only_trickles_times_out() {
+        let address = loopback_server(|mut stream| {
+            read_request(&mut stream);
+            // The header of a 16000-byte TLS handshake record and the start
+            // of a ServerHello of matching length; the rest never completes.
+            let _ = stream.write_all(&[0x16, 0x03, 0x03, 0x3e, 0x80, 0x02, 0x00, 0x3e, 0x7c]);
+            trickle(stream, 0);
+        });
+        assert_times_out(format!("https://{address}"));
+    }
+
+    #[test]
+    fn a_response_head_that_only_trickles_times_out() {
+        let address = loopback_server(|mut stream| {
+            read_request(&mut stream);
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nx-padding: ");
+            trickle(stream, b'a');
+        });
+        assert_times_out(format!("http://{address}"));
+    }
+
+    #[test]
+    fn a_response_body_that_stops_midway_times_out() {
+        let address = loopback_server(|mut stream| {
+            read_request(&mut stream);
+            let _ =
+                stream.write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100000\r\n\r\n{\"data\":");
+            go_silent(stream);
+        });
+        assert_times_out(format!("http://{address}"));
+    }
+
+    #[test]
+    fn a_slow_download_that_keeps_arriving_outlives_the_stall_limit() {
+        // 50 chunks 50 ms apart: about 2.5 s in total against a 1 s limit,
+        // with no gap anywhere near the limit.
+        const CHUNKS: usize = 50;
+        let chunk = "x".repeat(1000);
+        let expected = chunk.repeat(CHUNKS);
+        let address = loopback_server(move |mut stream| {
+            read_request(&mut stream);
+            let head = format!(
+                "HTTP/1.1 200 OK\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                chunk.len() * CHUNKS
+            );
+            let _ = stream.write_all(head.as_bytes());
+            for _ in 0..CHUNKS {
+                std::thread::sleep(Duration::from_millis(50));
+                if stream.write_all(chunk.as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
+        let (result, elapsed) = request_on_a_thread(format!("http://{address}"), STALL_LIMIT);
+        let response = result.unwrap_or_else(|error| {
+            panic!("a download that kept arriving failed after {elapsed:?}: {error:#}")
+        });
+        assert_eq!(response.status, 200);
+        assert_eq!(response.body, expected);
+        assert!(
+            elapsed > STALL_LIMIT,
+            "the download finished in {elapsed:?}, so it never outlived the limit"
+        );
     }
 }

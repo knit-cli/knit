@@ -7,6 +7,7 @@
 use super::client::{
     api_base_url, normalize_base_url, remote_token_env_name, resolve_remote, resolve_token,
 };
+use crate::bounded_http::{run_with_stall_limit, seconds};
 use crate::ids::slugify;
 use crate::model::{KnitConfig, KnitRemote};
 use crate::output as out;
@@ -323,23 +324,24 @@ struct BoundedResponse {
 
 /// One bounded, redirect-free authenticated GET. Following no redirects and
 /// capping both time and body size means a broken or hostile endpoint cannot
-/// stall token entry or stream unbounded data. Transport failures return a
-/// sanitized message that carries no token material.
+/// stall token entry or stream unbounded data. `timeout` covers the whole
+/// exchange on the clock, including the phases ureq's own timeout does not
+/// reach (name resolution, a TLS handshake that only trickles). Transport
+/// failures return a sanitized message that carries no token material.
 fn bounded_bearer_get(
     full_url: &str,
     token: &str,
     timeout: Duration,
 ) -> std::result::Result<BoundedResponse, String> {
-    let agent = ureq::AgentBuilder::new()
+    let request = ureq::AgentBuilder::new()
         .timeout_connect(timeout)
         .timeout(timeout)
         .redirects(0)
-        .build();
-    match agent
+        .build()
         .get(full_url)
-        .set("authorization", &format!("Bearer {token}"))
-        .call()
-    {
+        .set("authorization", &format!("Bearer {token}"));
+    let token = token.to_string();
+    let exchange = run_with_stall_limit(timeout, move |_| match request.call() {
         Ok(response) => {
             let status = response.status();
             if !(200..300).contains(&status) {
@@ -360,7 +362,7 @@ fn bounded_bearer_get(
                 Ok(_) => Ok(BoundedResponse { status, body }),
                 Err(error) => Err(redact(
                     &format!("the response body could not be read: {error}"),
-                    token,
+                    &token,
                 )),
             }
         }
@@ -369,9 +371,15 @@ fn bounded_bearer_get(
             body: String::new(),
         }),
         Err(ureq::Error::Transport(transport)) => {
-            Err(redact(&format!("the request failed: {transport}"), token))
+            Err(redact(&format!("the request failed: {transport}"), &token))
         }
-    }
+    });
+    exchange.unwrap_or_else(|stalled| {
+        Err(format!(
+            "the request timed out: no complete response within {}",
+            seconds(stalled.limit)
+        ))
+    })
 }
 
 /// Verify a candidate token with a single bounded `GET
@@ -1003,5 +1011,41 @@ mod tests {
             }
             other => panic!("connection refusal must stay indeterminate, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_tls_handshake_that_only_trickles_cannot_stall_token_entry() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!(
+            "https://{}/api/v1/me/access-token",
+            listener.local_addr().unwrap()
+        );
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { continue };
+                std::thread::spawn(move || {
+                    let mut buffer = [0u8; 4096];
+                    let _ = std::io::Read::read(&mut stream, &mut buffer);
+                    // A TLS record header promising 16000 bytes, then one
+                    // byte every 100 ms: the socket is never idle for long.
+                    let _ = stream.write_all(&[0x16, 0x03, 0x03, 0x3e, 0x80, 0x02, 0x00, 0x3e]);
+                    while stream.write_all(&[0]).is_ok() {
+                        std::thread::sleep(Duration::from_millis(100));
+                    }
+                });
+            }
+        });
+        let started = std::time::Instant::now();
+        let reason = match bounded_bearer_get(&url, "synthetic-candidate", Duration::from_secs(1)) {
+            Ok(response) => panic!("a stalled handshake answered HTTP {}", response.status),
+            Err(reason) => reason,
+        };
+        assert!(reason.contains("timed out"), "{reason}");
+        assert!(!reason.contains("synthetic-candidate"), "{reason}");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "a 1s limit took {:?}",
+            started.elapsed()
+        );
     }
 }
