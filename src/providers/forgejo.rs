@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     PULL_REQUEST_KIND,
 };
+use crate::bounded_http::send_for_text;
 use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -9,6 +10,9 @@ use serde_json::json;
 use std::ffi::OsString;
 
 const CLI: &str = "tea";
+/// One native API attempt finishes or fails within this. ureq applies it to
+/// the socket; `send_for_text` holds the whole exchange to it on the clock.
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
 const LIST_FIELDS: &str = "index,state,title,head,base,url";
 
 /// Codeberg / Forgejo / Gitea adapter, backed by the `tea` CLI.
@@ -619,7 +623,7 @@ fn api_output(
     let agent = ureq::AgentBuilder::new()
         .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(10))
-        .timeout(std::time::Duration::from_secs(30))
+        .timeout(API_TIMEOUT)
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
         .build();
     for attempt in 0..3 {
@@ -631,18 +635,15 @@ fn api_output(
         if body.is_some() {
             request = request.set("Content-Type", "application/json");
         }
-        let response = match body {
-            Some(input) => request.send_string(input),
-            None => request.call(),
-        };
-        match response {
-            Ok(response) => {
-                return response.into_string().with_context(|| {
+        match send_for_text(request, body, API_TIMEOUT) {
+            Ok(reply) if !reply.rejected => {
+                return reply.body.with_context(|| {
                     format!("failed to read Forgejo API response for {operation}")
                 });
             }
-            Err(ureq::Error::Status(status, response)) => {
-                let detail = response.into_string().unwrap_or_default();
+            Ok(reply) => {
+                let status = reply.status;
+                let detail = reply.body.unwrap_or_default();
                 let detail = credential
                     .as_ref()
                     .map(|value| value.redact(&detail))
@@ -662,7 +663,7 @@ fn api_output(
                     detail.trim()
                 );
             }
-            Err(ureq::Error::Transport(error)) => {
+            Err(error) => {
                 if attempt < 2 {
                     std::thread::sleep(std::time::Duration::from_millis(250 * (attempt + 1)));
                     continue;

@@ -4,9 +4,14 @@
 //! stores, or default IPv6 routing can hang simple GitHub I/O.
 
 use super::CLI;
+use crate::bounded_http::send_for_text;
 use crate::providers::{cli_output, PrTarget};
 use anyhow::{bail, Context, Result};
 use std::ffi::OsString;
+
+/// One native API exchange finishes or fails within this. ureq applies it to
+/// the socket; `send_for_text` holds the whole exchange to it on the clock.
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 pub(super) fn github_api_output(
     target: &PrTarget,
@@ -107,7 +112,7 @@ pub(super) fn native_github_api_output(
     let agent = ureq::AgentBuilder::new()
         .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(API_TIMEOUT)
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
         .build();
     let mut request = agent
@@ -119,27 +124,23 @@ pub(super) fn native_github_api_output(
     if body.is_some() {
         request = request.set("Content-Type", "application/json");
     }
-    let result = match body {
-        Some(input) => request.send_string(input),
-        None => request.call(),
-    };
 
-    match result {
-        Ok(response) => {
-            let text = response
-                .into_string()
+    match send_for_text(request, body, API_TIMEOUT) {
+        Ok(reply) if !reply.rejected => {
+            let text = reply
+                .body
                 .with_context(|| format!("failed to read GitHub API response for {operation}"))?;
             Ok(text.trim_end().to_string())
         }
-        Err(ureq::Error::Status(status, response)) => {
-            // Read `Retry-After` before the body consumes the response: when
-            // GitHub says how long to wait, Knit waits exactly that long
+        Ok(reply) => {
+            let status = reply.status;
+            // When GitHub says how long to wait, Knit waits exactly that long
             // instead of guessing with its own backoff ladder.
-            let retry_after = response
-                .header("retry-after")
+            let retry_after = reply
+                .retry_after
                 .and_then(|value| value.trim().parse::<u64>().ok())
                 .map(std::time::Duration::from_secs);
-            let detail = response.into_string().unwrap_or_default();
+            let detail = reply.body.unwrap_or_default();
             let detail = credential
                 .as_ref()
                 .map(|value| value.redact(&detail))
@@ -159,9 +160,7 @@ pub(super) fn native_github_api_output(
                 ),
             }))
         }
-        Err(ureq::Error::Transport(transport)) => {
-            bail!("GitHub API request failed during {operation}: {transport}")
-        }
+        Err(error) => bail!("GitHub API request failed during {operation}: {error}"),
     }
 }
 

@@ -2,6 +2,7 @@ use super::{
     cli_output, parse_pr_url, repo_scoped_args, CheckRun, Forge, PrTarget, PullRequest,
     MERGE_REQUEST_KIND,
 };
+use crate::bounded_http::send_for_text;
 use crate::model::ForgeAuthor;
 use anyhow::{bail, Context, Result};
 use serde::Deserialize;
@@ -10,6 +11,9 @@ use std::ffi::OsString;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const CLI: &str = "glab";
+/// One native API exchange finishes or fails within this. ureq applies it to
+/// the socket; `send_for_text` holds the whole exchange to it on the clock.
+const API_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(20);
 
 /// GitLab forge adapter, backed by the `glab` CLI. Review objects are merge requests.
 pub struct GitLab;
@@ -750,7 +754,7 @@ fn native_api_output(
     let agent = ureq::AgentBuilder::new()
         .redirects(if credential.is_some() { 0 } else { 5 })
         .timeout_connect(std::time::Duration::from_secs(5))
-        .timeout(std::time::Duration::from_secs(20))
+        .timeout(API_TIMEOUT)
         .resolver(ipv4_first_resolver as fn(&str) -> std::io::Result<Vec<std::net::SocketAddr>>)
         .build();
     let mut request = agent
@@ -761,16 +765,13 @@ fn native_api_output(
     if body.is_some() {
         request = request.set("Content-Type", "application/json");
     }
-    let response = match body {
-        Some(input) => request.send_string(input),
-        None => request.call(),
-    };
-    match response {
-        Ok(response) => response
-            .into_string()
+    match send_for_text(request, body, API_TIMEOUT) {
+        Ok(reply) if !reply.rejected => reply
+            .body
             .with_context(|| format!("failed to read GitLab API response for {operation}")),
-        Err(ureq::Error::Status(status, response)) => {
-            let detail = response.into_string().unwrap_or_default();
+        Ok(reply) => {
+            let status = reply.status;
+            let detail = reply.body.unwrap_or_default();
             let detail = credential
                 .as_ref()
                 .map(|value| value.redact(&detail))
@@ -786,9 +787,7 @@ fn native_api_output(
                 detail.trim()
             );
         }
-        Err(ureq::Error::Transport(error)) => {
-            bail!("GitLab API request failed during {operation}: {error}")
-        }
+        Err(error) => bail!("GitLab API request failed during {operation}: {error}"),
     }
 }
 
