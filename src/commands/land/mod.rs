@@ -154,6 +154,7 @@ pub fn land_default_version(
                     "Service: {}; source: {}",
                     run["serviceStatus"], run["sourceStatus"]
                 );
+                print_v2_reused_steps(&run);
             }
         }
         return v2::display_plan(&active, &raw, &candidate);
@@ -259,6 +260,7 @@ pub fn land_default_destination() -> Result<()> {
         None,
         None,
         false,
+        false,
     )
 }
 
@@ -276,6 +278,7 @@ pub fn apply_land_plan(
     lane_name: Option<&str>,
     expected_plan_hash: Option<&str>,
     json_output: bool,
+    no_cache: bool,
 ) -> Result<()> {
     if json_output {
         crate::output::route_human_lines_to_stderr();
@@ -324,6 +327,7 @@ pub fn apply_land_plan(
             skip_checks,
             json_output,
             expected_plan_hash,
+            no_cache,
         );
     }
     if json_output {
@@ -793,6 +797,7 @@ pub fn resume_land_run(
             skip_checks,
             json_output,
             None,
+            false,
         );
     }
     if !acknowledge.is_empty() || note.is_some() || json_output {
@@ -934,6 +939,7 @@ pub fn show_land_status(run_path: Option<&Path>) -> Result<()> {
     if let Some(path) = resolve_land_run_path(&active, run_path)? {
         let raw: serde_json::Value = read_json(&path)?;
         if raw["schemaVersion"] == "0.2" {
+            print_v2_reused_steps(&raw);
             println!("{}", serde_json::to_string_pretty(&raw)?);
             return Ok(());
         }
@@ -974,6 +980,19 @@ fn plan_superseded_by_revert(active: &ActiveBundle, path: &Path) -> Result<bool>
     let raw: serde_json::Value = read_json(path)?;
     Ok(raw["schemaVersion"] == "0.2"
         && v2::bundle_fingerprint_is_stale(&raw, &serde_json::to_value(&active.bundle)?))
+}
+
+pub(crate) fn print_v2_reused_steps(run: &serde_json::Value) {
+    if let Some(steps) = run["steps"].as_array() {
+        for step in steps {
+            if let (Some(id), Some(source)) = (
+                step["id"].as_str(),
+                step["output"]["reused"]["runId"].as_str(),
+            ) {
+                println!("{id}: reused from run {source}");
+            }
+        }
+    }
 }
 
 fn archive_landed_bundle(active: &mut ActiveBundle, keep_worktrees: bool) -> Result<usize> {

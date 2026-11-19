@@ -650,8 +650,14 @@ fn landing_deployment_agents_line(deployment: &ProjectLandingDeployment) -> Stri
             .map(|repo| format!(", when `{repo}` changed"))
             .unwrap_or_else(|| ", runs on every landing".to_string()),
     };
+    // `unchanged` is the only cache mode, so presence is the whole answer.
+    let cache = if deployment.cache.is_some() {
+        ", cache=unchanged".to_string()
+    } else {
+        String::new()
+    };
     format!(
-        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}{watches}",
+        "- `{id}`{repo} uses `{mode}`{checkout}{command}{timeout}{watches}{cache}",
         id = deployment.id
     )
 }
