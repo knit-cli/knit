@@ -92,7 +92,7 @@ pub struct LogArgs {
     /// Show entries at or after this ISO date or relative date (plain dates mean midnight UTC).
     #[arg(long, alias = "after", value_name = "DATE")]
     pub since: Option<String>,
-    /// Show entries at or before this ISO date or relative date (plain dates mean midnight UTC).
+    /// Show entries at or before this ISO date or relative date (plain dates include that whole UTC day).
     #[arg(long, alias = "before", value_name = "DATE")]
     pub until: Option<String>,
     /// Match an entry message. Repeat to add patterns.
@@ -699,8 +699,9 @@ pub enum Commands {
     },
     /// Squash bundle commits into one commit per repository and one ledger group.
     Squash {
-        #[arg(short, long)]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
     },
     /// Rebase bundle branches onto their refreshed bases: each recorded
     /// review's base (repository and branch, as `knit land update` uses it),
@@ -711,8 +712,9 @@ pub enum Commands {
         repos: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         squash: bool,
-        #[arg(short, long, requires = "squash")]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, requires = "squash", value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         offline: bool,
         #[arg(long = "continue", conflicts_with = "abort")]

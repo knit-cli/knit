@@ -1156,7 +1156,7 @@ pub fn run(cli: Cli) -> Result<()> {
             force,
             no_push,
         } => commands::sign::sign_bundle_commits(&repos, all, force, no_push),
-        Commands::Squash { message } => commands::rewrite::squash(message.as_deref()),
+        Commands::Squash { message } => commands::rewrite::squash(&message),
         Commands::Rebase {
             repos,
             squash,
@@ -1167,7 +1167,7 @@ pub fn run(cli: Cli) -> Result<()> {
         } => commands::rewrite::rebase(
             &repos,
             squash,
-            message.as_deref(),
+            &message,
             offline,
             continue_rebase,
             abort,
