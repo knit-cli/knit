@@ -404,7 +404,8 @@ pub enum Commands {
         no_remote: bool,
     },
     /// Pull tracked repos. With no flags: inside a bundle pulls that bundle's
-    /// checkouts; at the workspace base pulls every project source checkout and
+    /// checkouts, including commits others pushed to its published feature
+    /// branches; at the workspace base pulls every project source checkout and
     /// open bundle, reporting each.
     Pull {
         /// Optional repo ids or paths to limit a single-bundle pull.

@@ -623,14 +623,20 @@ impl std::fmt::Display for Movement {
     }
 }
 
-/// Subject line and Git author date of one recorded commit, captured when the
-/// commit was observed. Lets history name and time a commit long after the
-/// branch it lived on is gone.
+/// Subject line, Git author date and Git author of one recorded commit,
+/// captured when the commit was observed. Lets history name, time and
+/// attribute a commit long after the branch it lived on is gone.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CommitDetail {
     pub subject: String,
     pub authored_at: String,
+    /// Who wrote the commit. An observed commit has no commit group to carry
+    /// its author, and it is often someone other than the bundle's owner: a
+    /// maintainer pushing to the review branch, say. Optional so older
+    /// artifacts (and consumers) stay compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub author: Option<CommitAuthor>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

@@ -250,9 +250,10 @@ pub fn commit_author(cwd: &Path, sha: &str) -> Result<CommitAuthor> {
     Ok(CommitAuthor { name, email })
 }
 
-/// Subject line and author date of each requested commit that this repo still
-/// has. Best effort: unknown or unreadable commits are simply absent from the
-/// result, and a repo that is not a usable checkout yields an empty map.
+/// Subject line, author date and author of each requested commit that this
+/// repo still has. Best effort: unknown or unreadable commits are simply
+/// absent from the result, and a repo that is not a usable checkout yields an
+/// empty map.
 /// Batched so naming a long commit list costs a bounded number of git calls.
 pub fn commit_details(cwd: &Path, shas: &[String]) -> BTreeMap<String, CommitDetail> {
     let wanted = shas.iter().cloned().collect::<BTreeSet<_>>();
@@ -269,15 +270,18 @@ pub fn commit_details(cwd: &Path, shas: &[String]) -> BTreeMap<String, CommitDet
             // are compared as strings, so mixed offsets would misorder events.
             // format-local under TZ=UTC pins every date to the ledger's form.
             OsString::from("--date=format-local:%Y-%m-%dT%H:%M:%SZ"),
-            OsString::from("--format=%H %ad %s"),
+            // Unit separators: an author name can hold any printable text.
+            OsString::from("--format=%H%x1f%ad%x1f%an%x1f%ae%x1f%s"),
         ];
         args.extend(chunk.iter().map(OsString::from));
         let Ok(output) = git_output_with_env(cwd, args, &[("TZ", "UTC")]) else {
             continue;
         };
         for line in output.lines() {
-            let mut parts = line.trim_end().splitn(3, ' ');
-            let (Some(sha), Some(authored_at)) = (parts.next(), parts.next()) else {
+            let mut parts = line.trim_end().splitn(5, '\u{1f}');
+            let (Some(sha), Some(authored_at), Some(name), Some(email)) =
+                (parts.next(), parts.next(), parts.next(), parts.next())
+            else {
                 continue;
             };
             // With every requested sha missing, git log falls back to HEAD, so
@@ -291,6 +295,10 @@ pub fn commit_details(cwd: &Path, shas: &[String]) -> BTreeMap<String, CommitDet
                 CommitDetail {
                     subject: subject.lines().next().unwrap_or_default().to_string(),
                     authored_at: authored_at.to_string(),
+                    author: Some(CommitAuthor {
+                        name: name.to_string(),
+                        email: email.to_string(),
+                    }),
                 },
             );
         }

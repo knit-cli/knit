@@ -88,6 +88,37 @@ pub fn ledger_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Optio
     head
 }
 
+/// Whether the ledger has ever named `sha` for this repo: as a recorded commit,
+/// as either end of a movement, or as a commit a rewrite replaced.
+pub fn ledger_mentions_commit(bundle: &ChangeGroup, repo_id: &str, sha: &str) -> bool {
+    let grouped = |groups: &[crate::model::CommitGroup]| {
+        groups
+            .iter()
+            .flat_map(|group| &group.commits)
+            .any(|commit| commit.repo_id == repo_id && commit.sha == sha)
+    };
+    grouped(&bundle.commit_groups)
+        || bundle.nodes.iter().any(|node| {
+            node.commits
+                .iter()
+                .any(|commit| commit.repo_id == repo_id && commit.sha == sha)
+                || node
+                    .rewrite
+                    .as_ref()
+                    .is_some_and(|rewrite| grouped(&rewrite.superseded_groups))
+                || node
+                    .repo_changes
+                    .iter()
+                    .filter(|change| change.repo_id == repo_id)
+                    .any(|change| {
+                        change.after_sha == sha
+                            || change.before_sha.as_deref() == Some(sha)
+                            || change.commits.iter().any(|commit| commit == sha)
+                            || change.dropped_commits.iter().any(|commit| commit == sha)
+                    })
+        })
+}
+
 pub fn status_note(change: &RepoChange) -> String {
     match change.movement {
         Movement::Advanced => format!("unrecorded commits: {}", change.commits.len()),
@@ -119,10 +150,10 @@ pub fn sync_observed_changes(active: &mut ActiveBundle) -> Result<Vec<RepoChange
     sync_observed_changes_for_repo_ids(active, None)
 }
 
-pub fn sync_observed_changes_for_repo_ids(
-    active: &mut ActiveBundle,
-    repo_ids: Option<&[String]>,
-) -> Result<Vec<RepoChange>> {
+/// Refuses while a rebase owns the ledger or a checkout sits on an
+/// intermediate rebase HEAD. Callers that only record opportunistically check
+/// this first and leave the checkouts alone instead of failing.
+pub fn ensure_no_pending_rebase(active: &ActiveBundle) -> Result<()> {
     // A multi-repository command can have completed some Git rebases while
     // others are still pending. Its recovery record owns the entire ledger.
     if active
@@ -140,6 +171,14 @@ pub fn sync_observed_changes_for_repo_ids(
             }
         }
     }
+    Ok(())
+}
+
+pub fn sync_observed_changes_for_repo_ids(
+    active: &mut ActiveBundle,
+    repo_ids: Option<&[String]>,
+) -> Result<Vec<RepoChange>> {
+    ensure_no_pending_rebase(active)?;
     let changes = detect_unrecorded_changes(active)?;
     let changes = match repo_ids {
         Some(repo_ids) => changes
