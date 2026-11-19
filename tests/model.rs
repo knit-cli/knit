@@ -1,5 +1,5 @@
 use knit::model::{
-    ledger_relation, ChangeGroup, CommitDetail, LedgerRelation, Movement, RepoChange,
+    ledger_relation, ChangeGroup, CommitAuthor, CommitDetail, LedgerRelation, Movement, RepoChange,
 };
 use std::collections::BTreeMap;
 
@@ -214,10 +214,12 @@ fn recorded_commit_details_survive_a_round_trip() {
             CommitDetail {
                 subject: "Add capacity form".to_string(),
                 authored_at: "2026-08-12T07:30:00+02:00".to_string(),
+                author: None,
             },
         )]),
     };
 
+    // A detail recorded before authors were captured keeps its exact bytes.
     let encoded = serde_json::to_string(&change).unwrap();
     assert!(
         encoded.contains(r#""commitDetails":{"def456":{"subject":"Add capacity form","authoredAt":"2026-08-12T07:30:00+02:00"}}"#),
@@ -225,4 +227,17 @@ fn recorded_commit_details_survive_a_round_trip() {
     );
     let decoded: RepoChange = serde_json::from_str(&encoded).unwrap();
     assert_eq!(decoded.commit_details, change.commit_details);
+
+    let mut attributed = change.clone();
+    attributed.commit_details.get_mut("def456").unwrap().author = Some(CommitAuthor {
+        name: "Ada Maintainer".to_string(),
+        email: "ada@example.test".to_string(),
+    });
+    let encoded = serde_json::to_string(&attributed).unwrap();
+    assert!(
+        encoded.contains(r#""author":{"name":"Ada Maintainer","email":"ada@example.test"}"#),
+        "{encoded}"
+    );
+    let decoded: RepoChange = serde_json::from_str(&encoded).unwrap();
+    assert_eq!(decoded.commit_details, attributed.commit_details);
 }

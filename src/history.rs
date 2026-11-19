@@ -1311,6 +1311,7 @@ mod tests {
                 Some(CommitDetail {
                     subject: "Tighten capacity validation".to_string(),
                     authored_at: "2026-08-11T18:22:05+02:00".to_string(),
+                    author: None,
                 }),
             )],
         )]);
@@ -1353,6 +1354,7 @@ mod tests {
             Some(CommitDetail {
                 subject: "Add capacity form".to_string(),
                 authored_at: "2026-08-12T07:30:00Z".to_string(),
+                author: None,
             }),
         );
         change.before_sha = None;
@@ -1391,6 +1393,7 @@ mod tests {
             CommitDetail {
                 subject: "Typo in seat map".to_string(),
                 authored_at: "2026-08-10T11:00:00Z".to_string(),
+                author: None,
             },
         )]);
         let bundle = bundle_with(vec![BundleNode::git_observed(

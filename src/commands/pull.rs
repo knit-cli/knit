@@ -1,12 +1,12 @@
 use crate::checkout::checkout_dir;
 use crate::commands::base::advance_local_base;
-use crate::commands::bundle::list_open_bundle_ids;
+use crate::commands::bundle::{bundle_state, list_open_bundle_ids, BundleStatus};
 use crate::commands::project::load_project_by_id;
 use crate::commands::remote::{
     prepare_remote_pull, pull_bundle_remote_state, pull_remote_state, RemoteBundleOutcome,
     RemotePullContext,
 };
-use crate::git::{current_branch, git_output, rev_parse};
+use crate::git::{current_branch, git_output, is_ancestor, remote_ref_sha, rev_list, rev_parse};
 use crate::ids::short_sha;
 use crate::model::{ChangeGroup, ProjectRepoEntry, RepoEntry};
 use crate::output as out;
@@ -17,7 +17,7 @@ use crate::store::{
     resolve_optional_bundle_id, save_active_bundle, ActiveBundle, BundleResolutionSource,
 };
 use crate::time::now_iso;
-use crate::tracking::{sync_note, sync_observed_changes_for_repo_ids};
+use crate::tracking::{ensure_no_pending_rebase, sync_note, sync_observed_changes_for_repo_ids};
 use anyhow::{bail, Context, Result};
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -347,7 +347,194 @@ pub fn pull(
 
     // A specific bundle is in context: pull its repos (and its remote artifact).
     pull_repos(selectors, all, rebase, force, feature)?;
-    pull_remote_state(remote, no_remote, merge)
+    pull_remote_state(remote, no_remote, merge)?;
+    if feature {
+        return Ok(());
+    }
+    // Last, so a newer ledger pulled just above is the one that decides which
+    // of the arriving commits are still unrecorded.
+    pull_published_feature_branches(selectors, all, force)
+}
+
+// ---------------------------------------------------------------------------
+// Published feature branches
+// ---------------------------------------------------------------------------
+
+struct FeatureTarget {
+    repo: RepoEntry,
+    cwd: PathBuf,
+    branch: String,
+}
+
+/// What a bare `knit pull` found on the branch one review is built from.
+enum FeatureOutcome {
+    /// Nothing to bring in: never published, already current, or the checkout
+    /// is not on the feature branch.
+    Current,
+    Advanced {
+        before: String,
+        after: String,
+    },
+    /// The published branch has commits this checkout lacks, and taking them
+    /// is more than a fast-forward of a clean checkout.
+    Held(String),
+}
+
+/// Fast-forward each feature checkout to its published branch and record what
+/// arrived.
+///
+/// Anyone with push access can add commits to a published feature branch; a
+/// maintainer editing a pull request opened from a fork is the usual case.
+/// Those commits reach the ledger only through a checkout, so a pull that
+/// stopped at the base branches left them out of the bundle. The branch is
+/// read from where it was published (the fork for a contribution, `origin`
+/// otherwise), never from a tracking ref that only this machine's pushes move.
+///
+/// A checkout that is dirty, diverged or on another branch is reported and
+/// left alone, so a bare `knit pull` keeps working in the middle of a feature.
+fn pull_published_feature_branches(selectors: &[String], all: bool, force: bool) -> Result<()> {
+    let mut active = load_active_bundle_for_update()?;
+    // A landed or closed bundle's ledger is finished history.
+    if bundle_state(&active.bundle) != BundleStatus::Open {
+        return Ok(());
+    }
+    if let Err(pending) = ensure_no_pending_rebase(&active) {
+        println!(
+            "{} {}",
+            out::warn("feature checkouts not updated:"),
+            out::muted(format!("{pending:#}"))
+        );
+        return Ok(());
+    }
+    let targets: Vec<FeatureTarget> = resolve_repo_indexes(&active, selectors, all)?
+        .into_iter()
+        .filter_map(|index| {
+            let repo = &active.bundle.repos[index];
+            Some(FeatureTarget {
+                branch: repo.feature_branch.clone()?,
+                cwd: checkout_dir(&active, repo)?,
+                repo: repo.clone(),
+            })
+        })
+        .collect();
+    if targets.is_empty() {
+        return Ok(());
+    }
+
+    let results: Vec<Result<FeatureOutcome>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = targets
+            .iter()
+            .map(|target| scope.spawn(move || pull_published_feature_branch(target, force)))
+            .collect();
+        handles
+            .into_iter()
+            .map(|handle| handle.join().expect("feature pull worker thread panicked"))
+            .collect()
+    });
+
+    let mut failures = Vec::new();
+    for (target, result) in targets.iter().zip(results) {
+        let repo_id = &target.repo.id;
+        match result {
+            Ok(FeatureOutcome::Current) => {}
+            Ok(FeatureOutcome::Advanced { before, after }) => println!(
+                "{}: {} {} -> {}",
+                out::repo(repo_id),
+                out::ok("feature advanced"),
+                out::sha(short_sha(&before)),
+                out::sha(short_sha(&after))
+            ),
+            Ok(FeatureOutcome::Held(reason)) => println!(
+                "{}: {} ({})",
+                out::repo(repo_id),
+                out::warn("feature not updated"),
+                out::muted(reason)
+            ),
+            Err(error) => {
+                println!(
+                    "{}: {}",
+                    out::repo(repo_id),
+                    out::danger("feature pull failed")
+                );
+                failures.push(format!("{repo_id}: {error:#}"));
+            }
+        }
+    }
+
+    // Recorded even for a checkout this pull did not move: the artifact pull
+    // above fast-forwards checkouts too, and those commits are just as new.
+    let repo_ids: Vec<String> = targets
+        .iter()
+        .map(|target| target.repo.id.clone())
+        .collect();
+    let changes = sync_observed_changes_for_repo_ids(&mut active, Some(&repo_ids))?;
+    for change in &changes {
+        println!("{}: {}", out::repo(&change.repo_id), sync_note(change));
+    }
+    if !changes.is_empty() {
+        active.bundle.updated_at = now_iso();
+        save_active_bundle(&active)?;
+    }
+
+    if !failures.is_empty() {
+        bail!("pull failed:\n{}", failures.join("\n"));
+    }
+    Ok(())
+}
+
+fn pull_published_feature_branch(target: &FeatureTarget, force: bool) -> Result<FeatureOutcome> {
+    let FeatureTarget { repo, cwd, branch } = target;
+    if current_branch(cwd)?.as_deref() != Some(branch.as_str()) {
+        return Ok(FeatureOutcome::Current);
+    }
+    let contribution = crate::contribution::configured(repo);
+    let remote = if contribution {
+        crate::contribution::source(repo).context("missing contribution remote")?
+    } else if git_output(cwd, ["remote", "get-url", "origin"]).is_ok() {
+        "origin"
+    } else {
+        return Ok(FeatureOutcome::Current);
+    };
+    let Some(published) = remote_ref_sha(cwd, remote, &format!("refs/heads/{branch}"))? else {
+        return Ok(FeatureOutcome::Current);
+    };
+    let before = rev_parse(cwd, "HEAD")?;
+    // Also covers a checkout that is ahead of what was published. A published
+    // commit this checkout lacks is never an ancestor, so it falls through.
+    if published == before || is_ancestor(cwd, &published, &before) {
+        return Ok(FeatureOutcome::Current);
+    }
+
+    let tip = if contribution {
+        let reference = crate::contribution::fetch_ref(cwd, repo, branch, true)?;
+        rev_parse(cwd, &reference)?
+    } else {
+        git_output(cwd, ["fetch", "origin", branch])?;
+        rev_parse(cwd, "FETCH_HEAD")?
+    };
+    if is_ancestor(cwd, &tip, &before) {
+        return Ok(FeatureOutcome::Current);
+    }
+    let incoming = rev_list(cwd, &before, &tip)?.len();
+    let incoming = format!(
+        "{incoming} published commit{}",
+        if incoming == 1 { "" } else { "s" }
+    );
+    if !is_ancestor(cwd, &before, &tip) {
+        return Ok(FeatureOutcome::Held(format!(
+            "{incoming} and local work have diverged; `knit pull --feature --rebase` replays local work onto them"
+        )));
+    }
+    if !force && !git_output(cwd, ["status", "--short"])?.trim().is_empty() {
+        return Ok(FeatureOutcome::Held(format!(
+            "{incoming} waiting; commit or stash local changes, then pull again"
+        )));
+    }
+    git_output(cwd, ["merge", "--ff-only", &tip])?;
+    Ok(FeatureOutcome::Advanced {
+        before,
+        after: rev_parse(cwd, "HEAD")?,
+    })
 }
 
 /// Result of pulling one unit (a project repo's source checkout, or a bundle).

@@ -257,6 +257,7 @@ pub(crate) fn label(kind: &str) -> &str {
         "merge_permission" => "merge",
         "signatures" => "signed commits",
         "behind" => "update branch",
+        "head" => "review head",
         "host" => "host rules",
         other => other,
     }
