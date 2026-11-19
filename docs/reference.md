@@ -120,7 +120,7 @@ knit push [--all] [--set-upstream] [--remote <name>]... [--no-remote] [--no-hist
 knit sync [--repair-groups [--apply]]
 knit run <project-command> [--repo <repo>]... [--all]
 knit run [--repo <repo>] [--all] -- <command> [args...]
-knit run up|status                             # bundle runtime stack
+knit run up|status [--json]                    # bundle runtime stack
 knit run down [--purge]
 knit run eject [--force]
 knit run --list
@@ -253,6 +253,27 @@ Repo and service ids are uppercased with non-alphanumerics mapped to `_` (`gloss
 In contract mode the `database` block picks between two modes. `shared` attaches the stack to an existing dev database on `host`/`port` and fails fast when it is unreachable (an optional `startCommand`, run in the stack checkout, can boot it). `bundle` gives each runtime its own database: Knit names it from `nameTemplate` (`{bundleId}` substituted), publishes it on `portBase`, and activates the compose file's `bundle-db` profile so a profile-gated database service starts.
 
 In transform mode the lifted shape brings its own database service by default, with a fresh project-scoped volume per bundle — isolated and empty. To test bundles against real dev data instead, set `database.mode: "shared"` and name the compose service that IS the database in `database.service`: the service is stripped from every lifted stack that has it, and references to it in environments and build args are rewired to `host`/`port` — connection URLs (`@db:5432` → `@host:port`), values exactly equal to the service name (split HOST vars), and values equal to `containerPort` (default 5432) whose key mentions PORT. Reachability is checked before anything starts. Note the tradeoff: bundle code, including its migrations, then runs against the shared dev database.
+
+**Managed Docker runtime.** In a managed workspace, `knit run up|down|status` forwards to the provider broker before looking up project command aliases. Archive and purge use the same broker. A workspace is managed when `SVARTAL_RUNTIME_TOKEN` is set; the broker socket is `T3_PROVIDER_BROKER_SOCKET` (default `/run/svartal/provider-broker.sock`). The environment ID comes from `KNIT_ENVIRONMENT_ID`, or `T3CODE_HOME/userdata/environment-id` (default home `/var/lib/svartal/.t3code`).
+
+The broker invokes the internal `knit --bundle ID runtime-worker up|down|status [--purge] [--json]` command with all four trusted settings:
+
+| Variable | Meaning |
+| --- | --- |
+| `KNIT_RUNTIME_ENGINE_VOLUME` | Workspace named volume. |
+| `KNIT_RUNTIME_ENGINE_VOLUME_MOUNT` | Absolute path where the worker mounts that volume. |
+| `KNIT_RUNTIME_OWNER` | Required workspace owner identity. |
+| `KNIT_RUNTIME_NETWORK` | Broker-owned bridge network for private previews. |
+
+The worker resolves enabled profiles, validates the complete Compose document, and executes a private immutable snapshot under `/tmp`. It never executes configured project commands or database start hooks. Docker uses a clean environment and private HOME/config; workspace `.env` files cannot select Docker settings. Application `env_file` values are resolved into the private snapshot. Outside binds, host namespaces, privileged settings, external resources, custom drivers, lifecycle hooks and unsafe build options are rejected with an option-specific error. Workspace binds become named-volume subpaths; builds use namespaced tags; services receive fixed capability and resource bounds.
+
+Managed images must be readable from a registry using the worker's empty credential configuration. Every image-only service and external Dockerfile `FROM`/`COPY --from` source is pulled and pinned; host-local IDs and the reserved `knit-` output namespace cannot be requested as inputs. Pull failures never fall back to cached images. The validated Dockerfile is frozen inline, ordinary named/numeric multi-stage copies remain supported, and builds force fresh base resolution and disable layer-cache reuse. The familiar `# syntax=docker/dockerfile:1` directive is normalized to the engine's built-in frontend. Custom frontends, frontend control arguments, `ONBUILD` instructions/base triggers, `RUN` options (including cache mounts), heredocs, remote or variable-based `ADD` sources, and non-native platform overrides are currently rejected. Build contexts remain mutable application data, but cannot change the frozen build policy.
+
+Before creating containers, the worker inspects the authorized images and explicitly maps any image-declared volume paths to stable, labelled project volumes. These survive ordinary down/recreation and are discoverable by purge and owner deprovisioning. Already-orphaned anonymous volumes from older launches have no trustworthy ownership metadata and are not swept automatically. Transform mode remaps source build contexts, Dockerfiles, absolute source-path build arguments, and binds to bundle checkouts, preferring the most specific matching repository.
+
+Managed services publish no host ports. Each project gets its own default network. The worker explicitly attaches containers to the owner preview network using unique aliases, avoiding Compose's automatic service aliases on that shared network. Owner, root, bundle and repository determine project identity. Cleanup and status discover and inspect Docker resources rather than trusting editable runtime state. Only running, ownership-verified containers on the preview network expose `targetHost`, `targetPort` and `protocol` fields on their status ports. Local runtime behavior is unchanged.
+
+`knit run status --json` prints one JSON object on stdout and nothing else — `bundleId`, `recorded`, `running`, `profilePath`, `frontendPort`, `startedAt`, and a `stacks` array of `{repo, projectName, mode, composeFile, services, ports, database}` — the same facts as the human report, with the camelCase field names of `state.json` and optional fields omitted when absent. Without recorded run state, `recorded` is false and `stacks` lists the compose projects that still own containers, with `repo: null`. It is the surface a remote caller parses; `--json` is rejected for the other `knit run` verbs.
 
 ### Checks
 
