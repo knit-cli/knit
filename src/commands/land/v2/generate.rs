@@ -311,6 +311,7 @@ pub(super) fn build(
                 "sourceRepos",
                 "interactive",
                 "runner",
+                "cache",
             ] {
                 if let Some(v) = recipe.get(k) {
                     s[k] = v.clone();
@@ -694,7 +695,7 @@ fn command_inherit(command: &Value, parent: &Value) -> Value {
     if !env.is_empty() {
         result["env"] = json!(env);
     }
-    for key in ["cwd", "timeoutSeconds", "checkout"] {
+    for key in ["cwd", "timeoutSeconds", "checkout", "cache"] {
         if result.get(key).is_none() {
             if let Some(value) = parent.get(key) {
                 result[key] = value.clone();
@@ -735,6 +736,9 @@ pub(crate) fn display_plan(active: &ActiveBundle, plan: &Value, path: &Path) -> 
         println!("Wave {}: {}", i + 1, wave.join(" | "));
     }
     for step in steps {
+        if step["cache"] == "unchanged" {
+            println!("{} cache=unchanged", step["id"]);
+        }
         if step["interactive"] == true {
             println!("{}: attached local terminal required", step["id"]);
         }
