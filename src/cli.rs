@@ -699,8 +699,9 @@ pub enum Commands {
     },
     /// Squash bundle commits into one commit per repository and one ledger group.
     Squash {
-        #[arg(short, long)]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
     },
     /// Rebase bundle branches onto their refreshed bases: each recorded
     /// review's base (repository and branch, as `knit land update` uses it),
@@ -711,8 +712,9 @@ pub enum Commands {
         repos: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         squash: bool,
-        #[arg(short, long, requires = "squash")]
-        message: Option<String>,
+        /// Commit message. Repeat as <repo>=<message> to set one repo's message.
+        #[arg(short, long, requires = "squash", value_name = "[REPO=]MESSAGE")]
+        message: Vec<String>,
         #[arg(long, conflicts_with_all = ["continue_rebase", "abort"])]
         offline: bool,
         #[arg(long = "continue", conflicts_with = "abort")]
@@ -1773,6 +1775,9 @@ pub enum LandCommand {
         run_out: Option<PathBuf>,
         #[arg(long)]
         resume: bool,
+        /// Execute deployment commands even when unchanged inputs could be reused.
+        #[arg(long)]
+        no_cache: bool,
         #[arg(long)]
         json: bool,
         /// Plan file to execute. Defaults to .knit/land-plans/<bundle>.land.json.
