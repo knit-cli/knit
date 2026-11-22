@@ -299,19 +299,36 @@ pub fn commit_details(cwd: &Path, shas: &[String]) -> BTreeMap<String, CommitDet
 }
 
 pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<String>> {
+    rev_list_with(cwd, before_sha, after_sha, false)
+}
+
+/// `before..after` along the first-parent line only: the commits made on the
+/// branch itself, oldest first. A merge commit is listed and stands for
+/// whatever it brought in, so merging the base branch into a feature branch
+/// adds one commit to the list rather than the base's whole recent history.
+///
+/// This reads the commit graph alone. It needs no ref for the base branch, so
+/// the answer is the same on every machine whatever each has fetched.
+pub fn rev_list_first_parent(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<String>> {
+    rev_list_with(cwd, before_sha, after_sha, true)
+}
+
+fn rev_list_with(
+    cwd: &Path,
+    before_sha: &str,
+    after_sha: &str,
+    first_parent: bool,
+) -> Result<Vec<String>> {
     if before_sha == after_sha {
         return Ok(Vec::new());
     }
 
-    let range = format!("{before_sha}..{after_sha}");
-    let output = git_output(
-        cwd,
-        [
-            OsString::from("rev-list"),
-            OsString::from("--reverse"),
-            OsString::from(range),
-        ],
-    )?;
+    let mut args = vec![OsString::from("rev-list"), OsString::from("--reverse")];
+    if first_parent {
+        args.push(OsString::from("--first-parent"));
+    }
+    args.push(OsString::from(format!("{before_sha}..{after_sha}")));
+    let output = git_output(cwd, args)?;
 
     Ok(output
         .lines()
@@ -319,6 +336,18 @@ pub fn rev_list(cwd: &Path, before_sha: &str, after_sha: &str) -> Result<Vec<Str
         .filter(|line| !line.is_empty())
         .map(ToString::to_string)
         .collect())
+}
+
+/// Whether this repository has the commit `sha` in its object store.
+pub fn commit_exists(cwd: &Path, sha: &str) -> bool {
+    git_success(cwd, ["cat-file", "-e", &format!("{sha}^{{commit}}")])
+}
+
+/// Whether `reference` has pointed at `sha` at some time this repository still
+/// remembers. False when the reference has no reflog, or the entry expired.
+pub fn reflog_contains(cwd: &Path, reference: &str, sha: &str) -> bool {
+    git_output(cwd, ["reflog", "show", "--format=%H", reference])
+        .is_ok_and(|log| log.lines().any(|line| line.trim() == sha))
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {

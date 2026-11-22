@@ -1,6 +1,6 @@
 //! In-memory ledger projection for explicit and externally observed Git rewrites.
 use crate::checkout::checkout_dir;
-use crate::git::{commit_author, commit_details, git_output, is_ancestor, rev_list};
+use crate::git::{commit_author, commit_details, git_output, is_ancestor, rev_list_first_parent};
 use crate::ids::{commit_group_id, node_id};
 use crate::model::{BundleNode, CommitGroup, CommitRef, Movement, NodeRewrite, RepoChange};
 use crate::store::ActiveBundle;
@@ -60,8 +60,11 @@ pub fn record_rewrite(
             .with_context(|| format!("unknown rewrite repository: {}", rewrite.repo_id))?;
         let path =
             checkout_dir(active, repo).with_context(|| format!("{}: missing checkout", repo.id))?;
-        let mut dropped = rev_list(&path, &rewrite.old_base, &rewrite.old_head)?;
-        let mut new = rev_list(&path, &rewrite.new_base, &rewrite.new_head)?;
+        // First-parent, like every other list of a bundle's commits: a
+        // branch that merged its base did not author the base's commits, so
+        // rewriting or rewinding it does not drop them either.
+        let mut dropped = rev_list_first_parent(&path, &rewrite.old_base, &rewrite.old_head)?;
+        let mut new = rev_list_first_parent(&path, &rewrite.new_base, &rewrite.new_head)?;
         if kind == RewriteKind::Squash && new.len() > 1 {
             bail!(
                 "{}: squash must produce at most one feature commit",
@@ -394,7 +397,7 @@ fn patch_id(path: &Path, sha: &str) -> Result<Option<String>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::git::rev_parse;
+    use crate::git::{rev_list, rev_parse};
     use crate::history::bundle_history_snapshot;
     use crate::model::{ChangeGroup, CommitAuthor, RepoEntry};
     struct TempDir(std::path::PathBuf);

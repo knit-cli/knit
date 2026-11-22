@@ -5,7 +5,7 @@ use crate::model::{BundleNode, CommitGroup, CommitRef, Movement, RepoChange};
 use crate::output as out;
 use crate::store::{load_active_bundle_for_update, save_active_bundle, ActiveBundle};
 use crate::time::now_iso;
-use crate::tracking::{sync_note, sync_observed_changes};
+use crate::tracking::{behind_note, detect_behind_checkouts, sync_note, sync_observed_changes};
 use anyhow::Result;
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -14,9 +14,21 @@ pub fn sync_bundle() -> Result<()> {
     let mut active = load_active_bundle_for_update()?;
     ensure_mutable_checkouts(&active)?;
     let changes = sync_observed_changes(&mut active)?;
+    // A checkout that is behind its recorded head has nothing to record; say
+    // so, or the run reads as if the checkout and the ledger agreed.
+    let behind = detect_behind_checkouts(&active)?;
+    for checkout in &behind {
+        println!(
+            "{}: {}",
+            out::repo(&checkout.repo_id),
+            out::warn(behind_note(checkout))
+        );
+    }
 
     if changes.is_empty() {
-        println!("{}", out::ok("No unrecorded git commits found."));
+        if behind.is_empty() {
+            println!("{}", out::ok("No unrecorded git commits found."));
+        }
         return Ok(());
     }
 

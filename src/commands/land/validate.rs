@@ -289,6 +289,8 @@ pub(super) fn ensure_plan_matches_bundle_state(
                 .join(", ")
         );
     }
+    // Nor do the pins describe a worktree that has not caught up with them.
+    crate::tracking::ensure_checkouts_not_behind(active, None)?;
     let changed_now = crate::commands::publish::publish_scope_repo_ids(&active.bundle);
     if changed_now != plan.changed_repos {
         let added = changed_now

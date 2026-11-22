@@ -9,7 +9,7 @@ use crate::model::PublicationEntry;
 use crate::output as out;
 use crate::status::status_label;
 use crate::store::{ensure_workspace_fallback_status_is_unambiguous, load_active_bundle};
-use crate::tracking::{detect_unrecorded_changes, status_note};
+use crate::tracking::{behind_note, detect_ledger_drift, status_note};
 use anyhow::Result;
 use serde::Serialize;
 
@@ -48,6 +48,10 @@ struct StatusRepo {
     /// Commits made outside knit that the ledger has not recorded yet.
     #[serde(skip_serializing_if = "Option::is_none")]
     unrecorded: Option<String>,
+    /// The checkout has not caught up with the head the ledger records: the
+    /// commits were made elsewhere and `knit pull` brings them in.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    behind: Option<String>,
     /// The repo's review as last recorded; `knit status` never asks the host.
     #[serde(skip_serializing_if = "Option::is_none")]
     review: Option<ReviewReading>,
@@ -73,7 +77,8 @@ pub fn show_status(json: bool) -> Result<()> {
     let active = load_active_bundle()?;
     crate::commands::handoff::print_location(&active.bundle);
     ensure_workspace_fallback_status_is_unambiguous(&active)?;
-    let unrecorded = detect_unrecorded_changes(&active)?;
+    let drift = detect_ledger_drift(&active)?;
+    let (unrecorded, behind) = (drift.unrecorded, drift.behind);
     let state = bundle_state(&active.bundle);
     let readings = review_reading::read_reviews(&active.bundle, chrono::Utc::now());
     let review_for = |repo_id: &str| readings.iter().find(|r| r.repo_id == repo_id).cloned();
@@ -87,6 +92,10 @@ pub fn show_status(json: bool) -> Result<()> {
             .iter()
             .find(|change| change.repo_id == repo.id)
             .map(|change| status_note(change).to_string());
+        let behind_note = behind
+            .iter()
+            .find(|checkout| checkout.repo_id == repo.id)
+            .map(behind_note);
 
         let Some(status_dir) = checkout_dir(&active, repo) else {
             let missing = if is_in_place(repo) {
@@ -104,6 +113,7 @@ pub fn show_status(json: bool) -> Result<()> {
                 status: missing.to_string(),
                 wrong_branch: false,
                 unrecorded: unrecorded_note,
+                behind: behind_note,
                 review: review_for(&repo.id),
             });
             continue;
@@ -125,6 +135,7 @@ pub fn show_status(json: bool) -> Result<()> {
             status: status_label(&short_status).to_string(),
             wrong_branch,
             unrecorded: unrecorded_note,
+            behind: behind_note,
             review: review_for(&repo.id),
         });
     }
@@ -193,7 +204,7 @@ pub fn show_status(json: bool) -> Result<()> {
         if repo.wrong_branch {
             label.push_str(" (wrong branch)");
         }
-        if let Some(note) = &repo.unrecorded {
+        if let Some(note) = repo.unrecorded.as_ref().or(repo.behind.as_ref()) {
             label.push_str(&format!(" ({note})"));
         }
         println!(

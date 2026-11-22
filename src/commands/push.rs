@@ -100,6 +100,15 @@ pub fn push_repos(
     }
 
     let indexes = resolve_repo_indexes(&active, selectors, all)?;
+    // Before anything is pushed: a checkout that is behind the ledger would
+    // publish an older head. Git rejects that as a non-fast-forward, but a
+    // forced push replaces commits made elsewhere, on origin and then, with
+    // the ledger that follows, on the sync remote.
+    let selected: Vec<String> = indexes
+        .iter()
+        .map(|&index| active.bundle.repos[index].id.clone())
+        .collect();
+    crate::tracking::ensure_checkouts_not_behind(&active, Some(&selected))?;
     let mut discovered = false;
     for &index in &indexes {
         if let Some(cwd) = checkout_dir(&active, &active.bundle.repos[index]) {
