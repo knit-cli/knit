@@ -343,11 +343,71 @@ pub fn commit_exists(cwd: &Path, sha: &str) -> bool {
     git_success(cwd, ["cat-file", "-e", &format!("{sha}^{{commit}}")])
 }
 
-/// Whether `reference` has pointed at `sha` at some time this repository still
-/// remembers. False when the reference has no reflog, or the entry expired.
-pub fn reflog_contains(cwd: &Path, reference: &str, sha: &str) -> bool {
-    git_output(cwd, ["reflog", "show", "--format=%H", reference])
-        .is_ok_and(|log| log.lines().any(|line| line.trim() == sha))
+/// One move of a reference, as its reflog remembers it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReflogEntry {
+    /// The value the reference left. `None` when it was created by this
+    /// entry, or when the log does not say.
+    pub old: Option<String>,
+    /// Whether this entry created the reference.
+    pub created: bool,
+    /// The value the reference took.
+    pub new: String,
+}
+
+/// The reflog of `reference`, oldest entry first. Empty when it has none.
+///
+/// Each entry holds the value the reference left as well as the one it took.
+/// git expires the entry for reaching a commit after 90 days, so on a branch
+/// left alone for months only the entry for leaving its head still names that
+/// head. `git reflog show` prints the values taken; the values left are read
+/// from the log file, where the repository keeps one. Where it does not (the
+/// reftable backend), the value an entry left is taken to be the one the entry
+/// before it took, and the oldest entry's is unknown.
+pub fn reflog(cwd: &Path, reference: &str) -> Vec<ReflogEntry> {
+    if let Some(log) = reflog_file(cwd, reference) {
+        return log
+            .lines()
+            .filter_map(|line| {
+                let mut values = line.split([' ', '\t']);
+                let (old, new) = (values.next()?, values.next()?);
+                let created = old.bytes().all(|byte| byte == b'0');
+                Some(ReflogEntry {
+                    old: (!created).then(|| old.to_string()),
+                    created,
+                    new: new.to_string(),
+                })
+            })
+            .collect();
+    }
+    let taken = git_output(cwd, ["reflog", "show", "--format=%H", reference]).unwrap_or_default();
+    let mut entries: Vec<ReflogEntry> = Vec::new();
+    for new in taken.lines().rev().map(str::trim).filter(|l| !l.is_empty()) {
+        entries.push(ReflogEntry {
+            old: entries.last().map(|entry| entry.new.clone()),
+            created: false,
+            new: new.to_string(),
+        });
+    }
+    entries
+}
+
+/// The raw reflog of `reference`: one `<old> <new> <who> <when>\t<why>` line
+/// per entry. `None` when there is no log, or the ref backend keeps it
+/// somewhere other than a file.
+fn reflog_file(cwd: &Path, reference: &str) -> Option<String> {
+    let path = git_output(
+        cwd,
+        ["rev-parse", "--git-path", &format!("logs/{reference}")],
+    )
+    .ok()?;
+    let path = PathBuf::from(path.trim());
+    let path = if path.is_absolute() {
+        path
+    } else {
+        cwd.join(path)
+    };
+    std::fs::read_to_string(path).ok()
 }
 
 pub fn is_ancestor(cwd: &Path, ancestor: &str, descendant: &str) -> bool {
