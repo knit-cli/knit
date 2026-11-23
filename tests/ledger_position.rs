@@ -548,8 +548,7 @@ fn a_rewrite_recorded_on_another_machine_is_caught_up_with_not_undone() {
 /// The published branch is rewound with plain git, so no ledger hears of it.
 /// A checkout that was never on the recorded head first catches up with the
 /// published branch. Once it has, the recorded commit it still lacks is one
-/// the branch lost, and that is recorded: `knit pull` has nothing more to
-/// bring.
+/// the branch lost, and that is recorded: there is nothing more to pull.
 #[test]
 fn a_branch_rewound_where_it_is_published_is_caught_up_with_then_recorded() {
     let m = Machines::new();
@@ -572,7 +571,12 @@ fn a_branch_rewound_where_it_is_published_is_caught_up_with_then_recorded() {
         status.contains("clean (behind recorded head by 2; run `knit pull`)"),
         "{status}"
     );
-    m.b(&["pull"]);
+    // Caught up with plain git, which is what `knit pull` does to the
+    // checkout, so that the reading is the one under test.
+    git(
+        &m.b_checkout,
+        ["merge", "--ff-only", &format!("origin/{BRANCH}")],
+    );
     assert_eq!(head(&m.b_checkout), ahead[0]);
 
     let status = m.b(&["status"]);
@@ -613,7 +617,10 @@ fn a_branch_rewritten_where_it_is_published_is_recorded_once_caught_up_with() {
         status.contains("clean (behind recorded head by 1; run `knit pull`)"),
         "{status}"
     );
-    m.b(&["pull"]);
+    git(
+        &m.b_checkout,
+        ["merge", "--ff-only", &format!("origin/{BRANCH}")],
+    );
     assert_eq!(head(&m.b_checkout), rewritten);
 
     let status = m.b(&["status"]);
