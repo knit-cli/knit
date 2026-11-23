@@ -114,9 +114,9 @@ pub fn detect_ledger_drift(active: &ActiveBundle) -> Result<LedgerDrift> {
 ///
 /// A checkout that was reset has HEAD on an ancestor of the recorded head, and
 /// so has one that never received the recorded commits. What tells them apart
-/// is whether this checkout was ever on the recorded head, and the reflog
-/// answers that: every way a branch reaches a commit here (a commit, a merge,
-/// a fast-forward, the `worktree add` that created it) leaves an entry.
+/// is whether this checkout's branch was ever on the recorded head, and its
+/// reflog answers that: every way a branch reaches a commit here (a commit, a
+/// merge, a fast-forward, its creation) leaves an entry. See [`held_commit`].
 ///
 /// The reflog is the only evidence that says what this checkout did. The
 /// ledger cannot: it is shared, and it is replaced wholesale by an artifact
@@ -150,15 +150,18 @@ fn behind_checkout(
     })
 }
 
-/// Whether this checkout, or the branch it is on, has ever pointed at `sha`.
+/// Whether the branch this checkout is on has ever pointed at `sha`.
+///
+/// The branch's own reflog, not HEAD's: HEAD also remembers every commit the
+/// checkout merely visited, such as a detached look at the fetched head or a
+/// spell on another branch, and neither put the commits on this branch. Every
+/// move of a checked-out branch is written to both logs, so the branch's log
+/// misses nothing that happened to it. A detached checkout has only HEAD's.
 fn held_commit(worktree_dir: &Path, sha: &str) -> bool {
-    reflog_contains(worktree_dir, "HEAD", sha)
-        || current_branch(worktree_dir)
-            .ok()
-            .flatten()
-            .is_some_and(|branch| {
-                reflog_contains(worktree_dir, &format!("refs/heads/{branch}"), sha)
-            })
+    match current_branch(worktree_dir).ok().flatten() {
+        Some(branch) => reflog_contains(worktree_dir, &format!("refs/heads/{branch}"), sha),
+        None => reflog_contains(worktree_dir, "HEAD", sha),
+    }
 }
 
 pub fn latest_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Option<String> {

@@ -241,6 +241,52 @@ fn committing_on_a_checkout_that_is_behind_warns_and_records_no_rewind() {
     assert_eq!(groups.last().unwrap()["message"], "Local change");
 }
 
+/// Looking at the recorded head is not holding it. A detached checkout of the
+/// fetched head and back leaves the branch where it was: still behind.
+#[test]
+fn visiting_the_recorded_head_detached_does_not_turn_behind_into_a_rewind() {
+    let m = Machines::new();
+    let ahead = m.a_commits_and_pushes(&["Second change", "Third change"]);
+    let recorded = bundle(&m.a);
+    m.b(&["sync", "pull", "--bundles"]);
+    git(&m.b_checkout, ["fetch", "origin"]);
+
+    git(&m.b_checkout, ["checkout", "--detach", &ahead[1]]);
+    git(&m.b_checkout, ["checkout", BRANCH]);
+
+    let status = m.b(&["status"]);
+    assert!(
+        status.contains("clean (behind recorded head by 2; run `knit pull`)"),
+        "{status}"
+    );
+    let sync = m.b(&["sync"]);
+    assert!(!sync.contains("rewind"), "{sync}");
+    let local = bundle(&m.b);
+    assert_eq!(local["nodes"], recorded["nodes"]);
+    assert_eq!(local["commitGroups"], recorded["commitGroups"]);
+}
+
+/// A checkout that has done nothing since `knit bundle pull` created it holds
+/// the recorded head: creating the branch is enough for a reset to be a rewind.
+#[test]
+fn a_reset_right_after_the_bundle_was_pulled_is_a_rewind() {
+    let m = Machines::new();
+    let recorded = head(&m.b_checkout);
+
+    git(&m.b_checkout, ["reset", "--hard", "HEAD~1"]);
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (rewound commits: 1)"), "{status}");
+    let sync = m.b(&["sync"]);
+    assert!(
+        sync.contains("backend: observed rewind removing 1 commit(s)"),
+        "{sync}"
+    );
+    let local = bundle(&m.b);
+    let change = &last_node(&local)["repoChanges"][0];
+    assert_eq!(change["movement"], "rewound");
+    assert_eq!(change["droppedCommits"], json!([recorded]));
+}
+
 /// The other way to have HEAD on an ancestor of the recorded head: this
 /// checkout held the recorded commits and was reset. That is still a rewind.
 #[test]
