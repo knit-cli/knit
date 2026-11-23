@@ -10,7 +10,7 @@ use crate::store::{
     load_active_bundle_for_update, load_effective_config, save_active_bundle, ActiveBundle,
 };
 use crate::time::now_iso;
-use crate::tracking::{sync_note, sync_observed_changes};
+use crate::tracking::{behind_note, detect_behind_checkouts, sync_note, sync_observed_changes};
 use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::ffi::OsString;
@@ -34,6 +34,15 @@ pub(crate) fn commit_active(
             "{}: {}",
             out::repo(&change.repo_id),
             out::warn(sync_note(change))
+        );
+    }
+    // Committing on a checkout that is behind forks the branch from commits
+    // made elsewhere. Git allows it, so this only warns.
+    for checkout in &detect_behind_checkouts(active)? {
+        crate::human!(
+            "{}: {}",
+            out::repo(&checkout.repo_id),
+            out::warn(behind_note(checkout))
         );
     }
 

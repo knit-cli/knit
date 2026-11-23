@@ -1442,6 +1442,10 @@ Knit colors interactive terminal output for scanability. It disables color autom
 
 If a tracked branch is reset backward, `knit status` reports rewound commits and `knit sync` records a `git.observed` node with `movement: "rewound"` and `droppedCommits`. Existing `commit.group` nodes remain as history; current state is derived from each repo's latest `headSha`.
 
+A checkout can also sit on an older commit than the ledger records without having been reset: the ledger was pulled from another machine (`knit sync pull` moves the artifact, not the checkouts) and the commits it names were made there. `knit status` reports that as `behind recorded head by N; run \`knit pull\``, or as `recorded head <sha> is not in this checkout` while the commits have not been fetched. Nothing is recorded in that state. `knit sync` and `knit commit` say so and go on; `knit push`, `knit land` and `knit handoff out` stop until the checkout is brought forward. Knit tells the two cases apart by the reflog: a rewind is recorded only when the branch the checkout is on has pointed at the recorded head. Having looked at that commit (a detached checkout of it, or another branch on it) does not count. With reflogs disabled or expired, a reset reads as behind; to record it, bring the checkout forward and reset again.
+
+Counts of unrecorded and rewound commits, and the commits a `git.observed` node lists, follow the branch's first-parent line. Merging the base branch into a feature branch counts as one commit, the merge. The same holds for any merge: a `git pull` that merges a teammate's commits records the merge commit, not each commit it brought in.
+
 `knit commit` commits only repos with staged changes in their tracked checkouts. With `-a`/`--all`, it stages first and then commits. `knit commit` also syncs unrecorded git commits before creating a new logical commit group, so the ledger remains ordered.
 
 The git commits are created sequentially, one repo at a time. Knit records them as one logical commit group in the bundle. Every repo commit gets the same logical message plus trailers:

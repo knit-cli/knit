@@ -3920,6 +3920,14 @@ pub(crate) fn local_apply(
         if !unrecorded.is_empty() {
             bail!("worktree heads changed; run knit sync and regenerate the plan");
         }
+        let checked: Vec<String> = active
+            .bundle
+            .repos
+            .iter()
+            .map(|repo| repo.id.clone())
+            .filter(|repo_id| !live.contains(repo_id))
+            .collect();
+        crate::tracking::ensure_checkouts_not_behind(active, Some(&checked))?;
         // Required checks are evaluated against the same effective heads the
         // executor uses: with an integration source, freshness speaks for the
         // pinned source, not the reviewed feature head.

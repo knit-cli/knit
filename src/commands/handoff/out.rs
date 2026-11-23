@@ -131,6 +131,8 @@ pub fn handoff_out(to: Option<&str>, message: Option<&str>, force: bool, json: b
             );
         }
     }
+    // A handoff publishes this machine's heads as the bundle's current state.
+    crate::tracking::ensure_checkouts_not_behind(&active, None)?;
     if let Some(index) = active
         .bundle
         .nodes

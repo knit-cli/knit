@@ -54,7 +54,7 @@ Project-wide history is stored separately from bundle artifacts. Local history e
 
 `path` is absolute. `checkoutMode` is `worktree` for generated Knit worktrees or `inPlace` for operating in the original repo checkout. `worktreePath` is relative to the Knit workspace in `worktree` mode and is the original absolute repo path in `inPlace` mode.
 
-`baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When actual git `HEAD` differs from `headSha`, Knit reports unrecorded git commits and `knit sync` records them.
+`baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When a checkout moves away from `headSha`, Knit reports unrecorded git commits and `knit sync` records them. A checkout that has only not caught up with `headSha` (the ledger arrived from another machine before the commits did) is reported as behind and nothing is recorded.
 
 Optional `sourceRemote` and `targetRemote` are portable repository URLs, not Git
 remote names. The source holds contribution commits and the feature branch; the
@@ -137,6 +137,8 @@ Movement values:
 - `advanced`: the branch moved forward from `beforeSha` to `afterSha`; `commits` lists newly added commits.
 - `rewound`: the branch was reset to an ancestor; `droppedCommits` lists commits no longer reachable from the branch head.
 - `diverged`: the branch was rewritten to a different line; `commits` lists new commits and `droppedCommits` lists replaced commits.
+
+`commits` and `droppedCommits` follow the branch's first-parent line: the commits made on the feature branch, plus merge commits. What a merge brings in is not listed, so merging the base branch into the feature branch adds one commit, not the base's recent history. A `land.update` node is the exception: it records the base commits its merge integrated.
 
 Rewind example:
 

@@ -1,6 +1,9 @@
 use crate::checkout::checkout_dir;
-use crate::git::{commit_details, git_output, is_ancestor, merge_base, rev_list, rev_parse};
-use crate::ids::node_id;
+use crate::git::{
+    commit_details, commit_exists, current_branch, git_output, is_ancestor, merge_base,
+    reflog_contains, rev_list, rev_list_first_parent, rev_parse,
+};
+use crate::ids::{node_id, short_sha};
 use crate::model::{BundleNode, ChangeGroup, Movement, NodeRewrite, RepoChange, RepoEntry};
 use crate::rewrite::{record_rewrite, RepoRewrite, RewriteKind};
 use crate::store::ActiveBundle;
@@ -9,8 +12,69 @@ use anyhow::{bail, Context, Result};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// A checkout that has not caught up with the head the ledger records, as
+/// opposed to one that moved away from it.
+///
+/// The ledger travels between machines on its own (`knit sync pull` refreshes
+/// the artifact and leaves checkouts alone), so the recorded head can be a
+/// commit this checkout has never been on. Nothing happened to the branch
+/// here, and there is nothing to record: the checkout needs bringing forward.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BehindCheckout {
+    pub repo_id: String,
+    pub head_sha: String,
+    pub recorded_sha: String,
+    /// Recorded commits this checkout lacks, counted like unrecorded ones.
+    /// `None` when the recorded head is not in this repository yet, so the
+    /// distance cannot be measured.
+    pub missing: Option<usize>,
+}
+
+/// How each checkout that is not on its recorded head differs from it.
+#[derive(Debug, Default)]
+pub struct LedgerDrift {
+    /// Checkouts that moved away from their recorded head: work to record.
+    pub unrecorded: Vec<RepoChange>,
+    /// Checkouts that have not caught up with their recorded head.
+    pub behind: Vec<BehindCheckout>,
+}
+
+/// Movements of a checkout away from its recorded head: work to record.
+/// A checkout that is merely behind the ledger is not one of them; see
+/// [`detect_behind_checkouts`].
 pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange>> {
-    let mut changes = Vec::new();
+    Ok(detect_ledger_drift(active)?.unrecorded)
+}
+
+/// Checkouts that sit behind their recorded head without having moved.
+pub fn detect_behind_checkouts(active: &ActiveBundle) -> Result<Vec<BehindCheckout>> {
+    Ok(detect_ledger_drift(active)?.behind)
+}
+
+/// Refuse to act on checkouts that are behind the ledger. For commands that
+/// publish a checkout's head or trust it to be the recorded one: from a
+/// checkout that is behind, either would put an older head in place of
+/// commits made elsewhere.
+pub fn ensure_checkouts_not_behind(
+    active: &ActiveBundle,
+    repo_ids: Option<&[String]>,
+) -> Result<()> {
+    let behind: Vec<String> = detect_behind_checkouts(active)?
+        .iter()
+        .filter(|behind| repo_ids.is_none_or(|ids| ids.contains(&behind.repo_id)))
+        .map(|behind| format!("{}: {}", behind.repo_id, behind_note(behind)))
+        .collect();
+    if !behind.is_empty() {
+        bail!(
+            "checkout is behind the bundle ledger:\n{}",
+            behind.join("\n")
+        );
+    }
+    Ok(())
+}
+
+pub fn detect_ledger_drift(active: &ActiveBundle) -> Result<LedgerDrift> {
+    let mut drift = LedgerDrift::default();
 
     for repo in &active.bundle.repos {
         let Some(worktree_dir) = repo_worktree_dir(active, repo) else {
@@ -27,7 +91,14 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
             continue;
         }
 
-        changes.push(build_repo_change(
+        if let Some(recorded) = before_sha.as_deref() {
+            if let Some(behind) = behind_checkout(&worktree_dir, &repo.id, recorded, &after_sha) {
+                drift.behind.push(behind);
+                continue;
+            }
+        }
+
+        drift.unrecorded.push(build_repo_change(
             &worktree_dir,
             repo.id.clone(),
             before_sha,
@@ -35,7 +106,62 @@ pub fn detect_unrecorded_changes(active: &ActiveBundle) -> Result<Vec<RepoChange
         )?);
     }
 
-    Ok(changes)
+    Ok(drift)
+}
+
+/// `Some` when the checkout at `head` is behind `recorded` rather than moved
+/// away from it.
+///
+/// A checkout that was reset has HEAD on an ancestor of the recorded head, and
+/// so has one that never received the recorded commits. What tells them apart
+/// is whether this checkout's branch was ever on the recorded head, and its
+/// reflog answers that: every way a branch reaches a commit here (a commit, a
+/// merge, a fast-forward, its creation) leaves an entry. See [`held_commit`].
+///
+/// The reflog is the only evidence that says what this checkout did. The
+/// ledger cannot: it is shared, and it is replaced wholesale by an artifact
+/// pull, so it holds no record of which heads one machine has been on. Without
+/// reflog evidence (reflogs disabled, or the entry expired) a real rewind
+/// reads as behind. That is the safe way to be wrong: nothing is recorded and
+/// nothing is dropped, whereas a rewind recorded by mistake supersedes commit
+/// groups another machine made.
+fn behind_checkout(
+    worktree_dir: &Path,
+    repo_id: &str,
+    recorded: &str,
+    head: &str,
+) -> Option<BehindCheckout> {
+    // Not fetched yet: the ledger arrived before the commits did. The checkout
+    // cannot have moved away from a commit it does not have.
+    let fetched = commit_exists(worktree_dir, recorded);
+    if fetched
+        && (!is_ancestor(worktree_dir, head, recorded) || held_commit(worktree_dir, recorded))
+    {
+        return None;
+    }
+    Some(BehindCheckout {
+        repo_id: repo_id.to_string(),
+        head_sha: head.to_string(),
+        recorded_sha: recorded.to_string(),
+        missing: fetched
+            .then(|| rev_list_first_parent(worktree_dir, head, recorded).ok())
+            .flatten()
+            .map(|commits| commits.len()),
+    })
+}
+
+/// Whether the branch this checkout is on has ever pointed at `sha`.
+///
+/// The branch's own reflog, not HEAD's: HEAD also remembers every commit the
+/// checkout merely visited, such as a detached look at the fetched head or a
+/// spell on another branch, and neither put the commits on this branch. Every
+/// move of a checked-out branch is written to both logs, so the branch's log
+/// misses nothing that happened to it. A detached checkout has only HEAD's.
+fn held_commit(worktree_dir: &Path, sha: &str) -> bool {
+    match current_branch(worktree_dir).ok().flatten() {
+        Some(branch) => reflog_contains(worktree_dir, &format!("refs/heads/{branch}"), sha),
+        None => reflog_contains(worktree_dir, "HEAD", sha),
+    }
 }
 
 pub fn latest_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Option<String> {
@@ -111,6 +237,17 @@ pub fn sync_note(change: &RepoChange) -> String {
             "observed divergence (+{} -{} commit(s))",
             change.commits.len(),
             change.dropped_commits.len()
+        ),
+    }
+}
+
+/// What to tell the user about a checkout that is behind its recorded head.
+pub fn behind_note(behind: &BehindCheckout) -> String {
+    match behind.missing {
+        Some(count) => format!("behind recorded head by {count}; run `knit pull`"),
+        None => format!(
+            "recorded head {} is not in this checkout; run `knit pull`",
+            short_sha(&behind.recorded_sha)
         ),
     }
 }
@@ -378,6 +515,13 @@ fn commit_identity(path: &Path, sha: &str) -> Result<String> {
     )
 }
 
+/// Describe how a checkout moved from the recorded head to `after_sha`.
+///
+/// Commits are listed along the first-parent line, so the lists hold the work
+/// done on this branch plus any merge commits. What a merge brings in from the
+/// base branch is base history, not bundle work, and is never listed: a branch
+/// that merged a busy base would otherwise count hundreds of commits as its
+/// own. See [`rev_list_first_parent`].
 fn build_repo_change(
     worktree_dir: &Path,
     repo_id: String,
@@ -411,7 +555,7 @@ fn build_repo_change(
                 base_after_sha: None,
                 before_sha,
                 after_sha: after_sha.clone(),
-                commits: rev_list(worktree_dir, &before, &after_sha)
+                commits: rev_list_first_parent(worktree_dir, &before, &after_sha)
                     .context("failed to list advanced commits")?,
                 dropped_commits: Vec::new(),
                 commit_details: BTreeMap::new(),
@@ -430,7 +574,7 @@ fn build_repo_change(
                 before_sha,
                 after_sha: after_sha.clone(),
                 commits: Vec::new(),
-                dropped_commits: rev_list(worktree_dir, &after_sha, &before)
+                dropped_commits: rev_list_first_parent(worktree_dir, &after_sha, &before)
                     .context("failed to list dropped commits")?,
                 commit_details: BTreeMap::new(),
             },
@@ -440,9 +584,10 @@ fn build_repo_change(
     let base = merge_base(worktree_dir, &before, &after_sha)?;
     let (commits, dropped_commits) = if let Some(base) = base {
         (
-            rev_list(worktree_dir, &base, &after_sha)
+            rev_list_first_parent(worktree_dir, &base, &after_sha)
                 .context("failed to list divergent commits")?,
-            rev_list(worktree_dir, &base, &before).context("failed to list replaced commits")?,
+            rev_list_first_parent(worktree_dir, &base, &before)
+                .context("failed to list replaced commits")?,
         )
     } else {
         (vec![after_sha.clone()], vec![before])

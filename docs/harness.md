@@ -86,6 +86,11 @@ CLI prints is for humans: do not parse it.
 `unrecorded` appears on a repo when a tracked branch moved outside Knit and the
 ledger has not caught up; `knit sync` records those commits.
 
+`behind` appears instead when the checkout has not caught up with the ledger:
+the recorded head was made on another machine and `knit pull` brings it in.
+Both are a short note for display, such as `unrecorded commits: 2` or
+``behind recorded head by 2; run `knit pull` ``.
+
 `knit status` never calls the host. Once a review is recorded for a repo, its
 entry carries `review`, the review state Knit last recorded (by `knit publish
 create` or `knit publish sync`), and `publications` gains `readiness` and
