@@ -327,6 +327,316 @@ fn a_reset_of_commits_the_checkout_held_still_records_a_rewind() {
     assert_eq!(observed_movements(&m.remote_ledger()), ["rewound"]);
 }
 
+impl Machines {
+    /// A commit machine B makes with plain git, in a file machine A never
+    /// touches, so it replays onto A's commits without a conflict.
+    fn b_git_commit(&self, subject: &str) -> String {
+        fs::write(self.b_checkout.join("local.txt"), format!("{subject}\n")).unwrap();
+        git(&self.b_checkout, ["add", "local.txt"]);
+        git(&self.b_checkout, ["commit", "-m", subject]);
+        head(&self.b_checkout)
+    }
+}
+
+const BEHIND_WITH_ONE_LOCAL: &str =
+    "behind recorded head by 2, with 1 commit(s) not on it; run `knit pull --feature --rebase`";
+
+/// Machine B commits on the head both machines started from while the ledger
+/// already records two commits machine A made. B replaced nothing: it is
+/// behind, with a commit of its own to replay on the recorded head.
+#[test]
+fn local_commits_on_a_checkout_that_is_behind_are_not_a_divergence() {
+    let m = Machines::new();
+    let ahead = m.a_commits_and_pushes(&["Second change", "Third change"]);
+    let recorded = bundle(&m.a);
+    m.b(&["sync", "pull", "--bundles"]);
+    let local = m.b_git_commit("Local change");
+
+    // Before the commits are fetched there is nothing to measure against.
+    let status = m.b(&["status"]);
+    assert!(status.contains("is not in this checkout"), "{status}");
+    m.b(&["sync"]);
+    assert_eq!(bundle(&m.b)["nodes"], recorded["nodes"]);
+
+    // Fetched, neither head contains the other: the shape a rewrite leaves.
+    git(&m.b_checkout, ["fetch", "origin"]);
+    let status = m.b(&["status"]);
+    assert!(
+        status.contains(&format!("clean ({BEHIND_WITH_ONE_LOCAL})")),
+        "{status}"
+    );
+    assert!(!status.contains("diverged"), "{status}");
+    let document: Value = serde_json::from_str(&m.b(&["status", "--json"])).unwrap();
+    assert_eq!(document["repos"][0]["behind"], BEHIND_WITH_ONE_LOCAL);
+    assert!(
+        document["repos"][0].get("unrecorded").is_none(),
+        "{document}"
+    );
+
+    // Nothing records a divergence: not a sync, and not a push.
+    let sync = m.b(&["sync"]);
+    assert!(
+        sync.contains(&format!("backend: {BEHIND_WITH_ONE_LOCAL}")),
+        "{sync}"
+    );
+    assert!(!sync.contains("divergence"), "{sync}");
+    for args in [vec!["push"], vec!["push", "--force-with-lease"]] {
+        let push = knit_fails_with_env(&m.b_checkout, &args, &ENV);
+        assert!(
+            push.contains(&format!("backend: {BEHIND_WITH_ONE_LOCAL}")),
+            "{push}"
+        );
+    }
+    let ledger = bundle(&m.b);
+    assert_eq!(ledger["nodes"], recorded["nodes"]);
+    assert_eq!(ledger["commitGroups"], recorded["commitGroups"]);
+    assert_eq!(m.origin_branch(), ahead[1]);
+    let remote = m.remote_ledger();
+    assert_eq!(remote["nodes"], recorded["nodes"]);
+    assert_eq!(remote["commitGroups"], recorded["commitGroups"]);
+
+    // The command the note names replays the local commit on the recorded
+    // head, where it is an ordinary unrecorded commit.
+    let pull = m.b(&["pull", "--feature", "--rebase"]);
+    assert!(
+        pull.contains("backend: observed 1 unrecorded commit(s)"),
+        "{pull}"
+    );
+    let replayed = head(&m.b_checkout);
+    assert_ne!(replayed, local);
+    assert_eq!(git(&m.b_checkout, ["rev-parse", "HEAD~1"]).trim(), ahead[1]);
+    let ledger = bundle(&m.b);
+    assert_eq!(ledger["commitGroups"], recorded["commitGroups"]);
+    assert_eq!(observed_movements(&ledger), ["advanced"]);
+    assert_eq!(
+        last_node(&ledger)["repoChanges"][0]["commits"],
+        json!([replayed])
+    );
+    assert!(m.b(&["status"]).contains("clean\n"));
+    m.b(&["push"]);
+    assert_eq!(m.origin_branch(), replayed);
+}
+
+/// `knit commit` on that checkout records its own commit group and nothing
+/// else: no divergence, and machine A's commit groups stay.
+#[test]
+fn committing_on_a_checkout_that_is_behind_with_local_commits_records_no_divergence() {
+    let m = Machines::new();
+    m.a_commits_and_pushes(&["Second change", "Third change"]);
+    let recorded = bundle(&m.a);
+    m.b(&["sync", "pull", "--bundles"]);
+    git(&m.b_checkout, ["fetch", "origin"]);
+    m.b_git_commit("Local change");
+
+    fs::write(m.b_checkout.join("more.txt"), "more local work\n").unwrap();
+    git(&m.b_checkout, ["add", "more.txt"]);
+    let commit = m.b(&["commit", "-m", "Recorded local change"]);
+    assert!(
+        commit.contains(&format!("backend: {BEHIND_WITH_ONE_LOCAL}")),
+        "{commit}"
+    );
+    let ledger = bundle(&m.b);
+    assert!(observed_movements(&ledger).is_empty(), "{ledger}");
+    let groups = ledger["commitGroups"].as_array().unwrap();
+    assert_eq!(
+        groups[..groups.len() - 1],
+        recorded["commitGroups"].as_array().unwrap()[..]
+    );
+    assert_eq!(groups.last().unwrap()["message"], "Recorded local change");
+}
+
+/// A rewrite of commits the checkout held is still a divergence, and still
+/// recorded: here an amend of the recorded head after `knit pull` put the
+/// checkout on it.
+#[test]
+fn amending_commits_the_checkout_held_still_records_a_divergence() {
+    let m = Machines::new();
+    let ahead = m.a_commits_and_pushes(&["Second change", "Third change"]);
+    m.b(&["pull"]);
+    assert_eq!(head(&m.b_checkout), ahead[1]);
+
+    append_line(&m.b_checkout.join("app.txt"), "amended");
+    git(&m.b_checkout, ["commit", "--all", "--amend", "--no-edit"]);
+    let amended = head(&m.b_checkout);
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (diverged (+1 -1))"), "{status}");
+    let sync = m.b(&["sync"]);
+    assert!(
+        sync.contains("backend: observed divergence (+1 -1 commit(s))"),
+        "{sync}"
+    );
+    let ledger = bundle(&m.b);
+    let change = &last_node(&ledger)["repoChanges"][0];
+    assert_eq!(change["movement"], "diverged");
+    assert_eq!(change["commits"], json!([amended]));
+    assert_eq!(change["droppedCommits"], json!([ahead[1]]));
+}
+
+/// A branch left alone for months has no reflog entry for reaching its head:
+/// git expires them. The entry for leaving that head still names it, so a
+/// reset or an amend of a dormant branch is still read as one.
+#[test]
+fn a_rewrite_of_a_head_whose_reflog_entry_expired_is_still_recorded() {
+    let m = Machines::new();
+    let ahead = m.a_commits_and_pushes(&["Second change", "Third change"]);
+    m.b(&["pull"]);
+    assert_eq!(head(&m.b_checkout), ahead[1]);
+    git(&m.b_checkout, ["reflog", "expire", "--expire=now", "--all"]);
+    assert_eq!(
+        git(&m.b_checkout, ["reflog", "show", BRANCH]).trim(),
+        "",
+        "the branch's reflog is empty"
+    );
+
+    git(&m.b_checkout, ["reset", "--hard", "HEAD~1"]);
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (rewound commits: 1)"), "{status}");
+
+    git(&m.b_checkout, ["reset", "--hard", &ahead[1]]);
+    git(&m.b_checkout, ["reflog", "expire", "--expire=now", "--all"]);
+    append_line(&m.b_checkout.join("app.txt"), "amended");
+    git(&m.b_checkout, ["commit", "--all", "--amend", "--no-edit"]);
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (diverged (+1 -1))"), "{status}");
+
+    // With the log emptied after the rewrite nothing says how the branch got
+    // here. That is no proof it was never on the recorded head, so it stays a
+    // divergence.
+    git(&m.b_checkout, ["reflog", "expire", "--expire=now", "--all"]);
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (diverged (+1 -1))"), "{status}");
+}
+
+/// Machine A rewrites its last commit and publishes the rewrite, ledger and
+/// branch. Machine B still sits on the commit A replaced. To B's git that is a
+/// divergence too, and recording it would undo A's rewrite in the ledger.
+#[test]
+fn a_rewrite_recorded_on_another_machine_is_caught_up_with_not_undone() {
+    let m = Machines::new();
+    let replaced = m.a_commits_and_pushes(&["Second change"]);
+    m.b(&["pull"]);
+    assert_eq!(head(&m.b_checkout), replaced[0]);
+
+    append_line(&m.a_checkout.join("app.txt"), "amended");
+    git(&m.a_checkout, ["commit", "--all", "--amend", "--no-edit"]);
+    let rewritten = head(&m.a_checkout);
+    knit_with_env(&m.a, ["sync"], &ENV);
+    knit_with_env(&m.a, ["push", "--force-with-lease"], &ENV);
+    m.serve_pushed_artifact();
+    let recorded = bundle(&m.a);
+    assert_eq!(observed_movements(&recorded), ["diverged"]);
+
+    m.b(&["sync", "pull", "--bundles"]);
+    git(&m.b_checkout, ["fetch", "origin"]);
+    let note =
+        "behind recorded head by 1, with 1 commit(s) not on it; run `knit pull --feature --rebase`";
+    let status = m.b(&["status"]);
+    assert!(status.contains(&format!("clean ({note})")), "{status}");
+    let sync = m.b(&["sync"]);
+    assert!(sync.contains(&format!("backend: {note}")), "{sync}");
+    assert_eq!(bundle(&m.b)["nodes"], recorded["nodes"]);
+
+    // git knows the commit B sits on was published before, and drops it.
+    m.b(&["pull", "--feature", "--rebase"]);
+    assert_eq!(head(&m.b_checkout), rewritten);
+    assert!(m.b(&["status"]).contains("clean\n"));
+    let ledger = bundle(&m.b);
+    assert_eq!(ledger["nodes"], recorded["nodes"]);
+    assert_eq!(ledger["commitGroups"], recorded["commitGroups"]);
+}
+
+/// The published branch is rewound with plain git, so no ledger hears of it.
+/// A checkout that was never on the recorded head first catches up with the
+/// published branch. Once it has, the recorded commit it still lacks is one
+/// the branch lost, and that is recorded: there is nothing more to pull.
+#[test]
+fn a_branch_rewound_where_it_is_published_is_caught_up_with_then_recorded() {
+    let m = Machines::new();
+    let ahead = m.a_commits_and_pushes(&["Second change", "Third change"]);
+    m.b(&["sync", "pull", "--bundles"]);
+    git(&m.b_checkout, ["fetch", "origin"]);
+    git(
+        &m.a_checkout,
+        [
+            "push",
+            "--force",
+            "origin",
+            &format!("{}:{BRANCH}", ahead[0]),
+        ],
+    );
+    git(&m.b_checkout, ["fetch", "origin"]);
+
+    let status = m.b(&["status"]);
+    assert!(
+        status.contains("clean (behind recorded head by 2; run `knit pull`)"),
+        "{status}"
+    );
+    // Caught up with plain git, which is what `knit pull` does to the
+    // checkout, so that the reading is the one under test.
+    git(
+        &m.b_checkout,
+        ["merge", "--ff-only", &format!("origin/{BRANCH}")],
+    );
+    assert_eq!(head(&m.b_checkout), ahead[0]);
+
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (rewound commits: 1)"), "{status}");
+    let sync = m.b(&["sync"]);
+    assert!(
+        sync.contains("backend: observed rewind removing 1 commit(s)"),
+        "{sync}"
+    );
+    let ledger = bundle(&m.b);
+    let change = &last_node(&ledger)["repoChanges"][0];
+    assert_eq!(change["movement"], "rewound");
+    assert_eq!(change["droppedCommits"], json!([ahead[1]]));
+    assert!(m.b(&["status"]).contains("clean\n"));
+}
+
+/// The same for a rewrite: the published branch is amended with plain git, and
+/// a checkout that was never on the recorded head ends up on the amended
+/// commit. It has everything that is published, so the ledger is what is out
+/// of date, and the divergence is recorded.
+#[test]
+fn a_branch_rewritten_where_it_is_published_is_recorded_once_caught_up_with() {
+    let m = Machines::new();
+    let replaced = m.a_commits_and_pushes(&["Second change"]);
+    m.b(&["sync", "pull", "--bundles"]);
+    git(&m.b_checkout, ["fetch", "origin"]);
+    append_line(&m.a_checkout.join("app.txt"), "amended");
+    git(&m.a_checkout, ["commit", "--all", "--amend", "--no-edit"]);
+    let rewritten = head(&m.a_checkout);
+    git(
+        &m.a_checkout,
+        ["push", "--force", "origin", &format!("HEAD:{BRANCH}")],
+    );
+    git(&m.b_checkout, ["fetch", "origin"]);
+
+    let status = m.b(&["status"]);
+    assert!(
+        status.contains("clean (behind recorded head by 1; run `knit pull`)"),
+        "{status}"
+    );
+    git(
+        &m.b_checkout,
+        ["merge", "--ff-only", &format!("origin/{BRANCH}")],
+    );
+    assert_eq!(head(&m.b_checkout), rewritten);
+
+    let status = m.b(&["status"]);
+    assert!(status.contains("clean (diverged (+1 -1))"), "{status}");
+    let sync = m.b(&["sync"]);
+    assert!(
+        sync.contains("backend: observed divergence (+1 -1 commit(s))"),
+        "{sync}"
+    );
+    let ledger = bundle(&m.b);
+    let change = &last_node(&ledger)["repoChanges"][0];
+    assert_eq!(change["movement"], "diverged");
+    assert_eq!(change["commits"], json!([rewritten]));
+    assert_eq!(change["droppedCommits"], json!([replaced[0]]));
+}
+
 /// A bundle on one machine, with a second clone standing in for whoever
 /// merges the base branch into the feature branch.
 struct Feature {

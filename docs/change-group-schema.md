@@ -54,7 +54,7 @@ Project-wide history is stored separately from bundle artifacts. Local history e
 
 `path` is absolute. `checkoutMode` is `worktree` for generated Knit worktrees or `inPlace` for operating in the original repo checkout. `worktreePath` is relative to the Knit workspace in `worktree` mode and is the original absolute repo path in `inPlace` mode.
 
-`baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When a checkout moves away from `headSha`, Knit reports unrecorded git commits and `knit sync` records them. A checkout that has only not caught up with `headSha` (the ledger arrived from another machine before the commits did) is reported as behind and nothing is recorded.
+`baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When a checkout moves away from `headSha`, Knit reports unrecorded git commits and `knit sync` records them. A checkout that was never on `headSha` and has not caught up with the published branch (the ledger arrived from another machine before the commits did) is reported as behind and nothing is recorded, whether or not it has commits of its own.
 
 Optional `sourceRemote` and `targetRemote` are portable repository URLs, not Git
 remote names. The source holds contribution commits and the feature branch; the

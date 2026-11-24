@@ -1,7 +1,7 @@
 use crate::checkout::checkout_dir;
 use crate::git::{
-    commit_details, commit_exists, current_branch, git_output, is_ancestor, merge_base,
-    reflog_contains, rev_list, rev_list_first_parent, rev_parse,
+    commit_details, commit_exists, current_branch, git_output, is_ancestor, merge_base, reflog,
+    rev_list, rev_list_first_parent, rev_parse, ReflogEntry,
 };
 use crate::ids::{node_id, short_sha};
 use crate::model::{BundleNode, ChangeGroup, Movement, NodeRewrite, RepoChange, RepoEntry};
@@ -28,6 +28,10 @@ pub struct BehindCheckout {
     /// `None` when the recorded head is not in this repository yet, so the
     /// distance cannot be measured.
     pub missing: Option<usize>,
+    /// Commits this checkout has that the recorded head does not: work made
+    /// here on the older head, to replay once the checkout catches up. Zero
+    /// for a checkout that is only behind.
+    pub local: usize,
 }
 
 /// How each checkout that is not on its recorded head differs from it.
@@ -92,7 +96,7 @@ pub fn detect_ledger_drift(active: &ActiveBundle) -> Result<LedgerDrift> {
         }
 
         if let Some(recorded) = before_sha.as_deref() {
-            if let Some(behind) = behind_checkout(&worktree_dir, &repo.id, recorded, &after_sha) {
+            if let Some(behind) = behind_checkout(&worktree_dir, repo, recorded, &after_sha) {
                 drift.behind.push(behind);
                 continue;
             }
@@ -113,55 +117,149 @@ pub fn detect_ledger_drift(active: &ActiveBundle) -> Result<LedgerDrift> {
 /// away from it.
 ///
 /// A checkout that was reset has HEAD on an ancestor of the recorded head, and
-/// so has one that never received the recorded commits. What tells them apart
-/// is whether this checkout's branch was ever on the recorded head, and its
-/// reflog answers that: every way a branch reaches a commit here (a commit, a
-/// merge, a fast-forward, its creation) leaves an entry. See [`held_commit`].
+/// so has one that never received the recorded commits. A checkout whose
+/// commits were rewritten has a HEAD that neither contains the recorded head
+/// nor is contained by it, and so has one that never received the recorded
+/// commits and has commits of its own. In both pairs the first moved away from
+/// the recorded head and the second was never on it.
+///
+/// What tells them apart is whether this checkout's branch was ever on the
+/// recorded head, and its reflog answers that: every way a branch reaches a
+/// commit here (a commit, a merge, a fast-forward, its creation) leaves an
+/// entry, and so does every way it leaves one. See [`branch_log`].
 ///
 /// The reflog is the only evidence that says what this checkout did. The
 /// ledger cannot: it is shared, and it is replaced wholesale by an artifact
-/// pull, so it holds no record of which heads one machine has been on. Without
-/// reflog evidence (reflogs disabled, or the entry expired) a real rewind
-/// reads as behind. That is the safe way to be wrong: nothing is recorded and
-/// nothing is dropped, whereas a rewind recorded by mistake supersedes commit
-/// groups another machine made.
+/// pull, so it holds no record of which heads one machine has been on.
+///
+/// A checkout is behind only while the published feature branch has commits
+/// it lacks ([`lacks_published_commits`]). One that has everything published
+/// and still lacks the recorded head is on a branch that was rewound or
+/// rewritten where it is published, without the ledger hearing of it: the
+/// checkout is right, and its position is recorded. Beyond that:
+///
+/// - HEAD on an ancestor of the recorded head is behind unless the log names
+///   the recorded head. A reset writes an entry that does, so a log without
+///   one, or no log at all, means no reset happened here that git remembers.
+/// - A HEAD that diverges from the recorded head is behind only when the log
+///   shows the branch coming to HEAD without the recorded head
+///   ([`came_without_recorded`]). Without that proof it is recorded as a
+///   divergence, as a rewrite is: a branch whose log was expired after a
+///   rewrite is still a rewrite.
+///
+/// Both lean the way that is safe when the log has nothing to say. For an
+/// ancestor that is recording nothing: a rewind recorded by mistake supersedes
+/// commit groups another machine made. For a divergence it is recording what
+/// git shows, which is what Knit did before it could tell the two apart.
 fn behind_checkout(
     worktree_dir: &Path,
-    repo_id: &str,
+    repo: &RepoEntry,
     recorded: &str,
     head: &str,
 ) -> Option<BehindCheckout> {
+    let behind = |missing, local| BehindCheckout {
+        repo_id: repo.id.clone(),
+        head_sha: head.to_string(),
+        recorded_sha: recorded.to_string(),
+        missing,
+        local,
+    };
     // Not fetched yet: the ledger arrived before the commits did. The checkout
     // cannot have moved away from a commit it does not have.
-    let fetched = commit_exists(worktree_dir, recorded);
-    if fetched
-        && (!is_ancestor(worktree_dir, head, recorded) || held_commit(worktree_dir, recorded))
+    if !commit_exists(worktree_dir, recorded) {
+        return Some(behind(None, 0));
+    }
+    // On the recorded head's line and past it: unrecorded work.
+    if is_ancestor(worktree_dir, recorded, head) {
+        return None;
+    }
+    let log = branch_log(worktree_dir);
+    if log
+        .iter()
+        .any(|entry| entry.new == recorded || entry.old.as_deref() == Some(recorded))
     {
         return None;
     }
-    Some(BehindCheckout {
-        repo_id: repo_id.to_string(),
-        head_sha: head.to_string(),
-        recorded_sha: recorded.to_string(),
-        missing: fetched
-            .then(|| rev_list_first_parent(worktree_dir, head, recorded).ok())
-            .flatten()
-            .map(|commits| commits.len()),
-    })
+    // Nothing published that the checkout lacks: there is nothing to catch up
+    // with, so the branch lost the recorded head where it is published.
+    if !lacks_published_commits(worktree_dir, repo, head) {
+        return None;
+    }
+    // Counted the way a divergence is, from where the two lines part.
+    let base = merge_base(worktree_dir, head, recorded).ok().flatten()?;
+    if base != head && !came_without_recorded(&log, head, &base) {
+        return None;
+    }
+    let missing = rev_list_first_parent(worktree_dir, &base, recorded).ok()?;
+    let local = rev_list_first_parent(worktree_dir, &base, head).ok()?;
+    Some(behind(Some(missing.len()), local.len()))
 }
 
-/// Whether the branch this checkout is on has ever pointed at `sha`.
+/// The reflog of the branch this checkout is on, oldest entry first.
 ///
 /// The branch's own reflog, not HEAD's: HEAD also remembers every commit the
 /// checkout merely visited, such as a detached look at the fetched head or a
 /// spell on another branch, and neither put the commits on this branch. Every
 /// move of a checked-out branch is written to both logs, so the branch's log
 /// misses nothing that happened to it. A detached checkout has only HEAD's.
-fn held_commit(worktree_dir: &Path, sha: &str) -> bool {
+fn branch_log(worktree_dir: &Path) -> Vec<ReflogEntry> {
     match current_branch(worktree_dir).ok().flatten() {
-        Some(branch) => reflog_contains(worktree_dir, &format!("refs/heads/{branch}"), sha),
-        None => reflog_contains(worktree_dir, "HEAD", sha),
+        Some(branch) => reflog(worktree_dir, &format!("refs/heads/{branch}")),
+        None => reflog(worktree_dir, "HEAD"),
     }
+}
+
+/// Whether `log` shows the branch coming to `head` from a point where it had
+/// not reached the recorded head: an unbroken run of entries that ends on
+/// `head` and starts either where the branch was created or on `base`, the
+/// commit where `head` and the recorded head part.
+///
+/// The caller has checked that no entry names the recorded head. That alone
+/// proves little, because entries expire: a log emptied after a rewrite names
+/// nothing. An unbroken run does prove it. Each entry in it starts on the
+/// value the one before it ended on, so nothing between them is missing, and
+/// the branch was not on the recorded head anywhere along it.
+fn came_without_recorded(log: &[ReflogEntry], head: &str, base: &str) -> bool {
+    let mut at = head;
+    for entry in log.iter().rev() {
+        if entry.new != at {
+            return false;
+        }
+        if entry.created {
+            return true;
+        }
+        match entry.old.as_deref() {
+            Some(old) if old == base => return true,
+            Some(old) => at = old,
+            None => return false,
+        }
+    }
+    false
+}
+
+/// Whether the feature branch, as last fetched from where it is published, has
+/// commits `head` lacks. The ref is the one `knit pull` fast-forwards the
+/// checkout to; a branch that was never published or fetched has none.
+fn lacks_published_commits(worktree_dir: &Path, repo: &RepoEntry, head: &str) -> bool {
+    let Some(branch) = repo
+        .feature_branch
+        .clone()
+        .or_else(|| current_branch(worktree_dir).ok().flatten())
+    else {
+        return false;
+    };
+    let reference = if crate::contribution::configured(repo) {
+        crate::contribution::role_ref(repo, &branch, true).ok()
+    } else {
+        Some(format!("refs/remotes/origin/{branch}"))
+    };
+    reference
+        .and_then(|reference| {
+            crate::git::ref_commit_sha(worktree_dir, &reference)
+                .ok()
+                .flatten()
+        })
+        .is_some_and(|published| !is_ancestor(worktree_dir, &published, head))
 }
 
 pub fn latest_recorded_head_sha(bundle: &ChangeGroup, repo: &RepoEntry) -> Option<String> {
@@ -242,10 +340,16 @@ pub fn sync_note(change: &RepoChange) -> String {
 }
 
 /// What to tell the user about a checkout that is behind its recorded head.
+///
+/// A checkout with commits of its own cannot be fast-forwarded, so the command
+/// named is the one that replays them on the recorded head.
 pub fn behind_note(behind: &BehindCheckout) -> String {
-    match behind.missing {
-        Some(count) => format!("behind recorded head by {count}; run `knit pull`"),
-        None => format!(
+    match (behind.missing, behind.local) {
+        (Some(count), 0) => format!("behind recorded head by {count}; run `knit pull`"),
+        (Some(count), local) => format!(
+            "behind recorded head by {count}, with {local} commit(s) not on it; run `knit pull --feature --rebase`"
+        ),
+        (None, _) => format!(
             "recorded head {} is not in this checkout; run `knit pull`",
             short_sha(&behind.recorded_sha)
         ),
