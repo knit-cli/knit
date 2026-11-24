@@ -198,6 +198,59 @@ fn awaiting(upstream: usize) -> String {
     }
 }
 
+/// A gate for a review whose head commit is not the one this bundle recorded.
+///
+/// Commits someone else pushed to the review branch (a maintainer editing a
+/// pull request opened from a fork, a teammate on a shared branch) are on the
+/// review but in no ledger until a checkout pulls them, and nothing local
+/// shows it. A review that still shows an earlier recorded head is waiting for
+/// a push instead; that is reported only for a contribution, whose landing
+/// pins the exact head. Elsewhere unpushed work is an ordinary state.
+fn head_gate(
+    active: &ActiveBundle,
+    repo: &crate::model::RepoEntry,
+    cwd: &std::path::Path,
+    pr: &providers::PullRequest,
+) -> Option<Gate> {
+    let live = pr.head_ref_oid.as_deref()?;
+    // Some hosts and older adapters report an abbreviated or placeholder head.
+    if !matches!(live.len(), 40 | 64) || !live.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    let live = live.to_ascii_lowercase();
+    let recorded = crate::tracking::latest_recorded_head_sha(&active.bundle, repo)?;
+    if recorded == live {
+        return None;
+    }
+    let short = crate::ids::short_sha;
+    // An earlier head is an ancestor of the recorded one, or after a rewrite
+    // (squash, rebase, amend) a commit the ledger replaced. A head this
+    // checkout has never fetched is neither.
+    let earlier = crate::git::is_ancestor(cwd, &live, &recorded)
+        || crate::tracking::ledger_mentions_commit(&active.bundle, &repo.id, &live);
+    let summary = if !earlier {
+        format!(
+            "review head {} has commits this bundle has not recorded (recorded head {}): run `knit pull`",
+            short(&live),
+            short(&recorded)
+        )
+    } else if crate::contribution::cross_repository(repo).unwrap_or(false) {
+        format!(
+            "review still shows {}, not the recorded head {}: run `knit push`",
+            short(&live),
+            short(&recorded)
+        )
+    } else {
+        return None;
+    };
+    Some(gates::gate(
+        "head",
+        GateState::Blocked,
+        GateActor::You,
+        summary,
+    ))
+}
+
 /// Fetch a publication's live PR state and classify its landing readiness. Forge
 /// errors are captured into the verdict rather than aborting the whole table.
 pub(crate) fn assess_landing_readiness(
@@ -240,6 +293,9 @@ pub(crate) fn assess_landing_readiness(
             }
         }
     };
+    // A review whose head moved is still a readable review. `head_gate` says
+    // what moved and what to run; the adapter would only refuse it outright.
+    target.verify_head = false;
 
     // A maintainer's rewrite is read without the head pin, and so is every
     // re-read while the host settles mergeability.
@@ -288,7 +344,7 @@ pub(crate) fn assess_landing_readiness(
         _ => {}
     }
 
-    let gates = match forge.gates(&target, &pr) {
+    let mut gates = match forge.gates(&target, &pr) {
         Ok(gates) => gates,
         Err(error) => {
             return LandReadiness {
@@ -298,6 +354,7 @@ pub(crate) fn assess_landing_readiness(
             }
         }
     };
+    gates.extend(head_gate(active, repo, &cwd, &pr));
     let mergeable = if pr.mergeability_computing() {
         "computing"
     } else if pr.is_conflicting() {

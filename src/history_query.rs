@@ -1039,6 +1039,7 @@ mod tests {
                     crate::model::CommitDetail {
                         subject: "Recorded subject".into(),
                         authored_at: "2026-01-03T00:00:00Z".into(),
+                        author: None,
                     },
                 )]),
             }],
@@ -1433,6 +1434,7 @@ mod tests {
                     CommitDetail {
                         subject: "Old commit observed today".into(),
                         authored_at: "2020-01-01T00:00:00Z".into(),
+                        author: None,
                     },
                 )]),
             }],
