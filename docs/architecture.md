@@ -66,7 +66,7 @@ src/
   git.rs        git subprocess helpers
   history.rs    project history ledger persistence and refresh
   ids.rs        slugs, commit group ids, SHA formatting
-  output.rs     terminal output helpers
+  output.rs     terminal output helpers; replaces the print!-family macros crate-wide
   paths.rs      path comparison helpers
   repo_selectors.rs shared tracked-repo selector resolution
   selectors.rs  bundle log selector resolution for HEAD, node ids, and SHAs
@@ -98,6 +98,7 @@ Rust does not use classes in the TypeScript sense. The equivalent separation her
 - `providers/` owns the `Forge` trait and its host adapters. `mod.rs` defines the trait, the canonical `PullRequest`/`CheckRun` types, host detection from a remote URL (`for_remote`/`for_repo`/`by_id`), a shared CLI runner, and the provider-agnostic publication helpers. The GitHub, GitLab, Forgejo, and Bitbucket adapters map host JSON onto the canonical types. GitLab and Forgejo retain their `glab`/`tea` workspace paths while REST supplies richer status and artifact-mode operations; Bitbucket is REST-only. Unknown remotes retain the historical GitHub fallback. Provider modules expose small operations; command modules decide workflow policy.
 - `commands/mod.rs` should only re-export command entry points.
 - `git.rs` is the only place that should construct raw `git` subprocess calls.
+- `output.rs` replaces `print!`, `println!`, `eprint!` and `eprintln!` for the whole crate (`lib.rs` declares it first with `#[macro_use]`). When the reader of stdout or stderr goes away (`knit log | head`), the replacements drop further output and the command runs to completion with its own exit status, instead of panicking. Knit deliberately keeps SIGPIPE ignored rather than dying the way `git log | head` does, because being killed at a progress line could stop a multi-repo commit, land, or merge between its git steps and its ledger write or rollback. `knit-runtime` does the same for its own `println!` in `support.rs`.
 - `store.rs` is the only place that should resolve bundle context. Resolution prefers `--bundle`, `KNIT_BUNDLE`, generated worktree cwd, then workspace fallback config.
 - `checkout.rs` owns checkout path resolution, checkout mode labels, and in-place branch safety checks.
 - Pure helper behavior should live in small modules and have integration tests under `tests/`.

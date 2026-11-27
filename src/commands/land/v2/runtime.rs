@@ -3734,6 +3734,7 @@ fn execute(
     });
     if json_output {
         println!("{}", serde_json::to_string(&journal.snapshot())?);
+        crate::commands::failure::document_printed();
     } else {
         eprintln!(
             "Landing run {}: {} ({})",

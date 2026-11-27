@@ -10,6 +10,45 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+// Mirrors knit's `output::write_stream`: every `println!` in this crate
+// (`lib.rs` declares this module first with `#[macro_use]`) drops output once
+// its reader has closed instead of panicking, so `knit run up | head` still
+// starts every stack rather than stopping between two of them. The crate
+// prints nothing else, so `println!` is the only macro replaced.
+#[cfg(not(test))]
+macro_rules! println {
+    () => {
+        $crate::support::stdout_line(format_args!(""))
+    };
+    ($($arg:tt)*) => {
+        $crate::support::stdout_line(format_args!($($arg)*))
+    };
+}
+
+#[cfg(not(test))]
+static STDOUT_CLOSED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(not(test))]
+pub(crate) fn stdout_line(args: std::fmt::Arguments<'_>) {
+    use std::io::Write;
+    use std::sync::atomic::Ordering;
+
+    if STDOUT_CLOSED.load(Ordering::Relaxed) {
+        return;
+    }
+    let mut stdout = std::io::stdout().lock();
+    let result = stdout
+        .write_fmt(args)
+        .and_then(|()| stdout.write_all(b"\n"));
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+            STDOUT_CLOSED.store(true, Ordering::Relaxed);
+        }
+        Err(error) => panic!("failed printing to stdout: {error}"),
+    }
+}
+
 pub(crate) mod out {
     use std::env;
     use std::fmt::Display;

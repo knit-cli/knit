@@ -576,7 +576,8 @@ pub struct CommitAuthor {
 }
 
 /// The acting human behind a ledger node on a shared environment, from the
-/// T3_ACTOR_* variables the environment server exports per provider session.
+/// KNIT_ACTOR_* variables (or their legacy T3_ACTOR_* twins) a host exports
+/// per session; see `ambient_actor`.
 /// Distinct from `session_id` (the conversation) and from git authorship
 /// (which records identity per commit): the actor names who drove the turn.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -836,7 +837,8 @@ pub struct BundleNode {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub session_id: Option<String>,
     /// Acting human on a shared environment, when the harness exports
-    /// T3_ACTOR_*; absent for plain CLI use and single-user setups.
+    /// KNIT_ACTOR_* (or legacy T3_ACTOR_*); absent for plain CLI use and
+    /// single-user setups.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub actor: Option<NodeActor>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -906,12 +908,24 @@ fn non_empty_env(name: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-/// Ambient acting-human identity, from the T3_ACTOR_* contract.
+/// Environment variable prefixes for the acting human, in precedence order.
+/// `KNIT_ACTOR_` is the documented name; `T3_ACTOR_` is the original name,
+/// still accepted so hosts that already export it see no change.
+const ACTOR_ENV_PREFIXES: [&str; 2] = ["KNIT_ACTOR_", "T3_ACTOR_"];
+
+/// Ambient acting-human identity. The first prefix whose `SESSION` variable
+/// is set supplies the whole actor: `LABEL` and `EMAIL` are read only under
+/// that same prefix, never mixed in from the other one. So `KNIT_ACTOR_SESSION`
+/// with only `T3_ACTOR_LABEL` records a session without a label, and a
+/// `KNIT_ACTOR_LABEL` without `KNIT_ACTOR_SESSION` is ignored, as label and
+/// email always were without their session variable.
 fn ambient_actor() -> Option<NodeActor> {
-    non_empty_env("T3_ACTOR_SESSION").map(|session| NodeActor {
-        session,
-        label: non_empty_env("T3_ACTOR_LABEL"),
-        email: non_empty_env("T3_ACTOR_EMAIL"),
+    ACTOR_ENV_PREFIXES.iter().find_map(|prefix| {
+        non_empty_env(&format!("{prefix}SESSION")).map(|session| NodeActor {
+            session,
+            label: non_empty_env(&format!("{prefix}LABEL")),
+            email: non_empty_env(&format!("{prefix}EMAIL")),
+        })
     })
 }
 

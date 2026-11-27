@@ -172,23 +172,31 @@ fn relation_matches(key: &RelationKey, event: &HistoryEvent) -> bool {
     }
 }
 
+/// When the work in this scope happened: the latest of the matched and
+/// same-scope events, which for a commit group is when its commits were made
+/// and for a base commit is its commit time. The rest of the bundle is
+/// context, not this scope: counting it let a later archive or tag stand in
+/// for the commit time.
 pub(super) fn related_instance_time(instance: &RelatedInstance) -> String {
     instance
         .matched
         .iter()
         .chain(instance.related.iter())
-        .chain(instance.other_bundle.iter())
         .map(event_time)
         .max()
         .unwrap_or_default()
 }
 
+/// The event's time in UTC, so times recorded with a local offset (older
+/// base-commit entries) compare and print like every other ledger time.
 fn event_time(event: &HistoryEvent) -> String {
-    event
-        .occurred_at
-        .as_deref()
-        .unwrap_or(&event.recorded_at)
-        .to_string()
+    let raw = event.occurred_at.as_deref().unwrap_or(&event.recorded_at);
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|time| {
+            time.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        })
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 pub(super) fn related_repo_paths(
@@ -256,17 +264,18 @@ pub(super) fn print_related_instance(
     subjects: &CommitSubjects,
 ) {
     println!();
-    let bundle = instance.bundle_id.as_deref().unwrap_or("-");
-    let title = instance
-        .bundle_title
-        .as_deref()
-        .unwrap_or("untitled bundle");
-    println!(
-        "{} {} {}",
-        out::heading("Bundle:"),
-        out::repo(bundle),
-        title
-    );
+    match &instance.bundle_id {
+        Some(bundle) => println!(
+            "{} {} {}",
+            out::heading("Bundle:"),
+            out::repo(bundle),
+            instance
+                .bundle_title
+                .as_deref()
+                .unwrap_or("untitled bundle")
+        ),
+        None => println!("{} {}", out::heading("Bundle:"), no_bundle_label(instance)),
+    }
     println!("{} {}", out::heading("Scope:"), instance.scope_label());
     println!(
         "{} {}",
@@ -283,11 +292,25 @@ pub(super) fn print_related_instance(
     }
 
     if !instance.other_bundle.is_empty() {
-        println!("{}", out::heading("Other commits in bundle:"));
+        println!("{}", out::heading("Other activity in bundle:"));
         print_event_list(&instance.other_bundle, subjects);
     }
 
     print_inspect_commands(instance, repo_paths);
+}
+
+/// What a scope outside every bundle is, in the `[base: <branch>]` form that
+/// `knit history list` uses for base history: there is no bundle to name.
+fn no_bundle_label(instance: &RelatedInstance) -> String {
+    let base_branch = instance
+        .matched
+        .iter()
+        .filter(|event| event.kind == "base.commit")
+        .find_map(|event| event.branch.as_deref());
+    match base_branch {
+        Some(branch) => format!("none [base: {branch}]"),
+        None => "none".to_string(),
+    }
 }
 
 pub(super) fn print_event_list(events: &[HistoryEvent], subjects: &CommitSubjects) {
@@ -349,7 +372,7 @@ fn print_inspect_commands(instance: &RelatedInstance, repo_paths: &BTreeMap<Stri
         };
         commands.insert(format!(
             "git -C {} show --stat {}",
-            shell_quote(&repo_path.to_string_lossy()),
+            out::shell_word(&repo_path.to_string_lossy()),
             commit
         ));
     }
@@ -361,17 +384,6 @@ fn print_inspect_commands(instance: &RelatedInstance, repo_paths: &BTreeMap<Stri
     println!("{}", out::heading("Inspect:"));
     for command in commands {
         println!("  {command}");
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 
@@ -415,6 +427,63 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["knit"]
         );
+    }
+
+    #[test]
+    fn when_is_the_commit_time_not_a_later_bundle_event() {
+        let mut archived = event("archive", "backend", "aaa111", None, "n9");
+        archived.kind = "bundle.archived".to_string();
+        archived.repo_id = None;
+        archived.commit = None;
+        archived.occurred_at = Some("2026-06-05T12:30:00.123Z".to_string());
+        let events = vec![
+            event("touch", "backend", "aaa111", Some("kg1"), "n1"),
+            event("api", "frontend", "bbb222", Some("kg1"), "n1"),
+            archived,
+        ];
+        let commits = BTreeSet::from(["aaa111".to_string()]);
+
+        let instances = related_instances(&events, "backend", &commits);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].other_bundle.len(), 1);
+        assert_eq!(related_instance_time(&instances[0]), "2026-06-05T10:00:00Z");
+    }
+
+    #[test]
+    fn when_is_printed_in_utc_whatever_offset_was_recorded() {
+        let mut base = event(
+            "base",
+            "backend",
+            "aaa111",
+            None,
+            "base:backend:main:aaa111",
+        );
+        base.occurred_at = Some("2026-06-05T12:00:00+02:00".to_string());
+
+        assert_eq!(event_time(&base), "2026-06-05T10:00:00Z");
+    }
+
+    #[test]
+    fn base_commits_are_labelled_base_history_not_a_bundle() {
+        let mut base = event(
+            "base",
+            "backend",
+            "aaa111",
+            None,
+            "base:backend:main:aaa111",
+        );
+        base.kind = "base.commit".to_string();
+        base.bundle_id = None;
+        base.bundle_title = None;
+        base.branch = Some("main".to_string());
+        let commits = BTreeSet::from(["aaa111".to_string()]);
+
+        let instances = related_instances(&[base], "backend", &commits);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].bundle_id, None);
+        assert_eq!(no_bundle_label(&instances[0]), "none [base: main]");
     }
 
     #[test]

@@ -47,13 +47,17 @@ pub(super) fn events(
             "log".to_string(),
             "--first-parent".into(),
             "--no-show-signature".into(),
-            "--format=%H%x00%P%x00%cI%x00%s".into(),
+            // Same UTC form as `crate::git::commit_details`: ledger timestamps
+            // are compared as strings, so a local offset here would misorder
+            // base commits against bundle events and print a second format.
+            "--date=format-local:%Y-%m-%dT%H:%M:%SZ".into(),
+            "--format=%H%x00%P%x00%cd%x00%s".into(),
         ];
         if let Some(limit) = limit {
             args.push(format!("--max-count={limit}"));
         }
         args.extend([head.to_string(), "--".into()]);
-        let log = crate::git::git_output(&checkout, args)?;
+        let log = crate::git::git_output_with_env(&checkout, args, &[("TZ", "UTC")])?;
         for line in log.lines() {
             let columns = line.splitn(4, '\0').collect::<Vec<_>>();
             if columns.len() != 4 {

@@ -15,8 +15,8 @@ use super::clone::{
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
-    print_json_error_envelope, RemoteBundle, RemoteErrorKind, RemoteExportBundle,
-    RemoteExportRepository, RemoteProjectExport, RemoteViews,
+    classified, RemoteBundle, RemoteErrorKind, RemoteExportBundle, RemoteExportRepository,
+    RemoteProjectExport, RemoteViews,
 };
 use crate::commands::worktree::materialize_repos;
 use crate::ids::slugify;
@@ -2129,12 +2129,7 @@ pub fn pull_bundle_by_slug(slug: &str, json: bool) -> Result<()> {
             }
             Ok(())
         }
-        Err((kind, error)) => {
-            if json {
-                print_json_error_envelope(kind, &error);
-            }
-            Err(error)
-        }
+        Err((kind, error)) => Err(classified(kind, error)),
     }
 }
 

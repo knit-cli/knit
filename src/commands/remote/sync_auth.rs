@@ -470,11 +470,14 @@ pub fn remote_auth_status(name: &str, json_output: bool) -> Result<()> {
         )
     })?;
     let token = resolve_token(&remote_name, remote).map_err(|_| {
-        anyhow::anyhow!(
-            "No remote token configured for `{remote_name}`. Set one with `knit auth remote \
+        crate::commands::failure::error(
+            crate::commands::failure::ErrorKind::NoToken,
+            format!(
+                "No remote token configured for `{remote_name}`. Set one with `knit auth remote \
              {remote_name}` (hidden prompt at a terminal, `--token-stdin` for pipes), or set \
              the {} environment variable.",
-            remote_token_env_name(&remote_name)
+                remote_token_env_name(&remote_name)
+            ),
         )
     })?;
     let shown_url = display_url(&base_url);

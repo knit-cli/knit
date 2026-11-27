@@ -1,7 +1,103 @@
 use std::env;
-use std::fmt::Display;
-use std::io::IsTerminal;
+use std::fmt::{self, Display};
+use std::io::{self, IsTerminal, Write};
 use std::sync::atomic::{AtomicBool, Ordering};
+
+// Every `print!`, `println!`, `eprint!` and `eprintln!` in this crate expands
+// to these instead of the standard library's macros (`lib.rs` declares this
+// module first with `#[macro_use]`, and a crate's own `macro_rules!` shadow
+// the prelude's). The standard macros panic when the reader of a pipe has
+// gone away (`knit log | head`); these drop the output and let the command
+// finish. See `write_stream` for why knit keeps running rather than dying the
+// way `git log | head` does. Unit tests keep the standard macros so the test
+// harness still captures their output.
+#[cfg(not(test))]
+macro_rules! print {
+    ($($arg:tt)*) => {
+        $crate::output::write_stream($crate::output::Stream::Out, format_args!($($arg)*), false)
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! println {
+    () => {
+        $crate::output::write_stream($crate::output::Stream::Out, format_args!(""), true)
+    };
+    ($($arg:tt)*) => {
+        $crate::output::write_stream($crate::output::Stream::Out, format_args!($($arg)*), true)
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! eprint {
+    ($($arg:tt)*) => {
+        $crate::output::write_stream($crate::output::Stream::Err, format_args!($($arg)*), false)
+    };
+}
+
+#[cfg(not(test))]
+macro_rules! eprintln {
+    () => {
+        $crate::output::write_stream($crate::output::Stream::Err, format_args!(""), true)
+    };
+    ($($arg:tt)*) => {
+        $crate::output::write_stream($crate::output::Stream::Err, format_args!($($arg)*), true)
+    };
+}
+
+#[doc(hidden)]
+#[derive(Clone, Copy)]
+pub enum Stream {
+    Out,
+    Err,
+}
+
+static STDOUT_CLOSED: AtomicBool = AtomicBool::new(false);
+static STDERR_CLOSED: AtomicBool = AtomicBool::new(false);
+
+/// Write one `print!`-family message. A stream whose reader has closed
+/// (`BrokenPipe`, which Rust reports instead of raising SIGPIPE because it
+/// starts every program with SIGPIPE ignored) is marked closed and every later
+/// message to it is dropped silently; the command carries on and exits with its
+/// own status.
+///
+/// Knit deliberately does not restore SIGPIPE's default "terminate" action,
+/// which is how `git log | head` exits: the first progress line written after
+/// the reader left would kill knit on the spot, in the middle of a commit
+/// across repos, a land, or a merge before its rollback, without running the
+/// drop guards that release bundle locks or the rollback paths. Finishing the
+/// operation with its output discarded is the only outcome that never leaves
+/// repos half-updated. Any other write error keeps the standard macros'
+/// behavior and panics.
+#[doc(hidden)]
+pub fn write_stream(stream: Stream, args: fmt::Arguments<'_>, newline: bool) {
+    let (closed, name) = match stream {
+        Stream::Out => (&STDOUT_CLOSED, "stdout"),
+        Stream::Err => (&STDERR_CLOSED, "stderr"),
+    };
+    if closed.load(Ordering::Relaxed) {
+        return;
+    }
+    let result = match stream {
+        Stream::Out => write_message(&mut io::stdout().lock(), args, newline),
+        Stream::Err => write_message(&mut io::stderr().lock(), args, newline),
+    };
+    match result {
+        Ok(()) => {}
+        Err(error) if error.kind() == io::ErrorKind::BrokenPipe => {
+            closed.store(true, Ordering::Relaxed);
+        }
+        Err(error) => panic!("failed printing to {name}: {error}"),
+    }
+}
+
+fn write_message(out: &mut impl Write, args: fmt::Arguments<'_>, newline: bool) -> io::Result<()> {
+    out.write_fmt(args)?;
+    if newline {
+        out.write_all(b"\n")?;
+    }
+    Ok(())
+}
 
 /// When set, `human!` lines go to stderr instead of stdout. A `--json` command
 /// flips this once at startup so stdout carries only its machine-readable
@@ -47,6 +143,21 @@ pub fn heading(text: impl Display) -> String {
 
 pub fn muted(text: impl Display) -> String {
     paint(text, Style::Dim)
+}
+
+/// One shell word for a command line Knit prints for the user to paste:
+/// bare when it holds only characters no shell treats specially, otherwise
+/// single-quoted, so a path with spaces or quotes still pastes as one word.
+pub fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 /// Progress tail for streamed multi-repo output: ` (done/total)` in muted

@@ -4677,6 +4677,12 @@ fn a_lane_landing_never_touches_a_source_checkout_on_the_lane_branch() {
     );
     assert!(apply.contains("bundle stays open"), "{apply}");
     assert!(apply.contains("left alone"), "{apply}");
+    // ...with the command that catches the clone up, left to the user.
+    assert!(
+        apply.contains("Next: fast-forward the checked-out branch to the merge with `git -C ")
+            && apply.contains(" merge --ff-only "),
+        "{apply}"
+    );
 
     // Origin got the merge.
     let backend_remote = root.join("backend.git");
@@ -4715,6 +4721,49 @@ fn a_lane_landing_never_touches_a_source_checkout_on_the_lane_branch() {
     assert_eq!(
         git(&frontend, ["rev-parse", "refs/heads/staging"]),
         git(&root.join("frontend.git"), ["rev-parse", "staging"])
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn land_points_repos_without_origin_at_merge_instead_of_publish() {
+    let root = unique_temp_dir();
+    // backend has a local bare origin; frontend is a plain local repo.
+    let (_backend_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let frontend = root.join("frontend");
+    init_repo(&frontend, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "local feature"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    for repo in ["backend", "frontend"] {
+        append_line(
+            &workspace.join(format!(".knit/worktrees/local-feature/{repo}/app.txt")),
+            "local change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Local change"]);
+
+    let refused = knit_fails(&workspace, ["land"]);
+    assert!(
+        refused.contains(
+            "frontend has no recorded review and no `origin` remote to open one on — integrate it with `knit merge local-feature --into main` instead"
+        ),
+        "{refused}"
+    );
+    // backend can get a review, so the publish advice stays for it alone.
+    assert!(
+        refused.contains("backend has no recorded review — run `knit publish create` first"),
+        "{refused}"
     );
 
     fs::remove_dir_all(root).unwrap();

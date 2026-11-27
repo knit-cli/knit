@@ -291,7 +291,8 @@ pub fn format_history_event(event: &HistoryEvent) -> String {
             event.branch.as_deref().unwrap_or("unknown destination")
         ),
         "bundle.landed" => "bundle landing recorded".to_string(),
-        _ => "bundle activity".to_string(),
+        kind if is_lifecycle_event_kind(kind) => "bundle activity".to_string(),
+        _ => "bundle".to_string(),
     };
     format!("{when}  [{label}] {repo:<18} {sha:<8} {bundle:<18} {message}")
 }
@@ -867,6 +868,16 @@ fn lifecycle_kind(node_type: &str) -> Option<&'static str> {
         "repo.removed" => Some("repo.removed"),
         _ => None,
     }
+}
+
+/// Whether a history event records a bundle's lifecycle (created, repos added
+/// or removed, landed, archived) rather than a commit. These are the events
+/// `knit log` and `knit history` label `[bundle activity]`.
+pub fn is_lifecycle_event_kind(kind: &str) -> bool {
+    matches!(
+        kind,
+        "bundle.created" | "bundle.landed" | "bundle.archived" | "repo.added" | "repo.removed"
+    )
 }
 
 fn lifecycle_message(kind: &str) -> &'static str {
@@ -1536,6 +1547,23 @@ mod tests {
                 "aaa111",
             ])
         );
+    }
+
+    #[test]
+    fn every_lifecycle_kind_written_is_labelled_as_lifecycle() {
+        for node_type in [
+            "feature.created",
+            "feature.landed",
+            "feature.archived",
+            "repo.added",
+            "repo.removed",
+        ] {
+            let kind = lifecycle_kind(node_type).unwrap();
+            assert!(is_lifecycle_event_kind(kind), "{kind}");
+        }
+        assert!(!is_lifecycle_event_kind("commit.recorded"));
+        assert!(!is_lifecycle_event_kind("base.commit"));
+        assert!(!is_lifecycle_event_kind("branch.landed"));
     }
 
     #[test]

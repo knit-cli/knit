@@ -162,6 +162,7 @@ pub fn create_publications_with_options(
         }
         return Ok(());
     }
+    ensure_jobs_have_origin(&active, &jobs)?;
     preflight(&active.bundle, &jobs, Some(&active), renew)?;
     for job in &jobs {
         let cwd = crate::checkout::checkout_dir(&active, &job.repo)
@@ -790,6 +791,37 @@ fn write_bundle_artifact_output(bundle: &ChangeGroup, out_path: Option<&Path>) -
             Ok(())
         }
     }
+}
+
+/// A repo with no `origin` has no code host to open a review on. Refuse
+/// before anything is pushed, name those repos, and point at `knit merge`.
+fn ensure_jobs_have_origin(active: &crate::store::ActiveBundle, jobs: &[PublishJob]) -> Result<()> {
+    let mut missing = Vec::new();
+    let mut others = Vec::new();
+    for job in jobs {
+        let lacks = match crate::checkout::checkout_dir(active, &job.repo) {
+            Some(cwd) => crate::contribution::lacks_origin(&cwd, &job.repo)?,
+            None => false,
+        };
+        if lacks {
+            missing.push((job.repo.id.as_str(), job.base_branch.as_str()));
+        } else {
+            others.push(job.repo.id.as_str());
+        }
+    }
+    if missing.is_empty() {
+        return Ok(());
+    }
+    bail!(
+        "{}",
+        crate::contribution::no_origin_refusal(
+            &active.bundle.id,
+            &missing,
+            &others,
+            "there is no code host to open a review on",
+            &format!("knit publish create --bundle {}", active.bundle.id),
+        )
+    );
 }
 
 fn preflight(

@@ -240,7 +240,25 @@ The scope applies before repository/expression selection, grouping, and paging.
 Archiving a bundle does not make its work part of the base ledger. Historical
 activity from archived or deleted bundles remains available with `--scope activity`.
 An open bundle can already have some work on a base branch; the overlay labels
-its activity as open bundle work, not proof that every commit is still unmerged.
+its activity as bundle work, not proof that every commit is still unmerged.
+
+### Entry labels
+
+Text output starts each entry with a label that says what kind of record it is.
+The same words appear in every `--scope` and `--group`, in `--oneline` and full
+form. `knit history` uses `[bundle]` and `[bundle activity]` per event too, and
+names the branch for base commits and merges.
+
+| Label | Meaning |
+| --- | --- |
+| `[base]` | A commit observed on a configured base branch. |
+| `[bundle]` | Work recorded in a bundle: a commit group, observed commits, a revert, a tag or a check. Project-wide only; inside a bundle its own work has no label. It says where the work was recorded, not that it is unmerged or that the bundle is still open. |
+| `[bundle activity]` | The bundle's lifecycle: created, repos added or removed, landed, archived. It never names a commit. |
+| `[branch merge]` | A recorded merge into a destination branch. |
+
+With `--group bundle`, an entry that holds any bundle work reads `[bundle]`;
+one that holds only lifecycle events reads `[bundle activity]`. JSON output has
+no label; use each event's `kind`.
 
 `knit history refresh` and history sync record `base.commit` events from each
 project repository's cached `origin/<baseBranch>` first-parent Git history.

@@ -63,7 +63,34 @@ knit remote auth-status <name> --json
 ```
 
 These documents are contracts and change only deliberately. Everything else the
-CLI prints is for humans: do not parse it.
+CLI prints is for humans: do not parse it. The two a host polls have published
+schemas, additive like the artifact ones: `schemas/status.schema.json` and
+`schemas/bundle-list.schema.json` (`knit schema print status`, `knit schema
+print bundle-list`).
+
+When a `--json` command fails, it exits non-zero, prints a human `Error:` line
+on stderr, and prints one JSON document on stdout
+(`knit schema print error`):
+
+```json
+{ "error": { "kind": "noRemote", "message": "No sync remote configured. Run `knit remote add <name> <url>` first." } }
+```
+
+`kind` is one of `noWorkspace` (not in a Knit workspace), `noBundle` (no
+bundle resolves from here), `noRemote` (no sync remote configured, or no remote
+by that name), `noToken` (the remote has no token), `http` (the remote could
+not be reached or answered with an error), `notFound` (the remote has no such
+project or bundle), `usage` (the command line was rejected) or `other`. New
+kinds may be added; treat one you do not know like `other`. The exit status is
+2 for `usage` and for a failed handoff readiness check, and 1 otherwise.
+
+A few commands answer with a report that itself says what failed — `knit land
+validate`, and with `--json` `knit land preflight`, `knit land apply`, `knit
+land resume`, `knit land recover --apply`, `knit handoff probe`, `knit fork`
+and `knit auth status --check`. When they fail after printing that
+report, the report is the one document on stdout and no `error` envelope
+follows. So: on a non-zero exit, read stdout as JSON; if it has an `error`
+object, that is the failure, otherwise it is the command's own report.
 
 `knit status --json` is the one a host polls:
 
@@ -164,14 +191,15 @@ history answers "which conversation did this".
 | Variable                                          | Effect                                                              |
 | ------------------------------------------------- | -------------------------------------------------------------------- |
 | `KNIT_SESSION`                                    | Opaque session id. Recorded as `sessionId` on every node the command writes. Set it per conversation. |
-| `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL`, `T3_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor` when `T3_ACTOR_SESSION` is set; the other two are ignored without it. Optional; single-user setups leave them unset. |
+| `KNIT_ACTOR_SESSION`, `KNIT_ACTOR_LABEL`, `KNIT_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor` when `KNIT_ACTOR_SESSION` is set; the other two are ignored without it. Optional; single-user setups leave them unset. |
 
 Both are read from the environment of the `knit` process, so a host exports
 them when it spawns commands and agents. Absent variables simply mean the node
 carries no session or actor — nothing fails.
 
-The `T3_ACTOR_*` prefix is historical and kept for compatibility with harnesses
-that already export it.
+The older names `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL` and `T3_ACTOR_EMAIL` are
+still accepted. When `KNIT_ACTOR_SESSION` is set, all three values come from
+the `KNIT_ACTOR_*` names; otherwise they come from the `T3_ACTOR_*` names.
 
 Git authorship is separate and ordinary: set `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` (and the committer pair) as you would for any git process.

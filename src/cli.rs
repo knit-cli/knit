@@ -1478,7 +1478,8 @@ pub enum ConfigCommand {
 pub enum SchemaCommand {
     /// Print a bundled JSON Schema.
     Print {
-        /// Schema name: bundle, project, merge-run, land-plan, land-run, config.
+        /// Schema name: bundle, project, views, merge-run, land-plan, land-run, config, error,
+        /// status, bundle-list.
         name: String,
     },
 }

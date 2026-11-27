@@ -10,7 +10,7 @@
 
 use super::client::{fetch_project_export, request_json};
 use super::clone::{parse_clone_reference, resolve_remote_for_clone_classified};
-use super::{print_json_error_envelope, RemoteErrorKind, RemoteViews};
+use super::{classified, RemoteErrorKind, RemoteViews};
 use crate::model::{ProjectView, ViewBase, ViewSource};
 use crate::output as out;
 use anyhow::{Context, Result};
@@ -63,12 +63,7 @@ pub fn list_remote_views(
             }
             Ok(())
         }
-        Err((kind, error)) => {
-            if json {
-                print_json_error_envelope(kind, &error);
-            }
-            Err(error)
-        }
+        Err((kind, error)) => Err(classified(kind, error)),
     }
 }
 

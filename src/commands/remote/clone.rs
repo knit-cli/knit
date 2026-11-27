@@ -9,8 +9,7 @@ use super::client::{
 };
 use super::credentials::NO_ACCESS_HINT;
 use super::{
-    print_json_error_envelope, RemoteErrorKind, RemoteExportRepository, RemoteProjectExport,
-    RemoteViews,
+    classified, RemoteErrorKind, RemoteExportRepository, RemoteProjectExport, RemoteViews,
 };
 use crate::commands::agents::{
     print_bundle_worktree_agents_summary, write_bundle_worktree_agents_md,
@@ -191,12 +190,7 @@ pub fn clone_project_from_remote(
             }
             Ok(())
         }
-        Err((kind, error)) => {
-            if json {
-                print_json_error_envelope(kind, &error);
-            }
-            Err(error)
-        }
+        Err((kind, error)) => Err(classified(kind, error)),
     }
 }
 

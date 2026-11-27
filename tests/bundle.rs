@@ -660,6 +660,118 @@ fn ledger_nodes_record_ambient_actor_identity() {
     fs::remove_dir_all(root).unwrap();
 }
 
+#[test]
+fn ledger_nodes_resolve_knit_actor_names_before_t3_names() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    knit(&workspace, ["bundle", "venue capacity"]);
+    knit(&workspace, ["bundle", "add", backend.to_str().unwrap()]);
+    let file = workspace.join(".knit/worktrees/venue-capacity/backend/app.txt");
+
+    let commit_actor = |line: &str, env: &[(&str, &str)]| -> serde_json::Value {
+        append_line(&file, line);
+        knit_with_env(&workspace, ["commit", "--all", "-m", line], env);
+        let bundle = read_bundle(&workspace);
+        let last = bundle["nodes"].as_array().unwrap().last().unwrap().clone();
+        assert_eq!(last["type"].as_str(), Some("commit.group"));
+        last["actor"].clone()
+    };
+
+    // The documented KNIT_ACTOR_* names record the actor.
+    let actor = commit_actor(
+        "knit names",
+        &[
+            ("KNIT_ACTOR_SESSION", "knit-session"),
+            ("KNIT_ACTOR_LABEL", "bob"),
+            ("KNIT_ACTOR_EMAIL", "bob@example.com"),
+        ],
+    );
+    assert_eq!(
+        actor,
+        serde_json::json!({"session": "knit-session", "label": "bob", "email": "bob@example.com"})
+    );
+
+    // The legacy T3_ACTOR_* names alone still record the same way.
+    let actor = commit_actor(
+        "t3 names",
+        &[
+            ("T3_ACTOR_SESSION", "t3-session"),
+            ("T3_ACTOR_LABEL", "alice"),
+            ("T3_ACTOR_EMAIL", "alice@example.com"),
+        ],
+    );
+    assert_eq!(
+        actor,
+        serde_json::json!({"session": "t3-session", "label": "alice", "email": "alice@example.com"})
+    );
+
+    // Both full sets: KNIT_ACTOR_* wins.
+    let actor = commit_actor(
+        "both names",
+        &[
+            ("KNIT_ACTOR_SESSION", "knit-session"),
+            ("KNIT_ACTOR_LABEL", "bob"),
+            ("KNIT_ACTOR_EMAIL", "bob@example.com"),
+            ("T3_ACTOR_SESSION", "t3-session"),
+            ("T3_ACTOR_LABEL", "alice"),
+            ("T3_ACTOR_EMAIL", "alice@example.com"),
+        ],
+    );
+    assert_eq!(
+        actor,
+        serde_json::json!({"session": "knit-session", "label": "bob", "email": "bob@example.com"})
+    );
+
+    // Mixed: the prefix that supplies the session supplies label and email;
+    // the other prefix's label and email are not mixed in.
+    let actor = commit_actor(
+        "knit session t3 label",
+        &[
+            ("KNIT_ACTOR_SESSION", "knit-session"),
+            ("T3_ACTOR_LABEL", "alice"),
+            ("T3_ACTOR_EMAIL", "alice@example.com"),
+        ],
+    );
+    assert_eq!(actor, serde_json::json!({"session": "knit-session"}));
+
+    let actor = commit_actor(
+        "t3 session knit label",
+        &[
+            ("T3_ACTOR_SESSION", "t3-session"),
+            ("KNIT_ACTOR_LABEL", "bob"),
+            ("KNIT_ACTOR_EMAIL", "bob@example.com"),
+        ],
+    );
+    assert_eq!(actor, serde_json::json!({"session": "t3-session"}));
+
+    // Label and email without any session variable record nothing.
+    let actor = commit_actor(
+        "no session",
+        &[("KNIT_ACTOR_LABEL", "bob"), ("T3_ACTOR_LABEL", "alice")],
+    );
+    assert!(actor.is_null());
+
+    // An empty KNIT_ACTOR_SESSION counts as unset and falls back.
+    let actor = commit_actor(
+        "empty knit session",
+        &[
+            ("KNIT_ACTOR_SESSION", "  "),
+            ("KNIT_ACTOR_LABEL", "bob"),
+            ("T3_ACTOR_SESSION", "t3-session"),
+            ("T3_ACTOR_LABEL", "alice"),
+        ],
+    );
+    assert_eq!(
+        actor,
+        serde_json::json!({"session": "t3-session", "label": "alice"})
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
 // Regression: `knit bundle add` must record the repo in the artifact before it
 // creates any git side effects, so an interruption during materialization (a
 // SIGPIPE from `| head`, a Ctrl-C, or a crash) can never leave a branch and
