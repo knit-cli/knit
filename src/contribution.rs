@@ -16,6 +16,72 @@ pub fn destination(repo: &RepoEntry) -> Option<&str> {
     repo.target_remote.as_deref().or_else(|| source(repo))
 }
 
+/// True for a plain local repository: no contribution remotes are recorded
+/// and `cwd` has no `origin` URL, so there is nowhere to push, open a review
+/// or fetch a base from. The quickstart's toy repos are exactly this.
+pub(crate) fn lacks_origin(cwd: &Path, repo: &RepoEntry) -> Result<bool> {
+    if configured(repo) {
+        return Ok(false);
+    }
+    origin_missing(cwd)
+}
+
+/// True when `cwd` has no `origin` URL configured.
+pub(crate) fn origin_missing(cwd: &Path) -> Result<bool> {
+    Ok(
+        crate::git::git_output_optional(cwd, ["config", "--get-all", "remote.origin.url"])?
+            .is_none(),
+    )
+}
+
+/// The refusal for a command that needs a code host when some selected repos
+/// have no `origin`: names those repos, points at `knit merge` as the local
+/// way to integrate, and, when only some lack a remote, how to `retry` the
+/// command for the others (`retry` is the command without repo arguments).
+/// `missing` holds each repo id with the base branch it would merge into.
+pub(crate) fn no_origin_refusal(
+    bundle_id: &str,
+    missing: &[(&str, &str)],
+    others: &[&str],
+    consequence: &str,
+    retry: &str,
+) -> String {
+    let ids: Vec<&str> = missing.iter().map(|(id, _)| *id).collect();
+    let one = ids.len() == 1;
+    let mut message = format!(
+        "{} {} no `origin` remote, so {consequence}.",
+        ids.join(", "),
+        if one { "has" } else { "have" }
+    );
+    let merge = local_merge_command(bundle_id, missing.iter().map(|(_, branch)| *branch));
+    if others.is_empty() {
+        message.push_str(&format!(
+            " To integrate the bundle without a code host, run {merge}."
+        ));
+    } else {
+        message.push_str(&format!(
+            " Run `{retry} {}` for the repos that have one, add an `origin` remote to {}, or integrate the bundle without a code host with {merge}.",
+            others.join(" "),
+            ids.join(", ")
+        ));
+    }
+    message
+}
+
+/// "`knit merge <bundle> --into <branch>`", the local-only integration path.
+/// Repos with different base branches get a `<branch>` placeholder.
+pub(crate) fn local_merge_command<'a>(
+    bundle_id: &str,
+    branches: impl IntoIterator<Item = &'a str>,
+) -> String {
+    let branches: std::collections::BTreeSet<&str> = branches.into_iter().collect();
+    let into = match branches.len() {
+        1 => branches.into_iter().next().unwrap_or("<branch>"),
+        _ => "<branch>",
+    };
+    format!("`knit merge {bundle_id} --into {into}`")
+}
+
 pub fn github_name(remote: &str) -> Result<String> {
     let (host, name) = crate::auth::remote_target(remote)?;
     if host != "github.com" || name.split('/').count() != 2 {
@@ -491,7 +557,42 @@ pub fn discover(cwd: &Path, repo: &mut RepoEntry) -> Result<bool> {
 
 #[cfg(test)]
 mod tests {
-    use super::{configured_git_url, destination_ref, push_transport_url, tracking_ref};
+    use super::{
+        configured_git_url, destination_ref, local_merge_command, no_origin_refusal,
+        push_transport_url, tracking_ref,
+    };
+
+    #[test]
+    fn local_merge_command_names_one_shared_branch_or_a_placeholder() {
+        assert_eq!(
+            local_merge_command("my-feature", ["main", "main"]),
+            "`knit merge my-feature --into main`"
+        );
+        assert_eq!(
+            local_merge_command("my-feature", ["main", "develop"]),
+            "`knit merge my-feature --into <branch>`"
+        );
+    }
+
+    #[test]
+    fn no_origin_refusal_offers_a_retry_only_when_some_repos_have_origin() {
+        let all = no_origin_refusal(
+            "f",
+            &[("a", "main"), ("b", "main")],
+            &[],
+            "x",
+            "knit push --bundle f",
+        );
+        assert_eq!(
+            all,
+            "a, b have no `origin` remote, so x. To integrate the bundle without a code host, run `knit merge f --into main`."
+        );
+        let some = no_origin_refusal("f", &[("b", "main")], &["a"], "x", "knit push --bundle f");
+        assert_eq!(
+            some,
+            "b has no `origin` remote, so x. Run `knit push --bundle f a` for the repos that have one, add an `origin` remote to b, or integrate the bundle without a code host with `knit merge f --into main`."
+        );
+    }
 
     #[test]
     fn destination_receipts_do_not_normalize_forge_aliases() {
