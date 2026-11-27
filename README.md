@@ -29,7 +29,12 @@ Brew:
 ```sh
 brew install knit-cli/tap/knit   # macOS / Linux binaries
 ```
-From source:
+Windows, or any platform without a package: download the archive for your platform from
+[GitHub Releases](https://github.com/knit-cli/knit/releases), check it against its `.sha256`
+file, and put `knit` on your `PATH`. Windows builds pass the full test suite in CI but have
+not yet been used on a real Windows machine; see [docs/windows.md](docs/windows.md).
+
+From a clone of this repository (Rust 1.86 or newer):
 ```sh
 cargo install --path .   # the installed binary is named `knit`
 ```
@@ -93,4 +98,4 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 - **[docs/harness.md](docs/harness.md)** — building a host on top of Knit: the artifacts to read, the commands that answer in JSON, bundle context, and session attribution.
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
-- **[dist/README.md](dist/README.md)** — how releases are cut (binaries, Homebrew, Linux packages, Scoop/winget).
+- **[dist/README.md](dist/README.md)** — how releases are cut (binaries, Homebrew, Linux packages).
