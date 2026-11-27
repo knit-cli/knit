@@ -1,3 +1,8 @@
+// First, so its `print!`-family macros replace the standard ones in every
+// module declared below.
+#[macro_use]
+pub mod output;
+
 pub mod advice;
 pub mod auth;
 pub mod auth_git;
@@ -13,7 +18,6 @@ pub mod history;
 pub mod history_query;
 pub mod ids;
 pub mod model;
-pub mod output;
 pub mod parallel;
 pub mod paths;
 pub mod pending;
