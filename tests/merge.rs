@@ -441,7 +441,7 @@ fn a_checked_out_merge_target_gets_a_pasteable_fast_forward() {
     );
 
     let step = recorded_step(&workspace);
-    assert_eq!(step["localBranchCheckout"], backend.display().to_string());
+    assert_eq!(step["localBranchCheckout"], git_reported_path(&backend));
     assert_eq!(step["catchUpCommand"], command);
 
     let status = std::process::Command::new("sh")
@@ -458,6 +458,17 @@ fn a_checked_out_merge_target_gets_a_pasteable_fast_forward() {
     );
 
     fs::remove_dir_all(root).unwrap();
+}
+
+/// A checkout path as Knit prints and records it. Knit passes on the path git
+/// reports for the checkout, and git uses forward slashes on Windows.
+fn git_reported_path(path: &std::path::Path) -> String {
+    let text = path.display().to_string();
+    if cfg!(windows) {
+        text.replace('\\', "/")
+    } else {
+        text
+    }
 }
 
 /// A checked-out target with commits of its own cannot fast-forward, so no
@@ -489,7 +500,7 @@ fn a_diverged_checked_out_merge_target_gets_no_fast_forward_hint() {
     assert!(!merged.contains("Next:"), "{merged}");
 
     let step = recorded_step(&workspace);
-    assert_eq!(step["localBranchCheckout"], backend.display().to_string());
+    assert_eq!(step["localBranchCheckout"], git_reported_path(&backend));
     assert!(step.get("catchUpCommand").is_none(), "{step}");
 
     fs::remove_dir_all(root).unwrap();
@@ -523,7 +534,7 @@ fn merge_continue_prints_the_catch_up_for_a_checked_out_target() {
         printed_catch_up(&continued),
         format!(
             "git -C {} merge --ff-only {merge_sha}",
-            printed_shell_word(&backend.display().to_string())
+            printed_shell_word(&git_reported_path(&backend))
         )
     );
 
