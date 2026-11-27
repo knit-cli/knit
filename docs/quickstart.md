@@ -126,7 +126,7 @@ knit log --all --scope base-and-ongoing --repo backend --oneline -n 20
 ```
 
 ```txt
-[bundle activity] kg_20261127_756015  my-feature  Add my feature across backend and frontend
+[bundle] kg_20261127_756015  my-feature  Add my feature across backend and frontend
 [bundle activity] repo_20261127_148486  my-feature  Repo added to bundle
 ```
 

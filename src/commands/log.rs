@@ -177,34 +177,72 @@ fn print_entries(entries: &[HistoryEntry], args: &LogArgs, bundle_context: bool)
     Ok(())
 }
 
+/// Marks a bundle's lifecycle records, in the node view and the entry view alike.
+const LIFECYCLE_LABEL: &str = "[bundle activity]";
+
+/// What a history entry records, which decides its label.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EntryClass {
+    /// Commits observed on a configured base branch.
+    Base,
+    /// Recorded merges into a destination branch.
+    BranchMerge,
+    /// The bundle's own lifecycle: created, repos added or removed, landed,
+    /// archived. No commit belongs to it.
+    BundleActivity,
+    /// Work recorded in a bundle: commit groups, observed commits, reverts,
+    /// tags and checks.
+    BundleWork,
+}
+
+fn classify_entry(entry: &HistoryEntry) -> EntryClass {
+    let kinds = entry.events.iter().map(|event| event.kind.as_str());
+    if entry.events.is_empty() {
+        // Repository filters can narrow every event away; the bundle id alone
+        // still says whether this came from a bundle.
+        return if entry.bundle_id.is_some() {
+            EntryClass::BundleWork
+        } else {
+            EntryClass::Base
+        };
+    }
+    if kinds.clone().all(|kind| kind == "base.commit") {
+        EntryClass::Base
+    } else if kinds.clone().all(|kind| kind == "branch.landed") {
+        EntryClass::BranchMerge
+    } else if kinds.clone().all(crate::history::is_lifecycle_event_kind) {
+        EntryClass::BundleActivity
+    } else {
+        EntryClass::BundleWork
+    }
+}
+
+/// The label printed before an entry. Inside a bundle its own work stays
+/// unlabelled, as the node view prints it; project-wide it is marked
+/// `[bundle]` so it reads apart from `[base]` history.
+fn entry_label(entry: &HistoryEntry, bundle_context: bool) -> Option<&'static str> {
+    match classify_entry(entry) {
+        EntryClass::Base => Some("[base]"),
+        EntryClass::BranchMerge => Some("[branch merge]"),
+        EntryClass::BundleActivity => Some(LIFECYCLE_LABEL),
+        EntryClass::BundleWork => bundle_context.then_some("[bundle]"),
+    }
+}
+
 fn print_entry(entry: &HistoryEntry, oneline: bool, bundle_context: bool) {
     let bundle = entry.bundle_id.as_deref().unwrap_or("-");
-    let label = if entry.events.iter().all(|event| event.kind == "base.commit") {
-        "[base]"
-    } else if entry
-        .events
-        .iter()
-        .all(|event| event.kind == "branch.landed")
-    {
-        "[branch merge]"
-    } else {
-        "[bundle activity]"
-    };
+    let prefix = entry_label(entry, bundle_context)
+        .map(|label| format!("{label} "))
+        .unwrap_or_default();
+    let subject = entry.message.lines().next().unwrap_or_default();
     if bundle_context {
         println!(
-            "{} {}  {}  {}",
-            label,
+            "{prefix}{}  {}  {subject}",
             out::node(&entry.id),
             out::repo(bundle),
-            entry.message.lines().next().unwrap_or_default()
         );
     } else {
-        println!(
-            "{} {}  {}",
-            label,
-            out::node(&entry.id),
-            entry.message.lines().next().unwrap_or_default()
-        );
+        println!("{prefix}{}  {subject}", out::node(&entry.id));
     }
     if oneline {
         return;
@@ -498,7 +536,7 @@ fn print_node(node: &BundleNode, nodes: &[BundleNode]) {
                 None => String::new(),
             };
             println!(
-                "{}  {}  {}{verification}",
+                "{LIFECYCLE_LABEL} {}  {}  {}{verification}",
                 out::node(&node.id),
                 out::ok("landed"),
                 node.provider.as_deref().unwrap_or("provider")
@@ -523,7 +561,11 @@ fn print_node(node: &BundleNode, nodes: &[BundleNode]) {
             }
         }
         "repo.removed" => {
-            println!("{}  {}", out::node(&node.id), out::danger("removed repos"));
+            println!(
+                "{LIFECYCLE_LABEL} {}  {}",
+                out::node(&node.id),
+                out::danger("removed repos")
+            );
             if let Some(repo_ids) = &node.repo_ids {
                 for repo_id in repo_ids {
                     println!("  {}", out::repo(repo_id));
@@ -1025,5 +1067,105 @@ mod rewrite_tests {
             rewrite_summary(&observed, &nodes).unwrap(),
             "rewrote (rebase): 1 group(s) → kg_new; backend base 1111111 → 2222222"
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{HistoryEvent, HISTORY_EVENT_SCHEMA_VERSION};
+
+    fn event(kind: &str, bundle: Option<&str>) -> HistoryEvent {
+        HistoryEvent {
+            schema_version: HISTORY_EVENT_SCHEMA_VERSION.into(),
+            event_id: format!("event-{kind}"),
+            project_id: "demo".into(),
+            kind: kind.into(),
+            bundle_id: bundle.map(Into::into),
+            bundle_title: None,
+            repo_id: Some("backend".into()),
+            repo_remote: None,
+            base_branch: None,
+            branch: None,
+            commit: None,
+            before_sha: None,
+            after_sha: None,
+            movement: None,
+            node_id: None,
+            node_type: None,
+            commit_group_id: None,
+            message: None,
+            occurred_at: None,
+            recorded_at: "2026-01-01T00:00:00Z".into(),
+            recorded_by: "knit".into(),
+            metadata: None,
+        }
+    }
+
+    fn entry(kinds: &[&str], bundle: Option<&str>) -> HistoryEntry {
+        HistoryEntry {
+            id: "entry".into(),
+            bundle_id: bundle.map(Into::into),
+            bundle_title: None,
+            occurred_at: "2026-01-01T00:00:00Z".into(),
+            message: "message".into(),
+            events: kinds.iter().map(|kind| event(kind, bundle)).collect(),
+        }
+    }
+
+    #[test]
+    fn commit_work_never_carries_the_lifecycle_label() {
+        for kind in [
+            "commit.recorded",
+            "commit.observed",
+            "commit.reverted",
+            "commit.integrated",
+            "commit.dropped",
+            "commit.tagged",
+        ] {
+            let work = entry(&[kind, kind], Some("feature"));
+            assert_eq!(entry_label(&work, false), None, "{kind}");
+            assert_eq!(entry_label(&work, true), Some("[bundle]"), "{kind}");
+        }
+    }
+
+    #[test]
+    fn lifecycle_base_and_merge_labels_read_the_same_in_both_views() {
+        for (kinds, bundle, label) in [
+            (
+                &["repo.added", "repo.added"][..],
+                Some("f"),
+                "[bundle activity]",
+            ),
+            (&["bundle.created"][..], Some("f"), "[bundle activity]"),
+            (&["bundle.landed"][..], Some("f"), "[bundle activity]"),
+            (&["bundle.archived"][..], Some("f"), "[bundle activity]"),
+            (&["repo.removed"][..], Some("f"), "[bundle activity]"),
+            (&["base.commit"][..], None, "[base]"),
+            (&["branch.landed"][..], Some("f"), "[branch merge]"),
+        ] {
+            let entry = entry(kinds, bundle);
+            assert_eq!(entry_label(&entry, false), Some(label), "{kinds:?}");
+            assert_eq!(entry_label(&entry, true), Some(label), "{kinds:?}");
+        }
+    }
+
+    #[test]
+    fn a_whole_bundle_group_with_commits_is_bundle_work() {
+        let grouped = entry(
+            &["repo.added", "bundle.created", "commit.recorded"],
+            Some("feature"),
+        );
+        assert_eq!(entry_label(&grouped, true), Some("[bundle]"));
+        assert_eq!(entry_label(&grouped, false), None);
+    }
+
+    #[test]
+    fn an_entry_narrowed_to_no_events_keeps_its_origin() {
+        assert_eq!(
+            entry_label(&entry(&[], Some("feature")), true),
+            Some("[bundle]")
+        );
+        assert_eq!(entry_label(&entry(&[], None), true), Some("[base]"));
     }
 }
