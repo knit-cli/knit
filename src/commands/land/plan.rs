@@ -371,7 +371,41 @@ fn ensure_terminal_plan_covers_changed_repos(
         return Ok(());
     }
 
+    // A repo with no `origin` cannot get a review at all, so `knit publish
+    // create` is the wrong advice for it; the local path is `knit merge`.
+    let mut local_only = Vec::new();
+    let mut publishable = Vec::new();
+    for repo_id in unpublished {
+        let repo = active.bundle.repos.iter().find(|repo| repo.id == repo_id);
+        let lacks = match repo {
+            Some(repo) => {
+                let cwd = crate::checkout::checkout_dir(active, repo)
+                    .unwrap_or_else(|| std::path::PathBuf::from(&repo.path));
+                cwd.exists() && crate::contribution::lacks_origin(&cwd, repo)?
+            }
+            None => false,
+        };
+        match repo {
+            Some(repo) if lacks => local_only.push((repo_id, repo.base_branch.as_str())),
+            _ => publishable.push(repo_id),
+        }
+    }
+    let unpublished = publishable;
+
     let mut reasons = Vec::new();
+    if !local_only.is_empty() {
+        let ids: Vec<&str> = local_only.iter().map(|(id, _)| *id).collect();
+        reasons.push(format!(
+            "{} {} no recorded review and no `origin` remote to open one on — integrate {} with {} instead",
+            ids.join(", "),
+            if ids.len() == 1 { "has" } else { "have" },
+            if ids.len() == 1 { "it" } else { "them" },
+            crate::contribution::local_merge_command(
+                &active.bundle.id,
+                local_only.iter().map(|(_, branch)| *branch)
+            )
+        ));
+    }
     if !unpublished.is_empty() {
         reasons.push(format!(
             "{} {} no recorded review — run `knit publish create` first",
