@@ -73,6 +73,6 @@ to the bundle ledger or feature-branch reflog; unknown updates are refused.
 Transport aliases do not authorize borrowing observations from another
 destination. Retries retain the original lease.
 
-See [the reference](reference.md) for configuration details and
-[the design](landing-gates-and-bundle-rewrites.md) for the alternatives and
+See [the reference](../reference.md) for configuration details and
+[the design](../landing-gates-and-bundle-rewrites.md) for the alternatives and
 ownership rules.
