@@ -615,3 +615,117 @@ fn land_apply_advises_tag_command() {
         .to_string();
     assert!(message.contains("landed: run"), "{message}");
 }
+
+#[test]
+fn tag_no_push_without_any_origin_keeps_tags_local_and_says_so() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    let frontend = root.join("frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    init_repo(&backend, "backend");
+    init_repo(&frontend, "frontend");
+    knit(&workspace, ["bundle", "local release"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+
+    let created = knit_with_env(
+        &workspace,
+        ["tag", "v1", "--no-push"],
+        &[("KNIT_ADVICE", "1")],
+    );
+    assert!(created.contains("tagged"), "{created}");
+    assert!(!created.contains("push the tags later"), "{created}");
+    assert!(
+        created.contains("backend, frontend have no `origin` remote, so their tags stay local."),
+        "{created}"
+    );
+
+    // No remote is not an unreachable remote.
+    let show = knit(&workspace, ["tag", "show", "v1"]);
+    assert!(show.contains("remote (no remote)"), "{show}");
+    assert!(!show.contains("unreachable"), "{show}");
+
+    // A plain re-run has nothing to push and does not fail trying.
+    let rerun = knit(&workspace, ["tag", "v1"]);
+    assert!(
+        rerun.contains("backend: no `origin` remote, so the tag stays local"),
+        "{rerun}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn tag_no_push_in_a_mixed_set_offers_push_only_where_origin_exists() {
+    let root = unique_temp_dir();
+    let (backend_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    let frontend = root.join("frontend");
+    init_repo(&frontend, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "mixed release"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+
+    let created = knit_with_env(
+        &workspace,
+        ["tag", "v1", "--no-push"],
+        &[("KNIT_ADVICE", "1")],
+    );
+    assert!(
+        created.contains(
+            "Next: push the tags for backend later by re-running `knit tag v1`; frontend has no `origin` remote, so its tag stays local."
+        ),
+        "{created}"
+    );
+
+    let show = knit(&workspace, ["tag", "show", "v1"]);
+    let backend_line = show.lines().find(|l| l.contains("backend")).unwrap();
+    let frontend_line = show.lines().find(|l| l.contains("frontend")).unwrap();
+    assert!(backend_line.ends_with("remote -"), "{show}");
+    assert!(frontend_line.contains("remote (no remote)"), "{show}");
+
+    let rerun = knit(&workspace, ["tag", "v1"]);
+    assert!(rerun.contains("pushed"), "{rerun}");
+    assert!(
+        rerun.contains("frontend: no `origin` remote, so the tag stays local"),
+        "{rerun}"
+    );
+    assert!(!git(&backend_remote, ["tag", "--list", "knit/v1"])
+        .trim()
+        .is_empty());
+
+    // A configured remote that does not answer is still reported as such.
+    git(
+        &backend,
+        [
+            "remote",
+            "set-url",
+            "origin",
+            root.join("gone.git").to_str().unwrap(),
+        ],
+    );
+    let unreachable = knit(&workspace, ["tag", "show", "v1"]);
+    let backend_line = unreachable.lines().find(|l| l.contains("backend")).unwrap();
+    assert!(
+        backend_line.contains("remote (unreachable)"),
+        "{unreachable}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

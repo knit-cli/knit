@@ -191,10 +191,7 @@ pub(crate) fn create_tag_set_on(
 
     if no_git || no_push {
         if !no_git {
-            crate::advice::print(
-                &active.root,
-                format!("push the tags later by re-running `knit tag {name}`."),
-            );
+            print_no_push_followup(&active.root, &targets, name);
         }
         return Ok(());
     }
@@ -207,6 +204,55 @@ pub(crate) fn create_tag_set_on(
         super::push::PushForce::No,
     )?;
     Ok(())
+}
+
+/// After `--no-push`: only repos with a remote can have their tags pushed
+/// later, so the hint names them, and says which tags stay local because the
+/// repo has no `origin`. With no remote anywhere there is nothing to suggest.
+fn print_no_push_followup(root: &Path, targets: &[TagTarget], name: &str) {
+    let local: Vec<&str> = targets
+        .iter()
+        .filter(|target| !target.has_origin)
+        .map(|target| target.repo_id.as_str())
+        .collect();
+    let pushable: Vec<&str> = targets
+        .iter()
+        .filter(|target| target.has_origin)
+        .map(|target| target.repo_id.as_str())
+        .collect();
+    let stay_local = |ids: &[&str]| {
+        format!(
+            "{} {} no `origin` remote, so {} local.",
+            ids.join(", "),
+            if ids.len() == 1 { "has" } else { "have" },
+            if ids.len() == 1 {
+                "its tag stays"
+            } else {
+                "their tags stay"
+            }
+        )
+    };
+    if pushable.is_empty() {
+        if !local.is_empty() {
+            crate::human!("{}", out::muted(stay_local(&local)));
+        }
+        return;
+    }
+    if local.is_empty() {
+        crate::advice::print(
+            root,
+            format!("push the tags later by re-running `knit tag {name}`."),
+        );
+    } else {
+        crate::advice::print(
+            root,
+            format!(
+                "push the tags for {} later by re-running `knit tag {name}`; {}",
+                pushable.join(", "),
+                stay_local(&local)
+            ),
+        );
+    }
 }
 
 /// Resume an interrupted tag set from its ledger node: recreate missing local
@@ -278,6 +324,14 @@ fn resume_tag_set(
         }
 
         if no_push {
+            continue;
+        }
+        if crate::contribution::lacks_origin(&path, repo)? {
+            crate::human!(
+                "{}: {}",
+                out::repo(&repo.id),
+                out::muted("no `origin` remote, so the tag stays local")
+            );
             continue;
         }
         match remote_ref_sha(
@@ -401,16 +455,27 @@ pub fn show_tag(name: &str) -> Result<()> {
         }
         let local = ref_commit_sha(path, &tag_ref(name))?;
         let active = load_active_bundle().ok();
-        let destination = active
+        let repo_entry = active
             .as_ref()
-            .and_then(|a| a.bundle.repos.iter().find(|r| &r.id == repo_id))
+            .and_then(|a| a.bundle.repos.iter().find(|r| &r.id == repo_id));
+        let destination = repo_entry
             .map(super::merge::destination_remote)
             .unwrap_or("origin");
-        let remote = match remote_ref_sha(path, destination, &tag_ref(name)) {
-            Ok(remote) => remote
-                .map(|sha| short_sha(&sha))
-                .unwrap_or_else(|| "-".to_string()),
-            Err(_) => "(unreachable)".to_string(),
+        let no_remote = match repo_entry {
+            Some(repo) => crate::contribution::lacks_origin(path, repo)?,
+            None => crate::contribution::origin_missing(path)?,
+        };
+        // "(no remote)" is a repo with nothing to compare against;
+        // "(unreachable)" is a remote that is configured but did not answer.
+        let remote = if no_remote {
+            "(no remote)".to_string()
+        } else {
+            match remote_ref_sha(path, destination, &tag_ref(name)) {
+                Ok(remote) => remote
+                    .map(|sha| short_sha(&sha))
+                    .unwrap_or_else(|| "-".to_string()),
+                Err(_) => "(unreachable)".to_string(),
+            }
         };
         if local.is_some() {
             found_git = true;
