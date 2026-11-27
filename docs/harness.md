@@ -164,14 +164,15 @@ history answers "which conversation did this".
 | Variable                                          | Effect                                                              |
 | ------------------------------------------------- | -------------------------------------------------------------------- |
 | `KNIT_SESSION`                                    | Opaque session id. Recorded as `sessionId` on every node the command writes. Set it per conversation. |
-| `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL`, `T3_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor` when `T3_ACTOR_SESSION` is set; the other two are ignored without it. Optional; single-user setups leave them unset. |
+| `KNIT_ACTOR_SESSION`, `KNIT_ACTOR_LABEL`, `KNIT_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor` when `KNIT_ACTOR_SESSION` is set; the other two are ignored without it. Optional; single-user setups leave them unset. |
 
 Both are read from the environment of the `knit` process, so a host exports
 them when it spawns commands and agents. Absent variables simply mean the node
 carries no session or actor — nothing fails.
 
-The `T3_ACTOR_*` prefix is historical and kept for compatibility with harnesses
-that already export it.
+The older names `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL` and `T3_ACTOR_EMAIL` are
+still accepted. When `KNIT_ACTOR_SESSION` is set, all three values come from
+the `KNIT_ACTOR_*` names; otherwise they come from the `T3_ACTOR_*` names.
 
 Git authorship is separate and ordinary: set `GIT_AUTHOR_NAME` /
 `GIT_AUTHOR_EMAIL` (and the committer pair) as you would for any git process.
