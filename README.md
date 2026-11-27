@@ -45,26 +45,28 @@ cargo install --path .   # the installed binary is named `knit`
 knit init demo                          # a project remembers which repos belong together
 knit project add backend ../backend
 knit project add frontend ../frontend
+knit project command set ci --repo backend --repo frontend -- make test
 
 knit bundle "my feature" --cd           # branch + isolated worktree per repo; your shell
                                         # (or coding agent) lands inside the checkout
 # ...edit code in the per-repo worktrees...
 knit status                             # one view across every repo
 knit commit --all -m "Add my feature"   # one logical commit, recorded across repos
+knit check run ci                       # run `ci` in each repo, pin the verdict to these commits
 
-knit check run ci                       # run the project's `ci` command, pin the verdict to these commits
+# With a code host (GitHub, GitLab, Forgejo, Bitbucket):
 knit publish create                     # one PR per repo, cross-linked
-knit land --lane staging                # resolve each repo's staging branch from the project
-knit land --lane staging apply          # merge the feature branches into staging, deploy there;
-                                        # the PRs stay open and the bundle stays open, because
-                                        # staging is not its final destination
-knit land --lane production apply       # terminal: merge the PRs, deploy, archive the bundle
-knit land --target staging apply        # compatibility: one raw branch for every repo
-knit land && knit land apply            # default: keep recorded PR bases
+knit land                               # show the landing plan; nothing merges yet
+knit land apply                         # merge the PRs as a set, deploy, archive the bundle
+knit tag v1 --bundle my-feature         # after verifying: one named known-good set,
+                                        # exported as git tags knit/v1 in every repo
 
-knit tag v1 --bundle my-feature         # after verification: pin the configured project bases
-                                        # named set, exported as git tags knit/v1 in every repo
+# Without one:
+knit merge my-feature --into main       # merge every repo's feature branch, all or none
 ```
+
+Projects can also define landing lanes such as `staging` and `production`
+(`knit land --lane staging`); see the [reference](docs/reference.md).
 
 The [quickstart](docs/quickstart.md) walks this loop end to end with two toy repos in about ten minutes.
 
