@@ -205,3 +205,38 @@ The everyday verbs a host wraps are `knit bundle`, `knit add`, `knit commit`,
 - **UI.** There is no rendering in Knit.
 - **Identity for hosted forges.** `knit remote` holds a token per remote; how a
   host obtains that token is outside Knit.
+
+## 7. What Knit records about the machine and the person
+
+Knit sends nothing anywhere until a sync remote is configured, but its
+artifacts hold some identifying data from the start. In a bundle artifact
+(`.knit/bundles/<slug>.bundle.json`):
+
+| Field | What it holds | How to avoid it |
+| ----- | ------------- | --------------- |
+| `nodes[].origin.hostname` | The machine's name, on every node: `HOSTNAME`, else `COMPUTERNAME`, else the output of `hostname` | Set `HOSTNAME` to any label in Knit's environment. Keep it stable per machine: without `KNIT_ENVIRONMENT_ID`, handoff tells machines apart by hostname and platform |
+| `nodes[].origin.platform` | OS and architecture, such as `darwin/arm64` | None |
+| `nodes[].origin.environmentId` | `KNIT_ENVIRONMENT_ID`, only when set | Leave it unset |
+| `nodes[].sessionId`, `nodes[].actor` | The variables in [section 4](#4-attribution), only when set | Leave them unset |
+| `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address |
+| `repos[].path` | Absolute path of each source repo, which usually contains your OS user name | None |
+| `publications[].author` | The code host account that opened each review: login, and the name, avatar and profile URL when the host reports them | None |
+
+Nodes keep what they recorded; changing a variable later does not rewrite
+older nodes. Project files (`.knit/projects/<id>.project.json`) also hold the
+absolute repo paths.
+
+Where it goes:
+
+- **Sync remote.** Once one is configured, `knit push`, publish and land
+  upload the bundle artifact as it is, with every field above. The project
+  record is uploaded with repo paths blanked. Project history events
+  (`.knit/history/`) carry bundle titles, commit messages, branches and SHAs,
+  but none of the fields above.
+- **Git commits.** `knit commit` adds two trailers, `Knit-Group: <id>` and
+  `Knit-Bundle: <slug>`, and leaves authorship to git; `knit revert` also
+  adds `Knit-Reverts: <node id>`. Nothing else is added, so pushing to a code
+  host sends what plain git would, plus those lines.
+- **Pull request bodies.** Knit's block names the bundle id and title and
+  links the other reviews in the bundle, and the bundle's page on the sync
+  remote when there is one. It holds no hostname, path or session.
