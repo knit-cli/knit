@@ -19,7 +19,7 @@ pub struct KnitProject {
     pub updated_at: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub org_id: Option<String>,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "repos_once_per_id")]
     pub repos: Vec<ProjectRepoEntry>,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub commands: BTreeMap<String, ProjectRunCommand>,
@@ -60,6 +60,18 @@ impl KnitProject {
             auth: None,
         }
     }
+}
+
+/// A repo id names one checkout. Project files written by older clones can
+/// repeat an id (a fork and its upstream); the first entry is the one that
+/// clone checked out, so later repeats are dropped.
+fn repos_once_per_id<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Vec<ProjectRepoEntry>, D::Error> {
+    let mut repos = Vec::<ProjectRepoEntry>::deserialize(deserializer)?;
+    let mut seen = std::collections::BTreeSet::new();
+    repos.retain(|repo| seen.insert(repo.id.clone()));
+    Ok(repos)
 }
 
 /// Controls newly observed base history; existing ledger entries are never pruned.
