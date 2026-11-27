@@ -43,3 +43,24 @@ fn authoritative_guides_do_not_teach_removed_spellings() {
         "remote deletion guidance must include the required --delete switch"
     );
 }
+
+#[test]
+fn release_notes_live_under_docs_releases() {
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("docs");
+    for entry in std::fs::read_dir(&docs).unwrap() {
+        let name = entry.unwrap().file_name();
+        let name = name.to_string_lossy();
+        assert!(
+            !(name.starts_with("release-") && name.ends_with(".md")),
+            "release notes belong in docs/releases/, not docs/{name}"
+        );
+    }
+
+    let version = env!("CARGO_PKG_VERSION");
+    let notes = docs.join("releases").join(format!("release-{version}.md"));
+    assert!(
+        notes.is_file(),
+        "missing release notes for the current version at {}",
+        notes.display()
+    );
+}
