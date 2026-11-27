@@ -1807,3 +1807,19 @@ fn push_names_repos_without_origin_and_points_at_merge() {
     );
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn sync_reports_no_review_for_repos_without_origin() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, false);
+
+    // Nothing to sync is not a failure: there is no host to ask.
+    let sync = knit(&workspace, ["publish", "sync"]);
+    assert!(
+        sync.contains("frontend: no `origin` remote, so there is no review to sync"),
+        "{sync}"
+    );
+    assert!(!sync.contains("PR sync failed"), "{sync}");
+
+    fs::remove_dir_all(root).unwrap();
+}

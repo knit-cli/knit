@@ -18,6 +18,8 @@ use std::path::Path;
 #[allow(clippy::large_enum_variant)]
 enum SyncFetchResult {
     NoReviewObject,
+    /// A plain local repo with no recorded review: there is no host to ask.
+    NoRemote,
     Summary {
         repo_index: usize,
         summary: PullRequest,
@@ -52,6 +54,11 @@ fn fetch_pr_summary_for_sync(
     let Some(cwd) = checkout_dir(active, repo) else {
         bail!("{}: no feature checkout is recorded.", repo.id);
     };
+    if publication_for_repo(&active.bundle, &repo.id).is_none()
+        && crate::contribution::lacks_origin(&cwd, repo)?
+    {
+        return Ok(SyncFetchResult::NoRemote);
+    }
     let forge = providers::for_repo(repo)?;
     let base = publication_for_repo(&active.bundle, &repo.id)
         .map(|p| p.base_branch.as_str())
@@ -295,6 +302,13 @@ pub(super) fn sync_publications_for_indexes(
                     out::muted("no review object recorded")
                 );
             }
+            Ok(SyncFetchResult::NoRemote) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("no `origin` remote, so there is no review to sync")
+                );
+            }
             Ok(SyncFetchResult::Summary {
                 repo_index,
                 summary,
@@ -440,6 +454,13 @@ pub(super) fn sync_publications_for_indexes_from_artifact(
                     "{}: {}",
                     out::repo(&repo_id),
                     out::muted("no review object recorded")
+                );
+            }
+            Ok(SyncFetchResult::NoRemote) => {
+                println!(
+                    "{}: {}",
+                    out::repo(&repo_id),
+                    out::muted("no `origin` remote, so there is no review to sync")
                 );
             }
             Ok(SyncFetchResult::Summary {
