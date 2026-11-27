@@ -42,14 +42,15 @@ knit project add frontend ../frontend
 A **bundle** is the cross-repo analogue of a git branch. Starting one creates a `knit/<bundle>` branch and a generated worktree for each project repo:
 
 ```sh
-knit bundle "my feature" --cd --agents
+knit bundle "my feature" --agents
 ```
 
 This creates `.knit/bundles/my-feature.bundle.json` and checkouts under
-`.knit/worktrees/my-feature/<repo>/`. `--cd` drops your shell straight into the
-bundle's worktree root, and `--agents` writes an `AGENTS.md` tutorial for the
-workspace (the bundle worktree root gets its own `AGENTS.md` guidance by
-default). From that directory you can simply run `claude`, `opencode`, or any
+`.knit/worktrees/my-feature/<repo>/`. `--agents` writes an `AGENTS.md` tutorial
+for the workspace (the bundle worktree root gets its own `AGENTS.md` guidance
+by default). This walkthrough stays in `workspace`. In real work, add `--cd`
+(or run `knit bundle --cd` later) to start a shell in the bundle's worktree
+root. From that directory you can simply run `claude`, `opencode`, or any
 other coding agent — it wakes up inside an isolated checkout whose context
 resolves automatically, with guidance already on disk.
 
@@ -149,7 +150,15 @@ Before landing, you can record test verdicts on the bundle itself: `knit check r
 knit merge my-feature --into main
 ```
 
-This merges every repo's `knit/my-feature` branch into its own `main`, recording the run so it can be rolled back. After it succeeds, `backend:main` and `frontend:main` both contain the change.
+This merges every repo's `knit/my-feature` branch into `main`, recording the run so it can be rolled back. Knit merges in a checkout of its own, `.knit/merge-worktrees/main/<repo>/`, and never moves a branch that is checked out somewhere. Both toy repos have `main` checked out, so Knit reports that it left `main` alone and that the merge lives only in that checkout. Fast-forward each repo's `main` to the merge:
+
+```sh
+for r in backend frontend; do
+  git -C "../$r" merge --ff-only "$(git -C ".knit/merge-worktrees/main/$r" rev-parse HEAD)"
+done
+```
+
+Now `backend:main` and `frontend:main` both contain the change. When no checkout holds the target branch, Knit moves it for you and this step is not needed.
 
 After landing, once you have verified that main actually works (the deploy, CI, a quick QA pass — whatever you trust), you can record that fact as a cross-repo known-good marker:
 
@@ -157,7 +166,7 @@ After landing, once you have verified that main actually works (the deploy, CI, 
 knit tag v1 --bundle my-feature --no-push
 ```
 
-The toy repos have no `origin`, so `--no-push` pins each local configured base and exports local annotated tags. In a hosted project, omit `--no-push`: Knit fetches and pins each `origin/<base_branch>`, then pushes the tags. Either way the bundle ledger records one immutable named set — the whole-system snapshot a monorepo gets from a single SHA. Re-running the same command resumes a partial set. `knit tag` lists the tags; `knit tag show v1` shows per-repo SHAs and provenance.
+The toy repos have no `origin`, so `--no-push` pins each repo's local `main` (the merge you just fast-forwarded to) and exports local annotated tags. In a hosted project, omit `--no-push`: Knit fetches and pins each `origin/<base_branch>`, then pushes the tags. Either way the bundle ledger records one immutable named set — the whole-system snapshot a monorepo gets from a single SHA. Re-running the same command resumes a partial set. `knit tag` lists the tags; `knit tag show v1` shows per-repo SHAs and provenance.
 
 ## 8. Wrap up
 
