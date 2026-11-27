@@ -141,6 +141,17 @@ fn merge_manual_conflict_can_continue_and_merge_can_target_bundle() {
     assert!(!quiet_status.contains("Next:"));
     let show = knit(&workspace, ["merge", "show"]);
     assert!(show.contains("\"kind\": \"KnitMergeRun\""));
+    // The detached checkout offers a message naming the real target.
+    let merge_msg = git(&staging, ["rev-parse", "--git-path", "MERGE_MSG"]);
+    let merge_msg = staging.join(merge_msg.trim());
+    assert_eq!(
+        fs::read_to_string(&merge_msg)
+            .unwrap()
+            .lines()
+            .next()
+            .unwrap(),
+        "Merge branch 'knit/feature-y' into staging"
+    );
 
     fs::write(staging.join("app.txt"), "resolved staging\n").unwrap();
     git(&staging, ["add", "app.txt"]);
@@ -150,6 +161,10 @@ fn merge_manual_conflict_can_continue_and_merge_can_target_bundle() {
     assert_eq!(
         fs::read_to_string(staging.join("app.txt")).unwrap(),
         "resolved staging\n"
+    );
+    assert_eq!(
+        git(&staging, ["log", "-1", "--format=%s"]).trim(),
+        "Merge branch 'knit/feature-y' into staging"
     );
 
     knit(&workspace, ["bundle", "x y compat"]);
@@ -294,6 +309,31 @@ fn bundle_with_feature_commit(
         ],
     );
     workspace
+}
+
+/// The managed checkout for a branch target is detached, yet the merge commit
+/// names the real target the way `git merge` on that branch would: `into
+/// staging`, and no destination for `main` (git's `merge.suppressDest`).
+#[test]
+fn a_branch_target_merge_commit_names_the_target_not_head() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+
+    for (target, subject) in [
+        ("staging", "Merge branch 'knit/feature-x' into staging"),
+        ("main", "Merge branch 'knit/feature-x'"),
+    ] {
+        let merged = knit(&workspace, ["merge", "feature-x", "--into", target]);
+        assert!(merged.contains("Merged"), "{merged}");
+        let managed = workspace.join(format!(".knit/merge-worktrees/{target}/backend"));
+        assert_eq!(git(&managed, ["branch", "--show-current"]).trim(), "");
+        assert_eq!(git(&managed, ["log", "-1", "--format=%B"]).trim(), subject);
+    }
+
+    fs::remove_dir_all(root).unwrap();
 }
 
 /// A branch target merges in a detached managed checkout. When the local

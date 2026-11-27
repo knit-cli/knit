@@ -248,15 +248,20 @@ fn apply_merge_step(
         )));
     }
 
-    let merge_result = git_output(
-        &checkout,
-        [
-            OsString::from("merge"),
-            OsString::from("--no-ff"),
-            OsString::from("--no-edit"),
-            OsString::from(&step.source_ref),
-        ],
-    );
+    let mut merge_args = vec![
+        OsString::from("merge"),
+        OsString::from("--no-ff"),
+        OsString::from("--no-edit"),
+    ];
+    if step.target_kind == MergeTargetKind::Branch {
+        // The managed branch checkout is detached, so name the real target
+        // instead of `HEAD` in the commit message (and in MERGE_MSG when a
+        // conflict stops the merge). Git still applies `merge.suppressDest`.
+        merge_args.push(OsString::from("--into-name"));
+        merge_args.push(OsString::from(&step.target));
+    }
+    merge_args.push(OsString::from(&step.source_ref));
+    let merge_result = git_output(&checkout, merge_args);
 
     match merge_result {
         Ok(_) => {
@@ -590,6 +595,11 @@ pub(crate) fn merge_branch_into_target(
         merge_args.push(OsString::from(crate::git::branch_merge_message(
             &checkout, source_ref, name, branch,
         )?));
+    } else {
+        // Detached checkout: without a source branch name, let git word the
+        // message but name the real target rather than `HEAD`.
+        merge_args.push(OsString::from("--into-name"));
+        merge_args.push(OsString::from(branch));
     }
     merge_args.push(OsString::from(source_ref));
     let merge_result = git_output(&checkout, merge_args);
