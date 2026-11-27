@@ -43,8 +43,9 @@ the ledger — an append-only history of what happened to that bundle.
 Watch `.knit/bundles/` and `.knit/config.json` for changes if the host wants a
 live view. Knit writes an artifact to a temporary file and renames it over the
 old one, so a reader sees either version and never half of one. (On Windows,
-where rename-over-existing is refused, there is a brief window where the file
-is absent — retry rather than treating absence as deletion.)
+if that rename fails because another process has the file open, Knit deletes
+and renames, so there is a brief window where the file is absent — retry
+rather than treating absence as deletion.)
 
 ## 2. Commands that answer in JSON
 

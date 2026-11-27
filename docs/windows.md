@@ -6,10 +6,10 @@ records the hazards found in `src/`, what is expected to work on Windows, what
 the known blockers are, and the open design questions that must be answered
 before Knit can claim Windows support.
 
-Nothing here promises a working Windows build. The CI `windows` job
-(`.github/workflows/ci.yml`) currently runs `cargo check` plus the pure-unit
-test targets only; it does **not** exercise the git/worktree/process flows that
-make up the bulk of real usage.
+The CI `windows` job (`.github/workflows/ci.yml`) runs `cargo build
+--all-targets` and `cargo test --no-fail-fast`, the same as the macOS and Linux
+jobs. Passing CI is not the same as daily use on a Windows workstation, so
+treat Windows as less proven than macOS and Linux.
 
 ## How to read this
 
@@ -37,7 +37,7 @@ points, not pins.
 | Config dir resolution | `src/store.rs` (`global_config_path`) | Fixed | Resolves `KNIT_HOME` → `XDG_CONFIG_HOME` → `HOME` → (Windows) `%APPDATA%\\knit` → `%USERPROFILE%\\.config\\knit`. |
 | Color / TTY detection | `src/output.rs:101-119` | Low | Honors `NO_COLOR`, `KNIT_COLOR`, `CLICOLOR_FORCE`, `TERM != dumb`, and `is_terminal()`. The ANSI escapes (`\x1b[...]`) are not enabled on legacy `conhost` without VT processing; modern Windows Terminal / Win10+ console handles them. Low risk; worst case is stray escape sequences on old consoles. |
 | File locking | `src/store.rs:276-293` (`acquire_named_lock`), `Drop` at `src/store.rs:482-486` | Low | Lock is an advisory lockfile created with `OpenOptions::create_new(true)` and removed on `Drop`. `create_new` maps to exclusive create on Windows and works. No `flock`/`fcntl` is used. |
-| `fs::rename` over existing file | (none found) | n/a | No `fs::rename` calls exist in `src/`. JSON writes use `fs::write` directly (`src/store.rs:301-305`), and history uses append (`src/history.rs:92-95`). The classic Windows "rename onto existing file fails" hazard is **not** present. (Trade-off: writes are not atomic, but that is pre-existing and cross-platform.) |
+| `fs::rename` over existing file | `src/store.rs` (`write_json`), `src/history.rs` | Fixed | JSON artifacts and history rewrites are written to a sibling temp file and renamed over the target. On Windows that rename can fail while another process has the target open; for JSON artifacts Knit then removes the target and renames again, leaving a brief window where the file is absent. |
 | Symlinks | (none found) | n/a | No `symlink`/`symlink_file`/`symlink_dir` usage in `src/`. Git worktrees are created by the `git` CLI, which handles its own platform specifics. |
 | Path length | implicit (`.knit/worktrees/<bundle>/<repo>/...`) | Low/Medium | Worktree paths nest workspace + bundle slug + repo + repo contents and can exceed the legacy `MAX_PATH` (260) limit. Modern Windows with long-path support enabled handles this; older setups may fail deep in git operations. Out of Knit's direct control; flag for testing. |
 
