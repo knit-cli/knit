@@ -11,6 +11,13 @@ surface, they have published schemas, and reading them needs no process. Every
 change goes through the `knit` command instead, so one implementation owns
 locking, git, and the ledger.
 
+The smallest useful integration is three steps: run `knit bundle "<title>"` in
+a workspace, start the agent with its working directory set to
+`.knit/worktrees/<slug>/` and `KNIT_SESSION` set to the conversation id, and
+poll `knit status --json` from that directory to show what changed. Knit needs
+nothing else from the host: `git` on `PATH`, plus the code host's CLI only if
+the host offers publishing.
+
 ## 1. Read surface
 
 The workspace layout is in [reference.md](reference.md#storage). What a host
@@ -26,7 +33,8 @@ usually reads:
 | `.knit/land-runs/*.run.json`       | What a landing actually did                            | `schemas/land-run.schema.json` |
 | `.knit/merge-runs/<run-id>.json`   | What a merge actually did                              | `schemas/merge-run.schema.json` |
 
-The schemas ship in the repository under `schemas/`. They are additive: new
+The schemas ship in the repository under `schemas/`, and `knit schema print
+<name>` prints the copy built into the installed binary. They are additive: new
 fields appear over time, so parse permissively and ignore what you do not know.
 
 A bundle artifact is the source of truth for a feature. Its `nodes` array is
@@ -155,7 +163,7 @@ history answers "which conversation did this".
 | Variable                                          | Effect                                                              |
 | ------------------------------------------------- | -------------------------------------------------------------------- |
 | `KNIT_SESSION`                                    | Opaque session id. Recorded as `sessionId` on every node the command writes. Set it per conversation. |
-| `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL`, `T3_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor`. Optional; single-user setups leave them unset. |
+| `T3_ACTOR_SESSION`, `T3_ACTOR_LABEL`, `T3_ACTOR_EMAIL` | The acting human on a shared environment. Recorded as `actor` when `T3_ACTOR_SESSION` is set; the other two are ignored without it. Optional; single-user setups leave them unset. |
 
 Both are read from the environment of the `knit` process, so a host exports
 them when it spawns commands and agents. Absent variables simply mean the node
