@@ -77,7 +77,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **Bundle** — the branch-like feature unit; it snapshots freshly fetched configured bases and records them in `.bundle.json` as its source of truth.
 - **Worktrees** — generated per-repo checkouts under `.knit/worktrees/<bundle>/`; all edits happen there.
 - **Ledger** — append-only node chain inside the bundle; undo is `knit revert`, outside commits fold in via `knit sync`.
-- **Publish/land vs merge** — PRs landed as a set when you have a code host; direct local branch integration when you don't.
+- **Publish/land vs merge** — PRs landed as a set when you have a code host; `knit merge` into a local target branch, in Knit's own checkouts, when you don't.
 - **Checks** — named verdicts recorded on the ledger, pinned to exact heads; optionally gate landing.
 - **Tags** — immutable cross-repo known-good markers pinning post-land origin bases, exported as `knit/<name>` git tags.
 
