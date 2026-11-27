@@ -108,24 +108,35 @@ knit commit --all -m "Add my feature across backend and frontend"
 knit log
 ```
 
-`--all` stages then commits. Knit records both repo commits as one logical commit group in the bundle:
+`--all` stages then commits. Knit records both repo commits as one logical commit group in the bundle, listed above the bundle's own activity:
 
 ```txt
-kg_20260610_907b25  Add my feature across backend and frontend
-  backend    6b5fa99
-  frontend   af3a6bb
+kg_20261127_756015  Add my feature across backend and frontend
+  backend    b109edf
+  frontend   924ad6e
+[bundle activity] repo_20261127_148486  Repo added to bundle
+  frontend   repo.added
+  backend    repo.added
+[bundle activity] my-feature  my feature
+  -          bundle.created
 ```
 
-Inspect recorded work across the project locally with the same command:
+`knit log --all` searches the whole project instead of one bundle. On its own it
+reads the project's base history, which stays empty ("No history entries
+matched.") until `knit history refresh` records each repo's base branch. Add
+`--scope base-and-ongoing` to include open bundles:
 
 ```sh
-knit log --all --repo backend --oneline -n 20
-knit log --all --view backend --since="2 weeks ago"
+knit log --all --scope base-and-ongoing --repo backend --oneline -n 20
 ```
 
-The second command uses a saved view named `backend`. History queries work
-offline and do not refresh or synchronize the ledger. See
-[local history queries](history-queries.md) for repository sets, grouping,
+```txt
+[bundle activity] kg_20261127_756015  my-feature  Add my feature across backend and frontend
+[bundle activity] repo_20261127_148486  my-feature  Repo added to bundle
+```
+
+History queries work offline and never fetch or sync. See
+[local history queries](history-queries.md) for views, grouping, dates,
 message search, and JSON output.
 
 ## 7. Ship it
