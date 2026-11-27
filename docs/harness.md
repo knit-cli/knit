@@ -214,25 +214,38 @@ artifacts hold some identifying data from the start. In a bundle artifact
 
 | Field | What it holds | How to avoid it |
 | ----- | ------------- | --------------- |
-| `nodes[].origin.hostname` | The machine's name, on every node: `HOSTNAME`, else `COMPUTERNAME`, else the output of `hostname` | Set `HOSTNAME` to any label in Knit's environment. Keep it stable per machine: without `KNIT_ENVIRONMENT_ID`, handoff tells machines apart by hostname and platform |
+| `nodes[].origin.hostname` | Which machine recorded the node: `KNIT_MACHINE_LABEL` when set, otherwise `machine-` and the start of a random id that Knit creates once in the global config directory (`machine-id`, next to `config.json`). Never the real hostname, except in nodes written by older Knit versions | Nothing to do. Keep the label stable per machine: without `KNIT_ENVIRONMENT_ID`, handoff tells machines apart by this label and platform |
 | `nodes[].origin.platform` | OS and architecture, such as `darwin/arm64` | None |
 | `nodes[].origin.environmentId` | `KNIT_ENVIRONMENT_ID`, only when set | Leave it unset |
 | `nodes[].sessionId`, `nodes[].actor` | The variables in [section 4](#4-attribution), only when set | Leave them unset |
 | `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address |
-| `repos[].path` | Absolute path of each source repo, which usually contains your OS user name | None |
+| `repos[].path`, `repos[].worktreePath` | Where each source repo and bundle checkout is on disk; `path` usually contains your OS user name | Nothing to do: they stay on this machine unless the sync remote runs on it too (see below) |
 | `publications[].author` | The code host account that opened each review: login, and the name, avatar and profile URL when the host reports them | None |
 
-Nodes keep what they recorded; changing a variable later does not rewrite
-older nodes. Project files (`.knit/projects/<id>.project.json`) also hold the
-absolute repo paths.
+Nodes keep what they recorded; changing a variable later, or upgrading Knit,
+does not rewrite older nodes. Handoff still recognises nodes that an older
+Knit recorded on this machine under its real hostname. Project files
+(`.knit/projects/<id>.project.json`) also hold the absolute repo paths.
 
 Where it goes:
 
 - **Sync remote.** Once one is configured, `knit push`, publish and land
-  upload the bundle artifact as it is, with every field above. The project
-  record is uploaded with repo paths blanked. Project history events
-  (`.knit/history/`) carry bundle titles, commit messages, branches and SHAs,
-  but none of the fields above.
+  upload the bundle artifact with every field above except the checkout
+  paths: the upload carries `repos[].path` as an empty string and no
+  `worktreePath`, and every pull rebuilds both from the local project. The
+  exception is a sync remote whose address is on this computer (`localhost`
+  or a loopback address such as `127.0.0.1`): it gets the paths, because its
+  review analysis can then read the folders directly instead of the pushed
+  branches. Artifacts uploaded by older Knit versions keep the paths they
+  were uploaded with. The project record is uploaded with repo paths
+  blanked. Project history events (`.knit/history/`) carry bundle titles,
+  commit messages, branches and SHAs, but none of the fields above.
+- **Landing records.** When landing is synchronised with the sync remote,
+  land plans and land runs are uploaded too. Plans carry no checkout paths.
+  Runs (`.knit/land-runs/`) still embed, unchanged, a copy of the bundle
+  (`sourceBundle`, with its paths and nodes), the project (`sourceProject`,
+  with absolute repo paths) and the absolute path of the plan file
+  (`planPath`).
 - **Git commits.** `knit commit` adds two trailers, `Knit-Group: <id>` and
   `Knit-Bundle: <slug>`, and leaves authorship to git; `knit revert` also
   adds `Knit-Reverts: <node id>`. Nothing else is added, so pushing to a code

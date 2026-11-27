@@ -62,11 +62,10 @@ pub fn handoff_in(
     let _lock = store::acquire_named_lock(&root, &active.bundle.id)?;
     // Reload under the acceptance lock, after materialization saved its paths.
     active.bundle = store::read_json(&active.bundle_path)?;
-    let origin = ambient_origin();
     let accepted = active.bundle.nodes.iter().any(|n| {
         n.node_type == "handoff.in"
             && n.handoff.as_ref().is_some_and(|h| h.id == payload.id)
-            && n.origin.as_ref().is_some_and(|o| same_origin(o, &origin))
+            && n.origin.as_ref().is_some_and(is_here)
     });
     if !accepted {
         let node = BundleNode::handoff_in(

@@ -56,7 +56,7 @@ pub fn handoff_out(to: Option<&str>, message: Option<&str>, force: bool, json: b
         .then(|| read_json(&journal_path))
         .transpose()?;
     let mut journal = if let Some(j) = existing.filter(|j| !j.published) {
-        if !same_origin(&j.source, &ambient_origin()) {
+        if !is_here(&j.source) {
             bail!("Unfinished handoff belongs to a different source environment");
         }
         if to.is_some() && to != j.destination.as_deref() {
@@ -71,10 +71,7 @@ pub fn handoff_out(to: Option<&str>, message: Option<&str>, force: bool, json: b
 
             if !force
                 && (location.state != HandoffLocationState::Active
-                    || !location
-                        .origin
-                        .as_ref()
-                        .is_some_and(|o| same_origin(o, &ambient_origin())))
+                    || !location.origin.as_ref().is_some_and(is_here))
             {
                 bail!("Bundle already handed off to {}; use handoff in to continue here, or --force to publish a new handoff", location.label);
             }

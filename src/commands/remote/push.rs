@@ -1583,7 +1583,7 @@ fn push_bundle_artifact_outcome(
         "schema_version": bundle.schema_version,
         "producer": "knit",
         "producer_version": env!("CARGO_PKG_VERSION"),
-        "payload": bundle
+        "payload": bundle_upload(bundle, &remote.url)
     });
     apply_artifact_force_fields(&mut payload, force, lease.as_deref());
     let response = request(
@@ -1908,6 +1908,44 @@ fn repository_payload(repo: &ProjectRepoEntry) -> Value {
     })
 }
 
+/// The bundle artifact as uploaded. Checkout paths name this machine's file
+/// system (usually the OS user name) and every pull rebuilds them from the
+/// local project (`localize_bundle`), so they only travel to a sync remote on
+/// this same computer, whose review analysis can read the folders directly.
+/// Everything else, ledger nodes included, is uploaded exactly as recorded.
+fn bundle_upload<'a>(
+    bundle: &'a ChangeGroup,
+    remote_url: &str,
+) -> std::borrow::Cow<'a, ChangeGroup> {
+    if remote_is_on_this_computer(remote_url) {
+        return std::borrow::Cow::Borrowed(bundle);
+    }
+    let mut shared = bundle.clone();
+    for repo in &mut shared.repos {
+        // Older Knit versions require the field, so it stays, blank.
+        repo.path = String::new();
+        repo.worktree_path = None;
+    }
+    std::borrow::Cow::Owned(shared)
+}
+
+/// Whether the remote's host is a loopback address, the only case in which
+/// the server can be reading this machine's folders.
+fn remote_is_on_this_computer(remote_url: &str) -> bool {
+    let Ok(url) = url::Url::parse(remote_url) else {
+        return false;
+    };
+    match url.host() {
+        Some(url::Host::Domain(domain)) => {
+            let domain = domain.trim_end_matches('.').to_ascii_lowercase();
+            domain == "localhost" || domain.ends_with(".localhost")
+        }
+        Some(url::Host::Ipv4(address)) => address.is_loopback(),
+        Some(url::Host::Ipv6(address)) => address.is_loopback(),
+        None => false,
+    }
+}
+
 fn bundle_payload(bundle: &ChangeGroup) -> Value {
     json!({
         "title": bundle.title,
@@ -2015,6 +2053,87 @@ mod tests {
     use super::{apply_artifact_force_fields, lease_mismatch_message, repo_identity};
     use crate::commands::push::PushForce;
     use serde_json::json;
+
+    fn bundle_with_local_paths() -> crate::model::ChangeGroup {
+        let mut bundle = crate::model::ChangeGroup::new(
+            "travel".into(),
+            "Travel".into(),
+            "2026-01-01T00:00:00Z".into(),
+        );
+        bundle.repos.push(
+            serde_json::from_value(json!({
+                "id": "api",
+                "path": "/Users/someone/work/api",
+                "remote": "https://github.com/acme/api.git",
+                "baseBranch": "main",
+                "featureBranch": "knit/travel",
+                "worktreePath": ".knit/worktrees/travel/api",
+                "headSha": "1111111111111111111111111111111111111111"
+            }))
+            .unwrap(),
+        );
+        bundle
+    }
+
+    #[test]
+    fn uploads_to_another_computer_leave_out_checkout_paths() {
+        let bundle = bundle_with_local_paths();
+        let uploaded = serde_json::to_value(super::bundle_upload(
+            &bundle,
+            "https://svartal.example/api/v1",
+        ))
+        .unwrap();
+        let repo = &uploaded["repos"][0];
+        // Blank rather than missing: older Knit versions require the field.
+        assert_eq!(repo["path"], json!(""));
+        assert!(repo.get("worktreePath").is_none_or(|value| value.is_null()));
+        // What pulls, review analysis and landing need still travels.
+        assert_eq!(repo["id"], json!("api"));
+        assert_eq!(repo["featureBranch"], json!("knit/travel"));
+        assert_eq!(
+            repo["headSha"],
+            json!("1111111111111111111111111111111111111111")
+        );
+        assert_eq!(repo["remote"], json!("https://github.com/acme/api.git"));
+        // The local artifact is untouched.
+        assert_eq!(bundle.repos[0].path, "/Users/someone/work/api");
+        // An older Knit can still read the upload.
+        let _: crate::model::ChangeGroup = serde_json::from_value(uploaded).unwrap();
+    }
+
+    #[test]
+    fn uploads_to_a_server_on_this_computer_keep_checkout_paths() {
+        let bundle = bundle_with_local_paths();
+        for url in [
+            "http://127.0.0.1:4000/api/v1",
+            "http://127.8.0.1/api/v1",
+            "http://localhost:4100",
+            "http://LOCALHOST./api/v1",
+            "http://knithub.localhost/api/v1",
+            "http://[::1]:4000",
+        ] {
+            let uploaded = serde_json::to_value(super::bundle_upload(&bundle, url)).unwrap();
+            assert_eq!(
+                uploaded["repos"][0]["path"],
+                json!("/Users/someone/work/api"),
+                "{url}"
+            );
+            assert_eq!(
+                uploaded["repos"][0]["worktreePath"],
+                json!(".knit/worktrees/travel/api"),
+                "{url}"
+            );
+        }
+        for url in [
+            "https://svartal.dev/api/v1",
+            "http://192.168.1.20:4000",
+            "http://localhost.example.com",
+            "http://[::2]:4000",
+            "not a url",
+        ] {
+            assert!(!super::remote_is_on_this_computer(url), "{url}");
+        }
+    }
 
     #[test]
     fn views_upload_payload_carries_the_personal_document_only() {

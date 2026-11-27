@@ -52,7 +52,7 @@ Project-wide history is stored separately from bundle artifacts. Local history e
 }
 ```
 
-`path` is absolute. `checkoutMode` is `worktree` for generated Knit worktrees or `inPlace` for operating in the original repo checkout. `worktreePath` is relative to the Knit workspace in `worktree` mode and is the original absolute repo path in `inPlace` mode.
+`path` is absolute. `checkoutMode` is `worktree` for generated Knit worktrees or `inPlace` for operating in the original repo checkout. `worktreePath` is relative to the Knit workspace in `worktree` mode and is the original absolute repo path in `inPlace` mode. Both are machine-local: a copy uploaded to a sync remote on another computer carries `path` as an empty string and no `worktreePath`, and a pull rebuilds both from the local project.
 
 `baseSha` is the starting commit for the repo's feature branch. `headSha` is the last feature-branch tip recorded by Knit. When a checkout moves away from `headSha`, Knit reports unrecorded git commits and `knit sync` records them. A checkout that was never on `headSha` and has not caught up with the published branch (the ledger arrived from another machine before the commits did) is reported as behind and nothing is recorded, whether or not it has commits of its own.
 
@@ -330,8 +330,12 @@ Gloss should treat the bundle as read-only input. Gloss can analyze the current 
 
 New ledger nodes carry optional `origin` (`environmentId`, `hostname`,
 `platform`). `KNIT_ENVIRONMENT_ID` supplies the stable environment identity;
-plain CLI usage records hostname and normalized OS/architecture. Old nodes
-remain unchanged.
+plain CLI usage records a machine name and normalized OS/architecture. The
+machine name in `hostname` is `KNIT_MACHINE_LABEL` when set, otherwise
+`machine-` plus the start of a random id created once in the global Knit
+config directory (`machine-id`); it is never the real hostname. Nodes written
+by older Knit versions hold the real hostname and remain unchanged; handoff
+still recognises them as this machine.
 
 `checkpoint` references its normal commit group via `commitGroupId`.
 `handoff.out` and `handoff.in` carry a structured `handoff` payload:
@@ -339,7 +343,7 @@ remain unchanged.
 ```json
 {
   "id": "handoff-unique-id",
-  "source": { "hostname": "laptop", "platform": "darwin/arm64" },
+  "source": { "hostname": "machine-3f9a2c1b07de", "platform": "darwin/arm64" },
   "destination": "vps",
   "checkpointCommitGroupIds": ["kg_checkpoint"],
   "sizeMib": 2048
