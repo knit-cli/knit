@@ -4677,6 +4677,12 @@ fn a_lane_landing_never_touches_a_source_checkout_on_the_lane_branch() {
     );
     assert!(apply.contains("bundle stays open"), "{apply}");
     assert!(apply.contains("left alone"), "{apply}");
+    // ...with the command that catches the clone up, left to the user.
+    assert!(
+        apply.contains("Next: fast-forward the checked-out branch to the merge with `git -C ")
+            && apply.contains(" merge --ff-only "),
+        "{apply}"
+    );
 
     // Origin got the merge.
     let backend_remote = root.join("backend.git");

@@ -156,13 +156,16 @@ Before landing, you can record test verdicts on the bundle itself: `knit check r
 knit merge my-feature --into main
 ```
 
-This merges every repo's `knit/my-feature` branch into `main`, recording the run so it can be rolled back. Knit merges in a checkout of its own, `.knit/merge-worktrees/main/<repo>/`, and never moves a branch that is checked out somewhere. Both toy repos have `main` checked out, so Knit reports that it left `main` alone and that the merge lives only in that checkout. Fast-forward each repo's `main` to the merge:
+This merges every repo's `knit/my-feature` branch into `main`, recording the run so it can be rolled back. Knit merges in a checkout of its own, `.knit/merge-worktrees/main/<repo>/`, and never moves a branch that is checked out somewhere. Both toy repos have `main` checked out, so Knit reports that it left `main` alone and that the merge lives only in its own checkout. It then prints the commands that fast-forward each repo's `main` to the merge:
 
-```sh
-for r in backend frontend; do
-  git -C "../$r" merge --ff-only "$(git -C ".knit/merge-worktrees/main/$r" rev-parse HEAD)"
-done
+```txt
+Merged: my-feature into main
+Next: fast-forward the checked-out branches to the merge:
+  git -C /path/to/backend merge --ff-only febda4bbc7ac6c40bb0ed9532dc02ce7878bccfc
+  git -C /path/to/frontend merge --ff-only 14ed5fae0f087c481cb01dfb8e222daa2e669346
 ```
+
+Copy the two `git -C` lines from your own output and run them as printed: they name your real checkouts and merge commits. If `main` had commits the merge does not contain, Knit would say it cannot fast-forward and print no command for that repo.
 
 Now `backend:main` and `frontend:main` both contain the change. When no checkout holds the target branch, Knit moves it for you and this step is not needed.
 

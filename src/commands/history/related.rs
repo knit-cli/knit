@@ -349,7 +349,7 @@ fn print_inspect_commands(instance: &RelatedInstance, repo_paths: &BTreeMap<Stri
         };
         commands.insert(format!(
             "git -C {} show --stat {}",
-            shell_quote(&repo_path.to_string_lossy()),
+            out::shell_word(&repo_path.to_string_lossy()),
             commit
         ));
     }
@@ -361,17 +361,6 @@ fn print_inspect_commands(instance: &RelatedInstance, repo_paths: &BTreeMap<Stri
     println!("{}", out::heading("Inspect:"));
     for command in commands {
         println!("  {command}");
-    }
-}
-
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }
 

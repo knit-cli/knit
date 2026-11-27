@@ -10,6 +10,7 @@ mod run;
 
 pub(crate) use run::{merge_branch_into_target, BranchMergeOutcome};
 
+use crate::advice;
 use crate::checkout::is_in_place;
 use crate::git::{
     branch_checkout_path, current_branch, git_output, git_output_optional, is_ancestor,
@@ -141,6 +142,14 @@ struct MergeRunStep {
     pushed_sha: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     push_remote: Option<String>,
+    /// The checkout that holds the target branch, which Knit therefore left
+    /// alone instead of moving it to `afterSha`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    local_branch_checkout: Option<String>,
+    /// The command that fast-forwards that checkout to `afterSha`; absent
+    /// when its branch has commits the merge does not contain.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    catch_up_command: Option<String>,
 }
 
 struct SourcePlan {
@@ -411,12 +420,23 @@ fn hard_reset(cwd: &Path, reference: &str) -> Result<()> {
     git_output(cwd, ["reset", "--hard", reference]).map(|_| ())
 }
 
+/// A local target branch Knit did not move because a checkout holds it.
+pub(crate) struct LeftAlone {
+    /// The checkout that has the branch checked out.
+    pub(crate) checkout: PathBuf,
+    /// `git -C <checkout> merge --ff-only <merge>`, present only when the
+    /// branch was an ancestor of the merge when Knit looked, so the command
+    /// fast-forwards it rather than making a merge of its own.
+    pub(crate) catch_up: Option<String>,
+}
+
 /// Bring the user's local `refs/heads/<branch>` up to a merge Knit made in a
 /// detached managed checkout. The ref moves only when it is safe: it exists,
 /// no worktree has it checked out, and the move is a fast-forward. A branch
 /// some checkout holds -- the user's own clone, say -- is never touched: Knit
 /// does not mutate a working copy it does not own, so it says where the
-/// merge actually is instead. `pushed` names that place honestly.
+/// merge actually is instead, and returns how to bring that checkout up to
+/// it. `pushed` names that place honestly.
 fn settle_local_branch(
     repo_root: &Path,
     repo_id: &str,
@@ -424,37 +444,54 @@ fn settle_local_branch(
     after_sha: &str,
     pushed: bool,
     managed_checkout: &Path,
-) -> Result<()> {
+) -> Result<Option<LeftAlone>> {
     let full_ref = format!("refs/heads/{branch}");
     let Some(local_sha) = ref_commit_sha(repo_root, &full_ref)? else {
-        return Ok(());
+        return Ok(None);
     };
     if local_sha == after_sha {
-        return Ok(());
+        return Ok(None);
     }
     let merge_location = if pushed {
         format!("origin/{branch} has the merge")
     } else {
         format!("the merge lives only in {}", managed_checkout.display())
     };
+    let fast_forward = is_ancestor(repo_root, &local_sha, after_sha);
     if let Some(holder) = branch_checkout_path(repo_root, branch)? {
-        println!(
-            "{}",
-            out::muted(format!(
-                "{repo_id}: local {branch} is checked out in {} and was left alone; {merge_location}.",
-                holder.display()
-            ))
-        );
-        return Ok(());
+        let git_c = format!("git -C {}", out::shell_word(&holder.to_string_lossy()));
+        if fast_forward {
+            crate::human!(
+                "{}",
+                out::muted(format!(
+                    "{repo_id}: local {branch} is checked out in {} and was left alone; {merge_location}.",
+                    holder.display()
+                ))
+            );
+        } else {
+            // A fast-forward command would only fail here; name the real
+            // choice instead of offering it as the fix.
+            crate::human!(
+                "{}",
+                out::muted(format!(
+                    "{repo_id}: local {branch} is checked out in {} and has commits the merge does not contain, so it was left alone and cannot fast-forward; {merge_location}. `{git_c} merge {after_sha}` would merge the two.",
+                    holder.display()
+                ))
+            );
+        }
+        return Ok(Some(LeftAlone {
+            catch_up: fast_forward.then(|| format!("{git_c} merge --ff-only {after_sha}")),
+            checkout: holder,
+        }));
     }
-    if !is_ancestor(repo_root, &local_sha, after_sha) {
-        println!(
+    if !fast_forward {
+        crate::human!(
             "{}",
             out::muted(format!(
                 "{repo_id}: local {branch} has commits the merge does not contain and was left alone; {merge_location}."
             ))
         );
-        return Ok(());
+        return Ok(None);
     }
     git_output(
         repo_root,
@@ -466,7 +503,30 @@ fn settle_local_branch(
         ],
     )
     .with_context(|| format!("{repo_id}: failed to move local {branch} to {after_sha}"))?;
-    Ok(())
+    Ok(None)
+}
+
+/// The `Next:` hint for checked-out target branches Knit left behind the
+/// merge: one pasteable fast-forward command per checkout.
+fn print_catch_up(root: &Path, commands: &[String]) {
+    match commands {
+        [] => {}
+        [command] => advice::print(
+            root,
+            format!("fast-forward the checked-out branch to the merge with `{command}`"),
+        ),
+        commands => advice::print(
+            root,
+            format!(
+                "fast-forward the checked-out branches to the merge:\n{}",
+                commands
+                    .iter()
+                    .map(|command| format!("  {command}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            ),
+        ),
+    }
 }
 
 fn short_sha(sha: &str) -> &str {

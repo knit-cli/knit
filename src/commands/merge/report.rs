@@ -3,8 +3,8 @@
 
 use super::run::settle_local_branches;
 use super::{
-    acquire_run_locks, latest_merge_run, resolve_stored_path, short_or_dash, short_sha, MergeRun,
-    MergeRunStatus, MergeStepStatus, MergeTargetKind,
+    acquire_run_locks, latest_merge_run, print_catch_up, resolve_stored_path, short_or_dash,
+    short_sha, MergeRun, MergeRunStatus, MergeStepStatus, MergeTargetKind,
 };
 use crate::advice;
 use crate::git::{branch_exists, git_output, rev_parse};
@@ -96,10 +96,11 @@ pub(super) fn push_recorded_merge_run(
     )?;
     let _locks = acquire_run_locks(root, &run)?;
     push_merge_run_steps(root, &mut run, repos, set_upstream)?;
-    settle_local_branches(root, &run)?;
+    let catch_up = settle_local_branches(root, &mut run)?;
     run.status = MergeRunStatus::Succeeded;
     run.updated_at = now_iso();
     write_json(&path, &run)?;
+    print_catch_up(root, &catch_up);
     Ok(())
 }
 

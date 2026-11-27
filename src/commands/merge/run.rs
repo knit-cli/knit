@@ -6,9 +6,9 @@ use super::report::push_merge_run_steps;
 use super::{
     abort_merge_if_needed, acquire_merge_locks, acquire_run_locks, checkout_path_for,
     ensure_checkout_on_branch, ensure_ref_exists, hard_reset, has_unmerged_paths, latest_merge_run,
-    load_bundle, merge_in_progress, merge_run_path, resolve_stored_path, settle_local_branch,
-    MergeRun, MergeRunStatus, MergeRunStep, MergeStepStatus, MergeTargetKind, SourcePlan,
-    TargetPlan, MERGE_RUN_KIND,
+    load_bundle, merge_in_progress, merge_run_path, print_catch_up, resolve_stored_path,
+    settle_local_branch, MergeRun, MergeRunStatus, MergeRunStep, MergeStepStatus, MergeTargetKind,
+    SourcePlan, TargetPlan, MERGE_RUN_KIND,
 };
 use super::{destination_remote, target_ref};
 use crate::advice;
@@ -178,7 +178,7 @@ fn apply_pending_merge_steps(
                 bail!("Merge succeeded locally, but push failed:\n{error:#}");
             }
         }
-        settle_local_branches(root, run)?;
+        let catch_up = settle_local_branches(root, run)?;
         run.status = MergeRunStatus::Succeeded;
         run.updated_at = now_iso();
         write_json(run_path, run)?;
@@ -188,6 +188,7 @@ fn apply_pending_merge_steps(
             out::branch(&run.source),
             out::branch(&run.into)
         );
+        print_catch_up(root, &catch_up);
     }
 
     Ok(())
@@ -195,16 +196,19 @@ fn apply_pending_merge_steps(
 
 /// After a run's branch-target steps all merged (and pushed, when asked), move
 /// each repo's local `refs/heads/<target>` up to the merge where that is safe.
-/// The managed checkout is detached, so nothing else moves the branch.
-pub(super) fn settle_local_branches(root: &Path, run: &MergeRun) -> Result<()> {
-    for step in &run.steps {
+/// The managed checkout is detached, so nothing else moves the branch. A
+/// branch some checkout holds is recorded on its step and left alone; the
+/// returned commands fast-forward those checkouts, for a `Next:` hint.
+pub(super) fn settle_local_branches(root: &Path, run: &mut MergeRun) -> Result<Vec<String>> {
+    let mut catch_up = Vec::new();
+    for step in &mut run.steps {
         if step.target_kind != MergeTargetKind::Branch {
             continue;
         }
         let Some(after_sha) = &step.after_sha else {
             continue;
         };
-        settle_local_branch(
+        let left_alone = settle_local_branch(
             Path::new(&step.repo_path),
             &step.repo_id,
             &step.target,
@@ -212,8 +216,13 @@ pub(super) fn settle_local_branches(root: &Path, run: &MergeRun) -> Result<()> {
             step.pushed_sha.as_deref() == Some(after_sha.as_str()),
             &resolve_stored_path(root, &step.checkout_path),
         )?;
+        step.local_branch_checkout = left_alone
+            .as_ref()
+            .map(|left| left.checkout.to_string_lossy().into_owned());
+        step.catch_up_command = left_alone.and_then(|left| left.catch_up);
+        catch_up.extend(step.catch_up_command.clone());
     }
-    Ok(())
+    Ok(catch_up)
 }
 
 /// How one merge step failed. `Conflict` carries git's conflict report (text
@@ -423,6 +432,8 @@ fn prepare_merge_step(
         pushed_at: None,
         pushed_sha: None,
         push_remote: Some(destination_remote(source_repo).to_owned()),
+        local_branch_checkout: None,
+        catch_up_command: None,
     })
 }
 
@@ -636,7 +647,15 @@ pub(crate) fn merge_branch_into_target(
             );
         }
     }
-    settle_local_branch(&repo_root, &repo.id, branch, &after_sha, push, &checkout)?;
+    let left_alone =
+        settle_local_branch(&repo_root, &repo.id, branch, &after_sha, push, &checkout)?;
+    print_catch_up(
+        root,
+        &left_alone
+            .into_iter()
+            .filter_map(|left| left.catch_up)
+            .collect::<Vec<_>>(),
+    );
 
     Ok(BranchMergeOutcome {
         after_sha,
