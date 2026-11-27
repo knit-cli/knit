@@ -381,3 +381,151 @@ fn a_local_merge_target_is_left_alone_when_a_checkout_holds_it() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The pasteable command inside the `Next:` hint a merge printed for a
+/// checked-out target branch.
+fn printed_catch_up(output: &str) -> String {
+    let line = output
+        .lines()
+        .find(|line| line.contains("Next: fast-forward the checked-out branch to the merge"))
+        .unwrap_or_else(|| panic!("no catch-up hint in:\n{output}"));
+    line.split('`')
+        .nth(1)
+        .unwrap_or_else(|| panic!("no command in {line}"))
+        .to_string()
+}
+
+/// How Knit prints a path as one shell word: bare when nothing in it is
+/// special to a shell, single-quoted otherwise.
+fn printed_shell_word(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
+fn recorded_step(workspace: &std::path::Path) -> Value {
+    let show: Value = serde_json::from_str(&knit(workspace, ["merge", "show"])).unwrap();
+    show["steps"][0].clone()
+}
+
+/// A checked-out target is left alone, and Knit prints the exact command that
+/// brings it up to the merge. Pasted as printed, with a space in the path, it
+/// fast-forwards the user's checkout to the merge commit.
+#[cfg(unix)]
+#[test]
+fn a_checked_out_merge_target_gets_a_pasteable_fast_forward() {
+    let root = unique_temp_dir();
+    let backend = root.join("my repos").join("backend");
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+    git(&backend, ["checkout", "staging"]);
+
+    let merged = knit(&workspace, ["merge", "feature-x", "--into", "staging"]);
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    let merge_sha = git(&managed, ["rev-parse", "HEAD"]).trim().to_string();
+    let command = printed_catch_up(&merged);
+    assert_eq!(
+        command,
+        format!("git -C '{}' merge --ff-only {merge_sha}", backend.display())
+    );
+    // The hint follows the run's summary line.
+    assert!(
+        merged.find("Merged:").unwrap() < merged.find("Next:").unwrap(),
+        "{merged}"
+    );
+
+    let step = recorded_step(&workspace);
+    assert_eq!(step["localBranchCheckout"], backend.display().to_string());
+    assert_eq!(step["catchUpCommand"], command);
+
+    let status = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(&command)
+        .current_dir(&root)
+        .status()
+        .unwrap();
+    assert!(status.success());
+    assert_eq!(git(&backend, ["rev-parse", "HEAD"]).trim(), merge_sha);
+    assert_eq!(
+        fs::read_to_string(backend.join("app.txt")).unwrap(),
+        "feature x\n"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// A checked-out target with commits of its own cannot fast-forward, so no
+/// fast-forward is offered as the fix; the line names the merge instead.
+/// `--fetch` merges onto `origin/staging`, which lacks the local commit.
+#[test]
+fn a_diverged_checked_out_merge_target_gets_no_fast_forward_hint() {
+    let root = unique_temp_dir();
+    let (_remote, backend, _collaborator) = init_remote_repo(&root, "backend");
+    git(&backend, ["branch", "staging"]);
+    git(&backend, ["push", "origin", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+    git(&backend, ["checkout", "staging"]);
+    fs::write(backend.join("notes.txt"), "staging only\n").unwrap();
+    git(&backend, ["add", "notes.txt"]);
+    git(&backend, ["commit", "-m", "Staging only"]);
+
+    let merged = knit(
+        &workspace,
+        ["merge", "feature-x", "--into", "staging", "--fetch"],
+    );
+    assert!(merged.contains("Merged"), "{merged}");
+    assert!(
+        merged.contains("has commits the merge does not contain")
+            && merged.contains("cannot fast-forward"),
+        "{merged}"
+    );
+    assert!(!merged.contains("--ff-only"), "{merged}");
+    assert!(!merged.contains("Next:"), "{merged}");
+
+    let step = recorded_step(&workspace);
+    assert_eq!(step["localBranchCheckout"], backend.display().to_string());
+    assert!(step.get("catchUpCommand").is_none(), "{step}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+/// `knit merge --continue` finishes a run the same way a clean run does: the
+/// checked-out target is left alone and the hint names the resolved merge.
+#[test]
+fn merge_continue_prints_the_catch_up_for_a_checked_out_target() {
+    let root = unique_temp_dir();
+    let backend = root.join("backend");
+    init_repo(&backend, "backend");
+    git(&backend, ["branch", "staging"]);
+    let workspace = bundle_with_feature_commit(&root, &backend);
+    git(&backend, ["checkout", "staging"]);
+    // A staging commit the feature conflicts with.
+    fs::write(backend.join("app.txt"), "staging\n").unwrap();
+    git(&backend, ["commit", "-am", "Staging edit"]);
+
+    knit_fails(
+        &workspace,
+        ["merge", "feature-x", "--into", "staging", "--manual"],
+    );
+    let managed = workspace.join(".knit/merge-worktrees/staging/backend");
+    fs::write(managed.join("app.txt"), "resolved\n").unwrap();
+    git(&managed, ["add", "app.txt"]);
+    let continued = knit(&workspace, ["merge", "--continue"]);
+    let merge_sha = git(&managed, ["rev-parse", "HEAD"]).trim().to_string();
+    assert!(continued.contains("left alone"), "{continued}");
+    assert_eq!(
+        printed_catch_up(&continued),
+        format!(
+            "git -C {} merge --ff-only {merge_sha}",
+            printed_shell_word(&backend.display().to_string())
+        )
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}

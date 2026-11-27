@@ -49,6 +49,21 @@ pub fn muted(text: impl Display) -> String {
     paint(text, Style::Dim)
 }
 
+/// One shell word for a command line Knit prints for the user to paste:
+/// bare when it holds only characters no shell treats specially, otherwise
+/// single-quoted, so a path with spaces or quotes still pastes as one word.
+pub fn shell_word(value: &str) -> String {
+    if !value.is_empty()
+        && value
+            .chars()
+            .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
+}
+
 /// Progress tail for streamed multi-repo output: ` (done/total)` in muted
 /// style, or nothing when a single repo is reported and a count adds no
 /// information.
