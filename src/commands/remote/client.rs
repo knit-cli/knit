@@ -7,6 +7,7 @@ use crate::bounded_http::{
     is_timeout, run_with_stall_limit, seconds, transport_timed_out, ProgressReader, Stalled,
 };
 use crate::checkout::is_in_place;
+use crate::commands::failure::{self, ErrorKind};
 use crate::git::{
     branch_exists, current_branch, git_output, git_output_with_env, is_ancestor, ref_exists,
     rev_parse,
@@ -66,15 +67,20 @@ pub(super) fn resolve_project_id(
 
 pub(crate) fn resolve_remote<'a>(config: &'a KnitConfig, name: &str) -> Result<&'a KnitRemote> {
     let remote_name = slugify(name);
-    config.remotes.get(&remote_name).with_context(|| {
-        format!("No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first.")
+    config.remotes.get(&remote_name).ok_or_else(|| {
+        failure::error(
+            ErrorKind::NoRemote,
+            format!(
+                "No remote named `{remote_name}`. Run `knit remote add {remote_name} <url>` first."
+            ),
+        )
     })
 }
 
 pub(crate) fn resolve_token(name: &str, remote: &KnitRemote) -> Result<String> {
     token_from_env(&slugify(name))
         .or_else(|| remote.token.clone())
-        .context("No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`.")
+        .ok_or_else(|| failure::error(ErrorKind::NoToken, "No remote token configured. Set KNIT_REMOTE_<NAME>_TOKEN, KNIT_REMOTE_TOKEN, or `knit remote token <name> <token>`."))
 }
 
 pub(super) fn token_from_env(name: &str) -> Option<String> {
@@ -134,7 +140,10 @@ pub(super) fn with_first_available_remote<T>(
         None => configured_sync_remote_names(config),
     };
     if candidates.is_empty() {
-        bail!("No sync remote configured. Run `knit remote add <name> <url>` first.");
+        return Err(failure::error(
+            ErrorKind::NoRemote,
+            "No sync remote configured. Run `knit remote add <name> <url>` first.",
+        ));
     }
     let explicit = remote_override.is_some();
     let last = candidates.len() - 1;

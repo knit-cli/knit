@@ -120,6 +120,7 @@ pub fn preflight(
     });
     if json_output {
         println!("{}", serde_json::to_string_pretty(&report)?);
+        crate::commands::failure::document_printed();
     } else {
         println!(
             "Landing preflight for plan {} ({})",

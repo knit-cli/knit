@@ -1,3 +1,4 @@
+use crate::commands::failure::{self, ErrorKind};
 use crate::model::{BundleState, ChangeGroup, KnitConfig};
 use anyhow::{bail, Context, Result};
 use serde::{de::DeserializeOwned, Serialize};
@@ -77,8 +78,12 @@ pub fn load_active_bundle_for_update() -> Result<ActiveBundle> {
 
 fn load_active_bundle_inner(lock_for_update: bool) -> Result<ActiveBundle> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd)
-        .context("No Knit workspace found. Run `knit bundle \"feature title\"` first.")?;
+    let root = find_knit_root(&cwd).ok_or_else(|| {
+        failure::error(
+            ErrorKind::NoWorkspace,
+            "No Knit workspace found. Run `knit bundle \"feature title\"` first.",
+        )
+    })?;
     let config = load_config(&root)?;
     let (bundle_id, resolution_source) = resolve_bundle_id(&root, &cwd, &config)?;
     let bundle_path = root
@@ -509,22 +514,26 @@ pub(crate) fn resolve_bundle_id(
     let open_bundles = open_bundle_ids(root)?;
     match open_bundles.as_slice() {
         [] => match latest_finished_bundle_id(root)? {
-            Some(latest) => bail!(
+            Some(latest) => Err(no_bundle(format!(
                 "No active Knit bundle found. Landed and archived bundles are reached with `--bundle <slug>`; the most recent is `{latest}`: run the same command with `--bundle {latest}`, or start new work with `knit bundle \"feature title\"`."
-            ),
-            None => {
-                bail!("No active Knit bundle found. Run `knit bundle \"feature title\"` first.")
-            }
+            ))),
+            None => Err(no_bundle(
+                "No active Knit bundle found. Run `knit bundle \"feature title\"` first.",
+            )),
         },
-        [only] => bail!(
+        [only] => Err(no_bundle(format!(
             "No active Knit bundle is selected. Bundle `{only}` is open: run the same command with `--bundle {only}`, run it from `.knit/worktrees/{only}/<repo>/`, or select it with `knit switch {only} --workspace`."
-        ),
-        many => bail!(
+        ))),
+        many => Err(no_bundle(format!(
             "No active Knit bundle is selected and {} bundles are open: {}. Run the same command with `--bundle <bundle>`, or run it from `.knit/worktrees/<bundle>/<repo>/`.",
             many.len(),
             many.join(", ")
-        ),
+        ))),
     }
+}
+
+fn no_bundle(message: impl std::fmt::Display) -> anyhow::Error {
+    failure::error(ErrorKind::NoBundle, message)
 }
 
 pub(crate) fn resolve_optional_bundle_id(

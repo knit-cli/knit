@@ -65,6 +65,30 @@ knit remote auth-status <name> --json
 These documents are contracts and change only deliberately. Everything else the
 CLI prints is for humans: do not parse it.
 
+When a `--json` command fails, it exits non-zero, prints a human `Error:` line
+on stderr, and prints one JSON document on stdout
+(`knit schema print error`):
+
+```json
+{ "error": { "kind": "noRemote", "message": "No sync remote configured. Run `knit remote add <name> <url>` first." } }
+```
+
+`kind` is one of `noWorkspace` (not in a Knit workspace), `noBundle` (no
+bundle resolves from here), `noRemote` (no sync remote configured, or no remote
+by that name), `noToken` (the remote has no token), `http` (the remote could
+not be reached or answered with an error), `notFound` (the remote has no such
+project or bundle), `usage` (the command line was rejected) or `other`. New
+kinds may be added; treat one you do not know like `other`. The exit status is
+2 for `usage` and for a failed handoff readiness check, and 1 otherwise.
+
+A few commands answer with a report that itself says what failed — `knit land
+validate`, and with `--json` `knit land preflight`, `knit land apply`, `knit
+land resume`, `knit land recover --apply`, `knit handoff probe`, `knit fork`
+and `knit auth status --check`. When they fail after printing that
+report, the report is the one document on stdout and no `error` envelope
+follows. So: on a non-zero exit, read stdout as JSON; if it has an `error`
+object, that is the failure, otherwise it is the command's own report.
+
 `knit status --json` is the one a host polls:
 
 ```json

@@ -50,6 +50,7 @@ impl ProbeReport {
     pub fn print(&self, json: bool) -> anyhow::Result<()> {
         if json {
             println!("{}", serde_json::to_string_pretty(self)?);
+            crate::commands::failure::document_printed();
         } else {
             for c in &self.checks {
                 crate::human!("{:5} {:22} {}", c.status, c.label, c.message);

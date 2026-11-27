@@ -9,6 +9,7 @@ pub mod commit;
 pub mod config;
 pub mod diff;
 pub mod doctor;
+pub mod failure;
 pub mod fetch;
 pub mod fork;
 pub mod git_credential;

@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit --json failure",
+  "description": "What every `--json` command prints on stdout when it fails, as one JSON document. The process also prints a human `Error:` line on stderr and exits non-zero. Fields may be added over time.",
+  "type": "object",
+  "required": ["error"],
+  "properties": {
+    "error": {
+      "type": "object",
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "description": "What went wrong, for a host to branch on. New kinds can appear: treat an unknown kind like `other`.",
+          "examples": ["noWorkspace", "noBundle", "noRemote", "noToken", "http", "notFound", "usage", "other"]
+        },
+        "message": {
+          "type": "string",
+          "description": "The same explanation as the stderr `Error:` line, on one line, for people."
+        }
+      }
+    }
+  }
+}

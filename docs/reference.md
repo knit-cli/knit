@@ -161,7 +161,7 @@ knit config set auto-tag true|false
 knit config set push-sync true|false
 knit config set sync-remote <name>
 knit config set sync-remotes <name>[,<name>...]
-knit schema print <bundle|project|merge-run|land-plan|land-run|config>
+knit schema print <bundle|project|views|merge-run|land-plan|land-run|config|error>
 knit doctor
 knit migrate [--check]
 knit sync                                      # record git commits made outside Knit (local reconcile)

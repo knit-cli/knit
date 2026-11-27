@@ -5,7 +5,7 @@
 
 use super::client::request_json;
 use super::clone::resolve_remote_for_clone_classified;
-use super::{print_json_error_envelope, RemoteErrorKind, RemoteOwnerSummary};
+use super::{classified, RemoteErrorKind, RemoteOwnerSummary};
 use crate::output as out;
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -70,12 +70,7 @@ pub fn list_remote_projects(remote_name: Option<&str>, json: bool) -> Result<()>
             }
             Ok(())
         }
-        Err((kind, error)) => {
-            if json {
-                print_json_error_envelope(kind, &error);
-            }
-            Err(error)
-        }
+        Err((kind, error)) => Err(classified(kind, error)),
     }
 }
 
@@ -242,7 +237,10 @@ mod tests {
     #[test]
     fn error_envelope_matches_the_contract() {
         let error = anyhow::anyhow!("No remote selected.");
-        let value = super::super::json_error_envelope(RemoteErrorKind::NoRemote, &error);
+        let value = crate::commands::failure::envelope(&super::super::classified(
+            RemoteErrorKind::NoRemote,
+            error,
+        ));
         assert_eq!(
             value,
             json!({"error": {"kind": "noRemote", "message": "No remote selected."}})

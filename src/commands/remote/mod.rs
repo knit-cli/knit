@@ -187,43 +187,15 @@ struct RemoteOwnerSummary {
     slug: Option<String>,
 }
 
-/// Stable machine-readable error categories for `--json` commands, mirrored by
-/// consumers such as ivaldi. `noRemote`/`noToken` are configuration problems,
-/// `http` is a transport or server failure, `other` is everything else.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum RemoteErrorKind {
-    NoRemote,
-    NoToken,
-    Http,
-    NotFound,
-    Other,
-}
+/// Remote commands sort their failures into the shared `--json` error kinds
+/// (`noRemote`, `noToken`, `http`, `notFound`, `other`); `main` prints the
+/// envelope. See [`crate::commands::failure`].
+use crate::commands::failure::ErrorKind as RemoteErrorKind;
 
-impl RemoteErrorKind {
-    fn as_str(self) -> &'static str {
-        match self {
-            RemoteErrorKind::NoRemote => "noRemote",
-            RemoteErrorKind::NoToken => "noToken",
-            RemoteErrorKind::Http => "http",
-            RemoteErrorKind::NotFound => "notFound",
-            RemoteErrorKind::Other => "other",
-        }
-    }
-}
-
-fn json_error_envelope(kind: RemoteErrorKind, error: &anyhow::Error) -> Value {
-    serde_json::json!({
-        "error": {
-            "kind": kind.as_str(),
-            "message": format!("{error:#}"),
-        }
-    })
-}
-
-/// Print the `--json` error envelope to stdout. The caller still returns the
-/// error so the process exits non-zero and stderr keeps the human message.
-fn print_json_error_envelope(kind: RemoteErrorKind, error: &anyhow::Error) {
-    println!("{}", json_error_envelope(kind, error));
+/// Attach `kind` to a remote command's error so the `--json` envelope that
+/// `main` prints reports it. A more precise kind already on a cause is kept.
+fn classified(kind: RemoteErrorKind, error: anyhow::Error) -> anyhow::Error {
+    crate::commands::failure::classify(kind, error)
 }
 
 #[derive(Clone, Debug, Deserialize)]

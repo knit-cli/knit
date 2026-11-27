@@ -224,7 +224,12 @@ pub fn fork_repos(
     if json_output {
         crate::output::route_human_lines_to_stderr();
     }
-    let root = find_knit_root(&std::env::current_dir()?).context("No Knit workspace found")?;
+    let root = find_knit_root(&std::env::current_dir()?).ok_or_else(|| {
+        crate::commands::failure::error(
+            crate::commands::failure::ErrorKind::NoWorkspace,
+            "No Knit workspace found",
+        )
+    })?;
     let _credentials = crate::auth::activate_clone_root(root.clone());
     let project_id = load_config(&root)?
         .active_project
@@ -282,6 +287,7 @@ pub fn fork_repos(
             "{}",
             serde_json::to_string_pretty(&json!({"dryRun": dry_run, "repos": results}))?
         );
+        crate::commands::failure::document_printed();
     }
     if failed {
         bail!("one or more repositories could not be forked");

@@ -9,8 +9,9 @@ pub fn print_schema(name: &str) -> Result<()> {
         "land-plan" => include_str!("../../schemas/land-plan.schema.json"),
         "land-run" => include_str!("../../schemas/land-run.schema.json"),
         "config" => include_str!("../../schemas/config.schema.json"),
+        "error" => include_str!("../../schemas/error.schema.json"),
         _ => bail!(
-            "Unknown schema `{name}`. Use bundle, project, views, merge-run, land-plan, land-run, or config."
+            "Unknown schema `{name}`. Use bundle, project, views, merge-run, land-plan, land-run, config, or error."
         ),
     };
     println!("{schema}");
