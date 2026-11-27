@@ -63,7 +63,10 @@ knit remote auth-status <name> --json
 ```
 
 These documents are contracts and change only deliberately. Everything else the
-CLI prints is for humans: do not parse it.
+CLI prints is for humans: do not parse it. The two a host polls have published
+schemas, additive like the artifact ones: `schemas/status.schema.json` and
+`schemas/bundle-list.schema.json` (`knit schema print status`, `knit schema
+print bundle-list`).
 
 When a `--json` command fails, it exits non-zero, prints a human `Error:` line
 on stderr, and prints one JSON document on stdout

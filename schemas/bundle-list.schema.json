@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit bundle list --json",
+  "description": "What `knit bundle list --json` prints: the bundles in the workspace and where each artifact lives. Archived and deleted bundles appear only with --archived, --deleted or --all. Fields may be added over time, so ignore what you do not know.",
+  "type": "object",
+  "required": ["activeBundle", "bundles"],
+  "properties": {
+    "activeBundle": {
+      "type": ["string", "null"],
+      "description": "The bundle that resolves from the current directory, or null when none does."
+    },
+    "bundles": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["id", "title", "state", "active", "repos", "path"],
+        "properties": {
+          "id": { "type": "string" },
+          "title": { "type": "string" },
+          "state": {
+            "type": "string",
+            "examples": ["open", "closed", "landed", "archived", "deleted"]
+          },
+          "active": { "type": "boolean", "description": "True for the bundle named by `activeBundle`." },
+          "repos": { "type": "array", "items": { "type": "string" }, "description": "Repo ids in the bundle." },
+          "path": { "type": "string", "description": "The bundle artifact (`schemas/bundle.schema.json`), so a host can read the full record." }
+        }
+      }
+    }
+  }
+}
