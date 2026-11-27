@@ -10,6 +10,11 @@
 //! knit CLI adapts bundle state into that contract; anything else (an app
 //! embedding the runtime, a future standalone binary) can do the same.
 
+// First, so its `println!` replaces the standard one in every module
+// declared below.
+#[macro_use]
+mod support;
+
 mod bindings;
 pub mod config;
 mod database;
@@ -18,7 +23,6 @@ mod envfile;
 mod plan;
 mod readiness;
 mod state;
-mod support;
 mod transform;
 mod up;
 mod yaml;
