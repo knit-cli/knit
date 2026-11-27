@@ -1048,3 +1048,71 @@ fn project_repo_publish_draft_validates_and_roundtrips() {
     typo["repos"][1]["publish"] = json!({"drafts": true});
     assert_invalid(&schema, &typo, "misspelled publish key");
 }
+
+/// `knit status --json` and `knit bundle list --json` are what a host polls
+/// (`docs/harness.md`); their published schemas must accept what the commands
+/// print today, including every optional part, and reject a broken document.
+#[test]
+fn published_schemas_describe_status_and_bundle_list_json() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "venue capacity"]);
+    for repo in ["api", "web", "docs"] {
+        let path = root.join(repo);
+        init_repo(&path, repo);
+        knit(&workspace, ["bundle", "add", path.to_str().unwrap()]);
+    }
+    // Reviews recorded for two repos, one of them with a blocking gate.
+    write_bundle_publications_for_repos(&workspace, "venue-capacity", "OPEN", &["api", "web"]);
+    let bundle_path = workspace.join(".knit/bundles/venue-capacity.bundle.json");
+    let mut bundle = read(&bundle_path);
+    bundle["publications"][0]["gates"] = json!({
+        "updatedAt": "2026-05-22T00:00:00.000Z",
+        "items": [
+            {"kind": "conflict", "state": "blocked", "actor": "you",
+             "summary": "conflicts with its base", "url": "https://example.test/pr/1"},
+            {"kind": "checks", "state": "met", "actor": "host", "summary": "checks pass"}
+        ]
+    });
+    fs::write(&bundle_path, serde_json::to_string_pretty(&bundle).unwrap()).unwrap();
+    // One checkout with changes, one missing.
+    append_line(
+        &workspace.join(".knit/worktrees/venue-capacity/web/app.txt"),
+        "edit",
+    );
+    fs::remove_dir_all(workspace.join(".knit/worktrees/venue-capacity/docs")).unwrap();
+
+    let status_schema = schema(&workspace, "status");
+    let status: Value = serde_json::from_str(&knit(&workspace, ["status", "--json"])).unwrap();
+    assert!(status["repos"][0]["review"].is_object(), "{status}");
+    assert!(status["publications"]["readiness"].is_string(), "{status}");
+    assert_eq!(status["repos"][2]["checkoutPresent"], false, "{status}");
+    assert_valid(&status_schema, &status, "knit status --json");
+    assert_eq!(status_schema, schema_file("status"));
+
+    let mut broken = status.clone();
+    broken.as_object_mut().unwrap().remove("repos");
+    assert_invalid(&status_schema, &broken, "status --json without repos");
+    let mut broken = status.clone();
+    broken["repos"][0]["checkoutPresent"] = json!("yes");
+    assert_invalid(
+        &status_schema,
+        &broken,
+        "status --json with a string checkoutPresent",
+    );
+
+    // A second bundle, archived, so the list carries more than one state.
+    knit(&workspace, ["bundle", "ticket refunds"]);
+    knit(&workspace, ["bundle", "archive", "ticket-refunds"]);
+    let list_schema = schema(&workspace, "bundle-list");
+    let list: Value =
+        serde_json::from_str(&knit(&workspace, ["bundle", "list", "--all", "--json"])).unwrap();
+    assert_eq!(list["bundles"].as_array().unwrap().len(), 2, "{list}");
+    assert_valid(&list_schema, &list, "knit bundle list --all --json");
+    assert_eq!(list_schema, schema_file("bundle-list"));
+
+    let mut broken = list.clone();
+    broken["bundles"][0].as_object_mut().unwrap().remove("path");
+    assert_invalid(&list_schema, &broken, "bundle list --json without a path");
+}

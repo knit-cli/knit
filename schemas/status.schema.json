@@ -1,0 +1,122 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Knit status --json",
+  "description": "What `knit status --json` prints: the resolved bundle and the git state of each of its repos. Read offline; `knit status` never calls the code host. Fields may be added over time, so ignore what you do not know.",
+  "type": "object",
+  "required": ["bundle", "resolvedFrom", "state", "repos", "publications"],
+  "properties": {
+    "bundle": { "type": "string", "description": "The resolved bundle id." },
+    "resolvedFrom": {
+      "type": "string",
+      "description": "How the bundle was resolved: `explicit` (--bundle), `env` (KNIT_BUNDLE), `cwd` (run inside its worktree) or `workspace` (the workspace fallback).",
+      "examples": ["explicit", "env", "cwd", "workspace"]
+    },
+    "state": {
+      "type": "string",
+      "examples": ["open", "closed", "landed", "archived", "deleted"]
+    },
+    "repos": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/repo" }
+    },
+    "publications": {
+      "type": "object",
+      "required": ["reviews", "repos"],
+      "properties": {
+        "reviews": { "type": "integer", "minimum": 0, "description": "Review objects (PRs/MRs) recorded for this bundle." },
+        "repos": { "type": "integer", "minimum": 0, "description": "Repos tracked in the bundle." },
+        "readiness": {
+          "type": "string",
+          "description": "From the recorded reviews only; absent when no review is recorded.",
+          "examples": ["blocked", "unverified", "ready"]
+        },
+        "freshForSeconds": {
+          "type": "integer",
+          "description": "How long a recorded review reading counts as current; present with `readiness`."
+        }
+      }
+    },
+    "revertVerified": {
+      "type": "boolean",
+      "description": "Present once a landing merged revert reviews: whether each revert was proven the exact inverse of the change it undoes."
+    }
+  },
+  "$defs": {
+    "repo": {
+      "type": "object",
+      "required": ["id", "branch", "expectedBranch", "worktree", "mode", "checkoutPresent", "status", "wrongBranch"],
+      "properties": {
+        "id": { "type": "string" },
+        "branch": {
+          "type": ["string", "null"],
+          "description": "The branch the checkout is on (`(detached)` for a detached HEAD); null when there is no checkout."
+        },
+        "expectedBranch": {
+          "type": ["string", "null"],
+          "description": "The bundle's feature branch; null before it is created."
+        },
+        "worktree": { "type": "string", "description": "The checkout path, relative to the workspace when inside it." },
+        "mode": { "type": "string", "examples": ["worktree", "in-place"] },
+        "checkoutPresent": { "type": "boolean" },
+        "status": {
+          "type": "string",
+          "description": "The git state of the checkout, or the missing-checkout reason.",
+          "examples": ["clean", "modified", "staged", "staged+modified", "missing worktree", "missing checkout"]
+        },
+        "wrongBranch": {
+          "type": "boolean",
+          "description": "True when an in-place checkout sits on a branch other than the bundle's."
+        },
+        "unrecorded": {
+          "type": "string",
+          "description": "A short note when commits were made outside Knit that the ledger has not recorded yet."
+        },
+        "behind": {
+          "type": "string",
+          "description": "A short note when the checkout has not caught up with the head the ledger records; it names the command that brings it in."
+        },
+        "review": { "$ref": "#/$defs/review" }
+      }
+    },
+    "review": {
+      "type": "object",
+      "description": "The repo's review as Knit last recorded it.",
+      "required": ["number", "url", "state", "mergeable", "verdict", "blocked", "openGates", "recordedAt", "ageSeconds", "stale"],
+      "properties": {
+        "number": { "type": "integer" },
+        "url": { "type": "string" },
+        "state": { "type": "string", "examples": ["open", "merged", "closed"] },
+        "mergeable": {
+          "type": ["string", "null"],
+          "description": "Null once the review is merged or closed.",
+          "examples": ["conflict", "behind", "clean", "unknown"]
+        },
+        "verdict": {
+          "type": ["string", "null"],
+          "description": "`ready` or the open gates' headline; null when unknown."
+        },
+        "blocked": { "type": "boolean" },
+        "openGates": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "required": ["kind", "state", "actor", "summary"],
+            "properties": {
+              "kind": { "type": "string" },
+              "state": { "type": "string", "examples": ["met", "pending", "blocked", "unknown"] },
+              "actor": { "type": "string", "examples": ["you", "maintainers", "host"] },
+              "summary": { "type": "string" },
+              "url": { "type": "string" }
+            }
+          }
+        },
+        "recordedAt": {
+          "type": ["string", "null"],
+          "description": "When the recorded gates last changed (RFC 3339)."
+        },
+        "ageSeconds": { "type": ["integer", "null"] },
+        "stale": { "type": "boolean" }
+      }
+    }
+  }
+}

@@ -129,7 +129,12 @@ struct BundleListEntry {
 
 pub fn list_bundles(all: bool, archived: bool, deleted: bool, json: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("failed to read current directory")?;
-    let root = find_knit_root(&cwd).context("No Knit workspace found.")?;
+    let root = find_knit_root(&cwd).ok_or_else(|| {
+        crate::commands::failure::error(
+            crate::commands::failure::ErrorKind::NoWorkspace,
+            "No Knit workspace found.",
+        )
+    })?;
     let dir = root.join(".knit/bundles");
     let deleted_dir = root.join(".knit/deleted/bundles");
     if !dir.exists() && !deleted_dir.exists() {

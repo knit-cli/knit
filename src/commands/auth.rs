@@ -1930,6 +1930,7 @@ fn status_project_with(
                 "reposWithoutAuthGroup": uncovered,
             }))?
         );
+        crate::commands::failure::document_printed();
     } else {
         println!("Project: {}", project.id);
         for row in &rows {

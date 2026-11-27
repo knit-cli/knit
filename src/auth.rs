@@ -1176,7 +1176,12 @@ pub(crate) fn optional_project_context(
     cwd: &Path,
     explicit: Option<&str>,
 ) -> Result<Option<(PathBuf, KnitProject)>> {
-    let root = context_root(cwd).context("No Knit workspace found for forge credential setup")?;
+    let root = context_root(cwd).ok_or_else(|| {
+        crate::commands::failure::error(
+            crate::commands::failure::ErrorKind::NoWorkspace,
+            "No Knit workspace found for forge credential setup",
+        )
+    })?;
     let config = store::load_config(&root)?;
     let selected = explicit.map(str::to_owned).or_else(|| {
         PROJECT_OVERRIDE

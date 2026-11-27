@@ -61,6 +61,7 @@ pub fn validate(
     let project = project.map(read_json::<Value>).transpose()?;
     let result = validation(&plan, bundle.as_ref(), project.as_ref());
     println!("{}", serde_json::to_string(&result)?);
+    crate::commands::failure::document_printed();
     if result["valid"] != true {
         bail!("Landing plan is invalid");
     }
