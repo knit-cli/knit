@@ -172,23 +172,31 @@ fn relation_matches(key: &RelationKey, event: &HistoryEvent) -> bool {
     }
 }
 
+/// When the work in this scope happened: the latest of the matched and
+/// same-scope events, which for a commit group is when its commits were made
+/// and for a base commit is its commit time. The rest of the bundle is
+/// context, not this scope: counting it let a later archive or tag stand in
+/// for the commit time.
 pub(super) fn related_instance_time(instance: &RelatedInstance) -> String {
     instance
         .matched
         .iter()
         .chain(instance.related.iter())
-        .chain(instance.other_bundle.iter())
         .map(event_time)
         .max()
         .unwrap_or_default()
 }
 
+/// The event's time in UTC, so times recorded with a local offset (older
+/// base-commit entries) compare and print like every other ledger time.
 fn event_time(event: &HistoryEvent) -> String {
-    event
-        .occurred_at
-        .as_deref()
-        .unwrap_or(&event.recorded_at)
-        .to_string()
+    let raw = event.occurred_at.as_deref().unwrap_or(&event.recorded_at);
+    chrono::DateTime::parse_from_rfc3339(raw)
+        .map(|time| {
+            time.with_timezone(&chrono::Utc)
+                .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
+        })
+        .unwrap_or_else(|_| raw.to_string())
 }
 
 pub(super) fn related_repo_paths(
@@ -415,6 +423,41 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec!["knit"]
         );
+    }
+
+    #[test]
+    fn when_is_the_commit_time_not_a_later_bundle_event() {
+        let mut archived = event("archive", "backend", "aaa111", None, "n9");
+        archived.kind = "bundle.archived".to_string();
+        archived.repo_id = None;
+        archived.commit = None;
+        archived.occurred_at = Some("2026-06-05T12:30:00.123Z".to_string());
+        let events = vec![
+            event("touch", "backend", "aaa111", Some("kg1"), "n1"),
+            event("api", "frontend", "bbb222", Some("kg1"), "n1"),
+            archived,
+        ];
+        let commits = BTreeSet::from(["aaa111".to_string()]);
+
+        let instances = related_instances(&events, "backend", &commits);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].other_bundle.len(), 1);
+        assert_eq!(related_instance_time(&instances[0]), "2026-06-05T10:00:00Z");
+    }
+
+    #[test]
+    fn when_is_printed_in_utc_whatever_offset_was_recorded() {
+        let mut base = event(
+            "base",
+            "backend",
+            "aaa111",
+            None,
+            "base:backend:main:aaa111",
+        );
+        base.occurred_at = Some("2026-06-05T12:00:00+02:00".to_string());
+
+        assert_eq!(event_time(&base), "2026-06-05T10:00:00Z");
     }
 
     #[test]
