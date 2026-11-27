@@ -1685,3 +1685,141 @@ fn artifact_publish_uses_the_persisted_web_url_without_remote_calls() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+/// A bundle over plain local repos, the quickstart's setup: `frontend` never
+/// has a remote, `backend` gets a local bare `origin` when `backend_origin`.
+/// Both carry a committed change. Returns the workspace.
+fn local_only_bundle(root: &std::path::Path, backend_origin: bool) -> std::path::PathBuf {
+    let backend = if backend_origin {
+        init_remote_repo(root, "backend").1
+    } else {
+        let backend = root.join("backend");
+        init_repo(&backend, "backend");
+        backend
+    };
+    let frontend = root.join("frontend");
+    init_repo(&frontend, "frontend");
+    let workspace = root.join("workspace");
+    fs::create_dir_all(&workspace).unwrap();
+    knit(&workspace, ["bundle", "local feature"]);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "add",
+            backend.to_str().unwrap(),
+            frontend.to_str().unwrap(),
+        ],
+    );
+    for repo in ["backend", "frontend"] {
+        append_line(
+            &workspace.join(format!(".knit/worktrees/local-feature/{repo}/app.txt")),
+            "local change",
+        );
+    }
+    knit(&workspace, ["commit", "--all", "-m", "Local change"]);
+    workspace
+}
+
+#[test]
+fn pr_create_names_repos_without_origin_and_points_at_merge() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, false);
+
+    let publish = knit_fails(&workspace, ["publish", "create"]);
+    assert!(
+        publish.contains("backend, frontend have no `origin` remote"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("no code host to open a review on"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("`knit merge local-feature --into main`"),
+        "{publish}"
+    );
+    assert!(!publish.contains("no configured URL"), "{publish}");
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn pr_create_names_only_the_repo_without_origin_in_a_mixed_bundle() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, true);
+
+    let publish = knit_fails(&workspace, ["publish", "create"]);
+    assert!(
+        publish.contains("frontend has no `origin` remote"),
+        "{publish}"
+    );
+    assert!(!publish.contains("backend, frontend"), "{publish}");
+    assert!(
+        publish.contains("`knit publish create --bundle local-feature backend`"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("add an `origin` remote to frontend"),
+        "{publish}"
+    );
+    assert!(
+        publish.contains("`knit merge local-feature --into main`"),
+        "{publish}"
+    );
+
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn push_names_repos_without_origin_and_points_at_merge() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, false);
+    let push = knit_fails(&workspace, ["push"]);
+    assert!(
+        push.contains("backend, frontend have no `origin` remote"),
+        "{push}"
+    );
+    assert!(push.contains("nowhere to push"), "{push}");
+    assert!(
+        push.contains("`knit merge local-feature --into main`"),
+        "{push}"
+    );
+    assert!(!push.contains("no configured URL"), "{push}");
+    fs::remove_dir_all(root).unwrap();
+
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, true);
+    let push = knit_fails(&workspace, ["push"]);
+    assert!(push.contains("frontend has no `origin` remote"), "{push}");
+    assert!(
+        push.contains("`knit push --bundle local-feature backend`"),
+        "{push}"
+    );
+    // Refused before anything moved: backend's branch did not reach origin.
+    assert_eq!(
+        git(
+            &root.join("backend.git"),
+            ["branch", "--list", "knit/local-feature"]
+        )
+        .trim(),
+        ""
+    );
+    fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn sync_reports_no_review_for_repos_without_origin() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, false);
+
+    // Nothing to sync is not a failure: there is no host to ask.
+    let sync = knit(&workspace, ["publish", "sync"]);
+    assert!(
+        sync.contains("frontend: no `origin` remote, so there is no review to sync"),
+        "{sync}"
+    );
+    assert!(!sync.contains("PR sync failed"), "{sync}");
+
+    fs::remove_dir_all(root).unwrap();
+}
