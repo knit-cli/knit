@@ -4,7 +4,7 @@ Knit is a CLI for authoring and coordinating multi-repo feature work. Think of i
 
 Knit shells out to `git`. It does not use libgit2 and it does not try to replace git — everyday verbs (`status`, `diff`, `add`, `commit`, `push`, `log`) just run across every repo in the bundle at once.
 
-<!-- image: docs/assets/hero.gif — short screencast: knit bundle → edit → commit → land -->
+<img src="docs/assets/hero.gif" width="830" alt="Terminal recording: knit bundle creates a branch and worktree in two repos, knit status shows both, and knit commit records one commit group across them">
 
 ## Install
 
