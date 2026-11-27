@@ -101,3 +101,4 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
 - **[dist/README.md](dist/README.md)** — how releases are cut (binaries, Homebrew, Linux packages).
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — build, test and submit a change.
