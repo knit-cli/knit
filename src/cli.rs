@@ -501,6 +501,16 @@ pub enum Commands {
         #[command(subcommand)]
         command: Option<TagCommand>,
     },
+    /// Internal trusted runtime entrypoint.
+    #[command(hide = true)]
+    RuntimeWorker {
+        #[arg(value_parser = ["up", "down", "status"])]
+        action: String,
+        #[arg(long)]
+        purge: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Run a project command inside resolved bundle checkouts.
     Run {
         /// Configured project command name. Omit when passing a raw command after --.
@@ -522,6 +532,9 @@ pub enum Commands {
         /// are preserved.
         #[arg(long)]
         purge: bool,
+        /// Print runtime status as JSON (`knit run status --json`).
+        #[arg(long)]
+        json: bool,
         /// Raw command to execute, for example `knit run -r web -- docker compose up`.
         #[arg(last = true, allow_hyphen_values = true)]
         args: Vec<OsString>,

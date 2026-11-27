@@ -10,14 +10,16 @@ use crate::checkout::checkout_dir;
 use crate::model::{KnitProject, ProjectRuntime};
 use crate::store::{load_active_bundle, project_path, read_json, ActiveBundle};
 use anyhow::{bail, Context, Result};
-use knit_runtime::{RuntimeContext, RuntimeRepo};
+use knit_runtime::{EngineView, RuntimeContext, RuntimeRepo};
 use std::path::PathBuf;
+mod broker;
+pub(crate) use broker::{forward_active, remote_enabled};
 
-pub fn try_handle(name: &str, force: bool, purge: bool) -> Result<bool> {
+pub fn try_handle(name: &str, force: bool, purge: bool, json: bool) -> Result<bool> {
     let active = load_active_bundle()?;
     let project = load_project_for_bundle(&active).ok();
     let runtime = project.as_ref().and_then(|p| p.runtime.clone());
-    let ctx = runtime_context(&active, project.as_ref());
+    let ctx = runtime_context(&active, project.as_ref())?;
 
     match name {
         "up" => {
@@ -49,7 +51,11 @@ pub fn try_handle(name: &str, force: bool, purge: bool) -> Result<bool> {
             if !runtime_applies(&ctx, runtime.as_ref()) {
                 return Ok(false);
             }
-            knit_runtime::status(&ctx).map(|_| true)
+            if json {
+                knit_runtime::status_json(&ctx).map(|_| true)
+            } else {
+                knit_runtime::status(&ctx).map(|_| true)
+            }
         }
         _ => Ok(false),
     }
@@ -60,9 +66,13 @@ pub fn try_handle(name: &str, force: bool, purge: bool) -> Result<bool> {
 /// transitions (archive/land/delete), where keeping restart data would only
 /// leak project-scoped volumes and Compose build images.
 pub(crate) fn purge_active_runtime(active: &ActiveBundle) -> Result<bool> {
+    if remote_enabled() {
+        broker::forward(active, "down", true, false)?;
+        return Ok(true);
+    }
     let project = load_project_for_bundle(active).ok();
     let runtime = project.as_ref().and_then(|project| project.runtime.clone());
-    let ctx = runtime_context(active, project.as_ref());
+    let ctx = runtime_context(active, project.as_ref())?;
     if !runtime_applies(&ctx, runtime.as_ref()) {
         return Ok(false);
     }
@@ -74,7 +84,8 @@ pub(crate) fn purge_active_runtime(active: &ActiveBundle) -> Result<bool> {
 /// recorded run state, or a detectable stack repo (so cleanup works even when
 /// a failed `up` never recorded state).
 fn runtime_applies(ctx: &RuntimeContext, runtime: Option<&ProjectRuntime>) -> bool {
-    runtime.is_some()
+    ctx.engine.is_some()
+        || runtime.is_some()
         || knit_runtime::has_state(ctx)
         || !knit_runtime::detect_stack_repo_ids(ctx).is_empty()
 }
@@ -108,7 +119,7 @@ fn resolve_stack_repo_ids(
 
 /// Translate the active bundle (plus project repos, for the `KNIT_*` env
 /// contract) into the runtime crate's context.
-fn runtime_context(active: &ActiveBundle, project: Option<&KnitProject>) -> RuntimeContext {
+fn runtime_context(active: &ActiveBundle, project: Option<&KnitProject>) -> Result<RuntimeContext> {
     let repos = active
         .bundle
         .repos
@@ -128,12 +139,66 @@ fn runtime_context(active: &ActiveBundle, project: Option<&KnitProject>) -> Runt
                 .collect()
         })
         .unwrap_or_default();
-    RuntimeContext {
+    Ok(RuntimeContext {
         root: active.root.clone(),
         bundle_id: active.bundle.id.clone(),
         repos,
         extra_checkouts,
+        engine: engine_view()?,
+    })
+}
+
+/// The engine view (docker outside of docker) from the environment a
+/// supervisor starts knit with. `KNIT_RUNTIME_ENGINE_VOLUME` is the switch:
+/// without it the runtime behaves exactly as it does on a laptop.
+fn engine_view() -> Result<Option<EngineView>> {
+    let Some(volume) = trimmed_env("KNIT_RUNTIME_ENGINE_VOLUME") else {
+        return Ok(None);
+    };
+    if !is_volume_name(&volume) {
+        bail!(
+            "KNIT_RUNTIME_ENGINE_VOLUME `{volume}` is not a Docker volume name (expected `^[A-Za-z0-9][A-Za-z0-9_.-]{{0,127}}$`)."
+        );
     }
+    let mount = PathBuf::from(
+        trimmed_env("KNIT_RUNTIME_ENGINE_VOLUME_MOUNT")
+            .context("runtime-worker requires KNIT_RUNTIME_ENGINE_VOLUME_MOUNT")?,
+    );
+    if !mount.is_absolute() {
+        bail!(
+            "KNIT_RUNTIME_ENGINE_VOLUME_MOUNT must be an absolute path, got `{}`.",
+            mount.display()
+        );
+    }
+    Ok(Some(EngineView {
+        volume,
+        mount,
+        owner: Some(
+            trimmed_env("KNIT_RUNTIME_OWNER")
+                .context("runtime-worker requires KNIT_RUNTIME_OWNER")?,
+        ),
+        network: trimmed_env("KNIT_RUNTIME_NETWORK")
+            .filter(|s| is_volume_name(s))
+            .context("runtime-worker requires valid KNIT_RUNTIME_NETWORK")?,
+    }))
+}
+
+fn trimmed_env(key: &str) -> Option<String> {
+    std::env::var(key)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+/// `^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`, Docker's volume name grammar.
+fn is_volume_name(value: &str) -> bool {
+    let mut characters = value.chars();
+    characters
+        .next()
+        .is_some_and(|first| first.is_ascii_alphanumeric())
+        && value.len() <= 128
+        && characters
+            .all(|character| character.is_ascii_alphanumeric() || "_.-".contains(character))
 }
 
 fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
@@ -145,4 +210,34 @@ fn load_project_for_bundle(active: &ActiveBundle) -> Result<KnitProject> {
         .or(config.active_project.as_deref())
         .context("The resolved bundle is not associated with a Knit project.")?;
     read_json(&project_path(&active.root, project_id))
+}
+
+/// Called only through the dedicated command; never dispatch project commands or broker RPC.
+pub fn worker(action: &str, purge: bool, json: bool) -> Result<()> {
+    if !["up", "down", "status"].contains(&action) || (purge && action != "down") {
+        bail!("Invalid runtime-worker operation");
+    }
+    engine_view()?.context("runtime-worker requires complete trusted engine environment")?;
+    if !try_handle(action, false, purge, json)? {
+        bail!("No runtime stack configured for this bundle");
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_volume_name;
+
+    #[test]
+    fn volume_names_follow_dockers_grammar() {
+        assert!(is_volume_name("workspace-volume-1"));
+        assert!(is_volume_name("a"));
+        assert!(is_volume_name("A_b.c-d0"));
+        assert!(!is_volume_name(""));
+        assert!(!is_volume_name("-leading-dash"));
+        assert!(!is_volume_name("has space"));
+        assert!(!is_volume_name("has/slash"));
+        assert!(!is_volume_name(&"a".repeat(129)));
+        assert!(is_volume_name(&"a".repeat(128)));
+    }
 }
