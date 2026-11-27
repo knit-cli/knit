@@ -441,8 +441,7 @@ pub fn isolated_git_config_global() -> String {
     dir.join("gitconfig").to_string_lossy().to_string()
 }
 
-/// Ambient identity overrides (exported by editor/agent harnesses such as a
-/// T3 Code session) would silently override the per-repo `git config` identity
+/// Ambient identity overrides (exported by editor/agent harnesses) would silently override the per-repo `git config` identity
 /// every fixture sets and inject actor attribution, breaking actor/author
 /// assertions. Test-provided env is applied after, so a test can still set any
 /// of these deliberately.
@@ -454,7 +453,10 @@ fn scrub_ambient_git_identity(command: &mut Command) {
         .env_remove("GIT_COMMITTER_EMAIL")
         .env_remove("T3_ACTOR_SESSION")
         .env_remove("T3_ACTOR_LABEL")
-        .env_remove("T3_ACTOR_EMAIL");
+        .env_remove("T3_ACTOR_EMAIL")
+        .env_remove("KNIT_ACTOR_SESSION")
+        .env_remove("KNIT_ACTOR_LABEL")
+        .env_remove("KNIT_ACTOR_EMAIL");
 }
 
 // KNIT_BUNDLE and KNIT_SESSION are removed everywhere: the test process may
