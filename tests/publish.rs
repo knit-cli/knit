@@ -1770,3 +1770,40 @@ fn pr_create_names_only_the_repo_without_origin_in_a_mixed_bundle() {
 
     fs::remove_dir_all(root).unwrap();
 }
+
+#[test]
+fn push_names_repos_without_origin_and_points_at_merge() {
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, false);
+    let push = knit_fails(&workspace, ["push"]);
+    assert!(
+        push.contains("backend, frontend have no `origin` remote"),
+        "{push}"
+    );
+    assert!(push.contains("nowhere to push"), "{push}");
+    assert!(
+        push.contains("`knit merge local-feature --into main`"),
+        "{push}"
+    );
+    assert!(!push.contains("no configured URL"), "{push}");
+    fs::remove_dir_all(root).unwrap();
+
+    let root = unique_temp_dir();
+    let workspace = local_only_bundle(&root, true);
+    let push = knit_fails(&workspace, ["push"]);
+    assert!(push.contains("frontend has no `origin` remote"), "{push}");
+    assert!(
+        push.contains("`knit push --bundle local-feature backend`"),
+        "{push}"
+    );
+    // Refused before anything moved: backend's branch did not reach origin.
+    assert_eq!(
+        git(
+            &root.join("backend.git"),
+            ["branch", "--list", "knit/local-feature"]
+        )
+        .trim(),
+        ""
+    );
+    fs::remove_dir_all(root).unwrap();
+}

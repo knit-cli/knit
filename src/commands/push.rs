@@ -126,6 +126,31 @@ pub fn push_repos(
             crate::contribution::push_remote(&cwd, repo)?;
         }
     }
+    // A plain local repo has nowhere to push; name it rather than letting Git
+    // report a remote with no URL.
+    let mut missing = Vec::new();
+    let mut others = Vec::new();
+    for &index in &indexes {
+        let repo = &active.bundle.repos[index];
+        let cwd = checkout_dir(&active, repo).context("missing feature checkout")?;
+        if crate::contribution::lacks_origin(&cwd, repo)? {
+            missing.push((repo.id.as_str(), repo.base_branch.as_str()));
+        } else {
+            others.push(repo.id.as_str());
+        }
+    }
+    if !missing.is_empty() {
+        bail!(
+            "{}",
+            crate::contribution::no_origin_refusal(
+                &active.bundle.id,
+                &missing,
+                &others,
+                "there is nowhere to push the feature branch",
+                &format!("knit push --bundle {}", active.bundle.id),
+            )
+        );
+    }
     // Validate every selected repository before starting any parallel push.
     for &index in &indexes {
         let repo = &active.bundle.repos[index];
