@@ -4,6 +4,8 @@ Knit is a CLI for authoring and coordinating multi-repo feature work. Think of i
 
 Knit shells out to `git`. It does not use libgit2 and it does not try to replace git — everyday verbs (`status`, `diff`, `add`, `commit`, `push`, `log`) just run across every repo in the bundle at once.
 
+Knit is alpha software with one maintainer: releases are frequent and commands and flags still change. It needs no account and sends no telemetry. It reaches the network only through `git` (fetching bases when a bundle starts, pushing) and your code host's CLI or API when you publish, land, fork or clone. A sync remote is opt-in; until you add one, nothing is uploaded anywhere.
+
 <img src="docs/assets/hero.gif" width="830" alt="Terminal recording: knit bundle creates a branch and worktree in two repos, knit status shows both, and knit commit records one commit group across them">
 
 ## Install
@@ -68,8 +70,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **An append-only ledger, not just branches.** Every bundle is a JSON artifact recording commits, observed changes, check verdicts, landings, and reverts. Other tools read it; nothing is locked in a database.
 - **Verdicts you can trust.** `knit check` pins pass/fail to the exact per-repo commits it ran against — a verdict goes stale the moment the bundle moves, and projects can require green-and-fresh checks before landing. With five agent bundles in flight, "which one is ready?" has a ledger answer, not a chat claim.
 - **Known-good markers across repos.** After landing and verifying the configured project bases, `knit tag` pins those bases as one immutable named set — the whole-system snapshot a monorepo gets from a single SHA — recorded on the ledger and exported as plain git tags any host, CI, or clone can read.
-- **Local-first, remote optional.** Everything works against plain git repos. A compatible remote can add dashboards, history sync, `knit clone` to rebuild a workspace anywhere, and cross-repo reviews on top of the same artifact.
-- **Review-ready artifact.** The same bundle artifact gives `urdir` enough cross-repo context to prepare review analysis that `gloss` can display and explain.
+- **Local-first, remote optional.** Everything works against plain git repos. A compatible hosted remote, such as [Svartal](https://svartal.com), can add dashboards, history sync and `knit clone` to rebuild a workspace anywhere. Once one is configured, `knit push`, publish and land upload the bundle artifact and project history to it.
 
 ## Concepts in one breath
 
