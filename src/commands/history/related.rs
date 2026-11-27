@@ -264,17 +264,18 @@ pub(super) fn print_related_instance(
     subjects: &CommitSubjects,
 ) {
     println!();
-    let bundle = instance.bundle_id.as_deref().unwrap_or("-");
-    let title = instance
-        .bundle_title
-        .as_deref()
-        .unwrap_or("untitled bundle");
-    println!(
-        "{} {} {}",
-        out::heading("Bundle:"),
-        out::repo(bundle),
-        title
-    );
+    match &instance.bundle_id {
+        Some(bundle) => println!(
+            "{} {} {}",
+            out::heading("Bundle:"),
+            out::repo(bundle),
+            instance
+                .bundle_title
+                .as_deref()
+                .unwrap_or("untitled bundle")
+        ),
+        None => println!("{} {}", out::heading("Bundle:"), no_bundle_label(instance)),
+    }
     println!("{} {}", out::heading("Scope:"), instance.scope_label());
     println!(
         "{} {}",
@@ -296,6 +297,20 @@ pub(super) fn print_related_instance(
     }
 
     print_inspect_commands(instance, repo_paths);
+}
+
+/// What a scope outside every bundle is, in the `[base: <branch>]` form that
+/// `knit history list` uses for base history: there is no bundle to name.
+fn no_bundle_label(instance: &RelatedInstance) -> String {
+    let base_branch = instance
+        .matched
+        .iter()
+        .filter(|event| event.kind == "base.commit")
+        .find_map(|event| event.branch.as_deref());
+    match base_branch {
+        Some(branch) => format!("none [base: {branch}]"),
+        None => "none".to_string(),
+    }
 }
 
 pub(super) fn print_event_list(events: &[HistoryEvent], subjects: &CommitSubjects) {
@@ -458,6 +473,28 @@ mod tests {
         base.occurred_at = Some("2026-06-05T12:00:00+02:00".to_string());
 
         assert_eq!(event_time(&base), "2026-06-05T10:00:00Z");
+    }
+
+    #[test]
+    fn base_commits_are_labelled_base_history_not_a_bundle() {
+        let mut base = event(
+            "base",
+            "backend",
+            "aaa111",
+            None,
+            "base:backend:main:aaa111",
+        );
+        base.kind = "base.commit".to_string();
+        base.bundle_id = None;
+        base.bundle_title = None;
+        base.branch = Some("main".to_string());
+        let commits = BTreeSet::from(["aaa111".to_string()]);
+
+        let instances = related_instances(&[base], "backend", &commits);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].bundle_id, None);
+        assert_eq!(no_bundle_label(&instances[0]), "none [base: main]");
     }
 
     #[test]

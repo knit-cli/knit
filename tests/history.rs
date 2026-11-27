@@ -460,3 +460,32 @@ fn related_dates_each_scope_by_its_commits_not_a_later_archive() {
     let base_scope = format!("Scope: node {}", base["nodeId"].as_str().unwrap());
     assert_eq!(related_when(&related, &base_scope), base_at, "{related}");
 }
+
+#[test]
+fn related_labels_base_commits_as_base_history_not_an_untitled_bundle() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+    knit(
+        &workspace,
+        ["bundle", "venue capacity", "--repo", "backend"],
+    );
+    let checkout = workspace.join(".knit/worktrees/venue-capacity/backend");
+    append_line(&checkout.join("app.txt"), "capacity form");
+    knit(&workspace, ["commit", "--all", "-m", "Add capacity form"]);
+
+    let related = knit(&checkout, ["related", "app.txt"]);
+
+    // The repo's initial commit on main belongs to no bundle.
+    assert!(!related.contains("untitled bundle"), "{related}");
+    let mut blocks = related.split("\nBundle: ").skip(1);
+    let base = blocks
+        .find(|block| block.contains("Initial backend"))
+        .unwrap_or_else(|| panic!("no block for the base commit in {related}"));
+    assert!(base.starts_with("none [base: main]\n"), "{related}");
+    // Bundle work keeps its bundle id and title.
+    assert!(
+        related.contains("Bundle: venue-capacity venue capacity"),
+        "{related}"
+    );
+}
