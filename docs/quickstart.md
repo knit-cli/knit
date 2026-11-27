@@ -283,9 +283,6 @@ knit clone https://<service-host>/<owner>/<project>
 The legacy split form remains available as
 `knit clone <owner>/<project> --remote <name> [--url <remote-api-url>]`.
 
-A compatible remote may also display cross-repo analysis and reviews produced
-by Urdir and Gloss.
-
 ## Concepts
 
 **Project.** A reusable repo template, created once with `knit init <name>` (like `git init`, but for a set of repos). Add repos with `knit project add <id> <path>`; mark a repo `--observe` to keep it available but out of default bundle starts. Projects can also define commands (`knit project command set …`) and a default landing template. Projects are optional — you can also `knit bundle add <path>` repos directly into an ad-hoc bundle.

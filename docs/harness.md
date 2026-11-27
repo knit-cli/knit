@@ -11,10 +11,6 @@ surface, they have published schemas, and reading them needs no process. Every
 change goes through the `knit` command instead, so one implementation owns
 locking, git, and the ledger.
 
-TypeScript hosts can skip the plumbing: [`knit-typescript-sdk`](https://www.npmjs.com/package/knit-typescript-sdk)
-is the reader, watcher, CLI runner and action catalog this document describes,
-already written.
-
 ## 1. Read surface
 
 The workspace layout is in [reference.md](reference.md#storage). What a host
@@ -174,9 +170,7 @@ Knit does not overwrite them.
 
 ## 5. Mutating
 
-Run the `knit` binary. It is on `PATH` after `brew install knit-cli/tap/knit`.
-(The TypeScript SDK also honours a `KNIT_BIN` override when the binary lives
-somewhere else; that convention is the SDK's, not the CLI's.)
+Run the `knit` binary ([install](../README.md#install)).
 
 Rules that keep a host out of trouble:
 
@@ -199,8 +193,6 @@ The everyday verbs a host wraps are `knit bundle`, `knit add`, `knit commit`,
   never spawns an agent.
 - **When to create a bundle.** Naming, one-bundle-per-conversation, or one per
   ticket — all host policy.
-- **UI.** There is no rendering in Knit. `knit-typescript-sdk/ui` offers the
-  headless decisions (status rollups, list truncation, picker semantics) if you
-  want them.
+- **UI.** There is no rendering in Knit.
 - **Identity for hosted forges.** `knit remote` holds a token per remote; how a
   host obtains that token is outside Knit.
