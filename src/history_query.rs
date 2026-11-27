@@ -521,12 +521,19 @@ fn query_sql(
     } else {
         "NULL"
     };
+    // Git commit times have whole-second resolution while knit's own nodes
+    // carry fractions, so a commit made in the same second as `knit bundle`
+    // reads as older than the bundle. Units are therefore compared to the
+    // second (`at` is normalized, so its first 19 bytes are the second), and
+    // units within one second keep the order the ledger recorded them in.
     let sql = format!(
         "WITH selected AS MATERIALIZED (
-        SELECT {key} AS g,{ordinal} AS ordinal,MAX(at) AS newest,MIN(event_id) AS tie FROM events
-        WHERE {} GROUP BY {key} ORDER BY ordinal DESC,newest DESC,tie ASC,g ASC LIMIT {limit} OFFSET {skip})
+        SELECT {key} AS g,{ordinal} AS ordinal,MAX(substr(at,1,19)) AS second,MAX(seq) AS recorded,
+        MAX(at) AS newest,MIN(event_id) AS tie FROM events
+        WHERE {} GROUP BY {key}
+        ORDER BY ordinal DESC,second DESC,recorded DESC,newest DESC,tie ASC,g ASC LIMIT {limit} OFFSET {skip})
         SELECT e.payload,e.at FROM selected s JOIN events e ON e.{key}=s.g
-        ORDER BY s.ordinal DESC,s.newest DESC,s.tie ASC,s.g ASC,e.at DESC,e.event_id ASC,e.seq ASC",
+        ORDER BY s.ordinal DESC,s.second DESC,s.recorded DESC,s.newest DESC,s.tie ASC,s.g ASC,e.at DESC,e.event_id ASC,e.seq ASC",
         if filters.is_empty() {
             "1".into()
         } else {
@@ -932,6 +939,78 @@ mod tests {
         assert_eq!(f.query(&q)[0].occurred_at, "2026-01-01T12:00:00.000000000Z");
         q.limit = Some(0);
         assert!(f.query(&q).is_empty());
+    }
+    #[test]
+    fn whole_second_commit_times_and_exact_ties_follow_ledger_order() {
+        // Git records commit times to the second, while knit's own lifecycle
+        // nodes carry milliseconds. A commit made within the same second as
+        // `knit bundle` therefore carries an earlier-looking timestamp
+        // (…:19Z) than the bundle it was made in (…:19.710Z).
+        let f = Fixture::new();
+        let lifecycle = |id: &str, node: &str, kind: &str, repo: Option<&str>, at: &str| {
+            let mut e = event(id, node, repo.unwrap_or("-"), at);
+            e.kind = kind.into();
+            e.repo_id = repo.map(Into::into);
+            e
+        };
+        f.write(&[
+            lifecycle(
+                "z-created",
+                "sample",
+                "bundle.created",
+                None,
+                "2026-11-27T14:43:19.710Z",
+            ),
+            lifecycle(
+                "y-added",
+                "repo-node",
+                "repo.added",
+                Some("backend"),
+                "2026-11-27T14:43:19.769Z",
+            ),
+            lifecycle(
+                "x-added",
+                "repo-node",
+                "repo.added",
+                Some("frontend"),
+                "2026-11-27T14:43:19.769Z",
+            ),
+            event("w-commit", "kg-node", "backend", "2026-11-27T14:43:19Z"),
+            event("v-commit", "kg-node", "frontend", "2026-11-27T14:43:19Z"),
+        ]);
+        let ids = |grouping| {
+            let entries = f.query(&HistoryQuery {
+                grouping,
+                ..Default::default()
+            });
+            entries.into_iter().map(|e| e.id).collect::<Vec<_>>()
+        };
+        assert_eq!(
+            ids(HistoryGrouping::Commit),
+            ["kg-node", "repo-node", "sample"]
+        );
+        assert_eq!(
+            ids(HistoryGrouping::Event),
+            ["v-commit", "w-commit", "x-added", "y-added", "z-created"]
+        );
+        let scoped = f.query(&HistoryQuery {
+            scope: Some("activity".into()),
+            ..Default::default()
+        });
+        assert_eq!(scoped[0].id, "kg-node");
+
+        // Exactly equal timestamps: the later ledger line is the newer entry,
+        // whatever the IDs sort as.
+        let g = Fixture::new();
+        g.write(&[
+            event("a", "node-a", "backend", "2026-01-01T12:00:00.500Z"),
+            event("b", "node-b", "backend", "2026-01-01T12:00:00.500Z"),
+        ]);
+        let entries = g.query(&HistoryQuery::default());
+        assert_eq!(
+            entries.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["node-b", "node-a"]
+        );
     }
     #[test]
     fn plain_date_until_includes_the_whole_day() {
