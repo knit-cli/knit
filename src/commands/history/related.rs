@@ -292,7 +292,7 @@ pub(super) fn print_related_instance(
     }
 
     if !instance.other_bundle.is_empty() {
-        println!("{}", out::heading("Other commits in bundle:"));
+        println!("{}", out::heading("Other activity in bundle:"));
         print_event_list(&instance.other_bundle, subjects);
     }
 
