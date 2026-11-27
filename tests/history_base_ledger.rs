@@ -156,3 +156,109 @@ fn configured_base_tracks_external_merges_but_not_an_intermediate_branch() {
     assert!(combined.contains("[bundle activity]"));
     fs::remove_dir_all(root).unwrap();
 }
+
+/// The line of `output` that mentions `needle`, for label assertions.
+fn line_with<'a>(output: &'a str, needle: &str) -> &'a str {
+    output
+        .lines()
+        .find(|line| line.contains(needle))
+        .unwrap_or_else(|| panic!("no line mentions {needle}:\n{output}"))
+}
+
+#[test]
+fn log_labels_commit_groups_apart_from_bundle_lifecycle_in_every_view() {
+    let root = unique_temp_dir();
+    let workspace = root.join("workspace");
+    setup_three_repo_project(&workspace, &root);
+    knit(
+        &workspace,
+        [
+            "bundle",
+            "label check",
+            "--repo",
+            "backend",
+            "--repo",
+            "frontend",
+        ],
+    );
+    let bundle_dir = workspace.join(".knit/worktrees/label-check");
+    append_line(&bundle_dir.join("backend/app.txt"), "label work");
+    append_line(&bundle_dir.join("frontend/app.txt"), "label work");
+    knit(&bundle_dir, ["commit", "--all", "-m", "Label work"]);
+    knit(&workspace, ["history", "refresh"]);
+
+    // Inside the bundle a commit group carries no label in either form; only
+    // the bundle's lifecycle does.
+    for form in [vec!["log"], vec!["log", "--oneline"]] {
+        let output = knit(&bundle_dir, form.clone());
+        let commit = line_with(&output, "Label work");
+        assert!(commit.starts_with("kg_"), "{form:?}: {commit}");
+        assert!(
+            line_with(&output, "Repo added to bundle").starts_with("[bundle activity] "),
+            "{form:?}:\n{output}"
+        );
+    }
+
+    // Project-wide, bundle work reads `[bundle]`, never as lifecycle, in every
+    // scope that shows it, in both forms and in commit and event grouping.
+    for scope in ["ongoing", "base-and-ongoing", "activity"] {
+        for group in ["commit", "event"] {
+            for oneline in [false, true] {
+                let mut args = vec!["log", "--all", "--scope", scope, "--group", group];
+                if oneline {
+                    args.push("--oneline");
+                }
+                let output = knit(&workspace, args.clone());
+                assert!(
+                    line_with(&output, "Label work").starts_with("[bundle] "),
+                    "{args:?}:\n{output}"
+                );
+                assert!(
+                    line_with(&output, "Repo added to bundle").starts_with("[bundle activity] "),
+                    "{args:?}:\n{output}"
+                );
+                if scope != "ongoing" {
+                    assert!(
+                        line_with(&output, "Initial backend").starts_with("[base] "),
+                        "{args:?}:\n{output}"
+                    );
+                }
+            }
+        }
+    }
+
+    // A whole-bundle group holds its commits, so it is bundle work too.
+    let grouped = knit(
+        &workspace,
+        [
+            "log",
+            "--all",
+            "--scope",
+            "ongoing",
+            "--group",
+            "bundle",
+            "--oneline",
+        ],
+    );
+    assert!(
+        line_with(&grouped, "label-check").starts_with("[bundle] "),
+        "{grouped}"
+    );
+    let grouped = knit(&bundle_dir, ["log", "--group", "bundle", "--oneline"]);
+    assert!(
+        !line_with(&grouped, "label-check").starts_with('['),
+        "{grouped}"
+    );
+
+    // The per-event listing uses the same words.
+    let listing = knit(&workspace, ["history"]);
+    assert!(
+        line_with(&listing, "Label work").contains("[bundle] "),
+        "{listing}"
+    );
+    assert!(
+        line_with(&listing, "Repo added to bundle").contains("[bundle activity] "),
+        "{listing}"
+    );
+    fs::remove_dir_all(root).unwrap();
+}
