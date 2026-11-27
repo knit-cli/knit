@@ -59,8 +59,8 @@ configured base branch and records the exact remote commit before creating any
 feature branch. Dirty or differently checked-out source repos are left alone.
 Local-only repos use their local configured base. Use `knit workspace status`
 to compare current checkouts with configured bases; it also lists open reviews
-whose base is not `origin/<base>`, such as a fork's upstream; `--offline` uses cached
-remote refs and `--from-local-base` deliberately starts from local bases.
+whose base is not `origin/<base>`, such as a fork's upstream. `knit bundle --offline`
+uses cached remote refs and `--from-local-base` deliberately starts from local bases.
 
 If your tool opens the *source* folder instead — Cursor, Codex, or any
 agent rooted at the workspace — that works too: the agent can create a bundle
@@ -94,9 +94,9 @@ knit diff
 Bundle: my-feature (workspace)
 State: open
 
-repo       branch           worktree                              mode       status
-backend    knit/my-feature  .knit/worktrees/my-feature/backend    worktree   modified
-frontend   knit/my-feature  .knit/worktrees/my-feature/frontend   worktree   modified
+repo           branch                     worktree                                         mode       status
+backend        knit/my-feature            .knit/worktrees/my-feature/backend               worktree   modified
+frontend       knit/my-feature            .knit/worktrees/my-feature/frontend              worktree   modified
 ```
 
 <!-- image: docs/assets/quickstart-status.png — `knit status` in a real two-repo bundle -->
@@ -195,7 +195,7 @@ Before touching a file, ask what feature work already touched it — across all
 repos, not just the one you are in:
 
 ```sh
-knit related --repo backend src/api/billing.rs
+knit related --repo backend README.md
 ```
 
 `knit related` works by joining two histories. First it asks Git which commits
@@ -203,15 +203,17 @@ touched the path. Then it looks those SHAs up in Knit's project history ledger
 (`.knit/history/`, built from bundle ledgers) to recover each commit's bundle
 and commit group — and with them the **companion commits in other repos** that
 shipped as part of the same logical change. Git stays the source of truth for
-file contents; Knit supplies the cross-repo context Git cannot see:
+file contents; Knit supplies the cross-repo context Git cannot see. Part of the
+output:
 
 ```txt
-Bundle: move-work-item-consumption-into-sej Move work item consumption into sej
-Scope: commit group kg_20260610_9ab2a5
+Bundle: my-feature my feature
+Scope: commit group kg_20261127_756015
+When: 2026-11-27T14:39:32Z
 Touched path:
-  sej     d2d5df2  Move work item consumption from knit into sej
+  backend            b109edf  Add my feature across backend and frontend
 Related in same scope:
-  knit    5d698c3  Move work item consumption from knit into sej
+  frontend           924ad6e  Add my feature across backend and frontend
 ```
 
 The file you queried lived in one repo; the answer tells you which commit in a

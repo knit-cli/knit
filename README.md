@@ -45,7 +45,7 @@ knit bundle "my feature" --cd           # branch + isolated worktree per repo; y
 knit status                             # one view across every repo
 knit commit --all -m "Add my feature"   # one logical commit, recorded across repos
 
-knit check run ci                       # record a test verdict pinned to these exact commits
+knit check run ci                       # run the project's `ci` command, pin the verdict to these commits
 knit publish create                     # one PR per repo, cross-linked
 knit land --lane staging                # resolve each repo's staging branch from the project
 knit land --lane staging apply          # merge the feature branches into staging, deploy there;
@@ -79,7 +79,7 @@ The [quickstart](docs/quickstart.md) walks this loop end to end with two toy rep
 - **Ledger** — append-only node chain inside the bundle; undo is `knit revert`, outside commits fold in via `knit sync`.
 - **Publish/land vs merge** — PRs landed as a set when you have a code host; `knit merge` into a local target branch, in Knit's own checkouts, when you don't.
 - **Checks** — named verdicts recorded on the ledger, pinned to exact heads; optionally gate landing.
-- **Tags** — immutable cross-repo known-good markers pinning post-land origin bases, exported as `knit/<name>` git tags.
+- **Tags** — immutable cross-repo known-good markers pinning the configured bases after landing, exported as `knit/<name>` git tags.
 
 The full versions live in the [quickstart](docs/quickstart.md#concepts) and the [reference](docs/reference.md).
 
@@ -92,4 +92,4 @@ The full versions live in the [quickstart](docs/quickstart.md#concepts) and the 
 - **[docs/harness.md](docs/harness.md)** — building a host on top of Knit: the artifacts to read, the commands that answer in JSON, bundle context, and session attribution.
 - **[docs/architecture.md](docs/architecture.md)** — module boundaries and test layout.
 - **[docs/change-group-schema.md](docs/change-group-schema.md)** — the bundle (`ChangeGroup`) schema.
-- **[dist/README.md](dist/README.md)** — how releases are cut (binaries, crates.io, Homebrew/Scoop/winget).
+- **[dist/README.md](dist/README.md)** — how releases are cut (binaries, Homebrew, Linux packages, Scoop/winget).
