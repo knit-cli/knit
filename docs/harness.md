@@ -218,7 +218,7 @@ artifacts hold some identifying data from the start. In a bundle artifact
 | `nodes[].origin.platform` | OS and architecture, such as `darwin/arm64` | None |
 | `nodes[].origin.environmentId` | `KNIT_ENVIRONMENT_ID`, only when set | Leave it unset |
 | `nodes[].sessionId`, `nodes[].actor` | The variables in [section 4](#4-attribution), only when set | Leave them unset |
-| `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address |
+| `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address. The Git commits themselves carry the same email to every host you push to |
 | `repos[].path`, `repos[].worktreePath` | Where each source repo and bundle checkout is on disk; `path` usually contains your OS user name | Nothing to do: they stay on this machine unless the sync remote runs on it too (see below) |
 | `publications[].author` | The code host account that opened each review: login, and the name, avatar and profile URL when the host reports them | None |
 
@@ -240,6 +240,18 @@ Where it goes:
   were uploaded with. The project record is uploaded with repo paths
   blanked. Project history events (`.knit/history/`) carry bundle titles,
   commit messages, branches and SHAs, but none of the fields above.
+- **Author and actor emails on Svartal.** Svartal keeps the uploaded
+  `commitGroups[].author.email` and `nodes[].actor.email` and uses them for
+  one thing: crediting the work to the account whose verified Git emails (or
+  GitHub no-reply address) match. It does not show them back: bundle pages,
+  bundle lists, summaries and review views carry the author's name only. The
+  full bundle artifact, which `knit pull`, clone and handoff download, keeps
+  the emails only for project members (the owner, organisation members and
+  invited members), who can pull the bundle and see the same addresses in
+  the Git commits. Anyone else who can read the project, such as a visitor to
+  a public one, gets `author.email` as an empty string and no `actor.email`.
+  Landing plans and runs are readable only by members. Older Svartal
+  versions may still return the emails to any reader of the bundle.
 - **Landing records.** When landing is synchronised with the sync remote,
   land plans and land runs are uploaded too. Plans carry no checkout paths.
   A run (`.knit/land-runs/`) embeds a copy of the bundle (`sourceBundle`,
