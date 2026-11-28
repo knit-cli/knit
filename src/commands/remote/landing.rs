@@ -298,8 +298,17 @@ fn retain_record(root: &Path, record: &PlanRecord) -> Result<()> {
                 record.revision
             );
         }
-        retained.bundle_snapshot = retained.bundle_snapshot.or(old.bundle_snapshot);
-        retained.project_snapshot = retained.project_snapshot.or(old.project_snapshot);
+        // The remote's copy may lack the checkout paths this machine kept.
+        let keep = |local: Option<Value>, remote: Option<Value>| match (local, remote) {
+            (Some(local), Some(remote))
+                if same_without_paths(&local, &remote, strip_repo_paths) =>
+            {
+                Some(local)
+            }
+            (local, remote) => remote.or(local),
+        };
+        retained.bundle_snapshot = keep(old.bundle_snapshot, retained.bundle_snapshot);
+        retained.project_snapshot = keep(old.project_snapshot, retained.project_snapshot);
     }
     private_save(&path, &serde_json::to_value(retained)?)
 }
@@ -335,6 +344,141 @@ fn validate_historical_run(run: &Value, bundle: &str, project_id: &str) -> Resul
         }
     }
     Ok(())
+}
+
+/// Blank every repo's checkout path in an embedded bundle or project copy and
+/// drop its worktree path. Older Knit versions require `path`, so it stays,
+/// blank, like in `push::bundle_upload`.
+fn strip_repo_paths(document: &mut Value) {
+    for repo in document
+        .get_mut("repos")
+        .and_then(Value::as_array_mut)
+        .into_iter()
+        .flatten()
+    {
+        if let Some(fields) = repo.as_object_mut() {
+            if fields.contains_key("path") {
+                fields.insert("path".into(), json!(""));
+            }
+            fields.remove("worktreePath");
+        }
+    }
+}
+
+/// A land run receipt without what names this machine's file system: the
+/// plan file's location and the checkout paths in its embedded bundle and
+/// project copies. Nothing else changes.
+fn strip_run_paths(run: &mut Value) {
+    if let Some(fields) = run.as_object_mut() {
+        fields.remove("planPath");
+    }
+    for key in ["sourceBundle", "resultBundle", "sourceProject"] {
+        if let Some(document) = run.get_mut(key) {
+            strip_repo_paths(document);
+        }
+    }
+}
+
+/// The receipt as uploaded to `remote_url`. Checkout paths and the plan path
+/// usually contain the OS user name, and nothing the remote does with a land
+/// run reads them unless it runs on this same computer, which keeps them. The
+/// local receipt is never changed.
+fn run_upload<'a>(run: &'a Value, remote_url: &str) -> std::borrow::Cow<'a, Value> {
+    if super::push::remote_is_on_this_computer(remote_url) {
+        return std::borrow::Cow::Borrowed(run);
+    }
+    let mut shared = run.clone();
+    strip_run_paths(&mut shared);
+    std::borrow::Cow::Owned(shared)
+}
+
+/// The landing sync body as uploaded to `remote_url`; see `run_upload`.
+fn artifacts_upload(payload: &Artifacts, remote_url: &str) -> Result<Value> {
+    let mut body = serde_json::to_value(payload)?;
+    if super::push::remote_is_on_this_computer(remote_url) {
+        return Ok(body);
+    }
+    for plan in body["plans"].as_array_mut().into_iter().flatten() {
+        for key in ["bundleSnapshot", "projectSnapshot"] {
+            if let Some(document) = plan.get_mut(key) {
+                strip_repo_paths(document);
+            }
+        }
+    }
+    for record in body["runs"].as_array_mut().into_iter().flatten() {
+        strip_run_paths(&mut record["run"]);
+    }
+    Ok(body)
+}
+
+/// Whether two copies of a document are the same apart from checkout paths.
+fn same_without_paths(a: &Value, b: &Value, strip: fn(&mut Value)) -> bool {
+    let (mut a, mut b) = (a.clone(), b.clone());
+    strip(&mut a);
+    strip(&mut b);
+    a == b
+}
+
+/// Upload a receipt under the run's landing lock. A sync remote that has not
+/// been upgraded insists that a continued run's embedded bundle copy equals
+/// the first upload exactly. When an older Knit made that first upload, with
+/// checkout paths, the remote refuses the copy without them; the retry then
+/// sends back the remote's own stored copy, so it learns nothing new.
+fn post_owned_run(
+    remote: &KnitRemote,
+    token: &str,
+    project: &str,
+    bundle_slug: &str,
+    run: &Value,
+    ownership: Value,
+) -> Result<()> {
+    let path = format!("/projects/{project}/landing-artifacts");
+    let body = |run: &Value| json!({"plans":[],"runs":[{"bundleSlug":bundle_slug,"run":run}],"ownership":ownership});
+    let shared = run_upload(run, &remote.url);
+    let response = request(remote, token, "POST", &path, Some(&body(&shared)))?;
+    if response.status != 409 || matches!(shared, std::borrow::Cow::Borrowed(_)) {
+        let _: Value = super::client::decode_response(response)?;
+        return Ok(());
+    }
+    let stored = stored_source_bundle(remote, token, project, bundle_slug, text(run, "id")?);
+    let Some(stored) = stored.filter(|stored| {
+        *stored != shared["sourceBundle"]
+            && same_without_paths(stored, &shared["sourceBundle"], strip_repo_paths)
+    }) else {
+        let _: Value = super::client::decode_response(response)?;
+        return Ok(());
+    };
+    let mut retry = shared.into_owned();
+    retry["sourceBundle"] = stored;
+    let _: Value = request_json(remote, token, "POST", &path, Some(&body(&retry)))?;
+    Ok(())
+}
+
+/// The embedded bundle copy of the remote's stored receipt for run `id`.
+fn stored_source_bundle(
+    remote: &KnitRemote,
+    token: &str,
+    project: &str,
+    bundle_slug: &str,
+    id: &str,
+) -> Option<Value> {
+    let query = url::form_urlencoded::Serializer::new(String::new())
+        .append_pair("bundleSlug", bundle_slug)
+        .finish();
+    let stored: Value = request_json(
+        remote,
+        token,
+        "GET",
+        &format!("/projects/{project}/landing-artifacts?{query}"),
+        None,
+    )
+    .ok()?;
+    stored["runs"]
+        .as_array()?
+        .iter()
+        .find(|record| record["run"]["id"] == id)
+        .map(|record| record["run"]["sourceBundle"].clone())
+        .filter(Value::is_object)
 }
 
 fn outgoing(root: &Path, index: &SyncIndex) -> Result<Artifacts> {
@@ -765,8 +909,15 @@ fn install_run(root: &Path, index: &mut SyncIndex, record: &RunRecord) -> Result
         let local_hash = document_hash(&local);
         // Svartal keeps the receipt the executor handed it. Finalization
         // (archive, ledger, sync status) is then written only to the local
-        // copy, so that copy is the same receipt, already synced.
-        if local_hash != hash && receipt_core(&local) == receipt_core(&record.run) {
+        // copy, so that copy is the same receipt, already synced. It was
+        // uploaded without checkout paths, which the local copy keeps.
+        if local_hash != hash
+            && same_without_paths(
+                &receipt_core(&local),
+                &receipt_core(&record.run),
+                strip_run_paths,
+            )
+        {
             index.runs.insert(id.into(), local_hash);
             return Ok(());
         }
@@ -864,7 +1015,7 @@ pub(super) fn push_plans_scoped_at(
     if !payload.plans.is_empty() {
         super::push::add_missing_hosted_repos_for_landing(root, remote, &token, &project)?;
     }
-    let mut body = serde_json::to_value(&payload)?;
+    let mut body = artifacts_upload(&payload, &remote.url)?;
     if let Some(slug) = bundle_slug {
         body["bundleSlug"] = json!(slug);
     }
@@ -1120,14 +1271,13 @@ pub(crate) fn claim_for_run(
             if !quiescent {
                 bail!("Interrupted landing ownership remains held: reconcile outstanding processes and record quiescence before changing execution intent");
             }
-            let _: Value = request_json(
+            post_owned_run(
                 &remote,
                 &api_token,
-                "POST",
-                &format!("/projects/{}/landing-artifacts", index.project),
-                Some(
-                    &json!({"plans":[], "runs":[{"bundleSlug":text(plan,"bundleId")?,"run":run}], "ownership":{"id":previous["id"],"token":previous["token"]}}),
-                ),
+                &index.project,
+                text(plan, "bundleId")?,
+                run,
+                json!({"id":previous["id"],"token":previous["token"]}),
             )?;
             payload["quiescent"] = json!(true);
         }
@@ -1215,14 +1365,13 @@ pub(crate) fn finish_for_plan(
     let Some(lease) = ownership else {
         return Ok(());
     };
-    let _: Value = request_json(
+    post_owned_run(
         &lease.remote,
         &lease.api_token,
-        "POST",
-        &format!("/projects/{}/landing-artifacts", lease.project),
-        Some(
-            &json!({"plans":[],"runs":[{"bundleSlug":lease.bundle_slug,"run":run}],"ownership":{"id":lease.id,"token":lease.token}}),
-        ),
+        &lease.project,
+        &lease.bundle_slug,
+        run,
+        json!({"id":lease.id,"token":lease.token}),
     )?;
     // A completed execution is an accepted local receipt, just like sync push.
     // Remember its exact content so a later pull can distinguish upstream
@@ -1667,6 +1816,118 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("immutable"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    fn bundle_with_paths() -> Value {
+        json!({"id":"demo","repos":[{"id":"api","path":"/Users/someone/work/api",
+            "worktreePath":"/Users/someone/work/.knit/worktrees/demo/api",
+            "featureBranch":"knit/demo","headSha":"abc","remote":"git@example.com:acme/api.git"}]})
+    }
+
+    fn project_with_paths() -> Value {
+        json!({"id":"demo","repos":[{"id":"api","path":"/Users/someone/work/api","baseBranch":"main"}],
+            "landing":{"steps":[]}})
+    }
+
+    fn run_with_paths() -> Value {
+        json!({"schemaVersion":"0.2","kind":"KnitLandRun","id":"land-run-1","bundleId":"demo",
+            "planPath":"/Users/someone/work/.knit/land-plans/demo.land.json","planHash":"h",
+            "plan":{"bundleId":"demo"},"sourceBundle":bundle_with_paths(),
+            "resultBundle":bundle_with_paths(),"sourceProject":project_with_paths(),
+            "status":"failed","steps":[{"id":"deploy","status":"failed"}]})
+    }
+
+    #[test]
+    fn land_uploads_to_another_computer_leave_out_paths() {
+        let mut plan = record(1, "deploy");
+        plan.bundle_snapshot = Some(bundle_with_paths());
+        plan.project_snapshot = Some(project_with_paths());
+        let payload = Artifacts {
+            plans: vec![plan],
+            runs: vec![RunRecord {
+                bundle_slug: "demo".into(),
+                run: run_with_paths(),
+            }],
+        };
+        let body = artifacts_upload(&payload, "https://svartal.example/api/v1").unwrap();
+        let text = body.to_string();
+        assert!(!text.contains("/Users/someone"), "{text}");
+        assert!(!text.contains("planPath"), "{text}");
+        let run = &body["runs"][0]["run"];
+        for key in ["sourceBundle", "resultBundle", "sourceProject"] {
+            assert_eq!(run[key]["repos"][0]["path"], json!(""), "{key}");
+            assert!(run[key]["repos"][0].get("worktreePath").is_none(), "{key}");
+            assert_eq!(run[key]["repos"][0]["id"], json!("api"), "{key}");
+        }
+        // Everything else travels unchanged.
+        assert_eq!(run["sourceBundle"]["repos"][0]["headSha"], json!("abc"));
+        assert_eq!(run["steps"], run_with_paths()["steps"]);
+        assert_eq!(body["plans"][0]["plan"], payload.plans[0].plan);
+        assert_eq!(
+            body["plans"][0]["projectSnapshot"]["landing"],
+            json!({"steps":[]})
+        );
+        // The local documents are untouched, and a server on this computer
+        // gets them as they are.
+        assert!(payload.runs[0].run["planPath"].is_string());
+        let local = artifacts_upload(&payload, "http://127.0.0.1:4000/api/v1").unwrap();
+        assert_eq!(local, serde_json::to_value(&payload).unwrap());
+        assert_eq!(
+            *run_upload(&run_with_paths(), "http://localhost:4000"),
+            run_with_paths()
+        );
+    }
+
+    #[test]
+    fn pulling_path_free_copies_keeps_the_local_paths() {
+        let root = temp();
+        let mut index = SyncIndex {
+            project: "demo".into(),
+            remote: "hosted".into(),
+            ..Default::default()
+        };
+        // A receipt this machine uploaded comes back without its paths.
+        let local = run_with_paths();
+        let path = root.join(".knit/land-runs/demo-1.run.json");
+        private_save(&path, &local).unwrap();
+        index
+            .runs
+            .insert("land-run-1".into(), document_hash(&local));
+        let mut remote = local.clone();
+        strip_run_paths(&mut remote);
+        let returned = RunRecord {
+            bundle_slug: "demo".into(),
+            run: remote.clone(),
+        };
+        install_run(&root, &mut index, &returned).unwrap();
+        assert_eq!(read_json::<Value>(&path).unwrap(), local);
+        // A real change on the remote still arrives.
+        remote["status"] = json!("succeeded");
+        install_run(
+            &root,
+            &mut index,
+            &RunRecord {
+                bundle_slug: "demo".into(),
+                run: remote.clone(),
+            },
+        )
+        .unwrap();
+        assert_eq!(read_json::<Value>(&path).unwrap(), remote);
+
+        // The cached plan record keeps its snapshots with paths.
+        let mut kept = record(1, "deploy");
+        kept.bundle_snapshot = Some(bundle_with_paths());
+        kept.project_snapshot = Some(project_with_paths());
+        retain_record(&root, &kept).unwrap();
+        let mut pulled = kept.clone();
+        for snapshot in [&mut pulled.bundle_snapshot, &mut pulled.project_snapshot] {
+            strip_repo_paths(snapshot.as_mut().unwrap());
+        }
+        retain_record(&root, &pulled).unwrap();
+        let cached: PlanRecord = read_json(&record_path(&root, &kept)).unwrap();
+        assert_eq!(cached.bundle_snapshot, kept.bundle_snapshot);
+        assert_eq!(cached.project_snapshot, kept.project_snapshot);
         fs::remove_dir_all(root).unwrap();
     }
 }

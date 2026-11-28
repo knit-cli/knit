@@ -1931,7 +1931,7 @@ fn bundle_upload<'a>(
 
 /// Whether the remote's host is a loopback address, the only case in which
 /// the server can be reading this machine's folders.
-fn remote_is_on_this_computer(remote_url: &str) -> bool {
+pub(super) fn remote_is_on_this_computer(remote_url: &str) -> bool {
     let Ok(url) = url::Url::parse(remote_url) else {
         return false;
     };

@@ -198,43 +198,6 @@ fn last_uploaded_payload(api: &Path) -> Value {
     last["payload"].clone()
 }
 
-/// This machine's address on its first non-loopback interface, if any.
-fn non_loopback_address() -> Option<std::net::IpAddr> {
-    // Connecting a UDP socket sends nothing; it only picks the route.
-    let socket = std::net::UdpSocket::bind("0.0.0.0:0").ok()?;
-    socket.connect("192.0.2.1:9").ok()?;
-    let address = socket.local_addr().ok()?.ip();
-    (!address.is_loopback() && !address.is_unspecified()).then_some(address)
-}
-
-/// Relay connections on `address` to the loopback stub at `target`, so the
-/// sync remote URL names a host that is not loopback.
-fn relay(address: std::net::IpAddr, target: &str) -> String {
-    let listener = std::net::TcpListener::bind((address, 0)).unwrap();
-    let url = format!("http://{}", listener.local_addr().unwrap());
-    let target = target.trim_start_matches("http://").to_string();
-    std::thread::spawn(move || {
-        for inbound in listener.incoming() {
-            let Ok(inbound) = inbound else { continue };
-            let Ok(outbound) = std::net::TcpStream::connect(&target) else {
-                continue;
-            };
-            let (mut a_read, mut b_write) =
-                (inbound.try_clone().unwrap(), outbound.try_clone().unwrap());
-            let (mut b_read, mut a_write) = (outbound, inbound);
-            std::thread::spawn(move || {
-                let _ = std::io::copy(&mut a_read, &mut b_write);
-                let _ = b_write.shutdown(std::net::Shutdown::Write);
-            });
-            std::thread::spawn(move || {
-                let _ = std::io::copy(&mut b_read, &mut a_write);
-                let _ = a_write.shutdown(std::net::Shutdown::Write);
-            });
-        }
-    });
-    url
-}
-
 #[test]
 fn pushes_to_another_computer_carry_no_checkout_paths_or_hostname() {
     let Some(address) = non_loopback_address() else {

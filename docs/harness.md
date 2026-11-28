@@ -242,10 +242,22 @@ Where it goes:
   commit messages, branches and SHAs, but none of the fields above.
 - **Landing records.** When landing is synchronised with the sync remote,
   land plans and land runs are uploaded too. Plans carry no checkout paths.
-  Runs (`.knit/land-runs/`) still embed, unchanged, a copy of the bundle
-  (`sourceBundle`, with its paths and nodes), the project (`sourceProject`,
-  with absolute repo paths) and the absolute path of the plan file
-  (`planPath`).
+  A run (`.knit/land-runs/`) embeds a copy of the bundle (`sourceBundle`,
+  and `resultBundle` once it finishes), a copy of the project
+  (`sourceProject`) and the plan file's location (`planPath`). Uploaded to a
+  sync remote on another computer, those copies have every repo `path`
+  blank and no `worktreePath`, and `planPath` is left out; plans uploaded
+  with their source snapshots get the same treatment. The bundle copy still
+  carries its nodes, so the machine label and platform above. A sync remote
+  on this computer gets the run as it is, like the bundle artifact. The
+  local run journal keeps everything, and a pull does not replace it with
+  the server's copy. One exception: a run that an older Knit started and
+  uploaded with its paths, continued against a sync remote that has not
+  been upgraded, sends back that remote's own stored bundle copy, because
+  such a remote refuses any other; it learns nothing new from it. Runs
+  uploaded by older Knit versions keep the paths they were uploaded with.
+  The landing lock records the workspace as a hash of its path, not the
+  path itself.
 - **Git commits.** `knit commit` adds two trailers, `Knit-Group: <id>` and
   `Knit-Bundle: <slug>`, and leaves authorship to git; `knit revert` also
   adds `Knit-Reverts: <node id>`. Nothing else is added, so pushing to a code
