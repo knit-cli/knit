@@ -100,10 +100,7 @@ pub(crate) fn prepare_probe(
         )),
         Some(location)
             if location.state == HandoffLocationState::Active
-                && !location
-                    .origin
-                    .as_ref()
-                    .is_some_and(|o| same_origin(o, &ambient_origin())) =>
+                && !location.origin.as_ref().is_some_and(is_here) =>
         {
             let message = format!(
                 "Active on {}; source must publish handoff out before acceptance",
@@ -164,6 +161,20 @@ pub(crate) fn same_origin(left: &NodeOrigin, right: &NodeOrigin) -> bool {
         (None, None) => left.hostname == right.hostname && left.platform == right.platform,
         _ => false,
     }
+}
+/// Whether a recorded origin is this machine. Like `same_origin` against
+/// `ambient_origin()`, but a node an older Knit recorded here under the real
+/// hostname also counts, so a handoff started before upgrading still
+/// recognises its own source.
+pub(crate) fn is_here(recorded: &NodeOrigin) -> bool {
+    let here = ambient_origin();
+    if same_origin(recorded, &here) {
+        return true;
+    }
+    recorded.environment_id.is_none()
+        && here.environment_id.is_none()
+        && recorded.platform == here.platform
+        && crate::model::machine::is_this_machine_name(&recorded.hostname)
 }
 pub(crate) fn check_git_operation(path: &Path) -> Result<()> {
     for marker in [
@@ -262,17 +273,20 @@ pub(crate) fn print_location(bundle: &ChangeGroup) {
             HandoffLocationState::Active => "Continued on",
             HandoffLocationState::Conflict => "Conflicting handoffs:",
         };
-        crate::human!("{verb} {} ({})", l.label, l.updated_at);
+        // Recorded machine names are random labels now; say when it is this one.
+        let here =
+            l.state == HandoffLocationState::Active && l.origin.as_ref().is_some_and(is_here);
+        let label = if here {
+            format!("this machine ({})", l.label)
+        } else {
+            l.label.clone()
+        };
+        crate::human!("{verb} {label} ({})", l.updated_at);
     }
 }
 pub(crate) fn warn_elsewhere(bundle: &ChangeGroup) {
     if let Some(l) = bundle.handoff_location() {
-        if l.state != HandoffLocationState::Active
-            || !l
-                .origin
-                .as_ref()
-                .is_some_and(|o| same_origin(o, &ambient_origin()))
-        {
+        if l.state != HandoffLocationState::Active || !l.origin.as_ref().is_some_and(is_here) {
             eprintln!(
                 "Warning: bundle handoff location is {} ({}); sync before continuing edits here.",
                 l.label, l.updated_at

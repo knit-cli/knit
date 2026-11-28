@@ -224,7 +224,8 @@
               },
               "hostname": {
                 "type": "string",
-                "minLength": 1
+                "minLength": 1,
+                "description": "Which machine recorded the node: a random per-machine label such as machine-3f9a2c1b07de, or KNIT_MACHINE_LABEL. Nodes written by older Knit versions hold the real hostname."
               },
               "platform": {
                 "type": "string",
@@ -255,7 +256,8 @@
                   },
                   "hostname": {
                     "type": "string",
-                    "minLength": 1
+                    "minLength": 1,
+                    "description": "Same meaning as origin.hostname."
                   },
                   "platform": {
                     "type": "string",

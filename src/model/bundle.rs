@@ -711,6 +711,9 @@ pub fn is_terminal_landed_node(node: &BundleNode) -> bool {
 pub struct NodeOrigin {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub environment_id: Option<String>,
+    /// Which machine recorded the node. New nodes hold this machine's random
+    /// label (`machine-<hex>`) or `KNIT_MACHINE_LABEL`; nodes written by older
+    /// Knit versions hold the real hostname and are never rewritten.
     pub hostname: String,
     pub platform: String,
 }
@@ -917,18 +920,9 @@ fn ambient_actor() -> Option<NodeActor> {
 
 /// Attribution for newly written nodes. Never backfill old nodes while reading.
 pub fn ambient_origin() -> NodeOrigin {
-    let hostname = non_empty_env("HOSTNAME")
-        .or_else(|| non_empty_env("COMPUTERNAME"))
-        .or_else(|| {
-            std::process::Command::new("hostname")
-                .output()
-                .ok()
-                .filter(|o| o.status.success())
-                .and_then(|o| String::from_utf8(o.stdout).ok())
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "unknown".into());
+    // Bundle artifacts are uploaded to sync remotes: record this machine's
+    // random label, never its real hostname (see `model::machine`).
+    let hostname = super::machine::label();
     let os = match std::env::consts::OS {
         "macos" => "darwin",
         other => other,

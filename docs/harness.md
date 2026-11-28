@@ -214,25 +214,62 @@ artifacts hold some identifying data from the start. In a bundle artifact
 
 | Field | What it holds | How to avoid it |
 | ----- | ------------- | --------------- |
-| `nodes[].origin.hostname` | The machine's name, on every node: `HOSTNAME`, else `COMPUTERNAME`, else the output of `hostname` | Set `HOSTNAME` to any label in Knit's environment. Keep it stable per machine: without `KNIT_ENVIRONMENT_ID`, handoff tells machines apart by hostname and platform |
+| `nodes[].origin.hostname` | Which machine recorded the node: `KNIT_MACHINE_LABEL` when set, otherwise `machine-` and the start of a random id that Knit creates once in the global config directory (`machine-id`, next to `config.json`). Never the real hostname, except in nodes written by older Knit versions | Nothing to do. Keep the label stable per machine: without `KNIT_ENVIRONMENT_ID`, handoff tells machines apart by this label and platform |
 | `nodes[].origin.platform` | OS and architecture, such as `darwin/arm64` | None |
 | `nodes[].origin.environmentId` | `KNIT_ENVIRONMENT_ID`, only when set | Leave it unset |
 | `nodes[].sessionId`, `nodes[].actor` | The variables in [section 4](#4-attribution), only when set | Leave them unset |
-| `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address |
-| `repos[].path` | Absolute path of each source repo, which usually contains your OS user name | None |
+| `commitGroups[].author` | Name and email of the git author of the recorded commits | Use the git identity you want published, such as a no-reply address. The Git commits themselves carry the same email to every host you push to |
+| `repos[].path`, `repos[].worktreePath` | Where each source repo and bundle checkout is on disk; `path` usually contains your OS user name | Nothing to do: they stay on this machine unless the sync remote runs on it too (see below) |
 | `publications[].author` | The code host account that opened each review: login, and the name, avatar and profile URL when the host reports them | None |
 
-Nodes keep what they recorded; changing a variable later does not rewrite
-older nodes. Project files (`.knit/projects/<id>.project.json`) also hold the
-absolute repo paths.
+Nodes keep what they recorded; changing a variable later, or upgrading Knit,
+does not rewrite older nodes. Handoff still recognises nodes that an older
+Knit recorded on this machine under its real hostname. Project files
+(`.knit/projects/<id>.project.json`) also hold the absolute repo paths.
 
 Where it goes:
 
 - **Sync remote.** Once one is configured, `knit push`, publish and land
-  upload the bundle artifact as it is, with every field above. The project
-  record is uploaded with repo paths blanked. Project history events
-  (`.knit/history/`) carry bundle titles, commit messages, branches and SHAs,
-  but none of the fields above.
+  upload the bundle artifact with every field above except the checkout
+  paths: the upload carries `repos[].path` as an empty string and no
+  `worktreePath`, and every pull rebuilds both from the local project. The
+  exception is a sync remote whose address is on this computer (`localhost`
+  or a loopback address such as `127.0.0.1`): it gets the paths, because its
+  review analysis can then read the folders directly instead of the pushed
+  branches. Artifacts uploaded by older Knit versions keep the paths they
+  were uploaded with. The project record is uploaded with repo paths
+  blanked. Project history events (`.knit/history/`) carry bundle titles,
+  commit messages, branches and SHAs, but none of the fields above.
+- **Author and actor emails on Svartal.** Svartal keeps the uploaded
+  `commitGroups[].author.email` and `nodes[].actor.email` and uses them for
+  one thing: crediting the work to the account whose verified Git emails (or
+  GitHub no-reply address) match. It does not show them back: bundle pages,
+  bundle lists, summaries and review views carry the author's name only. The
+  full bundle artifact, which `knit pull`, clone and handoff download, keeps
+  the emails only for project members (the owner, organisation members and
+  invited members), who can pull the bundle and see the same addresses in
+  the Git commits. Anyone else who can read the project, such as a visitor to
+  a public one, gets `author.email` as an empty string and no `actor.email`.
+  Landing plans and runs are readable only by members. Older Svartal
+  versions may still return the emails to any reader of the bundle.
+- **Landing records.** When landing is synchronised with the sync remote,
+  land plans and land runs are uploaded too. Plans carry no checkout paths.
+  A run (`.knit/land-runs/`) embeds a copy of the bundle (`sourceBundle`,
+  and `resultBundle` once it finishes), a copy of the project
+  (`sourceProject`) and the plan file's location (`planPath`). Uploaded to a
+  sync remote on another computer, those copies have every repo `path`
+  blank and no `worktreePath`, and `planPath` is left out; plans uploaded
+  with their source snapshots get the same treatment. The bundle copy still
+  carries its nodes, so the machine label and platform above. A sync remote
+  on this computer gets the run as it is, like the bundle artifact. The
+  local run journal keeps everything, and a pull does not replace it with
+  the server's copy. One exception: a run that an older Knit started and
+  uploaded with its paths, continued against a sync remote that has not
+  been upgraded, sends back that remote's own stored bundle copy, because
+  such a remote refuses any other; it learns nothing new from it. Runs
+  uploaded by older Knit versions keep the paths they were uploaded with.
+  The landing lock records the workspace as a hash of its path, not the
+  path itself.
 - **Git commits.** `knit commit` adds two trailers, `Knit-Group: <id>` and
   `Knit-Bundle: <slug>`, and leaves authorship to git; `knit revert` also
   adds `Knit-Reverts: <node id>`. Nothing else is added, so pushing to a code

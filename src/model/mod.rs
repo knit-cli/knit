@@ -6,10 +6,12 @@
 //! - [`view`] per-user named views (bundle shapes) over a project
 //! - [`bundle`] the bundle (`ChangeGroup`) and its contents
 //! - [`history`] project-wide metadata events pointing at Git commits
+//! - [`machine`] the random label ledger nodes record in place of the hostname
 
 mod bundle;
 mod config;
 mod history;
+pub mod machine;
 mod project;
 mod view;
 

@@ -24,6 +24,8 @@ struct Server {
     url: String,
     state: Arc<Mutex<Value>>,
     requests: Arc<AtomicUsize>,
+    /// Every request body, in order.
+    bodies: Arc<Mutex<Vec<String>>>,
     stop: Arc<AtomicBool>,
     handle: Option<thread::JoinHandle<()>>,
 }
@@ -35,6 +37,8 @@ impl Server {
         let state = Arc::new(Mutex::new(json!({"plans":[],"runs":[],"landing":{}})));
         let requests = Arc::new(AtomicUsize::new(0));
         let counter = requests.clone();
+        let bodies = Arc::new(Mutex::new(Vec::new()));
+        let recorded = bodies.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let (shared, done) = (state.clone(), stop.clone());
         let handle = thread::spawn(move || {
@@ -69,6 +73,10 @@ impl Server {
                 }
                 let mut body = vec![0; length];
                 reader.read_exact(&mut body).unwrap();
+                recorded
+                    .lock()
+                    .unwrap()
+                    .push(String::from_utf8_lossy(&body).into_owned());
                 let mut state = shared.lock().unwrap();
                 let mut code = 200;
                 let mut response = None;
@@ -108,7 +116,9 @@ impl Server {
                             state["landing"] = payload["landing"].clone();
                         }
                     }
-                } else if !request.contains("/api/v1/projects/demo/landing-artifacts ") {
+                } else if !request.contains("/api/v1/projects/demo/landing-artifacts ")
+                    && !request.contains("/api/v1/projects/demo/landing-artifacts?")
+                {
                     code = 404;
                 } else if request.starts_with("POST ") {
                     let payload: Value = serde_json::from_slice(&body).unwrap();
@@ -179,7 +189,14 @@ impl Server {
                                     .find(|old| old["run"]["id"] == r["run"]["id"]);
                                 // Match the host: a fresh claim cannot adopt an
                                 // already-imported unowned execution identity.
+                                // Like the host, a continued run keeps its
+                                // first embedded bundle copy; one that has not
+                                // been upgraded compares it exactly.
+                                let rewritten = old.is_some_and(|old| {
+                                    old["run"]["sourceBundle"] != r["run"]["sourceBundle"]
+                                });
                                 if (owned && imported["boundRun"].is_null() && old.is_some())
+                                    || (owned && rewritten)
                                     || (!owned && old.is_some_and(|old| old != r))
                                 {
                                     code = 409;
@@ -241,6 +258,7 @@ impl Server {
             url,
             state,
             requests,
+            bodies,
             stop,
             handle: Some(handle),
         }
@@ -1206,4 +1224,293 @@ fn first_run_of_an_unsynced_plan_claims_ownership_so_a_failure_resumes() {
         .all(|upload| upload["owned"] == true));
     drop(state);
     fs::remove_dir_all(dir).unwrap();
+}
+
+/// A workspace whose landing plan for bundle `demo` runs one step that fails
+/// until the service repo has tag `ready`. Its sync remote `hosted` is `url`.
+/// The service's origin lives outside `dir`, so `dir` appears in a document
+/// only through checkout and plan paths.
+struct FailingLanding {
+    dir: std::path::PathBuf,
+    service: std::path::PathBuf,
+    plan_path: std::path::PathBuf,
+}
+
+fn failing_landing(server: &Server, url: &str) -> FailingLanding {
+    // Short root: Git for Windows includes the checkout name in admin paths.
+    let allocated = unique_temp_dir();
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let dir = allocated.with_file_name(format!("kp-{nonce:x}"));
+    fs::rename(&allocated, &dir).unwrap();
+    setup(&dir, url);
+    let service = dir.join("service");
+    init_repo(&service, "service");
+    let origin = unique_temp_dir().join("origin.git");
+    git(&dir, ["init", "--bare", origin.to_str().unwrap()]);
+    git(
+        &service,
+        ["remote", "add", "origin", origin.to_str().unwrap()],
+    );
+    git(&service, ["checkout", "-b", "knit/demo"]);
+    git(&service, ["push", "-u", "origin", "knit/demo"]);
+    let head = git(&service, ["rev-parse", "HEAD"]).trim().to_string();
+    let mut bundle = serde_json::to_value(knit::model::ChangeGroup::new(
+        "demo".into(),
+        "Synthetic landing".into(),
+        "2026-01-01T00:00:00Z".into(),
+    ))
+    .unwrap();
+    bundle["projectId"] = json!("demo");
+    bundle["repos"] = json!([{"id":"service","path":service,"worktreePath":service,
+        "featureBranch":"knit/demo","baseBranch":"main","baseSha":head,"headSha":head}]);
+    write(&dir.join(".knit/bundles/demo.bundle.json"), &bundle);
+    let config_path = dir.join(".knit/config.json");
+    let mut config: Value = serde_json::from_slice(&fs::read(&config_path).unwrap()).unwrap();
+    config["activeBundle"] = json!("demo");
+    config["pushSync"] = json!(true);
+    config["syncRemotes"] = json!(["hosted"]);
+    write(&config_path, &config);
+    let project_path = dir.join(".knit/projects/demo.project.json");
+    let mut project: Value = serde_json::from_slice(&fs::read(&project_path).unwrap()).unwrap();
+    project["repos"] = json!([{"id":"service","path":service,"baseBranch":"main"}]);
+    project["landing"] = json!({"merge":{"enabled":false},"onFailure":"stop","steps":[{
+        "id":"deploy","type":"run","repoId":"service","effect":"read_only",
+        "command":["git","rev-parse","--verify","refs/tags/ready"]
+    }]});
+    write(&project_path, &project);
+    {
+        let mut state = server.state.lock().unwrap();
+        state["execution"] = json!(true);
+        state["uploads"] = json!([]);
+        state["landing"] = project["landing"].clone();
+    }
+    let plan_path = dir.join(".knit/land-plans/demo.land.json");
+    knit(&dir, ["land", "plan", "--out", plan_path.to_str().unwrap()]);
+    let mut plan: Value = serde_json::from_slice(&fs::read(&plan_path).unwrap()).unwrap();
+    plan["terminal"] = json!(false);
+    write(&plan_path, &plan);
+    FailingLanding {
+        dir,
+        service,
+        plan_path,
+    }
+}
+
+impl FailingLanding {
+    /// Apply the plan, which fails, and return the run journal's path.
+    fn apply_and_fail(&self) -> std::path::PathBuf {
+        let plan = self.plan_path.to_str().unwrap();
+        knit_fails(&self.dir, ["land", "apply", "--plan", plan, "--no-tag"]);
+        fs::read_dir(self.dir.join(".knit/land-runs"))
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.path())
+            .find(|p| p.to_string_lossy().ends_with(".run.json"))
+            .unwrap()
+    }
+
+    fn resume(&self, run_path: &Path) -> Value {
+        git(&self.service, ["tag", "ready"]);
+        knit(
+            &self.dir,
+            [
+                "land",
+                "resume",
+                "--run",
+                run_path.to_str().unwrap(),
+                "--keep-worktrees",
+            ],
+        );
+        read_value(run_path)
+    }
+
+    /// Spellings of the fixture root a document could carry.
+    fn roots(&self) -> Vec<String> {
+        let mut roots = vec![self.dir.to_string_lossy().into_owned()];
+        if let Ok(canonical) = fs::canonicalize(&self.dir) {
+            roots.push(canonical.to_string_lossy().into_owned());
+        }
+        roots
+    }
+}
+
+fn read_value(path: &Path) -> Value {
+    serde_json::from_slice(&fs::read(path).unwrap()).unwrap()
+}
+
+/// What Knit uploads of a local receipt to a remote on another computer.
+fn shared(run: &Value) -> Value {
+    let mut run = run.clone();
+    run.as_object_mut().unwrap().remove("planPath");
+    for key in ["sourceBundle", "resultBundle", "sourceProject"] {
+        for repo in run[key]["repos"].as_array_mut().into_iter().flatten() {
+            if repo.get("path").is_some() {
+                repo["path"] = json!("");
+            }
+            repo.as_object_mut().unwrap().remove("worktreePath");
+        }
+    }
+    run
+}
+
+fn assert_no_repo_paths(document: &Value) {
+    let repos = document["repos"].as_array().unwrap();
+    assert!(!repos.is_empty(), "{document}");
+    for repo in repos {
+        assert_eq!(repo["path"], json!(""), "{repo}");
+        assert!(repo.get("worktreePath").is_none(), "{repo}");
+    }
+}
+
+#[test]
+fn land_runs_sent_to_another_computer_carry_no_paths_and_still_resume() {
+    let Some(address) = non_loopback_address() else {
+        eprintln!("skipped: this machine has no non-loopback address");
+        return;
+    };
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    let url = relay(address, &server.url);
+    let landing = failing_landing(&server, &url);
+
+    let run_path = landing.apply_and_fail();
+    let failed = read_value(&run_path);
+    assert_eq!(failed["status"], "failed");
+    // The local journal keeps what this machine needs.
+    assert!(failed["planPath"].is_string());
+    assert!(!failed["sourceBundle"]["repos"][0]["path"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    assert!(failed["sourceBundle"]["repos"][0]["worktreePath"].is_string());
+    assert!(!failed["sourceProject"]["repos"][0]["path"]
+        .as_str()
+        .unwrap()
+        .is_empty());
+    {
+        let state = server.state.lock().unwrap();
+        assert_eq!(state["uploads"][0]["owned"], true);
+        assert_eq!(state["uploads"][0]["run"], shared(&failed));
+        // A plan about to run first travels without source snapshots.
+        let plan = &state["plans"][0];
+        for key in ["bundleSnapshot", "projectSnapshot"] {
+            if !plan[key].is_null() {
+                assert_no_repo_paths(&plan[key]);
+            }
+        }
+    }
+
+    let resumed = landing.resume(&run_path);
+    assert_eq!(resumed["id"], failed["id"]);
+    assert_eq!(resumed["status"], "succeeded");
+    assert_eq!(resumed["planPath"], failed["planPath"]);
+    assert_eq!(resumed["sourceBundle"], failed["sourceBundle"]);
+    {
+        let state = server.state.lock().unwrap();
+        assert!(state["ownership"].is_null());
+        let last = state["uploads"].as_array().unwrap().last().unwrap();
+        assert_eq!(last["owned"], true);
+        assert_eq!(last["run"], shared(&resumed));
+    }
+
+    // A pull brings the path-free copy back; the local journal stays as is.
+    let before = fs::read(&run_path).unwrap();
+    knit(
+        &landing.dir,
+        ["sync", "push", "--plans", "--remote", "hosted"],
+    );
+    knit(
+        &landing.dir,
+        ["sync", "pull", "--plans", "--remote", "hosted"],
+    );
+    assert_eq!(fs::read(&run_path).unwrap(), before);
+
+    let bodies = server.bodies.lock().unwrap();
+    assert!(bodies.iter().any(|body| body.contains("sourceBundle")));
+    for body in bodies.iter() {
+        assert!(!body.contains("planPath"), "{body}");
+        for root in landing.roots() {
+            assert!(!body.contains(&root), "{root} in {body}");
+        }
+    }
+    drop(bodies);
+    fs::remove_dir_all(&landing.dir).unwrap();
+}
+
+#[test]
+fn land_runs_sent_to_this_computer_keep_their_paths() {
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    assert!(
+        server.url.starts_with("http://127.0.0.1:"),
+        "{}",
+        server.url
+    );
+    let landing = failing_landing(&server, &server.url.clone());
+    let run_path = landing.apply_and_fail();
+    let failed = read_value(&run_path);
+    {
+        let state = server.state.lock().unwrap();
+        // Exactly the local journal, plan path and checkout paths included.
+        assert_eq!(state["uploads"][0]["run"], failed);
+        assert!(state["uploads"][0]["run"]["planPath"].is_string());
+    }
+    let resumed = landing.resume(&run_path);
+    assert_eq!(resumed["status"], "succeeded");
+    let state = server.state.lock().unwrap();
+    let last = state["uploads"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["run"], resumed);
+    drop(state);
+    fs::remove_dir_all(&landing.dir).unwrap();
+}
+
+/// A run an older Knit started uploaded its paths. Resumed by this Knit
+/// through a remote on another computer that has not been upgraded, which
+/// insists on the first embedded bundle copy, it still finishes: the retry
+/// sends back the remote's own copy, and nothing new about the machine.
+#[test]
+fn a_run_started_with_paths_resumes_against_a_server_that_compares_exactly() {
+    let Some(address) = non_loopback_address() else {
+        eprintln!("skipped: this machine has no non-loopback address");
+        return;
+    };
+    let _execution = EXECUTION_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let server = Server::new();
+    // Through loopback, the first upload carries the paths, as an older
+    // Knit's did to every remote.
+    let landing = failing_landing(&server, &server.url.clone());
+    let run_path = landing.apply_and_fail();
+    let failed = read_value(&run_path);
+    assert_eq!(server.state.lock().unwrap()["uploads"][0]["run"], failed);
+
+    let config_path = landing.dir.join(".knit/config.json");
+    let mut config = read_value(&config_path);
+    config["remotes"]["hosted"]["url"] = json!(relay(address, &server.url));
+    write(&config_path, &config);
+    let before = server.bodies.lock().unwrap().len();
+
+    let resumed = landing.resume(&run_path);
+    assert_eq!(resumed["status"], "succeeded");
+    let state = server.state.lock().unwrap();
+    assert!(state["ownership"].is_null());
+    let last = state["uploads"].as_array().unwrap().last().unwrap();
+    assert_eq!(last["owned"], true);
+    // The remote's stored bundle copy, and nothing else with a path.
+    let mut expected = shared(&resumed);
+    expected["sourceBundle"] = failed["sourceBundle"].clone();
+    assert_eq!(last["run"], expected);
+    drop(state);
+    let bodies = server.bodies.lock().unwrap();
+    // The first attempt left the paths out.
+    assert!(bodies[before..]
+        .iter()
+        .any(|body| body.contains("\"sourceBundle\"") && body.contains("\"path\":\"\"")));
+    for body in &bodies[before..] {
+        assert!(!body.contains("planPath"), "{body}");
+    }
+    drop(bodies);
+    fs::remove_dir_all(&landing.dir).unwrap();
 }
